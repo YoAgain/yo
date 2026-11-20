@@ -1,23 +1,32 @@
-// "Account Recovery" (spec 7), one full-height screen each, built from the same step cards; only the cards change state.
+// "Account Recovery" (spec 7), one full-height screen each, without cards: the symbol, title and line, then at the
+// bottom the step as a small line over one big white button and quiet links beneath.
 // The recovery key (from the red badge and the account page's Recovery Key row): save it through the share sheet,
-// show it. The passkey (from its row): create it, then try it once for its PRF output, as not every password manager
-// gives one and asking up front isn't reliable.
+// or show it; either keeps it, and only then the button becomes Done. The passkey (from its row): create it, then try
+// it once for its PRF output, as not every password manager gives one and asking up front isn't reliable.
 import LocalAuthentication
 import SwiftUI
 import YoCore
 
-/// The two recovery screens: full-height Amethyst assistants, the symbol, title and line with the cards centred in
-/// the screen, Done at the bottom; the content scrolls only when it does not fit.
-private struct RecoveryScreen<Content: View>: View {
+/// The two recovery screens: full-height Amethyst assistants, the symbol, title and line centred in the screen; at
+/// the bottom the step (a green check once done), the problem if any, the one big white button and its quiet links.
+/// The content scrolls only when it does not fit; the close button leaves at any time.
+private struct RecoveryScreen<Content: View, Links: View>: View {
   let symbol: String
   let title: String
   let line: String
+  let step: String
+  let stepDone: Bool
+  let problem: String?
   let busy: Bool
+  let button: String
+  var buttonSymbol: String? = nil
   var close: (() -> Void)?
-  let done: () -> Void
+  let action: () -> Void
   @ViewBuilder let content: Content
+  @ViewBuilder let links: Links
 
   @ScaledMetric(relativeTo: .largeTitle) private var symbolSize: CGFloat = 56
+  @ScaledMetric(relativeTo: .footnote) private var check: CGFloat = 16
 
   var body: some View {
     ZStack {
@@ -30,7 +39,7 @@ private struct RecoveryScreen<Content: View>: View {
               .font(.system(size: symbolSize))
               .accessibilityHidden(true)
             Text(title)
-              .font(.yo(24))
+              .font(.yo(34))  // a setup screen's large title
               .multilineTextAlignment(.center)
               .lineLimit(2)
               .minimumScaleFactor(0.7)
@@ -42,10 +51,52 @@ private struct RecoveryScreen<Content: View>: View {
               .opacity(0.85)
               .padding(.top, 8)
             content
-              .padding(.top, 32)
+              .padding(.top, 24)
             Spacer(minLength: 32)
-            PrimaryButton(ProductText.done.english, action: done)
+            HStack(spacing: 6) {
+              if stepDone {
+                Image(systemName: "checkmark")
+                  .font(.system(size: check * 0.6, weight: .heavy))
+                  .frame(width: check, height: check)
+                  .background(Color.green, in: .circle)
+                  .accessibilityHidden(true)
+                  .transition(.scale.combined(with: .opacity))
+              }
+              Text(step.isEmpty ? " " : step)  // nothing to say yet: the line keeps its place, the button stays put
+                .font(.footnote.weight(.semibold))
+                .opacity(stepDone ? 1 : 0.85)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(stepDone ? "\(step), done" : step)
+            .accessibilityHidden(step.isEmpty)
+            .sensoryFeedback(.success, trigger: stepDone) { _, now in now }
+            Note(problem)
+              .padding(.top, 8)
+            Button(action: action) {
+              Group {
+                if busy {
+                  ProgressView().tint(.black)
+                } else if let buttonSymbol {
+                  Label(button, systemImage: buttonSymbol)
+                } else {
+                  Text(button)
+                }
+              }
+              .font(.system(.title3, weight: .semibold))
+              .lineLimit(1)
+              .minimumScaleFactor(0.7)
+              .frame(maxWidth: .infinity, minHeight: 40)
+            }
+            .buttonStyle(.glassProminent)
+            .tint(.white)
+            .foregroundStyle(.black)
+            .disabled(busy)
+            .padding(.top, 10)
+            HStack(spacing: 10) { links }
+              .font(.subheadline.weight(.semibold))
+              .buttonStyle(.plain)
               .disabled(busy)
+              .padding(.top, 14)
           }
           .padding(.horizontal, 24)
           .padding(.bottom, 16)
@@ -67,6 +118,8 @@ private struct RecoveryScreen<Content: View>: View {
 
 struct RecoveryKeySheet: View {
   var close: (() -> Void)? = nil
+  /// Done (the key kept), when it leads somewhere else than `close`.
+  var done: (() -> Void)? = nil
 
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
@@ -77,6 +130,10 @@ struct RecoveryKeySheet: View {
   @State private var busy = false
   @State private var showingKey = false
   @State private var copiedKey = false
+  /// Kept this time by showing it, not through the share sheet: the step says "Shown".
+  @State private var keptByShowing = false
+  /// Face ID passed once on this screen; showing then saving does not ask again.
+  @State private var authorized = false
   @State private var problem: String?
 
   private var secured: Bool { accounts.account?.secured == true }
@@ -85,36 +142,30 @@ struct RecoveryKeySheet: View {
   var body: some View {
     RecoveryScreen(
       symbol: "key.fill", title: ProductText.recoveryKeyTitle.english, line: ProductText.recoveryKeyLine.english,
-      busy: busy, close: close, done: finish
+      step: saved ? (keptByShowing ? ProductText.shown : .saved).english : "", stepDone: saved,
+      problem: problem, busy: busy,
+      button: (saved ? ProductText.done : .saveRecoveryKey).english, buttonSymbol: saved ? nil : "square.and.arrow.up",
+      close: close, action: { if saved { finish() } else { Task { await share() } } }
     ) {
-      VStack(spacing: 12) {
-        StepCard(
-          number: 1, title: ProductText.recoveryKey.english,
-          status: (saved ? ProductText.saved : .notSavedYet).english, done: saved
-        ) {
-          StepButton(
-            title: (showingKey ? ProductText.hide : .show).english, symbol: showingKey ? "eye.slash" : "eye",
-            prominent: false
-          ) {
-            if showingKey { showingKey = false } else { Task { await showKey() } }
-          }
-          .accessibilityLabel(showingKey ? "Hide Recovery Key" : "Show Recovery Key")
-          StepButton(
-            title: (saved ? ProductText.saveAgain : .save).english, symbol: "square.and.arrow.up", busy: busy
-          ) { Task { await share() } }
-          .accessibilityLabel(saved ? "Save Recovery Key Again" : "Save Recovery Key")
+      if showingKey {
+        KeyCard(key: words, copied: copiedKey) {
+          UIPasteboard.general.string = RecoveryCode.shown(words)
+          copiedKey = true
         }
-        if showingKey {
-          KeyCard(key: words, copied: copiedKey) {
-            UIPasteboard.general.string = RecoveryCode.shown(words)
-            copiedKey = true
-          }
-          .transition(.opacity.combined(with: .move(edge: .top)))
-        }
+        .transition(.opacity.combined(with: .move(edge: .top)))
       }
-      .disabled(busy)
-      Note(problem)
-        .padding(.top, 12)
+    } links: {
+      if saved {
+        Button(ProductText.saveAgain.english, systemImage: "square.and.arrow.up") { Task { await share() } }
+          .accessibilityLabel("Save Recovery Key Again")
+        Text("·").accessibilityHidden(true)
+      }
+      Button(
+        (showingKey ? ProductText.hideKey : .showKey).english, systemImage: showingKey ? "eye.slash" : "eye"
+      ) {
+        if showingKey { showingKey = false } else { Task { await showKey() } }
+      }
+      .accessibilityLabel(showingKey ? "Hide Recovery Key" : "Show Recovery Key")
     }
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: saved)
     .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: showingKey)
@@ -129,12 +180,15 @@ struct RecoveryKeySheet: View {
     }
   }
 
-  private func finish() { if let close { close() } else { dismiss() } }
+  private func finish() {
+    if let done { done() } else if let close { close() } else { dismiss() }
+  }
 
-  /// A key already saved shows or goes out again only after Face ID.
+  /// A key already saved shows or goes out again only after Face ID, once per screen.
   private func allowed(_ reason: String) async -> Bool {
-    guard saved else { return true }
-    return (try? await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) == true
+    guard saved, !authorized else { return true }
+    authorized = (try? await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) == true
+    return authorized
   }
 
   /// The words to show or save; a secured account brought back without them gets new ones.
@@ -159,17 +213,27 @@ struct RecoveryKeySheet: View {
     problem = nil
     guard await allowed("Show your recovery key."), await ensureWords() else { return }
     showingKey = true
+    // Seen counts as kept, as saved does: the step is ticked and Done opens.
+    if !saved {
+      authorized = true
+      keptByShowing = true
+      await markSaved()
+    }
   }
 
   private func share() async {
     problem = nil
     guard await allowed("Save your recovery key."), await ensureWords() else { return }
     Share.recoveryKey(name: accounts.account?.username ?? "", key: words) { completed in
-      if completed { Task { await markSaved() } }
+      if completed {
+        keptByShowing = false
+        authorized = true
+        Task { await markSaved() }
+      }
     }
   }
 
-  /// Saved (shared or copied): the backup opens with the words.
+  /// Kept (shown or shared): the backup opens with the words.
   private func markSaved() async {
     guard !saved, words.count == 64 else { return }
     busy = true
@@ -197,44 +261,24 @@ struct PasskeySheet: View {
   var body: some View {
     RecoveryScreen(
       symbol: "person.badge.key.fill", title: ProductText.passkey.english,
-      line: "Sign in with Face ID on a new phone.", busy: busy, close: close, done: finish
-    ) {
-      VStack(spacing: 12) {
-        StepCard(
-          number: 1, title: ProductText.createPasskey.english,
-          status: on || created ? ProductText.created.english : nil, done: on || created
-        ) {
-          if !on && !created {
-            StepButton(title: ProductText.create.english, busy: busy) { Task { await createPasskey() } }
-              .accessibilityLabel(ProductText.createPasskey.english)
-          }
-        }
-        StepCard(
-          number: 2, title: ProductText.tryItOnce.english, status: nil, done: on
-        ) {
-          if !on {
-            StepButton(title: "Try with Face ID", symbol: "faceid", busy: busy && created) {
-              Task { await checkPasskey() }
-            }
-            .disabled(!created)
-          }
-        }
+      line: "Sign in with Face ID on a new phone.",
+      step: (on ? ProductText.passkeyOn : created ? .passkeyStepTry : .passkeyStepCreate).english, stepDone: on,
+      problem: problem, busy: busy,
+      button: on ? ProductText.done.english : created ? "Try with Face ID" : ProductText.createPasskey.english,
+      buttonSymbol: on ? nil : created ? "faceid" : nil, close: close,
+      action: {
+        if on { finish() } else if created { Task { await checkPasskey() } } else { Task { await createPasskey() } }
       }
-      .disabled(busy)
-      Note(problem)
-        .padding(.top, 12)
+    ) {
+      EmptyView()
+    } links: {
+      EmptyView()
     }
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: on)
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: created)
   }
 
   private func finish() { if let close { close() } else { dismiss() } }
-
-  private static func detail(_ error: Error) -> String {
-    guard Hub.isDevApp else { return "" }
-    let e = error as NSError
-    return " (\(e.domain) \(e.code): \(e.localizedDescription))"
-  }
 
   private func createPasskey() async {
     busy = true
@@ -246,7 +290,7 @@ struct PasskeySheet: View {
       created = true
     } catch {
       if !Passkeys.isCancellation(error) {
-        problem = "Couldn’t create passkey. Try again." + Self.detail(error)
+        problem = "Couldn’t create passkey. Try again."
       }
     }
   }
@@ -264,85 +308,8 @@ struct PasskeySheet: View {
       problem = "Your password manager can’t do this. Try iCloud Keychain."
     } catch {
       if !Passkeys.isCancellation(error) {
-        problem = "That didn’t work. Try again." + Self.detail(error)
+        problem = "That didn’t work. Try again."
       }
-    }
-  }
-}
-
-/// One step: its number (a green check once done), name and status line; beneath, its buttons side by side.
-private struct StepCard<Buttons: View>: View {
-  let number: Int
-  let title: String
-  let status: String?
-  let done: Bool
-  @ViewBuilder let buttons: Buttons
-
-  @ScaledMetric(relativeTo: .headline) private var circle: CGFloat = 28
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 14) {
-      HStack(spacing: 12) {
-        ZStack {
-          Circle().fill(done ? Color.green : .white)
-          Group {
-            if done {
-              Image(systemName: "checkmark").fontWeight(.heavy).foregroundStyle(.white)
-            } else {
-              Text("\(number)").font(.yo(14, relativeTo: .headline)).foregroundStyle(Color.amethyst)
-            }
-          }
-          .transition(.scale.combined(with: .opacity))
-        }
-        .frame(width: circle, height: circle)
-        .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 1) {
-          Text(title).font(.system(size: 17, weight: .semibold))
-          if let status { Text(status).font(.system(size: 13, weight: .medium)).opacity(0.85) }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number), \(title)\(done ? ", done" : "")\(status.map { ", \($0)" } ?? "")")
-        .frame(maxWidth: .infinity, alignment: .leading)
-      }
-      HStack(spacing: 8) { buttons }
-    }
-    .padding(16)
-    .background(.white.opacity(0.14), in: .rect(cornerRadius: 22))
-    .sensoryFeedback(.success, trigger: done) { _, now in now }
-  }
-}
-
-/// A card's button, each as wide as the others: white (Save, Create) or glass on the purple (Show).
-private struct StepButton: View {
-  let title: String
-  var symbol: String? = nil
-  var prominent = true
-  var busy = false
-  let action: () -> Void
-
-  var body: some View {
-    let label = Group {
-      if busy {
-        ProgressView().tint(prominent ? .black : .white)
-      } else if let symbol {
-        Label(title, systemImage: symbol)
-      } else {
-        Text(title)
-      }
-    }
-    .font(.subheadline.weight(.bold))
-    .lineLimit(1)
-    .minimumScaleFactor(0.7)
-    .frame(maxWidth: .infinity, minHeight: 34)
-    if prominent {
-      Button(action: action) { label }
-        .buttonStyle(.glassProminent)
-        .tint(.white)
-        .foregroundStyle(.black)
-    } else {
-      Button(action: action) { label }
-        .buttonStyle(.glass)
-        .foregroundStyle(.white)
     }
   }
 }

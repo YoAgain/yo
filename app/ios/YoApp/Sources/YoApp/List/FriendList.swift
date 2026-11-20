@@ -501,7 +501,7 @@ struct FriendList: View {
           if leftHanded {
             cameraButton
             // Only while the camera is open: the bar draws its glass even for a see-through item.
-            if cameraOn { flipButton }
+            if cameraOn && !selecting { flipButton }
           } else { leadingControl }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
@@ -518,7 +518,7 @@ struct FriendList: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItemGroup(placement: .bottomBar) {
-          if !leftHanded && cameraOn { flipButton }
+          if !leftHanded && cameraOn && !selecting { flipButton }
           if leftHanded { leadingControl } else { cameraButton }
         }
       }

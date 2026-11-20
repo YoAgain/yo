@@ -11,6 +11,16 @@ import YoCore
   }
 }
 
+/// The trailing chevron of a row that is a button but opens a page (its own sheet), as a navigation link's.
+struct DisclosureChevron: View {
+  var body: some View {
+    Image(systemName: "chevron.forward")
+      .font(.footnote.weight(.semibold))
+      .foregroundStyle(.tertiary)
+      .accessibilityHidden(true)
+  }
+}
+
 enum SettingKey {
   /// The bars' sides swapped: "Yo!!" at the left end, the photo sign and the undo ring at the right.
   static let leftHanded = "settings.leftHanded"
@@ -95,9 +105,13 @@ struct SettingsView: View {
             Button {
               sheet = .help
             } label: {
-              HStack {
-                Label("Help & About", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
-                SupportBadge()
+              LabeledContent {
+                DisclosureChevron()
+              } label: {
+                HStack {
+                  Label("Help & About", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
+                  SupportBadge()
+                }
               }
             }
             .tint(Color(.label))
@@ -105,7 +119,11 @@ struct SettingsView: View {
             Button {
               listAction(.addContact)
             } label: {
-              Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(Tile(.green))
+              LabeledContent {
+                DisclosureChevron()
+              } label: {
+                Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(Tile(.green))
+              }
             }
             .tint(Color(.label))
           }
@@ -115,12 +133,17 @@ struct SettingsView: View {
       // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      // No title and no close button: only the system's grabber, to pull the sheet down and away. The bar stays (empty
-      // and see-through), so a push or pop never changes its height and the pushed page's bar does not jump in; the
-      // list's own top margin goes instead, so the rows stay where they were without the bar.
+      // The title "Yodentity" and no close button: the system's grabber pulls the sheet down and away. The bar stays
+      // (see-through), so a push or pop never changes its height and the pushed page's bar does not jump in. The
+      // list keeps the system's own top margin below it, and while it does not scroll no edge effect fades the card.
+      .toolbar(.visible, for: .navigationBar)
       .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        // The root's own title, in a bar laid out as a pushed page's, so a push or pop never moves it.
+        ToolbarItem(placement: .principal) { Text("Yodentity").font(.headline) }
+      }
       .toolbarBackground(.hidden, for: .navigationBar)
-      .contentMargins(.top, 0, for: .scrollContent)
+      .scrollEdgeEffectHidden(!typeSize.isAccessibilitySize, for: .top)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { destination($0) }
@@ -149,8 +172,9 @@ struct SettingsView: View {
     .scrollBounceBehavior(.basedOnSize)
     // Always half height: a full page opens as a sheet of its own on top.
     .presentationDetents([.medium])
-    // The grabber on the first page; a page pushed in has its bar instead.
-    .presentationDragIndicator(path.isEmpty ? .visible : .hidden)
+    // The grabber on every page: toggled with the path, it moved the bar mid-push (the pushed page's back button and
+    // title began at the grabber's height, then dropped into place).
+    .presentationDragIndicator(.visible)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
     .presentationBackground(Color(.systemGroupedBackground))
     .task(id: "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)") {

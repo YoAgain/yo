@@ -42,16 +42,7 @@ extension FriendList {
       .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: listFriends, initial: true) { syncListFriends() }
       .onChange(of: inbox.memberNames) { syncSenderNames() }
-      // An open viewer takes a finished download in place of its placeholder.
-      .onChange(of: inbox.mediaChanges) {
-        syncListMedia()
-        if let open = viewing, open.contains(where: { $0.pending != nil }) {
-          viewing = open.map { item in
-            guard item.pending != nil, let ready = inbox.unseen(id: item.id), ready.pending == nil else { return item }
-            return Arrival(id: item.id, from: item.from, photo: ready.photo, video: ready.video, file: ready.file)
-          }
-        }
-      }
+      .onChange(of: inbox.mediaChanges) { syncListMedia() }
       .onChange(of: scenePhase, initial: true) { publish(listModel.foreground(now: listNow, active: scenePhase == .active)) }
       // A Yo sent from outside the list (Action button, Control Center, Siri, a notification's Yo Back): on top.
       .task { IntentSent.listen(); takeIntentSent() }
@@ -75,10 +66,12 @@ extension FriendList {
         guard scenePhase == .active else { return }
         Task { await inbox.takeSaved(accounts: accounts, friends: friends) }
       }
-      // "Yo Camera" (Shortcuts, Siri, the Action button): open straight in camera mode.
-      .onChange(of: AppRoute.shared.camera, initial: true) { _, on in
+      // "Yo Camera" (Shortcuts, Siri, the Action button): open straight in camera mode, once no sheet is up.
+      .onChange(of: AppRoute.shared.camera && !sheetUp, initial: true) { _, on in
         if on { AppRoute.shared.camera = false; if !cameraOn { cameraSwitched(true) } }
       }
+      // A sheet coming up over the camera (none should): the list under it, not the camera.
+      .onChange(of: sheetUp) { _, up in if up && cameraOn { cameraSwitched(false) } }
       // Back after more than 30 s away: the list again, not the camera (a quick app switch keeps the camera).
       .onChange(of: scenePhase) { _, phase in
         if phase == .background { leftAt = .now }

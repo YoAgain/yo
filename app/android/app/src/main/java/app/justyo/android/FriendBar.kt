@@ -17,11 +17,13 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -262,7 +264,10 @@ internal data class BarContent(
             },
             contentAlignment = Alignment.Center) {
             val sign = productMediaSign(if (bar.media.any { it.video }) ListKind.VIDEO else ListKind.PHOTO)
-            Text(sign, style = TextStyle(fontSize = 26.sp), maxLines = 1)
+            // Nothing downloaded yet: shown loading, and a finger on it opens nothing (MediaQueue.openable).
+            val loading = bar.media.none { it.ready }
+            Text(sign, Modifier.alpha(if (loading) .35f else 1f), style = TextStyle(fontSize = 26.sp), maxLines = 1)
+            if (loading) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
         }
     }
     Column(Modifier.fillMaxWidth().pointerInput(friend.key) {

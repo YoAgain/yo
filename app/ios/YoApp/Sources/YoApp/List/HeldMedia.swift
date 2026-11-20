@@ -89,11 +89,6 @@ struct HeldMedia: View {
           .ignoresSafeArea()
           .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { screen = $0 }
           .allowsHitTesting(false)
-        if current.pending != nil {
-          ProgressView().controlSize(.large).tint(.white)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .allowsHitTesting(false)
-        }
         VStack(alignment: .leading, spacing: 10) {
           TimelineView(.animation(minimumInterval: 1.0 / 120, paused: since == nil)) { timeline in
             let running = progress(at: timeline.date)
@@ -164,10 +159,6 @@ struct HeldMedia: View {
     }
     .onChange(of: finger.point) { _, point in follow(point) }
     .task(id: round) { await load() }
-    // The one waited for is downloaded: shown from its start.
-    .onChange(of: index < queue.count && queue[index].pending == nil) { _, ready in
-      if ready && seconds == nil { go(to: index) }
-    }
     .task(id: Run(round: round, held: held, ready: seconds != nil)) { await run() }
     .onAppear { ViewerSound.open() }
     .onDisappear {
@@ -238,11 +229,8 @@ struct HeldMedia: View {
     guard index < queue.count else { return finished() }
     let current = queue[index]
     player?.pause()
-    guard current.pending == nil else {
-      player = nil  // waits for its download (`queue` changes then)
-      full = nil
-      return
-    }
+    // Only downloaded ones are opened (`FriendList.see`); one still loading is passed by, never waited for.
+    guard current.pending == nil else { return go(to: index + 1) }
     guard let video = current.video else {
       player = nil
       full = nil

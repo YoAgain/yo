@@ -449,12 +449,15 @@ extension FriendList {
     case .down:
       shown = []
       heldFinger.point = nil
-      // A group's as "LEO in FAMILY".
-      viewing = inbox.media(for: friend)?.map {
+      // Only what is downloaded, written whole and checked (ReceivedMedia): one still loading stays on its bar, and
+      // the viewer never waits for a file or takes one in while open. A group's as "LEO in FAMILY".
+      let ready = (inbox.media(for: friend) ?? []).filter { $0.pending == nil }
+      guard !ready.isEmpty else { return }
+      viewing = ready.map {
         let user = Inbox.sender(of: $0)
         let name = user.flatMap { u in inbox.memberNames[u] ?? friends.all.first { $0.user == u }?.name }
         let from = friend.group == nil ? friend.name : "\(name ?? productText(text: .someone, lang: .english)) in \(friend.name)"
-        return Arrival(id: $0.id, from: from, photo: $0.photo, video: $0.video, file: $0.file, pending: $0.pending)
+        return Arrival(id: $0.id, from: from, photo: $0.photo, video: $0.video, file: $0.file)
       }
     case .tapped:
       heldFinger.point = nil

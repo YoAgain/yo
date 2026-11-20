@@ -317,6 +317,14 @@ import uniffi.yo.usernameValid
 }
 
 /** A complete recovery key in what was typed, pasted or read (as `Repository.restore` reads it); none otherwise. */
+/** A sign-in option's sign where the account's avatar sits, at the avatar's size. */
+@Composable
+private fun SignInOptionIcon(icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Box(Modifier.size(36.dp).background(Color.White.copy(alpha = 0.18f), CircleShape), contentAlignment = Alignment.Center) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
+    }
+}
+
 private fun parsedRecoveryKey(text: String): String? =
     uniffi.yo.recoveryKeyParse(text)
         ?: text.lowercase().filter { it in 'a'..'z' || it in '0'..'9' }.takeIf { it.length >= 64 }
@@ -436,7 +444,8 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
             exit = if (still) ExitTransition.None else fadeOut() + shrinkVertically(),
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
+                // The account's capsule, in glass: icon where the avatar sits, the name's size, the same height.
+                Surface(
                     onClick = {
                         start(SignInWay.PASSKEY) {
                             try {
@@ -451,15 +460,15 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                     },
                     // As the key field below it: the passkey and the recovery key are two equal options.
                     enabled = !busy, shape = CircleShape,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White,
-                        disabledContainerColor = Color.White.copy(alpha = 0.16f), disabledContentColor = Color.White.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    color = Color.White.copy(alpha = 0.16f), contentColor = Color.White,
                 ) {
-                    if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
-                    else {
-                        Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(copy(ProductText.PASSKEY), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        SignInOptionIcon(Icons.Default.Key)
+                        Spacer(Modifier.width(12.dp))
+                        Text(copy(ProductText.PASSKEY), Modifier.weight(1f), maxLines = 1,
+                            style = TextStyle(fontFamily = YoFont, fontSize = 22.sp, color = Color.White))
+                        if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
                     }
                 }
                 Row(Modifier.clearAndSetSemantics {}, verticalAlignment = Alignment.CenterVertically) {
@@ -480,18 +489,20 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                     modifier = Modifier.fillMaxWidth().semantics { contentDescription = placeholder },
                     enabled = !busy,
                     singleLine = true,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 17.sp,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 22.sp,
                         fontWeight = FontWeight.SemiBold, color = Color.White),
                     cursorBrush = SolidColor(Color.White),
                     keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, capitalization = KeyboardCapitalization.None,
                         keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { submitTyped(code) }),
                     decorationBox = { field ->
-                        Row(Modifier.heightIn(min = 52.dp).background(Color.White.copy(alpha = 0.16f), CircleShape)
-                            .padding(start = 18.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.heightIn(min = 56.dp).background(Color.White.copy(alpha = 0.16f), CircleShape)
+                            .padding(start = 12.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            SignInOptionIcon(Icons.Default.VpnKey)
+                            Spacer(Modifier.width(12.dp))
                             Box(Modifier.weight(1f)) {
-                                if (code.isEmpty()) Text(placeholder, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
-                                    color = Color.White.copy(alpha = 0.45f), maxLines = 1)
+                                if (code.isEmpty()) Text(placeholder, maxLines = 1,
+                                    style = TextStyle(fontFamily = YoFont, fontSize = 22.sp, color = Color.White.copy(alpha = 0.45f)))
                                 field()
                             }
                             when {
@@ -710,7 +721,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         addError = null
     }
     PredictiveBackHandler(recording!=null) { events -> events.collect { } }
-    PredictiveBackHandler(recording==null && (cameraOn || picked!=null)) { events -> events.collect { };cameraOn=false;picked=null }
+    // Back with media picked: the live camera again; with nothing picked: the list.
+    PredictiveBackHandler(recording==null && (cameraOn || picked!=null)) { events -> events.collect { }; if(picked!=null) picked=null else cameraOn=false }
     fun tap(friend: Friend) {
         Lat.mark("tap")
         if(importingShares) return
@@ -767,6 +779,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             cameraOn = false
             picked = null
             camera.close()
+        } else if (listObscured) {
+            return  // never under a sheet (Settings, a group, a menu, the viewer)
         } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             cameraOn = true
         } else {
@@ -775,7 +789,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     }
     val edgeCamera by rememberUpdatedState(::toggleCamera)
     val cameraAsked by model.openCamera.collectAsStateWithLifecycle()
-    LaunchedEffect(cameraAsked) { if (cameraAsked) { model.openCamera.value = false; if (!cameraOn) toggleCamera() } }
+    LaunchedEffect(cameraAsked, listObscured) { if (cameraAsked && !listObscured) { model.openCamera.value = false; if (!cameraOn) toggleCamera() } }
     val cameraEdgeOnLeft = cameraOn != s.leftHanded
     val gestureDensity = androidx.compose.ui.platform.LocalDensity.current
     val exclusionWidth = with(gestureDensity) { 28.dp.toPx() }
@@ -858,7 +872,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     // No menu in camera mode (iOS): a long press there is a hold.
     rowActions.menu = { friend -> if(!cameraOn && !tapLock.locked(friend.key)) menu=friend }
     rowActions.undo = { friend -> if(currentTouch(friend)) repo.command { cancelMedia(friend) } }
-    rowActions.media = { friend -> heldFinger.point=null;if(currentTouch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() } }
+    rowActions.media = { friend -> heldFinger.point=null;if(currentTouch(friend)) viewing=MediaQueue.openable(repo.state.value.media,friend.target).takeIf { it.isNotEmpty() } }
     rowActions.mediaTouch = { when(it) {
         is MediaTouch.Moved -> { heldFinger.barBottom=it.barBottom;heldFinger.point=it.point }
         MediaTouch.Tapped -> heldFinger.point=null
@@ -1080,7 +1094,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 val gallerySide = if (mirrored) Alignment.CenterEnd else Alignment.CenterStart
                 val cameraSide = if (mirrored) Alignment.CenterStart else Alignment.CenterEnd
                 Box(Modifier.align(gallerySide)) { controls() }
-                if (cameraOn && camera.zoomChoices.size > 1) {
+                if (cameraOn && picked == null && camera.zoomChoices.size > 1) {
                     IconButton(
                         onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); camera.zoom() }, enabled = recording == null,
                         modifier = Modifier.size(44.dp),
@@ -1090,7 +1104,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 Row(Modifier.align(cameraSide), horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     if (mirrored) cameraButton()
-                    if (cameraOn) IconButton(
+                    // Media picked: nothing to flip, only the library and the clear button stay.
+                    if (cameraOn && picked == null) IconButton(
                         onClick = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); camera.flip(); cameraVersion++ }, enabled = recording == null,
                         modifier = Modifier.size(56.dp),
                         colors = IconButtonDefaults.iconButtonColors(containerColor = glassTint, contentColor = Color.White),

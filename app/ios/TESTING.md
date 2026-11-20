@@ -57,8 +57,8 @@ the Linux build does not run the Simulator UI driver.
   Contact…], then Blocked Contacts (tap asks to unblock). Account Security shows a green check when recovery is in
   place, the red 1 before the chevron while it needs attention; it pushes the Account Security page.
 - Account Security: [Account Backup], then "Account Recovery" (its (i) opens "How Account Recovery Works") with
-  switches for Recovery Key (while on, "Show or Save Key" beneath it), Passkey and iCloud Keychain (follows iOS
-  Settings, not changeable here), footer "Any one brings your account back on a new phone." Turning Recovery Key or
+  switches for Recovery Key (while on, an eye button left of its switch opens Show or Save), Passkey and iCloud
+  Keychain (follows iOS Settings, not changeable here), no footer. Turning Recovery Key or
   Passkey on opens its half-height screen and the switch shows On only once saved / tried; turning one off asks
   first ("Turn Off Recovery Key?" / "Turn Off Passkey?"). The screens themselves have no Turn Off button. Showing the
   recovery key still requires device authentication.

@@ -1083,5 +1083,7 @@ fun friendlyError(context: Context,error: Exception): String = when (error) {
         else -> context.getString(R.string.hub_refused,error.status.toInt())
     }
     is YoException.State -> context.getString(R.string.account_unavailable)
+    // The core's own words (a save "Busy", an internal step) are for the error log, never the screen.
+    is YoException -> { android.util.Log.w("Yo", "core error: ${error::class.simpleName}"); context.getString(R.string.generic_failure) }
     else -> error.message?.takeIf { it.isNotBlank() } ?: context.getString(R.string.generic_failure)
 }

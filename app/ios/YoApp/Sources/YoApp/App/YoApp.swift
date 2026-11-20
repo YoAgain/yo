@@ -30,13 +30,13 @@ struct YoApp: App {
     Perf.mark("launch.init state \(UIApplication.shared.applicationState.rawValue)")
     PerfProbe.watchLaunchLag()
     PerfProbe.profileLaunch()
-    StateStorage.access = StateAccessTime(UIApplication.shared)
+    let application = UIApplication.shared
+    let foreground = ForegroundTurns(state: application.applicationState)
+    StateStorage.access = StateAccessTime(application, front: { foreground.isFront })
     Launch.start()
     // Only once Yo is in front, never in a background launch (Action button, silent push).
     Launch.whenActive { MediaSignWarmup.start() }
     // Every turn is revocable, by leaving the foreground or by background time expiring.
-    let application = UIApplication.shared
-    let foreground = ForegroundTurns(active: application.applicationState == .active)
     SharedAccess.foreground = { foreground.isActive }
     SharedAccess.hold = { expire in
       if let end = foreground.hold(expire) { return end }
@@ -260,9 +260,14 @@ struct YoApp: App {
 /// runs out, the access under way (milliseconds, at most SQLite's busy wait) finishes before the time is given back.
 private final class StateAccessTime: StateAccess, @unchecked Sendable {
   private let application: UIApplication
+  /// Not in the background: in front, also while inactive under Face ID, a passkey sheet or Control Center.
+  private let front: @Sendable () -> Bool
   private static let key = "yo.stateAccess"
 
-  init(_ application: UIApplication) { self.application = application }
+  init(_ application: UIApplication, front: @escaping @Sendable () -> Bool) {
+    self.application = application
+    self.front = front
+  }
 
   /// An access's background task, and its end for the expiry handler to wait on.
   private final class Under: @unchecked Sendable {
@@ -284,9 +289,10 @@ private final class StateAccessTime: StateAccess, @unchecked Sendable {
       under.task.end()
     }
     guard under.task.start(id) else {
-      // iOS may refuse background time even in front (seen on a first open: every refusal stalled the update). In
-      // front the app is not suspended, so the access goes on without it; leaving the front revokes the shared turns.
-      guard SharedAccess.foreground?() == true else {
+      // iOS may refuse background time even in front (seen on a first open: every refusal stalled the update, and
+      // under Face ID for a passkey: the backup's save came back "Busy"). In front, inactive too, the app is not
+      // suspended, so the access goes on without it; only the background suspends it.
+      guard front() else {
         Logger(subsystem: "app.justyo", category: "state-access").error("background time refused")
         return false
       }
@@ -500,12 +506,21 @@ private enum MediaSignWarmup {
 private final class ForegroundTurns: @unchecked Sendable {
   private let gate = NSLock()
   private var active: Bool
+  /// Not in the background (inactive counts): a process there is not suspended.
+  private var front: Bool
   private var turns: [UUID: @Sendable () -> Void] = [:]
   private var observers: [NSObjectProtocol] = []
 
-  init(active: Bool) {
-    self.active = active
+  init(state: UIApplication.State) {
+    active = state == .active
+    front = state != .background
     observers = [
+      NotificationCenter.default.addObserver(
+        forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
+      ) { [weak self] _ in self?.setFront(true) },
+      NotificationCenter.default.addObserver(
+        forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
+      ) { [weak self] _ in self?.setFront(false) },
       NotificationCenter.default.addObserver(
         forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
       ) { [weak self] _ in self?.setActive(true) },
@@ -516,6 +531,9 @@ private final class ForegroundTurns: @unchecked Sendable {
   }
 
   var isActive: Bool { gate.withLock { active } }
+  var isFront: Bool { gate.withLock { front } }
+
+  private func setFront(_ front: Bool) { gate.withLock { self.front = front } }
 
   func hold(_ expire: @escaping @Sendable () -> Void) -> (@Sendable () -> Void)? {
     gate.withLock {
@@ -529,6 +547,7 @@ private final class ForegroundTurns: @unchecked Sendable {
   private func setActive(_ active: Bool) {
     let expired = gate.withLock {
       self.active = active
+      if active { front = true }
       guard !active else { return [@Sendable () -> Void]() }
       let expired = Array(turns.values)
       turns.removeAll()

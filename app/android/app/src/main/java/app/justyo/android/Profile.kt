@@ -48,6 +48,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -355,11 +357,13 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         // iOS AccountSecurityPage: the three ways back on a new phone, each with its switch; the (i) above
                         // explains them. A passkey here rides on a saved recovery key, so without one its switch opens the key's screen.
                         val keyOn = s.secured && s.recoverySaved
-                        Section(copy(ProductText.ACCOUNT_RECOVERY), copy(ProductText.RECOVERY_FOOTER),
+                        Section(copy(ProductText.ACCOUNT_RECOVERY), null,
                             // On opens the key's screen, saved there; off makes the saved key stop working.
+                            // While on, the eye left of the switch opens the key's screen again, to show or save it.
                             Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key, badge = s.recoveryNeedsAttention, checked = keyOn,
+                                action = if (keyOn) Icons.Default.Visibility to copy(ProductText.SHOW_OR_SAVE_KEY) else null,
+                                onAction = ::openKey,
                                 onChecked = { on -> if (on) openKey() else turningOffKey = true }),
-                            if (keyOn) Setting(copy(ProductText.SHOW_OR_SAVE_KEY), Icons.Default.Visibility, onClick = ::openKey) else null,
                             // On opens the passkey's screen; it shows on once tried there.
                             Setting(copy(ProductText.PASSKEY), Icons.Default.Fingerprint, checked = passkeyConfigured, onChecked = { on ->
                                 when {
@@ -459,7 +463,9 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         }
     }
 
-    if (secure) RecoverySheet(model, s) { secure = false }
+    // Done there (the key kept) lands inside Account Security, where it now shows on; the ✕ stays where it was.
+    if (secure) RecoverySheet(model, s, onClose = { secure = false },
+        onDone = { secure = false; if (page != "Account Security") open("Account Security") })
     if (passkeyPage) PasskeySheet(model, passkeyConfigured) { passkeyPage = false; passkeyRevision++ }
     // Off: the backup moves to a new key at once, so the saved one stops working now; the new one is not saved yet.
     if (turningOffKey) AlertDialog(
@@ -712,27 +718,29 @@ private fun shareCode(context: Context, name: String) {
         }
     }
     val messages = support?.messages.orEmpty()
-    if (messages.isEmpty() && !offline) {
-        // The empty chat: one incoming message from the team, centred, and a quiet word on privacy under it.
-        Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)) {
-            SupportBubble(stringResource(R.string.support_empty_title), fromTeam = true)
-            Text(stringResource(R.string.support_privacy), Modifier.padding(start = 16.dp),
+    // Like a chat: the privacy line on top, the team's greeting as the first message, everything stacked from the
+    // bottom above the field; the greeting stays first, so sending the first message doesn't move it.
+    val scroll = rememberScrollState()
+    LaunchedEffect(scroll) { snapshotFlow { scroll.maxValue }.collect { scroll.animateScrollTo(it) } }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxWidth().verticalScroll(scroll).heightIn(min = maxHeight).padding(16.dp),
+            verticalArrangement = Arrangement.SpaceBetween) {
+            Text(stringResource(R.string.support_privacy), Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        return
-    }
-    LazyColumn(Modifier.fillMaxSize(), reverseLayout = true, contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (offline) item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                Row(Modifier.padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.support_offline), Modifier.weight(1f).padding(vertical = 12.dp))
-                    TextButton(onClick = { retry++ }) { Text(stringResource(R.string.retry)) }
+            Column(Modifier.fillMaxWidth().padding(top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(stringResource(R.string.ui_yo_team), Modifier.padding(start = 16.dp),
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    SupportBubble(stringResource(R.string.support_empty_title), fromTeam = true)
+                }
+                messages.forEach { message -> key(message.id) { SupportBubble(message.text, message.fromTeam) } }
+                if (offline) Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Row(Modifier.padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.support_offline), Modifier.weight(1f).padding(vertical = 12.dp))
+                        TextButton(onClick = { retry++ }) { Text(stringResource(R.string.retry)) }
+                    }
                 }
             }
-        }
-        items(messages.asReversed(), key = { it.id.toString() }) { message ->
-            SupportBubble(message.text, message.fromTeam)
         }
     }
 }
@@ -940,47 +948,12 @@ private fun shareCode(context: Context, name: String) {
     }
 }
 
-/** A step of recovery: its number (a tick once done), its name and state; beneath, its buttons side by side. */
-@Composable private fun RecoveryStep(number: Int, title: String, status: String?, done: Boolean, buttons: @Composable RowScope.() -> Unit = {}) {
-    Surface(Modifier.fillMaxWidth().padding(top = 12.dp), shape = RoundedCornerShape(22.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(Modifier.size(26.dp).background(if (done) Color(0xFF2ECC71) else Color.White, CircleShape), contentAlignment = Alignment.Center) {
-                    if (done) Icon(Icons.Default.Check, null, Modifier.size(16.dp), tint = Color.White)
-                    else Text("$number", style = TextStyle(fontFamily = YoFont, fontSize = 13.sp, color = Color(0xFF8E44AD)))
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(title, style = TextStyle(fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
-                    if (status != null) Text(status, style = TextStyle(fontSize = 13.sp), color = Color.White.copy(alpha = 0.85f))
-                }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), content = buttons)
-        }
-    }
-}
-
-/** A card's button, as wide as the others: white with a black label (no purple on purple), or outlined in white. */
-@Composable private fun RowScope.StepButton(label: String, icon: ImageVector?, prominent: Boolean = true, busy: Boolean = false,
-    enabled: Boolean = true, onClick: () -> Unit) {
-    val content: @Composable RowScope.() -> Unit = {
-        if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = if (prominent) Color.Black else Color.White, strokeWidth = 2.dp)
-        else {
-            if (icon != null) Icon(icon, null, Modifier.size(18.dp).padding(end = 4.dp))
-            Text(label, maxLines = 1)
-        }
-    }
-    if (prominent) Button(onClick = onClick, enabled = enabled, modifier = Modifier.weight(1f), content = content,
-        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
-            disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f)))
-    else OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.weight(1f), content = content,
-        border = androidx.compose.foundation.BorderStroke(1.5.dp, Color.White.copy(alpha = 0.6f)),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.5f)))
-}
-
-/** The recovery screens (iOS RecoveryScreen): a full-screen Amethyst assistant, its symbol, title and line, then the
- *  cards, centred; the close button top right, Done at the bottom. */
-@Composable private fun RecoveryScreen(icon: ImageVector, title: String, line: String, idle: Boolean, onClose: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit) {
+/** The recovery screens (iOS RecoveryScreen): a full-screen Amethyst assistant without cards, its symbol, title and
+ *  line centred; at the bottom the step as a small line (a green tick once done), the problem if any, one big white
+ *  button (black label, no purple on purple) and its quiet links. The close button top right leaves at any time. */
+@Composable private fun RecoveryScreen(icon: ImageVector, title: String, line: String, step: String, stepDone: Boolean,
+    problem: String?, idle: Boolean, button: String, buttonIcon: ImageVector?, onButton: () -> Unit, onClose: () -> Unit,
+    links: @Composable RowScope.() -> Unit = {}, content: @Composable ColumnScope.() -> Unit = {}) {
     androidx.compose.ui.window.Dialog(onDismissRequest = { if (idle) onClose() }, properties = androidx.compose.ui.window.DialogProperties(
         usePlatformDefaultWidth = false, decorFitsSystemWindows = false, dismissOnClickOutside = false)) {
         val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
@@ -991,10 +964,31 @@ private fun shareCode(context: Context, name: String) {
                     horizontalAlignment = Alignment.CenterHorizontally) {
                     Spacer(Modifier.weight(1f))
                     Icon(icon, null, Modifier.size(56.dp))
-                    Text(title, Modifier.padding(top = 20.dp), style = TextStyle(fontFamily = YoFont, fontSize = 24.sp), textAlign = TextAlign.Center, maxLines = 2)
+                    Text(title, Modifier.padding(top = 20.dp), style = TextStyle(fontFamily = YoFont, fontSize = 34.sp), textAlign = TextAlign.Center, maxLines = 2)
                     Text(line, Modifier.padding(top = 8.dp, bottom = 24.dp), textAlign = TextAlign.Center,
                         style = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium), color = Color.White.copy(alpha = 0.85f))
                     content()
+                    Spacer(Modifier.weight(1f))
+                    Row(Modifier.padding(top = 24.dp).semantics(mergeDescendants = true) {}, verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (stepDone) Box(Modifier.size(16.dp).background(Color(0xFF2ECC71), CircleShape), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.Check, null, Modifier.size(11.dp), tint = Color.White)
+                        }
+                        Text(step, style = TextStyle(fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+                            color = Color.White.copy(alpha = if (stepDone) 1f else 0.85f))
+                    }
+                    problem?.let { Text(it, Modifier.padding(top = 8.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodySmall.copy(
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)) }
+                    Button(onClick = onButton, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 10.dp).heightIn(min = 48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
+                            disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
+                        if (!idle) CircularProgressIndicator(Modifier.size(20.dp), color = Color.Black, strokeWidth = 2.dp)
+                        else {
+                            if (buttonIcon != null) Icon(buttonIcon, null, Modifier.size(20.dp).padding(end = 6.dp))
+                            Text(button, fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
+                        }
+                    }
+                    Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically, content = links)
                 }
                 FilledTonalIconButton(onClick = onClose, enabled = idle, modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 12.dp),
                     colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White)) {
@@ -1005,24 +999,26 @@ private fun shareCode(context: Context, name: String) {
     }
 }
 
-/** The white Done at the bottom of a recovery screen: it closes at any time, not while a step works. */
-@Composable private fun ColumnScope.RecoveryDone(idle: Boolean, onClose: () -> Unit) {
-    Spacer(Modifier.weight(1f))
-    Button(onClick = onClose, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 24.dp).heightIn(min = 48.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
-            disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
-        Text(copy(ProductText.DONE), fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+/** A quiet link under the big button: white text with its icon, no fill. */
+@Composable private fun RecoveryLink(label: String, icon: ImageVector, enabled: Boolean, onClick: () -> Unit) {
+    TextButton(onClick = onClick, enabled = enabled, colors = ButtonDefaults.textButtonColors(contentColor = Color.White,
+        disabledContentColor = Color.White.copy(alpha = 0.5f))) {
+        Icon(icon, null, Modifier.size(18.dp).padding(end = 4.dp))
+        Text(label, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
     }
 }
 
 /** The recovery key (iOS RecoveryKeySheet), from the red badge and the account page: save it, show it. */
-@Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit) {
+/** `onDone`: Done once the key is kept, when it leads somewhere else than `onClose` (the ✕). */
+@Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit, onDone: () -> Unit = onClose) {
     val res = LocalResources.current
     val context = LocalContext.current
     var shown by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var keySaved by remember { mutableStateOf(false) }
+    // Kept this time by showing it, not by saving: the step says "Shown".
+    var keptByShowing by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
     // Opened on a secured account: the key shown is the one already saved.
     LaunchedEffect(s.recovery, s.recoverySaved) {
@@ -1035,7 +1031,7 @@ private fun shareCode(context: Context, name: String) {
                 val key = state.value.recovery ?: error(res.getString(R.string.ui_recovery_key_missing))
                 context.contentResolver.openOutputStream(uri)?.use { write(it, key) } ?: error(res.getString(R.string.ui_couldn_t_save_the_recovery_key))
                 if (!keySaved) { if (state.value.secured) markRecoverySaved() else keepRecovery() }
-                keySaved = true
+                keySaved = true; keptByShowing = false
             } finally { busy = false }
         }
         Unit
@@ -1055,13 +1051,27 @@ private fun shareCode(context: Context, name: String) {
     val key = s.recovery
     val ready = key?.length == 64
     val idle = !busy
-    RecoveryScreen(Icons.Default.Key, copy(ProductText.RECOVERY_KEY_TITLE), copy(ProductText.RECOVERY_KEY_LINE), idle, onClose) {
-        RecoveryStep(1, copy(ProductText.RECOVERY_KEY), copy(if (keySaved) ProductText.SAVED else ProductText.NOT_SAVED_YET), keySaved) {
-            StepButton(copy(if (shown) ProductText.HIDE else ProductText.SHOW), if (shown) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                prominent = false, enabled = ready && idle) { shown = !shown }
-            StepButton(copy(if (keySaved) ProductText.SAVE_AGAIN else ProductText.SAVE), Icons.Default.Share, busy = busy,
-                enabled = ready && idle) { sharing = true }
+    fun show() {
+        shown = !shown
+        // Seen counts as kept, as saved does: the step is ticked and the button becomes Done.
+        if (shown && !keySaved) model.repository.command {
+            busy = true
+            try { if (state.value.secured) markRecoverySaved() else keepRecovery(); keySaved = true; keptByShowing = true }
+            finally { busy = false }
         }
+    }
+    RecoveryScreen(Icons.Default.Key, copy(ProductText.RECOVERY_KEY_TITLE), copy(ProductText.RECOVERY_KEY_LINE),
+        when { !keySaved -> ""; keptByShowing -> copy(ProductText.SHOWN); else -> copy(ProductText.SAVED) }, keySaved,
+        null, idle, copy(if (keySaved) ProductText.DONE else ProductText.SAVE_RECOVERY_KEY), if (keySaved) null else Icons.Default.Share,
+        onButton = { if (keySaved) onDone() else if (ready) sharing = true }, onClose = onClose,
+        links = {
+            if (keySaved) {
+                RecoveryLink(copy(ProductText.SAVE_AGAIN), Icons.Default.Share, ready && idle) { sharing = true }
+                Text("·", Modifier.clearAndSetSemantics {})
+            }
+            RecoveryLink(copy(if (shown) ProductText.HIDE_KEY else ProductText.SHOW_KEY),
+                if (shown) Icons.Default.VisibilityOff else Icons.Default.Visibility, ready && idle, ::show)
+        }) {
         if (shown && key != null) Box(Modifier.padding(top = 8.dp)) {
             YoSystemTheme {
                 KeyCard(key, copied) {
@@ -1072,7 +1082,6 @@ private fun shareCode(context: Context, name: String) {
                 }
             }
         }
-        RecoveryDone(idle, onClose)
     }
     if (sharing) AlertDialog(
         onDismissRequest = { sharing = false },
@@ -1112,34 +1121,29 @@ private fun shareCode(context: Context, name: String) {
         try { work() } catch (e: CancellationException) { throw e } catch (_: androidx.credentials.exceptions.GetCredentialCancellationException) {
         } catch (_: androidx.credentials.exceptions.CreateCredentialCancellationException) {
         } catch (_: IllegalArgumentException) { problem = res.getString(R.string.passkey_no_prf)
-        } catch (e: Exception) { problem = e.localizedMessage ?: res.getString(R.string.passkey_try_again)
+        } catch (e: Exception) {
+            // A short line on screen; what went wrong only in the log.
+            android.util.Log.w("YoPasskey", "passkey step failed: ${e::class.simpleName}")
+            problem = res.getString(R.string.passkey_try_again)
         } finally { busy = false }
     }
-    RecoveryScreen(Icons.Default.Fingerprint, copy(ProductText.PASSKEY), stringResource(R.string.passkey_line), idle, onClose) {
-        RecoveryStep(1, copy(ProductText.CREATE_PASSKEY), if (on || created != null) copy(ProductText.CREATED) else null, on || created != null) {
-            if (!on && created == null) StepButton(copy(ProductText.CREATE), null, busy = busy, enabled = idle) {
-                step {
-                    val (name, user) = model.repository.passkeyAccount() ?: return@step
-                    created = Passkeys.create(context, name, user)
-                }
-            }
-        }
-        RecoveryStep(2, copy(ProductText.TRY_IT_ONCE), null, on) {
-            if (!on) StepButton(stringResource(R.string.passkey_try), Icons.Default.Fingerprint, busy = busy && created != null,
-                enabled = idle && created != null) {
-                step {
-                    val id = created ?: return@step
-                    val (_, user) = model.repository.passkeyAccount() ?: return@step
-                    val answer = Passkeys.confirm(context, id, user)
-                    withContext(Dispatchers.IO) { model.repository.keepPasskey(answer) }
-                    created = null; on = true
-                }
-            }
-        }
-        problem?.let { Text(it, Modifier.padding(top = 8.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodySmall.copy(
-            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)) }
-        RecoveryDone(idle, onClose)
+    fun create() = step {
+        val (name, user) = model.repository.passkeyAccount() ?: return@step
+        created = Passkeys.create(context, name, user)
     }
+    fun check() = step {
+        val id = created ?: return@step
+        val (_, user) = model.repository.passkeyAccount() ?: return@step
+        val answer = Passkeys.confirm(context, id, user)
+        withContext(Dispatchers.IO) { model.repository.keepPasskey(answer) }
+        created = null; on = true
+    }
+    RecoveryScreen(Icons.Default.Fingerprint, copy(ProductText.PASSKEY), stringResource(R.string.passkey_line),
+        copy(when { on -> ProductText.PASSKEY_ON; created != null -> ProductText.PASSKEY_STEP_TRY; else -> ProductText.PASSKEY_STEP_CREATE }), on,
+        problem, idle,
+        when { on -> copy(ProductText.DONE); created != null -> stringResource(R.string.passkey_try); else -> copy(ProductText.CREATE_PASSKEY) },
+        if (!on && created != null) Icons.Default.Fingerprint else null,
+        onButton = { when { on -> onClose(); created != null -> check(); else -> create() } }, onClose = onClose)
 }
 
 /** A page of Android's own settings, or its first page where this phone has no such page. */

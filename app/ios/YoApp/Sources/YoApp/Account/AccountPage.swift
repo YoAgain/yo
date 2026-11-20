@@ -13,6 +13,9 @@ struct AccountPage: View {
   @Environment(AccountStore.self) private var accounts
   @State private var signingOut: Account?
   @State private var showingRecoveryKey = false
+  /// The key kept there with Done: its sheet gone, Account Security opens, where it now shows on.
+  @State private var keptKey = false
+  @State private var showingSecurity = false
   @State private var deleteTyped = ""
   @State private var deletingAccount = false
   @Binding var showingDelete: Bool
@@ -27,7 +30,10 @@ struct AccountPage: View {
           openSheet(.contacts)
         } label: {
           LabeledContent {
-            ContactSecurityPage(summaryOnly: true)
+            HStack(spacing: 8) {
+              ContactSecurityPage(summaryOnly: true)
+              DisclosureChevron()
+            }
           } label: {
             Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.green))
           }
@@ -47,7 +53,10 @@ struct AccountPage: View {
         if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
           Button { showingRecoveryKey = true } label: {
             LabeledContent {
-              RecoveryBadge()
+              HStack(spacing: 8) {
+                RecoveryBadge()
+                DisclosureChevron()
+              }
             } label: {
               Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
             }
@@ -111,7 +120,25 @@ struct AccountPage: View {
       .presentationDetents([.large])
       .presentationDragIndicator(.hidden)
     }
-    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
+    .sheet(
+      isPresented: $showingRecoveryKey,
+      onDismiss: {
+        if keptKey {
+          keptKey = false
+          showingSecurity = true
+        }
+      }
+    ) {
+      RecoveryKeySheet(
+        close: { showingRecoveryKey = false },
+        done: {
+          keptKey = true
+          showingRecoveryKey = false
+        })
+    }
+    .navigationDestination(isPresented: $showingSecurity) {
+      AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey)
+    }
     .confirmDestructive(
       $signingOut, title: { _ in "Sign Out?" },
       message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },
@@ -228,22 +255,20 @@ struct AccountSecurityPage: View {
           HStack(spacing: 8) {
             Label(ProductText.recoveryKey.english, systemImage: "key.fill").labelStyle(Tile(.amethyst))
             if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) { RecoveryBadge() }
+            // While on, the eye left of the switch opens the key's screen again, to show or save it.
+            if keySaved {
+              Spacer()
+              Button(ProductText.showOrSaveKey.english, systemImage: "eye") { showingRecoveryKey = true }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .tint(.amethyst)
+                .accessibilityIdentifier("security.showKey")
+            }
           }
         }
         .accessibilityIdentifier("security.recoveryKey")
-        if keySaved {
-          Button { showingRecoveryKey = true } label: {
-            LabeledContent {
-              Image(systemName: "chevron.forward")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .accessibilityHidden(true)
-            } label: {
-              Label(ProductText.showOrSaveKey.english, systemImage: "eye.fill").labelStyle(Tile(.amethyst))
-            }
-          }
-          .tint(Color(.label))
-          .accessibilityIdentifier("security.showKey")
+        .accessibilityActions {
+          if keySaved { Button(ProductText.showOrSaveKey.english) { showingRecoveryKey = true } }
         }
         // On opens the passkey's screen; it is on once tried there.
         Toggle(
@@ -268,11 +293,13 @@ struct AccountSecurityPage: View {
             .labelStyle(.iconOnly)
             .accessibilityIdentifier("security.howRecoveryWorks")
         }
-      } footer: {
-        Text(ProductText.recoveryFooter.english)
       }
       .disabled(busy)
     }
+    // Fits the half-height sheet without scrolling: compact sections from a small top margin.
+    .listSectionSpacing(.compact)
+    .contentMargins(.top, 8, for: .scrollContent)
+    .scrollBounceBehavior(.basedOnSize)
     .accessibilityIdentifier("security.page")
     .navigationTitle("Account Security")
     .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }

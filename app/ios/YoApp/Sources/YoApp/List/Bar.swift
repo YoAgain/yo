@@ -401,11 +401,16 @@ struct RowButton: View {
   private static let ring = 56.0
   private static let sign = 40.0  // the sign at the words' own size
 
+  /// Nothing downloaded yet: the sign shows it loading, and a finger on it opens nothing (`FriendList.see`).
+  private var loading: Bool { !media.isEmpty && media.allSatisfy { $0.pending != nil } }
+
   /// "📷" or "🎥" while media waits unseen: a finger on it shows them; only the sign takes the touch.
   @ViewBuilder private var sign: some View {
     if !mediaSign.isEmpty {
       Text(mediaSign)
         .font(.system(size: Metrics.rowFont))  // as tall as the words
+        .opacity(loading ? 0.35 : 1)
+        .overlay { if loading { ProgressView().controlSize(.small).tint(.white) } }
         .frame(width: Self.sign, height: Self.sign)
         .scaleEffect(viewing ? 0.88 : 1)
         .contentShape(.rect.inset(by: -10))  // easy to hit
@@ -428,6 +433,7 @@ struct RowButton: View {
         )
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(media.count == 1 ? "1 photo or video" : "\(media.count) photos or videos")
+        .accessibilityValue(loading ? "Loading" : "")
         .accessibilityAction { view(.down); view(.tapped) }  // opens them, running to the end
         .transition(.scale.combined(with: .opacity))
     }

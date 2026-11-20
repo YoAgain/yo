@@ -528,15 +528,32 @@ final class AccountStore {
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
       throw Diagnostics.failure(AccountError.noPRF)
     }
-    try await backupTurn {
-      try still(client)
-      if account?.secured == true {
-        try await rewrap(.set(prf))
-      } else {
-        try await saveBackup(prf: prf)
+    try await retryingBusy {
+      try await backupTurn {
+        try still(client)
+        if account?.secured == true {
+          try await rewrap(.set(prf))
+        } else {
+          try await saveBackup(prf: prf)
+        }
       }
     }
     newPasskey = nil
+  }
+
+  /// A save the state database refused for a moment ("Busy") is tried again shortly instead of failing the step;
+  /// putting the same backup again is harmless.
+  private func retryingBusy(_ work: () async throws -> Void) async throws {
+    var attempt = 1
+    while true {
+      do {
+        try await work()
+        return
+      } catch AccountError.hub(.Save(let kind)) where kind == "Busy" && attempt < 3 {
+        attempt += 1
+        try await Task.sleep(for: .milliseconds(400))
+      }
+    }
   }
 
   func secureWords() -> String {
@@ -544,7 +561,7 @@ final class AccountStore {
     return securing?.code ?? ""
   }
 
-  func keepWords() async throws { try await backupTurn { try await saveBackup(prf: nil) } }
+  func keepWords() async throws { try await retryingBusy { try await backupTurn { try await saveBackup(prf: nil) } } }
 
   private func saveBackup(prf: Data?) async throws {
     guard var account, let securing, let client else { throw Diagnostics.failure(AccountError.noBackup) }
@@ -1044,7 +1061,8 @@ enum AccountError: LocalizedError {
     case .keychain: "Yo can’t use the keychain right now. Unlock your iPhone and try again."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
     case .hub(.Replaced): "Your account is in use on another iPhone."
-    case .hub(let error): "Something went wrong. Try again." + (Hub.isDevApp ? " (\(error))" : "")
+    // The raw error goes to the error log (Hub.run records it), never on screen.
+    case .hub: "Something went wrong. Try again."
     }
   }
 }

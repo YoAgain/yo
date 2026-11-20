@@ -26,13 +26,17 @@ struct MessagePage: View {
   @State private var problem: String?
   @State private var failedSend = false
   @FocusState private var focused: Bool
+  @State private var visibleHeight: CGFloat = 0
   private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 
   var body: some View {
     NavigationStack {
       ScrollViewReader { scroll in
         ScrollView {
+          // Like Messages: the privacy line on top, the team's greeting as the first message, everything stacked
+          // from the bottom above the field; the greeting stays first, so sending the first message doesn't move it.
           LazyVStack(spacing: 4) {
+            greeting
             ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
               let previous = index > 0 ? messages[index - 1] : nil
               if previous == nil || gap(previous!, message) > 300_000 {
@@ -48,9 +52,20 @@ struct MessagePage: View {
             Color.clear.frame(height: 1).id("bottom")
           }
           .padding(.horizontal, 12)
-          .padding(.top, 8)
+          .padding(.top, 34)
+          .frame(minHeight: visibleHeight, alignment: .bottom)
+          .overlay(alignment: .top) {
+            Text("Not end-to-end encrypted")
+              .font(.caption2.weight(.medium))
+              .foregroundStyle(.secondary)
+              .padding(.top, 12)
+          }
         }
-        .overlay { if messages.isEmpty { empty } }
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+          geometry.containerSize.height - geometry.contentInsets.top - geometry.contentInsets.bottom
+        } action: { _, height in
+          visibleHeight = max(0, height)
+        }
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: messages.last?.id) { _, _ in
@@ -82,20 +97,16 @@ struct MessagePage: View {
     }
   }
 
-  /// The empty chat: one incoming message from the team, centred, and a quiet word on privacy under it.
-  @ViewBuilder private var empty: some View {
-    if loading {
-      ProgressView()
-    } else {
-      VStack(alignment: .leading, spacing: 6) {
-        bubble(SupportMessage(id: 0, fromTeam: true, text: "How can we help?", createdAt: 0, readAt: 0), grouped: true)
-        Text("Not end-to-end encrypted")
-          .font(.caption2)
-          .foregroundStyle(.tertiary)
-          .padding(.leading, 14)
-      }
-      .padding(.horizontal, 12)
+  /// The team's greeting, always the first message, with the sender's name over it as Messages shows it.
+  private var greeting: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text("Yo Team")
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.leading, 14)
+      bubble(SupportMessage(id: 0, fromTeam: true, text: "How can we help?", createdAt: 0, readAt: 0), grouped: true)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   /// A bubble like Messages: yours right in Yo purple, the team's left in gray; consecutive ones close together.

@@ -81,18 +81,23 @@ struct HelpHero: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      // A hidden first page gives the height on the first frame, so nothing grows into place while sliding in.
-      IntroPage(card: IntroCard.all[0], low: true, zoom: 1.25, sizer: true)
-        .fixedSize(horizontal: false, vertical: true)
-        .hidden()
-        .overlay {
-          TabView(selection: $page) {
-            ForEach(IntroCard.all.indices, id: \.self) { index in
-              IntroPage(card: IntroCard.all[index], low: true, zoom: 1.25).tag(index)
-            }
-          }
-          .tabViewStyle(.page(indexDisplayMode: .never))
+      // Hidden pages give the height on the first frame, so nothing grows into place while sliding in: all of them
+      // at once, so the longest title (two lines at large text) has its room too.
+      ZStack {
+        ForEach(IntroCard.all.indices, id: \.self) { index in
+          IntroPage(card: IntroCard.all[index], low: true, zoom: 1.25, sizer: true)
         }
+      }
+      .fixedSize(horizontal: false, vertical: true)
+      .hidden()
+      .overlay {
+        TabView(selection: $page) {
+          ForEach(IntroCard.all.indices, id: \.self) { index in
+            IntroPage(card: IntroCard.all[index], low: true, zoom: 1.25).tag(index)
+          }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+      }
       Dots(count: IntroCard.all.count, page: page) { next in withAnimation(.smooth) { page = next } }
     }
     .padding(.top, 24)
@@ -195,9 +200,14 @@ private struct IntroPage: View {
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
+  @Environment(\.dynamicTypeSize) private var typeSize
+
   private var words: some View {
     Text(card.title)
       .font(.yo(28, relativeTo: .title))
+      // In the Help card one line, a little smaller where it is narrow; with the largest text it wraps instead.
+      .lineLimit(low && !typeSize.isAccessibilitySize ? 1 : nil)
+      .minimumScaleFactor(low && !typeSize.isAccessibilitySize ? 0.7 : 1)
       .accessibilityAddTraits(.isHeader)
       .multilineTextAlignment(.center)
       .fixedSize(horizontal: false, vertical: true)

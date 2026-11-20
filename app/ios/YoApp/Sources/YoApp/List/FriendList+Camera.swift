@@ -51,7 +51,7 @@ extension FriendList {
       }
       .gesture(CameraEdgePan(
         left: cameraOn != leftHanded,
-        enabled: !edgeSettling && viewing == nil && recordingFor == nil,
+        enabled: !edgeSettling && viewing == nil && recordingFor == nil && !sheetUp,
         touched: {
           if !cameraOn && Camera.authorized { camera.start() }
         },
@@ -158,6 +158,12 @@ extension FriendList {
     }
   }
 
+  /// Media from the library chosen (or still loading): the taps send it, the camera's own controls are gone.
+  var selecting: Bool { !libraryItems.isEmpty || !picked.isEmpty }
+
+  /// A sheet over the list (Settings and what opens from it, New Group, members): the camera does not open under it.
+  var sheetUp: Bool { settings || newGroup || membersOf != nil }
+
   var flipButton: some View {
     Button {
       Haptic.tap(.light)
@@ -172,13 +178,14 @@ extension FriendList {
       var transaction = Transaction()
       transaction.disablesAnimations = true
       withTransaction(transaction) {
-        if cameraOn && !libraryItems.isEmpty {
+        // With media picked: back to the live camera; with nothing picked: closed.
+        if cameraOn && selecting {
           picked = []
           libraryItems = []
-        } else { cameraSwitched(!cameraOn) }
+        } else if cameraOn || !sheetUp { cameraSwitched(!cameraOn) }
       }
     } label: {
-      Label(cameraOn ? (libraryItems.isEmpty ? "Close Camera" : "Clear Selection") : "Camera",
+      Label(cameraOn ? (selecting ? "Clear Selection" : "Close Camera") : "Camera",
             systemImage: cameraOn ? "xmark" : "camera.fill")
     }
     .font(.system(size: 30))

@@ -338,6 +338,10 @@ class MediaQueue(
         return stage(target,bytes,1080,1080,held=false)
     }
     companion object {
+        /** What a bar's sign opens: only media downloaded, checked and written whole (`ready`), oldest first. One
+         *  still loading stays on its bar, loading; the viewer never waits for a file or takes one in while open. */
+        fun openable(media: List<Received>, target: String) =
+            media.filter { it.target == target && it.ready && !it.consumed }.sortedBy { it.at }
         private fun receivedFile(id: String) = "in-"+id.toByteArray().sha256Hex()
         fun mediaJson(m: YoMedia) = JSONObject().put("id",Repository.encode(m.id)).put("key",Repository.encode(m.key))
             .put("sha",Repository.encode(m.sha256)).put("size",m.size.toLong()).put("width",m.width.toInt()).put("height",m.height.toInt())

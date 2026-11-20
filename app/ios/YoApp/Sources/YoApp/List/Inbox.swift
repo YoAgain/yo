@@ -14,7 +14,8 @@ struct Arrival: Equatable, Identifiable {
   var photo: UIImage? = nil
   var video: URL? = nil
   var file: URL? = nil
-  /// Not downloaded yet: what it will be. On its bar from the moment its message comes; the viewer waits for it.
+  /// Not downloaded yet: what it will be. On its bar, loading, from the moment its message comes; opened only once
+  /// downloaded, written whole and checked.
   var pending: MediaFile.Kind? = nil
 
   var isVideo: Bool { video != nil || pending == .video }

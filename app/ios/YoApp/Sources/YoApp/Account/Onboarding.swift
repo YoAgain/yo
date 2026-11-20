@@ -508,7 +508,7 @@ struct RecoveryCard: View {
         ForEach(0..<(blocks.count + 3) / 4, id: \.self) { row in
           GridRow {
             ForEach(row * 4..<min(row * 4 + 4, blocks.count), id: \.self) { i in
-              Text(blocks[i]).font(.system(size: 22, weight: .semibold, design: .monospaced))
+              Text(blocks[i]).font(.system(.title2, design: .monospaced, weight: .semibold))
                 .frame(maxWidth: .infinity)
             }
           }
@@ -523,6 +523,18 @@ struct RecoveryCard: View {
     .padding(30)
     .frame(width: 390)
     .background(Color.amethyst)
+  }
+}
+
+/// A sign-in option's sign where an account's avatar sits, at the avatar's size.
+private struct OptionIcon: View {
+  let systemName: String
+
+  var body: some View {
+    Image(systemName: systemName)
+      .font(.system(size: 17, weight: .semibold))
+      .frame(width: 36, height: 36)
+      .background(.white.opacity(0.18), in: .circle)
   }
 }
 
@@ -626,7 +638,7 @@ private struct SignInCard: View {
     }
     .presentationDetents([.height(height)])
     .presentationBackground(Color.amethyst)
-    .presentationDragIndicator(.hidden)
+    .presentationDragIndicator(.visible)
     .preferredColorScheme(.dark)
   }
 
@@ -725,16 +737,16 @@ private struct SignInCard: View {
       keyProblem = nil
       passkey()
     } label: {
-      Group {
-        if signingInBy == .passkey {
-          ProgressView().tint(.white)
-        } else {
-          Label(ProductText.passkey.english, systemImage: "person.badge.key")
-            .font(.body.weight(.semibold))
-        }
+      // The accounts' capsule, in glass: icon where the avatar sits, the name's size, the same height.
+      HStack(spacing: 12) {
+        OptionIcon(systemName: "person.badge.key.fill")
+        Text(ProductText.passkey.english).font(.yo(22)).lineLimit(1)
+        Spacer(minLength: 0)
+        if signingInBy == .passkey { ProgressView().tint(.white) }
       }
       .foregroundStyle(.white)
-      .frame(maxWidth: .infinity, minHeight: 48)
+      .padding(.horizontal, 12)
+      .frame(maxWidth: .infinity, minHeight: 56)
       .background(.white.opacity(0.16), in: .capsule)
       .contentShape(.capsule)
     }
@@ -750,11 +762,12 @@ private struct SignInCard: View {
   /// One line: paste or type, scan, or a photo of the card; with text in it, a button to sign in.
   private var keyField: some View {
     HStack(spacing: 6) {
+      OptionIcon(systemName: "key.fill").padding(.trailing, 6).accessibilityHidden(true)
       TextField(
         "", text: $words,
-        prompt: Text(ProductText.recoveryKey.english).font(.body.weight(.semibold))
+        prompt: Text(ProductText.recoveryKey.english).font(.yo(22))
           .foregroundStyle(.white.opacity(0.45)))
-        .font(.system(.body, design: .monospaced, weight: .semibold))
+        .font(.system(.title2, design: .monospaced, weight: .semibold))
         .lineLimit(1)
         .tint(.white)
         .textInputAutocapitalization(.never)
@@ -763,7 +776,6 @@ private struct SignInCard: View {
         .submitLabel(.go)
         .onSubmit(submitTyped)
         .accessibilityLabel(ProductText.recoveryKey.english)
-        .padding(.leading, 18)
       if signingInBy == .recoveryKey {
         ProgressView().tint(.white).frame(width: 36, height: 36)
       } else if !words.isEmpty {
@@ -795,8 +807,9 @@ private struct SignInCard: View {
         .accessibilityLabel("Choose recovery key photo")
       }
     }
-    .padding(.trailing, 6)
-    .frame(minHeight: 48)
+    .padding(.leading, 12)
+    .padding(.trailing, 10)
+    .frame(minHeight: 56)
     .background(.white.opacity(0.16), in: .capsule)
     .disabled(busy)
   }
