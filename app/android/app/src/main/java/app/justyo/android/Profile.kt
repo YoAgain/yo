@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -238,7 +239,13 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         val intent = context.getSystemService(KeyguardManager::class.java).createConfirmDeviceCredentialIntent(
             res.getString(if (page == "Delete Account") R.string.ui_delete_account else R.string.ui_recovery_key),
             res.getString(R.string.ui_confirm_it_s_you))
-        if (intent != null) auth.launch(intent) else { afterAuth = null; model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue)) }
+        // No screen lock: said in the red banner (a snackbar would hide under this sheet); a tap on it opens Android's page.
+        if (intent != null) auth.launch(intent) else {
+            afterAuth = null
+            Problems.say(res.getString(R.string.problem_needs_screen_lock)) {
+                openSystemSettings(context, android.provider.Settings.ACTION_SECURITY_SETTINGS)
+            }
+        }
     }
     /** The recovery key's screen; a secured account's key only after the screen lock. */
     fun openKey() { if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true } }
@@ -718,31 +725,45 @@ private fun shareCode(context: Context, name: String) {
     }
 }
 
+/** The app icons iOS offers (AppIconPage.icons), by the same names: three to a row, as there. */
+private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default, "Negative" to R.string.icon_negative,
+    "Original" to R.string.icon_original, "OG2014" to R.string.icon_og2014, "Lilac2015" to R.string.icon_lilac2015)
+
 @Composable private fun IconChoice(current: String?, choose: (String?) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(bottom = 20.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        listOf(null, "Negative", "Original").forEach { name ->
-            val selected = current == name
-            OutlinedCard(
-                Modifier.weight(1f).selectable(selected, onClick = { choose(name) }),
-                border = if (selected) CardDefaults.outlinedCardBorder().copy(width = 2.dp, brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary))
-                    else CardDefaults.outlinedCardBorder(),
-            ) {
-                Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppIconPreview(name, 64, 16)
-                    Text(stringResource(when (name) { "Negative" -> R.string.icon_negative; "Original" -> R.string.icon_original; else -> R.string.icon_default }),
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelLarge)
+    Column(Modifier.fillMaxWidth().padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppIcons.chunked(3).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { (name, label) ->
+                    val selected = current == name
+                    OutlinedCard(
+                        Modifier.weight(1f).selectable(selected, onClick = { choose(name) }),
+                        border = if (selected) CardDefaults.outlinedCardBorder().copy(width = 2.dp, brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary))
+                            else CardDefaults.outlinedCardBorder(),
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            AppIconPreview(name, 64, 16)
+                            Text(stringResource(label), maxLines = 1, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
                 }
+                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }
 }
 
+/** An icon as the launcher shows it: the Yo wordmark or its negative on Amethyst; Full Color, OG 2014 and 2015 are
+ *  plain squares of their purple, as iOS's pictures are. */
 @Composable private fun AppIconPreview(name: String?, size: Int, radius: Int) {
-    val resource = if (name == "Negative") R.drawable.icon_negative else R.drawable.launcher_wordmark
-    val background = if (name == "Original") Color(0xFF9A44BE) else Amethyst
-    Image(painterResource(resource), null, Modifier.size(size.dp).clip(RoundedCornerShape(radius.dp)).background(background))
+    val modifier = Modifier.size(size.dp).clip(RoundedCornerShape(radius.dp))
+    when (name) {
+        "Original" -> Box(modifier.background(colorResource(R.color.original_purple)))
+        "OG2014" -> Box(modifier.background(Amethyst))
+        "Lilac2015" -> Box(modifier.background(colorResource(R.color.lilac_2015)))
+        else -> Image(painterResource(if (name == "Negative") R.drawable.icon_negative else R.drawable.launcher_wordmark), null,
+            modifier.background(Amethyst))
+    }
 }
 
 /** Status (iOS StatusPage): crashes, usage, then the server and this phone's part. Tapping the Yos row cycles its view. */
@@ -1053,7 +1074,9 @@ private fun shareCode(context: Context, name: String) {
         val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
         SideEffect { if (android.os.Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false }
         Surface(Modifier.fillMaxSize(), color = Amethyst, contentColor = Color.White) {
-            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+            // Bars and cutout only, not the keyboard: the screen has no field, and the PIN pad of the screen lock just
+            // before can still count as open when it appears, which pushed the button half up the screen.
+            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))) {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(top = 56.dp, bottom = 24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally) {
                     Spacer(Modifier.weight(1f))
@@ -1206,7 +1229,8 @@ private fun shareCode(context: Context, name: String) {
     var busy by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<String?>(null) }
     val idle = !busy
-    fun step(work: suspend () -> Unit) = scope.launch {
+    // `failed`: the line when it went wrong (iOS: creating says so, trying says "That didn't work").
+    fun step(failed: Int, work: suspend () -> Unit) = scope.launch {
         busy = true; problem = null
         try { work() } catch (e: CancellationException) { throw e } catch (_: androidx.credentials.exceptions.GetCredentialCancellationException) {
         } catch (_: androidx.credentials.exceptions.CreateCredentialCancellationException) {
@@ -1214,14 +1238,14 @@ private fun shareCode(context: Context, name: String) {
         } catch (e: Exception) {
             // A short line on screen; what went wrong only in the log.
             android.util.Log.w("YoPasskey", "passkey step failed: ${e::class.simpleName}")
-            problem = res.getString(R.string.passkey_try_again)
+            problem = res.getString(failed)
         } finally { busy = false }
     }
-    fun create() = step {
+    fun create() = step(R.string.passkey_create_failed) {
         val (name, user) = model.repository.passkeyAccount() ?: return@step
         created = Passkeys.create(context, name, user)
     }
-    fun check() = step {
+    fun check() = step(R.string.passkey_try_again) {
         val id = created ?: return@step
         val (_, user) = model.repository.passkeyAccount() ?: return@step
         val answer = Passkeys.confirm(context, id, user)

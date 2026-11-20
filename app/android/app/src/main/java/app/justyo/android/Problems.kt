@@ -14,16 +14,22 @@ import uniffi.yo.*
 object Problems {
     private class Entry(val retry: (() -> Unit)?, var expiry: Job?)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val active = LinkedHashMap<ProductProblem, Entry>()
+    /** By problem: a core [ProductProblem], or this phone's own words ([say]). */
+    private val active = LinkedHashMap<Any, Entry>()
     private val shown = MutableStateFlow<String?>(null)
     /** The banner's words now: the newest problem's. */
     val text = shown.asStateFlow()
 
-    fun report(problem: ProductProblem, retry: (() -> Unit)? = null) = synchronized(active) {
+    fun report(problem: ProductProblem, retry: (() -> Unit)? = null) = add(problem, productProblemPassing(problem), retry)
+
+    /** What this phone itself lacks for an action (no screen lock), in its own words; it hides after 6 s as well. */
+    fun say(text: String, retry: (() -> Unit)? = null) = add(text, false, retry)
+
+    private fun add(problem: Any, passing: Boolean, retry: (() -> Unit)?) = synchronized(active) {
         active.remove(problem)?.expiry?.cancel()
         val entry = Entry(retry, null)
         active[problem] = entry
-        if (!productProblemPassing(problem)) entry.expiry = scope.launch { delay(6000); resolve(problem, entry) }
+        if (!passing) entry.expiry = scope.launch { delay(6000); resolve(problem, entry) }
         publish()
     }
 
@@ -44,7 +50,7 @@ object Problems {
         entry.expiry?.cancel(); publish()
     }
 
-    private fun resolve(problem: ProductProblem, entry: Entry) = synchronized(active) {
+    private fun resolve(problem: Any, entry: Entry) = synchronized(active) {
         if (active[problem] === entry) { active.remove(problem); publish() }
     }
 
@@ -66,5 +72,7 @@ object Problems {
         active.values.forEach { it.expiry?.cancel() }; active.clear(); publish()
     }
 
-    private fun publish() { shown.value = active.keys.lastOrNull()?.let { productProblemText(it, Words) } }
+    private fun publish() {
+        shown.value = active.keys.lastOrNull()?.let { if (it is ProductProblem) productProblemText(it, Words) else it as String }
+    }
 }

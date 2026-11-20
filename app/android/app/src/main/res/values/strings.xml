@@ -75,7 +75,6 @@
     <string name="ui_mark_as_verified">Mark as Verified</string>
     <string name="ui_undo_before_sending">Undo Before Sending</string>
     <string name="ui_confirm_it_s_you">Confirm it’s you</string>
-    <string name="ui_set_a_screen_lock_in_android_settings_to_continue">Set a screen lock in Android Settings to continue.</string>
     <string name="ui_close">Close</string>
     <string name="ui_show_your_code">Show Your Code</string>
     <string name="ui_contacts">Contacts</string>
@@ -165,6 +164,8 @@
 <string name="icon_negative">Negative Yo</string>
 <string name="icon_original">Full Color</string>
 <string name="icon_default">Yo</string>
+<string name="icon_og2014">OG 2014</string>
+<string name="icon_lilac2015">2015</string>
 <string name="with_members">%1$s with %2$s</string>
 <string name="member_added">%1$s added %2$s to %3$s</string>
 <string name="member_removed">%1$s removed %2$s from %3$s</string>
@@ -190,6 +191,8 @@
     <string name="passkey_line">Sign in with your screen lock on a new phone.</string>
     <string name="passkey_try">Try with Screen Lock</string>
     <string name="passkey_no_prf">Your password manager can’t do this. Try Google Password Manager.</string>
+    <string name="problem_needs_screen_lock">Needs a Screen Lock</string>
+    <string name="passkey_create_failed">Couldn’t create passkey. Try again.</string>
     <string name="passkey_try_again">That didn’t work. Try again.</string>
     <string name="google_backup_footer">Your account key is in your Google account, end-to-end encrypted: a new phone signs in by itself.</string>
     <string name="google_backup_off">Your account isn’t backed up. Google encrypts it end to end only with a screen lock: set one in Android Settings, then turn this on.</string>

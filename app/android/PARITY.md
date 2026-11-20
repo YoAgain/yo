@@ -53,7 +53,6 @@ blocked, contacts, verification, Your Code, Status order).
 Still different, by decision or not yet done:
 - Swipe actions: Android keeps the platform's swipe-to-remove (with undo); iOS reveals Block and Trash and shows the
   last activity on a right swipe, and lets requests be swiped.
-- App Icon: three icons (iOS five: OG 2014 and 2015 need their launcher assets).
 - Long videos from the library are cut to ten seconds; iOS opens a trimmer.
 
 - One "Can't Open Your Account" screen; iOS tells "Server Not Reachable" (Try Again) apart.

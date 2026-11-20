@@ -1035,7 +1035,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     suspend fun verify(friend: Friend, verified: Boolean) { client?.setVerified(friend.target, verified); refresh(); media.wake() }
     suspend fun confirm(friend: Friend) { client?.confirmIdentity(friend.target); refresh(); media.wake(); client?.let { deliverLater(it) } }
     suspend fun icon(name: String?) {
-        val aliases = mapOf<String?,String>(null to "Default", "Negative" to "Negative", "Original" to "Original")
+        // The names iOS uses (its alternate icons), so the choice syncs between both.
+        val aliases = mapOf<String?,String>(null to "Default", "Negative" to "Negative", "Original" to "Original", "OG2014" to "OG2014", "Lilac2015" to "Lilac2015")
         val selected = aliases[name] ?: return
         val manager = context.packageManager
         fun component(value: String) = android.content.ComponentName(context.packageName, "app.justyo.android.${value}Icon")
