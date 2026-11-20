@@ -209,6 +209,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 friends = cached.optJSONArray("friends")?.objects()?.map(Friend::from).orEmpty(),
                 byFriend=cached.longMap("byFriend"),lastSent=cached.longMap("lastSent"),lastReceived=cached.longMap("lastReceived"),
                 secured = cached.optBoolean("secured"), leftHanded = cached.optBoolean("leftHanded"),
+                recoverySaved = cached.optBoolean("recoverySaved", true), recoveryPasskey = cached.optBoolean("recoveryPasskey"),
                 sent = cached.optLong("sent"), received = cached.optLong("received"),
                 pendingInvite = cached.stringOrNull("invite"), appIcon = cached.stringOrNull("appIcon"),
                 googleBackup = cached.optBoolean("googleBackup", true) && backupWanted(),
@@ -343,6 +344,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         vault.write("ui", JSONObject().put("username", s.username).put("friends", JSONArray(s.friends.map { it.json() }))
             .put("byFriend",JSONObject(s.byFriend)).put("lastSent",JSONObject(s.lastSent)).put("lastReceived",JSONObject(s.lastReceived))
             .put("appIcon", s.appIcon).put("secured", s.secured).put("leftHanded", s.leftHanded)
+            .put("recoverySaved", s.recoverySaved).put("recoveryPasskey", s.recoveryPasskey)
             .put("sent", s.sent).put("received", s.received).put("invite", s.pendingInvite).put("removed", JSONArray(removedUsers.toList()))
             .put("googleBackup", s.googleBackup).toString().toByteArray())
     }
@@ -412,7 +414,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val same = c.userId().hexBytes().contentEquals(decode(account.getString("userID")))
         val recovered = if (same) sealed.stringOrNull("code") ?: typedCode else null
         if (recovered != null) vault.write("recovery", recovered.toByteArray())
-        mutable.update { it.copy(username = c.username(), secured = same, recovery = recovered, broken = false, friends = emptyList()) }
+        mutable.update { it.copy(username = c.username(), secured = same, recovery = recovered, recoverySaved = true, broken = false, friends = emptyList()) }
         persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
         syncItem()
     }
@@ -433,7 +435,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         passkeyBackup = same && item.byPasskey
         if (code != null) vault.write("recovery", code.toByteArray()) else vault.delete("recovery")
         mutable.update { it.copy(username = c.username() ?: item.username, secured = code != null,
-            recovery = code, broken = false, friends = emptyList()) }
+            recovery = code, recoverySaved = true, broken = false, friends = emptyList()) }
         persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
         syncItem()
     }
@@ -470,14 +472,42 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     internal suspend fun keepPasskey(answer: Passkeys.Answer) = saveRecovery(answer)
 
-    suspend fun prepareRecovery(renew: Boolean = false) {
+    suspend fun prepareRecovery() {
         val c = client ?: return
-        val code = if (renew) newRecoveryKey() else state.value.recovery ?: vault.read("recovery-pending")?.decodeToString() ?: newRecoveryKey()
+        val code = state.value.recovery ?: vault.read("recovery-pending")?.decodeToString() ?: newRecoveryKey()
         vault.write("recovery-pending", code.toByteArray())
         mutable.update { it.copy(recovery = code) }
         check(c === client)
     }
     suspend fun keepRecovery() = saveRecovery(null)
+
+    /** The new key after "Turn Off Recovery Key" saved (shared or copied): the hub has it already. */
+    suspend fun markRecoverySaved() {
+        mutable.update { it.copy(recoverySaved = true) }; changes.withLock { persist() }
+    }
+
+    /**
+     * "Turn Off Recovery Key" (iOS `newRecoveryKey`): the backup is rewrapped at once under a new key, same K and
+     * passkey door, so the saved key stops working now; the new one shows "Not Saved" until it is saved. The new key
+     * is staged first (`recovery-pending`): if the hub's answer is lost, the next try opens the backup with it.
+     */
+    suspend fun turnOffRecovery() = accountTurn.withLock {
+        val c = client ?: return@withLock
+        val (backup, _) = listOfNotNull(vault.read("recovery"), vault.read("recovery-pending")).map { it.decodeToString() }
+            .firstNotNullOfOrNull { key -> openBackup(transport, null, YoDoor.RecoveryKey(key))?.let { it to key } }
+            ?: error(context.getString(R.string.ui_recovery_key_missing))
+        check(c === client)
+        val code = newRecoveryKey()
+        vault.write("recovery-pending", code.toByteArray())
+        val sealed = JSONObject(backup.sealed.decodeToString()).put("code", code)
+        sealed.optJSONObject("account")?.put("byCode", true)?.put("codeAuth", true)
+        c.putBackup(backup.k, sealed.toString().toByteArray(), code, YoPasskeyDoor.Keep(backup.record))
+        check(c === client)
+        vault.write("recovery", code.toByteArray()); vault.delete("recovery-pending")
+        val passkey = backup.record.byPasskey.isNotEmpty() && backup.record.authPasskey.isNotEmpty()
+        mutable.update { it.copy(recovery = code, recoverySaved = false, recoveryPasskey = passkey) }; changes.withLock { persist() }
+        syncItem()
+    }
     /** The recovery key this phone saved, to show it again. */
     internal fun savedRecovery(): String? = vault.read("recovery")?.decodeToString()
 
@@ -506,8 +536,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         c.putBackup(backup?.k ?: randomBytes(32), sealed, code, passkey)
         check(c === client)
         vault.write("recovery", code.toByteArray()); vault.delete("recovery-pending")
-        mutable.update { it.copy(secured = true, recovery = code) }; changes.withLock { persist() }
         passkeyBackup = !removePasskey && (answer != null || backup?.record?.byPasskey?.isNotEmpty() == true)
+        val passkeyOn = !removePasskey && (answer != null || backup?.record?.authPasskey?.isNotEmpty() == true) && passkeyBackup
+        mutable.update { it.copy(secured = true, recovery = code, recoveryPasskey = passkeyOn,
+            recoverySaved = it.recoverySaved || answer == null && !removePasskey) }; changes.withLock { persist() }
         syncItem()
     }
     /** While Yo is in front, Wi-Fi stays out of power save: an idle phone's radio otherwise sleeps between beacons

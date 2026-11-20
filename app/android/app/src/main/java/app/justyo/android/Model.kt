@@ -52,6 +52,9 @@ data class AppState(
     val loading: Boolean = true, val username: String? = null, val friends: List<Friend> = emptyList(),
     val busy: Boolean = false, val error: String? = null, val update: Boolean = false,
     val broken: Boolean = false, val secured: Boolean = false, val recovery: String? = null,
+    /** iOS `wordsSaved`: false after "Turn Off Recovery Key" until the new key is saved; `recoveryPasskey`: the passkey
+     *  still opens the backup then (no red badge, as iOS's `recoveryNeedsAttention`). */
+    val recoverySaved: Boolean = true, val recoveryPasskey: Boolean = false,
     /** `updating`: an old install signs in again ("Yo is updating…"). `googleBackup`: wanted in Google's cloud;
      *  `backedUp`: it is there, end-to-end encrypted (else the red dot on the menu). */
     val updating: Boolean = false, val googleBackup: Boolean = true, val backedUp: Boolean = true,
@@ -75,6 +78,9 @@ data class AppState(
     fun forScreen() = copy(sent = 0, received = 0, byFriend = emptyMap(), lastSent = emptyMap(), lastReceived = emptyMap(), lastSync = null)
     /** Wanted in Google's cloud but not there (no screen lock, or Google's backup off): the red dot. Turned off by choice is no warning. */
     val backupMissing: Boolean get() = googleBackup && !backedUp
+    /** The red 1 (iOS `recoveryNeedsAttention`): not secured, or the recovery key turned off and the new one not
+     *  saved while no passkey opens the backup either. */
+    val recoveryNeedsAttention: Boolean get() = !secured || !recoverySaved && !recoveryPasskey
 }
 
 data class KeyChange(val friend: Friend, val confirm: Boolean)

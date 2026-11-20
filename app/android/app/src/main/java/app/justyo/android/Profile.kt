@@ -332,7 +332,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                         // A passkey here rides on a saved recovery key, so without one its row opens the key's screen.
                         Section(copy(ProductText.ACCOUNT_RECOVERY), copy(ProductText.RECOVERY_FOOTER),
                             Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key,
-                                copy(if (s.secured) ProductText.SAVED else ProductText.NOT_SAVED), badge = !s.secured, onClick = {
+                                copy(if (s.secured && s.recoverySaved) ProductText.SAVED else ProductText.NOT_SAVED), badge = s.recoveryNeedsAttention, onClick = {
                                     if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true }
                                 }),
                             Setting(copy(ProductText.PASSKEY), Icons.Default.Fingerprint,
@@ -551,7 +551,7 @@ private fun shareCode(context: Context, name: String) {
                 maxLines = 1, softWrap = false,
                 autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = 26.sp),
             )
-            if (!s.secured) Badge { Text("1") }
+            if (s.recoveryNeedsAttention) Badge { Text("1") }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }
     }
@@ -939,8 +939,8 @@ private fun shareCode(context: Context, name: String) {
     var sharing by remember { mutableStateOf(false) }
     var turningOff by remember { mutableStateOf(false) }
     // Opened on a secured account: the key shown is the one already saved.
-    LaunchedEffect(s.recovery) {
-        if (s.secured && s.recovery != null && withContext(Dispatchers.IO) { model.repository.savedRecovery() } == s.recovery) keySaved = true
+    LaunchedEffect(s.recovery, s.recoverySaved) {
+        if (s.secured && s.recoverySaved && s.recovery != null && withContext(Dispatchers.IO) { model.repository.savedRecovery() } == s.recovery) keySaved = true
     }
     fun saveWith(write: suspend (java.io.OutputStream, String) -> Unit) = { uri: Uri? ->
         if (uri != null) model.repository.command {
@@ -948,7 +948,7 @@ private fun shareCode(context: Context, name: String) {
             try {
                 val key = state.value.recovery ?: error(res.getString(R.string.ui_recovery_key_missing))
                 context.contentResolver.openOutputStream(uri)?.use { write(it, key) } ?: error(res.getString(R.string.ui_couldn_t_save_the_recovery_key))
-                if (!keySaved) keepRecovery()
+                if (!keySaved) { if (state.value.secured) markRecoverySaved() else keepRecovery() }
                 keySaved = true
             } finally { busy = false }
         }
@@ -987,7 +987,7 @@ private fun shareCode(context: Context, name: String) {
             }
         }
         RecoveryDone(idle, onClose)
-        // Off: a new key, not saved yet; the saved one stops working once Save brings the new one.
+        // Off: the backup moves to a new key at once, so the saved one stops working now; the new one is not saved yet.
         if (keySaved) TextButton(onClick = { turningOff = true }, enabled = idle, modifier = Modifier.padding(top = 4.dp),
             colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))) { Text(stringResource(R.string.turn_off_recovery_key_action)) }
     }
@@ -996,8 +996,11 @@ private fun shareCode(context: Context, name: String) {
         title = { Text(stringResource(R.string.turn_off_recovery_key)) },
         text = { Text(stringResource(if (passkey || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
         confirmButton = { TextButton(onClick = {
-            turningOff = false; keySaved = false; shown = false; copied = false
-            model.repository.command { prepareRecovery(true) }
+            turningOff = false
+            model.repository.command {
+                busy = true
+                try { turnOffRecovery(); keySaved = false; shown = false; copied = false } finally { busy = false }
+            }
         }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
         dismissButton = { TextButton(onClick = { turningOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
     )
