@@ -97,16 +97,9 @@ struct SettingsView: View {
       // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      .scrollBounceBehavior(.basedOnSize)
-      // "Yodentity" as the inline title, the system’s close button on the right. The pages
-      // pushed in keep the same bar, so a push never shows or hides it.
-      .navigationTitle("Yodentity")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .topBarTrailing) {
-          Button(role: .close) { dismiss() }
-        }
-      }
+      // No title and no close button: only the system's grabber, to pull the sheet down and away. The pages pushed
+      // in show their bar with the back button.
+      .toolbar(.hidden, for: .navigationBar)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { page in
@@ -145,8 +138,11 @@ struct SettingsView: View {
         HitchMonitor.shared.scene = path.last.map { String(describing: $0) } ?? "settings root"
       #endif
     }
+    // Every page scrolls only when it does not fit.
+    .scrollBounceBehavior(.basedOnSize)
     .presentationDetents([detent])
-    .presentationDragIndicator(.automatic)
+    // The grabber on the first page (one height there: it only closes); a page pushed in has its bar instead.
+    .presentationDragIndicator(path.isEmpty ? .visible : .hidden)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
     .presentationBackground(Color(.systemGroupedBackground))
     .task(id: "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)") {
