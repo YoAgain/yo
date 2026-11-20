@@ -33,6 +33,7 @@ struct StatusPage: View {
   @AppStorage("stats.sent") private var sent = 0
   @AppStorage("stats.received") private var received = 0
   @State private var crashesOn = CrashReports.on
+  @State private var renewFailed: String?
 
   /// The last answers shown at once (no "Checking" while one is known); the checks refresh them quietly.
   init(summaryOnly: Bool = false, wordOnly: Bool = false) {
@@ -80,7 +81,7 @@ struct StatusPage: View {
     productStatusSummary(
       health: ProductHealth(
         reachable: reachable, milliseconds: milliseconds.map(UInt32.init), accepted: accepted,
-        notificationsAllowed: allowed, pushRegistered: Push.shared.registered(for: accounts.client), status: status,
+        notificationsAllowed: allowed, pushRegistered: Push.shared.registered(for: accounts.account?.userID), status: status,
         encryptedContacts: tally.map { UInt32($0.encrypted) }, contacts: UInt32(tally?.total ?? 0),
         backupAvailable: backupAvailable, backupSaved: savedAt != nil, storageKnown: storage != nil,
         answered: lastAnswer != nil),
@@ -150,11 +151,35 @@ struct StatusPage: View {
         LabeledContent("Storage", value: storageTotal)
       }
       Section("Server") {
-        let token = Push.shared.registered(for: accounts.client)
+        let token = Push.shared.registered(for: accounts.account?.userID)
         StatusRow(
           title: "Notifications",
           value: allowed.map { $0 && token ? "Ready" : $0 ? "No Token" : "Not Allowed" } ?? "Checking…",
           check: allowed.map { $0 && token ? .ok : .waiting } ?? .open)
+        // As Signal's: a fresh token from APNs to the hub; the row above turns Ready, or the red banner says why not.
+        Button {
+          Task {
+            do {
+              renewFailed = nil
+              try await Push.shared.renew(accounts)
+              let settings = await UNUserNotificationCenter.current().notificationSettings()
+              allowed = [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus)
+            } catch {
+              // Said on the row as well: the red banner is under this sheet.
+              renewFailed = productProblemText(problem: Problems.problem(of: error), lang: .english)
+              Problems.shared.report(error) { Task { try? await Push.shared.renew(accounts) } }
+            }
+          }
+        } label: {
+          LabeledContent {
+            if Push.shared.renewing { ProgressView().controlSize(.small) }
+            else if let renewFailed { CheckValue(value: renewFailed, check: .waiting) }
+          } label: {
+            Text(ProductText.renewPush.english)
+          }
+        }
+        .tint(Color(.label))
+        .disabled(Push.shared.renewing || accounts.client == nil)
         // A tap cycles Round Trip, Server Ping and Sync.
         Button {
           withAnimation(.smooth) { connectionView = (connectionView + 1) % 3 }

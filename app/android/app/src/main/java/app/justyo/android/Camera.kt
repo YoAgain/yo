@@ -306,7 +306,10 @@ object MediaFiles {
                         .setEncoderFactory(encoder)
                         .addListener(object: Transformer.Listener {
                             override fun onCompleted(composition: Composition,exportResult: ExportResult) { if(done.isActive) done.resume(Unit) }
-                            override fun onError(composition: Composition,exportResult: ExportResult,exportException: ExportException) { if(done.isActive) done.resumeWithException(exportException) }
+                            // Its words are the codec's ("Codec exception: CodecInfo{…}"), never the screen's.
+                            override fun onError(composition: Composition,exportResult: ExportResult,exportException: ExportException) {
+                                if(done.isActive) done.resumeWithException(IllegalStateException(context.getString(R.string.video_not_prepared),exportException))
+                            }
                         }).build()
                     done.invokeOnCancellation { Handler(Looper.getMainLooper()).post { transformer.cancel(); file.delete() } }
                     transformer.start(edited,file.absolutePath)

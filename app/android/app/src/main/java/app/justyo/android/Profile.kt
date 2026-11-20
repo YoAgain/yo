@@ -773,6 +773,8 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     val context = LocalContext.current
     var trip by remember { mutableStateOf<String?>(null) }
     var probing by remember { mutableStateOf(false) }
+    var renewing by remember { mutableStateOf(false) }
+    var renewFailed by remember { mutableStateOf<String?>(null) }
     var crashOn by remember { mutableStateOf(repo.crashes.enabled) }
     var yosView by rememberSaveable { mutableIntStateOf(0) }
     val notifications by model.notificationsEnabled.collectAsStateWithLifecycle()
@@ -794,6 +796,21 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
         Setting(stringResource(R.string.status_notifications), Icons.Default.Notifications,
             stringResource(if (notifications) R.string.status_ready else R.string.status_not_allowed), good = notifications,
             onClick = if (notifications) null else { { openNotificationSettings(context) } }),
+        // As Signal's: a new token to the hub. What failed is said on the row as well: the red banner is under this sheet.
+        Setting(copy(ProductText.RENEW_PUSH), value = renewFailed, good = renewFailed?.let { false },
+            enabled = !renewing && s.username != null, leading = {
+            Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                if (renewing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Refresh, null)
+            }
+        }, onClick = {
+            renewing = true; renewFailed = null
+            repo.command {
+                try { renewPush() } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    renewFailed = productProblemText(Problems.problemOf(e), Words)
+                    Problems.report(e) { command { renewPush() } }
+                } finally { renewing = false }
+            }
+        }),
         Setting(stringResource(R.string.ui_hub), Icons.Default.Cloud, stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected),
         Setting(stringResource(R.string.ui_round_trip), Icons.Default.Speed,
             if (probing) stringResource(R.string.ui_checking) else trip ?: stringResource(R.string.ui_not_checked), enabled = !probing, onClick = {

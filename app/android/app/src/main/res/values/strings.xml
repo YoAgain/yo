@@ -157,6 +157,7 @@
 <string name="camera_open_failed">Couldn’t open the camera. Check its permission or try another camera.</string>
 <string name="camera_not_ready">Camera not ready</string>
 <string name="video_too_large">Video is too large. Use a shorter video.</string>
+<string name="video_not_prepared">Couldn’t prepare this video on this phone.</string>
 <string name="keystore_missing">Keystore key missing. Sign in with your recovery key.</string>
 <string name="vault_damaged">Damaged vault item</string>
 <string name="sign_in_first">Sign in first</string>

@@ -118,6 +118,7 @@ copy! {
     Shown => ("Shown", "Angezeigt"),
     NotSaved => ("Not Saved", "Nicht gesichert"),
     SaveAgain => ("Save Again", "Erneut sichern"),
+    RenewPush => ("Renew Push Registration", "Push-Registrierung erneuern"),
     SaveRecoveryKey => ("Save Recovery Key", "Wiederherstellungsschlüssel sichern"),
     ShowKey => ("Show Key", "Schlüssel anzeigen"),
     HideKey => ("Hide Key", "Schlüssel ausblenden"),

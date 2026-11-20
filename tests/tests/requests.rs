@@ -101,6 +101,33 @@ fn a_declined_request_is_gone_and_a_later_yo_is_a_request_again() {
 }
 
 #[test]
+fn a_removed_friends_next_yo_is_a_request_and_adding_again_makes_a_contact() {
+    let hub = TestHub::start();
+    let (mut a, _, pa) = account(&hub, "ALICE");
+    let (mut b, hb, pb) = account(&hub, "BOB");
+    friends(&mut a, &mut b, &pb);
+    b.set_friend(a.user_id(), Some("Alice".into()), Some(1)).unwrap();
+    // Removed as a restored phone has it: no contact. A still holds B's key, so its Yo comes sealed, yet is a request.
+    b.remove_friend(a.user_id()).unwrap();
+    assert_eq!(accepted(&b, &a), Some(false));
+    let sent = deliveries(&hb, &a);
+    a.send_yo(&pb).unwrap();
+    let events = b.sync(0).unwrap();
+    assert_eq!(yos(&events, &a), 1);
+    assert!(events.iter().any(|e| matches!(e, Event::NewChat { user } if user == a.user_id())), "{events:?}");
+    b.after_sync().unwrap();
+    assert_eq!(accepted(&b, &a), Some(false));
+    assert_eq!(deliveries(&hb, &a), sent, "no receipt to a removed friend's request");
+    // Added again: a contact.
+    b.set_friend(a.user_id(), Some("Alice".into()), Some(1)).unwrap();
+    assert_eq!(accepted(&b, &a), Some(true));
+    // And a Yo to a removed friend makes them one again too.
+    b.remove_friend(a.user_id()).unwrap();
+    b.send_yo(&pa).unwrap();
+    assert_eq!(accepted(&b, &a), Some(true));
+}
+
+#[test]
 fn writing_first_accepts_and_a_reply_accepts_too() {
     let hub = TestHub::start();
     let (mut a, _, pa) = account(&hub, "ALICE");

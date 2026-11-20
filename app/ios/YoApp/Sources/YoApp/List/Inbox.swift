@@ -204,8 +204,9 @@ final class Inbox {
     lastSend[key] = this
     let problem = await this.value
     if lastSend[key] == this { lastSend[key] = nil }
-    // Their old app: the bar says "Needs Update" and the Yo waits for it; nothing failed here.
-    if problem != nil, problem != productText(text: .needsUpdate, lang: .english) {
+    // Their old app: the bar says "Needs Update" and the Yo waits for it; nothing failed here. A group nobody else is
+    // in: the list asks to delete it, a "Not Sent · Tap to Retry" beside that would only fail again (as Android).
+    if problem != nil, problem != productText(text: .needsUpdate, lang: .english), problem != Self.groupEmpty {
       let retry: (@MainActor () -> Void)?
       if unsent[friend.key] != nil || delivering != nil {
         retry = { self.resume(accounts: accounts, friends: friends) }

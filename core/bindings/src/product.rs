@@ -91,6 +91,7 @@ pub enum Text {
     Shown,
     NotSaved,
     SaveAgain,
+    RenewPush,
     SaveRecoveryKey,
     ShowKey,
     HideKey,

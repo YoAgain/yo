@@ -230,10 +230,10 @@ struct YoApp: App {
           await inbox.askForNotifications()
           Push.shared.register()
         }
-        // The push token to the hub once there is a token and an account (again for a new account).
-        .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")/\(accounts.client != nil)") {
-          await Push.shared.send(accounts)
+        // The push token to the hub once there is a token and an account (again for a new account or a reopened client).
+        .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")/\(accounts.client.map { "\(ObjectIdentifier($0).hashValue)" } ?? "")") {
           Launch.later { await accounts.refreshSupport() }
+          await Push.shared.send(accounts)  // tries again for a while: last, so nothing waits for it
         }
         .onChange(of: phase, initial: true) { _, phase in
           // First, so what goes out on the return goes on fresh connections.

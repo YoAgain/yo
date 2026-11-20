@@ -294,6 +294,15 @@ impl Client {
         }
         self.promote_contact(user);
         let now = crate::wall_ms();
+        // Added (again): a contact as a yes makes one (spec 4.10), told this account's key and name.
+        let adding = self.state.storage.friends.get(user).is_none_or(|f| f.removed.value);
+        let named = self.state.name.is_some();
+        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| adding && !c.accepted && !c.probe_service) {
+            contact.accepted = true;
+            contact.chat = true;
+            contact.key_due = !contact.blocked && !contact.gone;
+            contact.profile_due = named;
+        }
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
         if friend.name.value != name {
             friend.name.set(name, now);
@@ -320,12 +329,23 @@ impl Client {
         }
     }
 
-    /// Takes a friend off the list (a block stays as it is).
+    /// Takes a friend off the list (a block stays as it is). No contact from then on, as after a no and as a phone
+    /// restored from the storage has it (spec 4.10, 6.9): what comes from them later is a request again, and nothing
+    /// (key, name, receipt) goes back until a yes, a Yo to them or adding them again.
     pub fn remove_friend(&mut self, user: &str) -> Result<()> {
         let now = crate::wall_ms();
-        let Some(friend) = self.state.storage.friends.get_mut(user) else { return Ok(()) };
-        friend.removed.set(true, now);
-        self.storage_changed()
+        if let Some(contact) = self.state.contacts.get_mut(user) {
+            contact.accepted = false;
+            contact.chat = false;
+            contact.key_due = false;
+            contact.profile_due = false;
+            contact.receipt_due = false;
+        }
+        if let Some(friend) = self.state.storage.friends.get_mut(user) {
+            friend.removed.set(true, now);
+            self.state.storage_dirty = true;
+        }
+        self.persist()
     }
 
     /// The app's icon as kept in the storage: none for the default.

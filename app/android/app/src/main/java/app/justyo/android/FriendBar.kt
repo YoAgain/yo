@@ -476,7 +476,7 @@ private fun BarWords(
             val count = CountDigits.find(value) ?: return Triple(value, "", "")
             return Triple(value.substring(0, count.range.first), count.value, value.substring(count.range.last + 1))
         }
-        fun digitBlock(digits: String) = if (digits.isEmpty()) 0 else slot * maxOf(2, digits.length)
+        fun digitBlock(digits: String) = slot * digits.length  // as iOS's SteadyText: as wide as its digits, no more
         fun total(value: String) = with(density) {
             val (prefix, digits, suffix) = parts(value)
             (width(prefix) + digitBlock(digits) + width(suffix)).toDp()

@@ -160,13 +160,20 @@ struct SteadyText: View {
     return width
   }
 
-  /// The text in runs: each number whole, the words between them whole.
+  /// The text in runs: each count ("23" of "23× Yo") whole, the words between them whole. Only a count gets its steady
+  /// block, as Android's: digits in a name ("megac2651") are words, not spaced apart.
   private var parts: [(digit: Bool, text: String)] {
     var parts: [(digit: Bool, text: String)] = []
-    for character in text {
-      let digit = character.isNumber
-      if let last = parts.last, last.digit == digit { parts[parts.count - 1].text.append(character) }
-      else { parts.append((digit, String(character))) }
+    let characters = Array(text)
+    var index = 0
+    while index < characters.count {
+      var end = index
+      while end < characters.count, characters[end].isNumber { end += 1 }
+      let count = end > index && end < characters.count && characters[end] == "×"
+      let run = count ? String(characters[index..<end]) : String(characters[index..<max(end, index + 1)])
+      if !count, let last = parts.last, !last.digit { parts[parts.count - 1].text += run }
+      else { parts.append((count, run)) }
+      index = max(end, index + 1)
     }
     return parts
   }

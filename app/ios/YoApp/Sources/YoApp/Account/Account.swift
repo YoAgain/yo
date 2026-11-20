@@ -1012,7 +1012,7 @@ final class AccountStore {
   /// This phone forgets the account (the hub keeps the backup; the iCloud Keychain keeps it for the phone that has it).
   func reset(fullLocalReset: Bool = false) {
     Diagnostics.clear()
-    if let id = account?.userID { SyncedAccount.left = id }
+    if let id = account?.userID { SyncedAccount.left = id; Push.shared.forget(id) }
     let old = client
     account = nil
     client = nil

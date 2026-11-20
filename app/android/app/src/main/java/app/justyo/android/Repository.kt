@@ -612,13 +612,22 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     private var registeredPush: Pair<Long, String>? = null
 
-    suspend fun registerPush(token: String) = accountTurn.withLock {
+    suspend fun registerPush(token: String, again: Boolean = false) = accountTurn.withLock {
         val c = client ?: return@withLock
         val registration = sessionId to token
-        if (registeredPush != registration) {
+        if (again || registeredPush != registration) {
             c.setPush(3u, token)
             registeredPush = registration
         }
+    }
+
+    /** Settings › Status › Renew Push Registration (as Signal's): a new FCM token, sent to the hub even if it has the
+     *  old one. Throws what failed (Firebase, the connection, the hub) for the red banner. */
+    suspend fun renewPush() = withContext(Dispatchers.IO) {
+        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) error("no Firebase in this build")
+        val messaging = com.google.firebase.messaging.FirebaseMessaging.getInstance()
+        com.google.android.gms.tasks.Tasks.await(messaging.deleteToken(), 20, java.util.concurrent.TimeUnit.SECONDS)
+        registerPush(com.google.android.gms.tasks.Tasks.await(messaging.token, 20, java.util.concurrent.TimeUnit.SECONDS), again = true)
     }
 
     suspend fun syncPush() {

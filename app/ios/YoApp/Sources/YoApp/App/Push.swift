@@ -9,12 +9,24 @@ final class Push {
   static let shared = Push()
 
   private(set) var token: String?
-  /// Sent once per device registration (signing in again is a new one).
-  private var sentToken: String?
+  /// The token the hub took last, per account (user id, base64): kept across launches and clients, so Status says
+  /// what the hub holds, not only what this process happened to send to this client object.
+  private static let sentKey = "push.sent"
+  private var sent: [String: String] = UserDefaults.standard.dictionary(forKey: sentKey) as? [String: String] ?? [:]
+  /// Sent once per client in this process as well (signing in again is a new device registration).
   private weak var sentTo: YoClient?
 
-  func registered(for client: YoClient?) -> Bool {
-    token != nil && sentToken == token && sentTo === client
+  /// Whether the hub has this phone's token for the account: the one APNs gave this launch, or before APNs answered,
+  /// the last one the hub took.
+  func registered(for userID: Data?) -> Bool {
+    guard let userID, let held = sent[userID.base64EncodedString()] else { return false }
+    return token == nil || held == token
+  }
+
+  /// Signed out: the next registration is a new device, its token goes again.
+  func forget(_ userID: Data) {
+    sent[userID.base64EncodedString()] = nil
+    UserDefaults.standard.set(sent, forKey: Self.sentKey)
   }
 
   private static var platform: UInt8 { Hub.isDevApp ? 2 : 1 }  // sandbox : production
@@ -26,6 +38,36 @@ final class Push {
 
   fileprivate func received(_ deviceToken: Data) {
     token = deviceToken.map { String(format: "%02x", $0) }.joined()
+    answers += 1
+  }
+
+  fileprivate func failed(_ error: Error) {
+    refusal = error
+    answers += 1
+  }
+
+  /// APNs' answers so far (a token or a failure), for `renew` to wait for the next one.
+  @ObservationIgnored private var answers = 0
+  @ObservationIgnored private var refusal: Error?
+  private(set) var renewing = false
+
+  /// Settings › Status › Renew Push Registration (as Signal's): the token asked of APNs again and sent to the hub even
+  /// if the hub has it. Throws what failed (APNs, the connection, the hub) for the red banner.
+  func renew(_ accounts: AccountStore) async throws {
+    guard !renewing, let client = accounts.client, let userID = accounts.account?.userID else { return }
+    renewing = true
+    defer { renewing = false }
+    let before = answers
+    refusal = nil
+    UIApplication.shared.registerForRemoteNotifications()
+    for _ in 0..<100 where answers == before { try await Task.sleep(for: .milliseconds(100)) }
+    if let refusal { throw refusal }
+    guard let token else { throw YoError.Network(message: "no push token") }
+    let platform = Self.platform
+    try await Hub.run { try client.setPush(platform: platform, token: token) }
+    sent[userID.base64EncodedString()] = token
+    sentTo = client
+    UserDefaults.standard.set(sent, forKey: Self.sentKey)
   }
 
   /// What a registration carries; without a token yet 0 and empty (`send` sends it later).
@@ -34,16 +76,26 @@ final class Push {
     return (Self.platform, token)
   }
 
+  /// The token to the hub; not taken (offline, the hub busy), tried again after a while as long as this task runs
+  /// (it is started again for a new token, account or client).
   func send(_ accounts: AccountStore) async {
-    guard let token, let client = accounts.client, accounts.account != nil,
-      sentToken != token || sentTo !== client
-    else { return }
+    guard let token, let client = accounts.client, let userID = accounts.account?.userID else { return }
+    let user = userID.base64EncodedString()
+    guard sent[user] != token || sentTo !== client else { return }
     let platform = Self.platform
-    do {
-      try await Hub.run { try client.setPush(platform: platform, token: token) }
-      sentToken = token
-      sentTo = client
-    } catch {}  // offline: the next launch or token tries again
+    for wait in [5, 30, 120, 600] {
+      do {
+        try await Hub.run { try client.setPush(platform: platform, token: token) }
+        guard client === accounts.client else { return }
+        sent[user] = token
+        sentTo = client
+        UserDefaults.standard.set(sent, forKey: Self.sentKey)
+        return
+      } catch {
+        try? await Task.sleep(for: .seconds(wait))
+        if Task.isCancelled || client !== accounts.client { return }
+      }
+    }
   }
 }
 
@@ -62,6 +114,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
   }
   func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
     Diagnostics.record(error)
+    Push.shared.failed(error)
   }
 
   static var silentSync: (@MainActor () async -> Bool?)?
