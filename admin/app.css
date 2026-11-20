@@ -1227,3 +1227,10 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .hc-plats > .hc-pbar.plats { height: 18px; } .hc-pbar.plats > span { cursor: default; outline-offset: -2px; }
 .srow .srow-bar { width: 96px; height: 14px; align-self: center; }
 .srow:has(.srow-bar) { }
+.agroup { margin: 18px 0 0; }
+.glabel { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 10px; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--amethyst-soft); }
+.glabel small { font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--muted); }
+.pill-toggle { display: inline-flex; gap: 2px; margin-left: 10px; padding: 2px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); vertical-align: middle; }
+.pill-toggle button { min-width: 26px; height: 20px; padding: 0 8px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.pill-toggle button.on { background: var(--amethyst); color: #fff; }
+.pill-toggle button .ico { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

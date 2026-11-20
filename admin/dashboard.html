@@ -25,14 +25,14 @@
   <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
 </header>
   <div class="charts">
+  <article class="tile group chartw" id="t-ac">
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Active</span><span class="gnums"><b class="gsum big" id="ac-n">–</b><span class="gtoday" id="ac-s">–</span></span></h2>
+    <div class="area" id="ac-area"></div>
+  </article>
   <article class="tile group chartw" id="t-uc">
     <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><span class="gnums"><b class="gsum big" id="uc-n" title="total">–</b><span class="gtoday" title="today (UTC)">+<b id="uc-t">–</b> today</span></span></h2>
     <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
-  </article>
-  <article class="tile group chartw" id="t-ac">
-    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Active</span><span class="gnums"><b class="gsum big" id="ac-n">–</b><span class="gtoday" id="ac-s">–</span></span></h2>
-    <div class="area" id="ac-area"></div>
   </article>
   </div>
   <div class="halves">
@@ -72,10 +72,7 @@
   </article>
   <!-- The detail: closed by default; a click on a row, a service or a chart opens up to four cards about it here,
        in the range above; the same click again, × or Escape closes it. -->
-  <section class="detail full" id="detail" hidden aria-labelledby="detail-title">
-    <div class="dhead"><h2 id="detail-title"></h2><button type="button" class="close" id="detail-close" aria-label="Close" title="Close (Esc)">×</button></div>
-    <div class="dgrid" id="detail-cards"></div>
-  </section>
+  <section class="detail full" id="detail" aria-label="Details"><div id="detail-groups"></div></section>
   <div class="rangebar" aria-hidden="true"></div>
   <article class="tile full" id="t-db" aria-label="Database">
     <div class="tables" id="tables"></div>

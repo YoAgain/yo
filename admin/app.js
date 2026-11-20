@@ -457,7 +457,7 @@ if (document.body.classList.contains("login")) {
   const areaSub = {};
   const healthRows = (h, ym, yh) => {
     const span = range === 1 ? "last 24 hours" : range ? `${range} days` : "since the start";
-    const all = (key) => ym(key), yo = ym("yo-out"), slots = rangeSlots(yo), names = slots.map(([n]) => n);
+    const all = (key) => ym(key), yo = ym("yo-out"), names24 = hourNames(), slots = range === 1 ? names24.map((n, i) => [n, null, [i]]) : rangeSlots(yo), names = slots.map(([n]) => n);
     const sums = (keys) => slots.map((s) => keys.map((k) => slotSum(s, all(k), yh(k))));
     const whole = (rows) => rows.reduce((a, r) => a.map((v, i) => v + r[i]), rows[0].map(() => 0));
     const none = (key, what) => { sparkData[key].empty = `No data yet: the hub has counted no ${what} in this range`; $(`c-${key}`).dataset.tip = "no data yet"; };
@@ -689,13 +689,23 @@ if (document.body.classList.contains("login")) {
   // Each curve's legend, under it: what its two lines are.
   const LEGEND = { yc: [["Total", "l-main"], ["Sent", "l-bar"]], uc: [["Total", "l-main"], ["Sign-ups", "l-bar"]] };
   const areaTips = {}, areaHover = {};
+  let sentMode = (() => { try { return localStorage.getItem("sentMode") === "delivered" ? "delivered" : "sent"; } catch { return "sent"; } })();
+  // The Sent card's pill: ↑ sent, ↓ delivered.
+  const drawSentPill = () => {
+    const head = $("t-yc").querySelector(".gh");
+    head.querySelector(".pill-toggle")?.remove();
+    head.children[1].textContent = sentMode === "sent" ? "Sent" : "Delivered";
+    head.children[1].after(pillOf([["sent", "↑", "Sent"], ["delivered", "↓", "Delivered"]], sentMode, (v) => {
+      sentMode = v; try { localStorage.setItem("sentMode", v); } catch {}
+      if (last) render();
+    }));
+  };
   const areaChart = (key, total, perDay, hours, today, kind) => {
     set(`${key}-n`, num(total));
     if (!areaTips[key] && $(`${key}-svg`)) {
       areaTips[key] = true;
-      const what = { yc: "sent", uc: "signed up" }[key] || "";
       hoverTip($(`${key}-svg`), () => areaData[key]?.incs?.length || 0, (i) => {
-        const d = areaData[key];
+        const d = areaData[key], what = { yc: sentMode === "sent" ? "sent" : "delivered", uc: "signed up" }[key] || "";
         const c = key === "uc" ? "var(--amethyst-soft)" : "var(--ok)";
         return d ? { head: d.names[i], rows: [{ section: slotWord() }, { color: c, label: what[0].toUpperCase() + what.slice(1), value: num(d.incs[i]) },
           { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) }] } : "";
@@ -933,7 +943,10 @@ if (document.body.classList.contains("login")) {
       rangeRow("gr", ym("group-create"), "made", "Groups: made", null, false, yh("group-create"), null, yt("group-create"), "group-create");
       part(() => healthRows(h, ym, yh));
       // Running totals: Yos into users' inboxes (a bot's inbox apart), accounts without bots.
-      areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"), ev?.["yo-in"]?.today ?? 0, "yo-in");
+      // Sent (into inboxes) or Delivered (acknowledged by a device): the pill in the header chooses, the choice is kept.
+      const yk = sentMode === "sent" ? "yo-in" : "yo-out";
+      drawSentPill();
+      areaChart("yc", yt(yk) ?? 0, ym(yk), yh(yk), ev?.[yk]?.today ?? 0, yk);
       const sud = new Map(h.signup_days || []);
       areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, sud.get(today0()) ?? 0);
       const dn14 = days14().map(dayName);
@@ -1896,7 +1909,7 @@ if (document.body.classList.contains("login")) {
     // The bands are the app tile's states, bottom to top: current, fresh, update, must update, unknown (dev builds and
     // the like). The builds stay in each slot's `raw` row, for the hover.
     const stateOf = (a) => (belowMin(a) ? "must" : appInfo(a)?.state === "current" ? "current" : appInfo(a)?.state === "fresh" ? "fresh" : appInfo(a)?.state === "update" ? "update" : "unknown");
-    const mine = (a) => String(a).startsWith(`${plat}/`);
+    const mine = (a) => (plat === "all" ? /^(ios|android)\//.test(String(a)) : String(a).startsWith(`${plat}/`));
     const bands = REL_STATES.map(([k, name, color]) => ({ k, name, color }));
     const rows = slots.map(([, , row]) => {
       if (!row) return null;
@@ -1933,42 +1946,32 @@ if (document.body.classList.contains("login")) {
     const legend = d.bands.filter((b, j) => d.rows.some((r) => r && r[j])).map((b) => key(b.name, "", b.color));
     const foot = cfoot(legend);
     foot.classList.add("rlegend");
-    const say = (i) => {
-      mark.style.display = i < 0 ? "none" : "";
-      if (i < 0) return foot.home();
-      const r = d.rows[i], all = r ? r.reduce((a, v) => a + v, 0) : 0;
-      mark.setAttribute("x1", xs(i).toFixed(1)); mark.setAttribute("x2", xs(i).toFixed(1));
-      // The three newest builds on it, the rest as one share (the bands are the states; the builds are in the hover).
-      const on = (d.raw[i] || []).sort(([x], [y]) => buildKey(y).localeCompare(buildKey(x))).map(([ap, v]) => [buildLabel(ap), v]);
-      const rest = on.slice(3).reduce((a, [, v]) => a + v, 0), pc = (v) => `${Math.round((100 * v) / all)} %`;
-      const parts = [...on.slice(0, 3).map(([nm, v]) => `${nm} ${pc(v)}`), ...(rest ? [`others ${pc(rest)}`] : [])];
-      foot.replaceChildren(el("span", "pick", `${d.slots[i][1]} · ${all ? `${parts.join(" · ")} · ${num(all)} devices` : "not recorded"}`));
-    };
-    const near = (i) => have.reduce((b, k) => (Math.abs(k - i) < Math.abs(b - i) ? k : b), have[have.length - 1]);
-    const at = d.slots.findIndex(([k]) => k === relPick);
-    say(at >= 0 && d.rows[at] ? at : -1);
-    s.addEventListener("click", (e) => {
-      const rc = s.getBoundingClientRect(), i = near(f0 + Math.round(((e.clientX - rc.left) / rc.width) * span));
-      relPick = relPick === d.slots[i][0] ? null : d.slots[i][0]; say(relPick == null ? -1 : i);
-    });
     const pick = d.rows[have[have.length - 1]], pickAll = pick ? pick.reduce((a, v) => a + v, 0) : 0;
     const share = pickAll ? `${Math.round((100 * (pick[0] + pick[1])) / pickAll)} % current` : "";
     const card = dcard(titleText, share, s, foot);
-    // Hovering the chart shows it large (with its legend) beside the pointer.
-    s.addEventListener("pointerenter", () => {
-      const big = s.cloneNode(true);
-      big.classList.add("big");
-      bigBox.replaceChildren(el("b", "th", titleText), big, foot.cloneNode(true));
-      bigBox.hidden = false;
-      const r = card.getBoundingClientRect(), w = Math.min(640, innerWidth - 32);
-      bigBox.style.width = `${w}px`;
-      bigBox.style.left = `${Math.min(innerWidth - w - 16, Math.max(16, r.left))}px`;
-      bigBox.style.top = `${Math.max(16, r.top - 20)}px`;
-    });
-    s.addEventListener("pointerleave", () => { bigBox.hidden = true; });
     return card;
   };
-  const relCard = (h) => [relChart(h, "ios", "iOS releases"), relChart(h, "android", "Android releases")];
+  // A small pill of choices in a card's header (the chosen one lit); `change(value)` when another is chosen.
+  const pillOf = (options, current, change) => {
+    const p = el("span", "pill-toggle");
+    p.setAttribute("role", "group");
+    for (const [value, label, title] of options) {
+      const b = el("button", value === current ? "on" : null, label);
+      b.type = "button"; if (title) b.setAttribute("aria-label", title);
+      b.setAttribute("aria-pressed", String(value === current));
+      b.addEventListener("click", (e) => { e.stopPropagation(); change(value); });
+      p.append(b);
+    }
+    return p;
+  };
+  const saved = (k, fallback, allowed) => { try { const v = localStorage.getItem(k); return allowed.includes(v) ? v : fallback; } catch { return fallback; } };
+  const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+  let relPlat = saved("relPlat", "all", ["all", "ios", "android"]);
+  const relCard = (h) => {
+    const card = relChart(h, relPlat, "Releases");
+    card.querySelector("h3")?.children[0]?.after(pillOf([["all", "All"], ["ios", "iOS"], ["android", "Android"]], relPlat, (v) => { relPlat = v; save("relPlat", v); drawDetail(); }));
+    return [card];
+  };
   // Speed: the range's split in one bar with its four shares named.
   const latPct = (b, i) => { const t = b.reduce((a, v) => a + v, 0); return t ? (100 * b[i]) / t : 0; };
   const speedSplit = () => {
@@ -2107,6 +2110,10 @@ if (document.body.classList.contains("login")) {
           { ico: "send", label: "Yos", value: num(tot(d.lat[i])) }] : [{ ico: "send", label: "Yos", value: "none" }] }) },
       { ico: "clock", label: "Queue", value: `${num(h.messages)} Yos`, values: rows.map((r) => r?.[0] || 0), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ color: "#5dade2", label: "Yos waiting", value: rows[i] ? num(rows[i][0]) : "not kept" }] }) },
+      ...(pushData ? [(() => { const p = pushData, sum = (v) => v.reduce((x, y) => x + y, 0), at = (i) => ({ head: p.names[i], rows: [{ ico: "send", label: "Pushes sent", value: num(p.sent[i]) },
+          { label: "Folded, 1 s window", value: num(p.folded[i]) }, { label: "Folded, backlog", value: num(p.paced[i]) },
+          { label: "In backlog pacing now", value: h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices) }] });
+        return { ico: "send", label: "Push", value: num(sum(p.sent)), values: p.sent, scls: "cool", tip: at }; })()] : []),
       { ico: "image", label: "Media queue", value: h.blobs ? bytes(h.blobs[1]) : "–", values: rows.map((r) => r?.[1] || 0), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ ico: "disk", label: "Media waiting", value: rows[i] ? bytes(rows[i][1]) : "not kept" }] }) },
     ]);
@@ -2327,7 +2334,6 @@ if (document.body.classList.contains("login")) {
       if (info?.select) { const sel = $("st-every"); sel.hidden = false; const l = el("label", "hc-sel", "Report every"); l.append(sel); body.push(l); }
       const c = dcard(name, null, body);
       c.querySelector("h3").prepend(el("span", `dot ${chip?.classList.contains("ok") ? "ok" : chip?.classList.contains("bad") ? "bad" : ""}`));
-      if (detailKey === `svc:${id}`) c.classList.add("picked");
       return c;
     }),
   };
@@ -2337,20 +2343,30 @@ if (document.body.classList.contains("login")) {
   // What each tile opens, put together from the single topics above (old links to a topic still open it alone).
   // The operator's bots (YO_BOT_ACCOUNTS), counted apart by the hub and out of every number above: photos each sent
   // today, the Yos of the server's own services as a series of their own. Only in this detail, never on the card.
+  // Bots: all bot traffic as bars stacked by kind (Bot Yos, then each bot's photos) in blue shades; the numbers per kind
+  // and the note in the hover. Bots are not in Sent, Media or Accounts.
   const botCards = (h) => {
     const ev = h.events || {}, today = (k) => ev[k]?.today ?? 0;
     const media = Object.keys(ev).filter((k) => k.startsWith("bot-media:")).sort();
     if (!media.length && !ev["bot-yo"]?.total && !today("bot-yo")) return [];
-    const rows = [...media.map((k) => [`${k.slice(10)} photos`, num(today(k))]), ["Bot Yos", num(today("bot-yo"))]];
-    return [dcard("Bots", dnums(`${num(rows.reduce((a, r) => a + Number(String(r[1]).replace(/\D/g, "")), 0))}`, "today"), kvRows(rows), note("Not in the counts of Sent, Media or Accounts.")),
-      comboCard("Bot Yos", evSlots("bot-yo"), { cls: "cool", total: ev["bot-yo"]?.total, unit: "Yos" })];
+    const kinds = [["bot-yo", "Bot Yos"], ...media.map((k) => [k, `${k.slice(10)} photos`])], shades = ["#5dade2", "#3d8fc4", "#2f6f9c", "#7fc0ea", "#1f4f75"];
+    const series = kinds.map(([k, name], n) => ({ name, color: shades[n % shades.length], slots: evSlots(k), today: today(k) }));
+    const len = series[0].slots.values.length, names = series[0].slots.names, totalAt = (i) => series.reduce((s, x) => s + (x.slots.values[i] || 0), 0);
+    const top = Math.max(1, ...Array.from({ length: len }, (_, i) => totalAt(i))), W = 264, H = 80, gap = W / len;
+    const g = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart", preserveAspectRatio: "none" });
+    for (let i = 0; i < len; i++) {
+      let y = H;
+      for (const s of series) { const hh = ((s.slots.values[i] || 0) / top) * (H - 4); if (!hh) continue; y -= hh; g.append(svg("rect", { x: (i * gap + gap * 0.15).toFixed(1), width: (gap * 0.7).toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), rx: 1, fill: s.color })); }
+    }
+    hoverTip(g, len, (i) => ({ head: names[i], note: "Not in the counts of Sent, Media or Accounts.", rows: [...series.map((s) => ({ color: s.color, label: s.name, value: num(s.slots.values[i] || 0) })), { label: "Today", value: num(series.reduce((n, s) => n + s.today, 0)) }] }));
+    return [dcard("Bots", dnums(num(series.reduce((n, s) => n + s.today, 0)), "today"), g)];
   };
+
   { const one = { ...DETAIL }, title = (c) => c?.querySelector("h3 span")?.textContent, tot = (b) => b.reduce((a, v) => a + v, 0);
     // Yo: beside the tile's Yos: delivered, delivery performance (speed, the queues), media sent, groups.
     DETAIL.yc = () => {
       const h = hubNow, d = speedData;
       return [
-        comboCard("Delivered", evSlots("yo-out"), { total: h.events?.["yo-out"]?.total, unit: "delivered" }),
         perfCard(h),
         (() => { const by = evSlots("media-in-bytes");
           const yo = evSlots("yo-in");
@@ -2359,7 +2375,6 @@ if (document.body.classList.contains("login")) {
             more: (i) => [{ ico: "disk", label: "Size", value: bytes(by.values[i] || 0) },
               { ico: "send", label: "Share of Yos", value: yo.values[i] ? pctText((100 * (evSlots("media-in").values[i] || 0)) / yo.values[i]) : "–" }] }); })(),
         comboCard("Groups", evSlots("group-create"), { total: h.groups, unit: "made" }),
-        ...[pacingCard(h)].filter(Boolean),
         ...botCards(h),
       ];
     };
@@ -2477,48 +2492,36 @@ if (document.body.classList.contains("login")) {
   const SLUG = { yc: "yos", uc: "accounts", md: "media", gr: "groups", sc: "secured", pl: "platforms", vr: "app", pr: "problems", dl: "speed", ps: "push",
     cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
   const detailBox = $("detail");
-  let detailKey = null, detailPending = false;
-  // The status bot's select lives in the CLI card while it shows, else hidden at home.
+  let detailPending = false;
+  // All cards are on the page, always: a group each, under a small label, in this order. A click on a tile or row takes
+  // its group to the top of the screen.
+  const GROUPS = [["yc", "Yos"], ["uc", "Accounts"], ["vr", "App"], ["pr", "Problems"]];
+  // The status bot's select lives in the server card's hover while it shows, else hidden at home.
   const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
   const drawDetail = () => {
-    if (!detailKey) return;
+    if (!hubNow) return;
     parkSelect();
-    const t = TOPIC(detailKey);
-    let cards = [];
-    try { cards = (DETAIL[t]?.() || []).filter(Boolean); } catch (e) { console.warn(e); }
-    if (!cards.length) cards = [dcard(TITLE[t] || "", null, note("No data yet."))];
-    const s = srvNow, sub = t === "svc" || t === "upd" ? "" : t === "server" ? (s?.history_day?.length > 1 ? `last ${span((Date.now() - s.history_day[0][0]) / 1000)}` : "last hour") : spanWord();
-    $("detail-title").replaceChildren(el("span", null, TITLE[t] || ""), ...(sub ? [el("small", null, sub)] : []));
-    $("detail-cards").replaceChildren(...cards.slice(0, 16));
+    const groups = GROUPS.map(([t, label]) => {
+      let cards = [];
+      try { cards = (DETAIL[t]?.() || []).filter(Boolean); } catch (e) { console.warn(e); }
+      if (!cards.length) cards = [dcard(label, null, note("No data yet."))];
+      const g = el("section", "agroup"), head = el("h2", "glabel");
+      g.id = `grp-${t}`;
+      head.append(el("span", null, label), el("small", null, spanWord()));
+      const grid = el("div", "dgrid");
+      grid.append(...cards.slice(0, 16));
+      g.append(head, grid);
+      return g;
+    });
+    $("detail-groups").replaceChildren(...groups);
   };
-  // Redrawn with fresh data, unless the pointer is on it (its captions) or its select is open; then once it leaves.
-  function redrawDetail(only) {
-    if (!detailKey || (only && !only.includes(TOPIC(detailKey)))) return;
-    if (detailBox.matches(":hover") || document.activeElement?.closest?.("#detail select")) { detailPending = true; return; }
+  // Redrawn with fresh data, unless the pointer is on a card (its captions) or a select is open; then once it leaves.
+  function redrawDetail() {
+    if (detailBox.querySelector(".dcard:hover") || document.activeElement?.closest?.("#detail select")) { detailPending = true; return; }
     drawDetail();
   }
   detailBox.addEventListener("pointerleave", () => { if (detailPending) { detailPending = false; drawDetail(); } });
-  const keepHash = (key) => { try { history.replaceState(null, "", `${location.pathname}${location.search}${key ? `#detail-${SLUG[key]}` : ""}`); } catch {} };
-  const pickOnly = (key) => {
-    for (const n of document.querySelectorAll("[data-card]")) { const on = n.dataset.card === key; n.classList.toggle("picked", on); n.setAttribute("aria-expanded", String(on)); }
-  };
-  const closeDetail = () => {
-    if (!detailKey) return;
-    parkSelect();
-    detailKey = null; detailPending = false; detailBox.hidden = true;
-    $("detail-cards").replaceChildren();
-    pickOnly(null); keepHash(null);
-  };
-  const openDetail = (key) => {
-    if (detailKey === key) { closeDetail(); return; }
-    const was = detailKey;
-    detailKey = key; detailPending = false;
-    pickOnly(key); keepHash(key);
-    detailBox.hidden = false;
-    drawDetail();
-    // Below the screen (a phone, or a scrolled page): brought up to it.
-    if (!was && detailBox.getBoundingClientRect().top > innerHeight - 120) detailBox.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
+  const openDetail = (key) => { const g = $(`grp-${TOPIC(key)}`) || $(`grp-${key}`); if (g) g.scrollIntoView({ behavior: "smooth", block: "start" }); };
   for (const r of document.querySelectorAll(".crow[id^='c-']:not(.chips)")) if (!r.dataset.card) r.dataset.card = r.id.slice(2);
   $("t-yc").dataset.card = "yc"; $("t-uc").dataset.card = "uc";
   // Server, App and Problems: the whole tile opens its one detail, not each row its own.
@@ -2529,17 +2532,15 @@ if (document.body.classList.contains("login")) {
   serverHints();
   for (const n of document.querySelectorAll("[data-card]")) {
     if (n.tagName !== "BUTTON") { n.setAttribute("role", "button"); n.tabIndex = 0; }
-    n.setAttribute("aria-controls", "detail"); n.setAttribute("aria-expanded", "false");
+    n.setAttribute("aria-controls", "detail");
     n.addEventListener("click", (e) => { if (!e.target.closest("select, #hub-word")) openDetail(n.dataset.card); });
     n.addEventListener("keydown", (e) => { if (e.target === n && n.tagName !== "BUTTON" && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(n.dataset.card); } });
   }
-  $("detail-close").addEventListener("click", closeDetail);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && detailKey && !typing(e.target)) closeDetail(); });
   // Links, old ones too: #support/#feedback at the chat, #crashes/#diagnostics at diagnostics, #reserved, #users.
   const TABLES = { users: "users", todos: "todos", inbox: "support_messages", support: "support_messages", feedback: "support_messages", crashes: "diagnostics", diagnostics: "diagnostics", reports: "reports", db: null, reserved: "reserved" };
   const landing = () => {
     const h = location.hash.slice(1), d = h.startsWith("detail-") && Object.keys(SLUG).find((k) => SLUG[k] === h.slice(7));
-    if (d) { if (detailKey !== d) openDetail(d); } else if (h in TABLES) showTable(TABLES[h] || tableOpen);
+    if (d) openDetail(d); else if (h in TABLES) showTable(TABLES[h] || tableOpen);
   };
   window.addEventListener("hashchange", landing);
   const typing = (t) => t instanceof Element && (t.isContentEditable || t.closest("textarea, select, [contenteditable]")
