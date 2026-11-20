@@ -285,8 +285,8 @@ if (document.body.classList.contains("login")) {
   };
 
   // ---- app builds: the platform word ("iOS", "Android", "Bot"), green when current, yellow when an update is out,
-  // plain when unknown; build and newest build only in the tooltip. Worked out by the collector: current is the highest
-  // iOS build any user reports, the team's own included.
+  // plain when unknown; build and current build only in the tooltip. Worked out by the collector: current is the highest
+  // iOS build two users report; a build only one user has is "fresh" (counts as current).
   const build = (app) => (app || "").split("/").pop();
   const parse = (app) => {
     const [p, b] = (app || "").split("/");
@@ -297,7 +297,7 @@ if (document.body.classList.contains("login")) {
   const findNewest = (h) => { minApp = String(h?.min_app || "").split(",").map((m) => parse(m.trim())).filter(Boolean); };
   const appInfo = (app) => last?.app_builds?.[app] || (app ? { label: build(app), state: null, title: app } : null);
   const belowMin = (app) => { const v = parse(app); return !!v && minApp.some((m) => m[0] === v[0] && v[1] < m[1]); };
-  // "current", "update" or null (unknown, or no app).
+  // "fresh", "current", "update" or null (unknown, or no app).
   const appState = (app) => (belowMin(app) ? "update" : appInfo(app)?.state || null);
   const appTitle = (app, uid) => {
     const i = appInfo(app);
@@ -811,7 +811,7 @@ if (document.body.classList.contains("login")) {
       // hub's minimum, unknown) in the hover.
       const per = {};
       for (const [app, c] of h.apps || []) {
-        const st = belowMin(app) ? "must" : appInfo(app)?.state || "unknown", l = appInfo(app)?.label || "unknown";
+        const st0 = belowMin(app) ? "must" : appInfo(app)?.state || "unknown", st = st0 === "fresh" ? "current" : st0, l = appInfo(app)?.label || "unknown";
         (per[l] ||= { current: 0, update: 0, must: 0, unknown: 0, all: 0 })[st in VSTATES ? st : "unknown"] += c;
         per[l].all += c;
       }
@@ -1056,7 +1056,7 @@ if (document.body.classList.contains("login")) {
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
   let allSort = { key: "created", dir: -1 };  // newest sign-ups first
   const allValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
-    : key === "update" ? (u.app ? (belowMin(u.app) ? 3 : appState(u.app, u.id) === "update" ? 2 : appState(u.app, u.id) === "current" ? 0 : 1) : -1)
+    : key === "update" ? (u.app ? (belowMin(u.app) ? 3 : appState(u.app, u.id) === "update" ? 2 : ["current", "fresh"].includes(appState(u.app, u.id)) ? 0 : 1) : -1)
     : key === "secured" || key === "push" ? Number(!!u[key]) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
     th.tabIndex = 0;
@@ -1092,7 +1092,7 @@ if (document.body.classList.contains("login")) {
       app.append(appTag(u.app, u.id));
       cell(tr, app);
       // The device's software: current, an update out (or below the hub's minimum), or unknown.
-      const upd = u.app ? (belowMin(u.app) ? tag("must update", "bad") : st === "update" ? tag("update", "warn") : st === "current" ? tag("current", "ok") : tag("?", "muted")) : el("span", "muted", "–");
+      const upd = u.app ? (belowMin(u.app) ? tag("must update", "bad") : st === "update" ? tag("update", "warn") : st === "current" ? tag("current", "ok") : st === "fresh" ? tag("fresh", "info") : tag("?", "muted")) : el("span", "muted", "–");
       cell(tr, upd);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : el("span", "muted", "–"));
@@ -1692,7 +1692,7 @@ if (document.body.classList.contains("login")) {
     const own = apps.slice(0, RTOP), rest = apps.slice(RTOP);
     let shade = 0, mshade = 0;
     const bands = own.map((a) => ({ name: buildLabel(a), apps: [a],
-      cls: belowMin(a) ? "r-must" : a === apps[0] && appInfo(a)?.state === "current" ? "r-current" : null, color: null })).reverse();
+      cls: belowMin(a) ? "r-must" : a === apps[0] && ["current", "fresh"].includes(appInfo(a)?.state) ? "r-current" : null, color: null })).reverse();
     // Older = greyer: the shades go from the newest of the older builds down.
     for (let i = bands.length - 1; i >= 0; i--) {
       if (!bands[i].cls) bands[i].color = REL_SHADES[Math.min(REL_SHADES.length - 1, shade++)];

@@ -90,6 +90,7 @@ input[type=search]:focus, .add input:focus, select:focus { outline: none; border
 .tag.ok { color: var(--ok); background: rgba(46, 204, 113, .12); }
 .tag.warn { color: var(--warn); background: rgba(241, 196, 15, .12); }
 .tag.bad { color: var(--bad); background: rgba(231, 76, 60, .14); }
+.tag.info { color: #3fb8c9; background: rgba(63, 184, 201, .14); }
 
 /* Tables */
 table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -150,7 +151,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 #newusers-body { cursor: pointer; user-select: none; }
 .pm-slot { display: grid; place-items: center; width: 16px; height: 16px; }
 .ov .pm-slot .ico { width: 14px; height: 14px; stroke: var(--muted); }
-.ov .pm-slot .ico.app-current { stroke: var(--ok); }
+.ov .pm-slot .ico.app-current, .ov .pm-slot .ico.app-fresh { stroke: var(--ok); }
 .ov .pm-slot .ico.app-update { stroke: var(--warn); }
 .ov .pm-slot .ico.secured { stroke: var(--ok); }
 .pm-when { text-align: right; white-space: nowrap; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -361,7 +362,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .ustats h2 small { margin-left: auto; font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--muted); }
 .ugrid { max-height: calc(100vh - 160px); overflow: auto; }
 #all-users-table th { position: sticky; top: 0; background: var(--card); padding-top: 4px; }
-.app-current, .app-current b { color: var(--ok); }
+.app-current, .app-current b, .app-fresh, .app-fresh b { color: var(--ok); }
 .app-update, .app-update b { color: var(--warn); }
 
 /* Tabs as symbols: the chosen one with its title; counts small beside the symbol */

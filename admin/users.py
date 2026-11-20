@@ -499,15 +499,18 @@ def updates(previous=None, now=None):
     return data
 
 
-# ---- App versions: current is the highest iOS build users report --------------------------------------------------
-# Every TestFlight build is "yyyymmddHHMM"; anything else iOS reports (xtool's "1") is a dev build. Current is the
-# highest build any user reports (the team's own included, no exceptions); older has an update. No network.
+# ---- App versions: current is the highest iOS build that at least two users report -------------------------------
+# Every TestFlight build is "yyyymmddHHMM"; anything else iOS reports (xtool's "1") is a dev build. A build only one
+# user has is "fresh": everyone on the previous build stays "current". Once a second user has it, it becomes the
+# baseline and older builds are "update". If no build has two users, the highest build is the baseline (single-user
+# builds are then simply current). The team's own users count like any other. No network.
 IOS_BUILD = re.compile(r"\d{12}")
 
 
 def classify(app, newest=None, bot_min=None) -> dict:
-    """One reported app ("platform/build"): its platform word, state ("current", "update" or None: unknown) and the
-    details for the tooltip. newest: the highest iOS build any user reports."""
+    """One reported app ("platform/build"): its platform word, state ("fresh", "current", "update" or None:
+    unknown) and the details for the tooltip. newest: the baseline, the highest iOS build two users report; a build
+    above it is "fresh" (only one user so far)."""
     platform, _, b = (app or "").partition("/")
     if not platform or not b:
         return {"label": "unknown", "state": None, "title": app or "no app reported"}
@@ -520,24 +523,26 @@ def classify(app, newest=None, bot_min=None) -> dict:
         return {"label": name, "state": None, "title": f"{name} build {b}"}
     if not IOS_BUILD.fullmatch(b):
         return {"label": "iOS", "state": None, "title": f"iOS dev build {b} (dev/push.sh)"}
-    state = None if not newest else "current" if b >= newest else "update"
-    return {"label": "iOS", "state": state,
-            "title": f"TestFlight build {b}" + (f"; newest reported {newest}" if newest and newest != b else "")}
+    state = None if not newest else "fresh" if b > newest else "current" if b == newest else "update"
+    note = "; fresh: only 1 user so far" if state == "fresh" else f"; current {newest}" if newest and newest != b else ""
+    return {"label": "iOS", "state": state, "title": f"TestFlight build {b}" + note}
 
 
 def app_builds(out) -> dict:
     """Every reported app of both hubs ("ios/202611191257") with its label, state and details."""
-    seen, reported = set(), set()
+    seen, users_of = set(), {}
     for name in HUBS:
         h = out.get(name) or {}
         seen.update(a for a, _ in h.get("apps") or [])
-        for u in h.get("users") or []:
+        for i, u in enumerate(h.get("users") or []):
             apps = {u.get("app")} | {d.get("app") for d in u.get("device_list") or []}
             seen.update(apps)
-            reported.update(apps)
+            for a in apps:
+                if a and a.startswith("ios/") and IOS_BUILD.fullmatch(a[4:]):
+                    users_of.setdefault(a[4:], set()).add(u.get("id") or f"{name}#{i}")
     seen = {a for a in seen if a and a != "unknown"}
-    ios = [a.partition("/")[2] for a in reported if a and a.startswith("ios/") and IOS_BUILD.fullmatch(a[4:])]
-    newest = max(ios) if ios else None
+    two = [b for b, ids in users_of.items() if len(ids) >= 2]
+    newest = max(two or users_of, default=None)
     bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
     return {a: classify(a, newest, bot) for a in seen}
 
@@ -554,13 +559,14 @@ def below_min(app, minimum) -> bool:
 
 
 def version_day(apps, builds, minimum) -> dict:
-    """Of the user devices seen today (bots and the CLI left out): how many run the current build, have an update
+    """Of the user devices seen today (bots and the CLI left out): how many run the current build (a fresh one counts as current), have an update
     out, must update (below the hub's minimum) or are unknown (dev builds, Android until it has builds)."""
     out = {"current": 0, "update": 0, "must": 0, "unknown": 0}
     for app, n in apps or []:
         if (app or "").startswith(("yogpt/", "cli/")):
             continue
         state = "must" if below_min(app, minimum) else (builds.get(app) or {}).get("state") or "unknown"
+        state = "current" if state == "fresh" else state
         out[state if state in out else "unknown"] += n
     return out
 

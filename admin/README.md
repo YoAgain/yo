@@ -165,8 +165,8 @@ without a path unit, run the collector manually after each request to supply fre
 ## App versions
 
 The collector (no network) states each reported app (`ios/202611191257`: every TestFlight build is its UTC minute) in
-`app_builds` of `users.json`. Current is the highest iOS build reported by any user outside `YO_ADMIN_INTERNAL_USERS`;
-an older one has an update. Internal testers (on newer main builds) do not move "current" and are never shown with an
+`app_builds` of `users.json`. Current is the highest iOS build reported by at least two distinct users (if none has two, the highest build);
+a build only one user has is "fresh" (counts as current, tooltip "fresh: only 1 user so far"), an older one has an update. Internal testers (on newer main builds) do not move "current" and are never shown with an
 update; their tooltip says "internal tester". `ios/1` is a dev build; YoGPT is compared with its deploy; Android and
 the CLI are unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an
 update is out, plain when unknown, with the builds in its tooltip. Builds below `YO_MIN_APP` count as update. The App
