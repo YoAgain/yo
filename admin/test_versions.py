@@ -20,11 +20,11 @@ class ClassifyTests(unittest.TestCase):
             ("ios/1", NEWEST, None, "iOS", None),
             ("yogpt/202611182101", NEWEST, bot, "Bot", "current"),
             ("yogpt/202611181000", NEWEST, bot, "Bot", "update"),
-            ("android/202611160001", NEWEST, None, "Android", None),  # the dev app's 12 digits
-            ("android/29919800", "29919800", None, "Android", "current"),
-            ("android/29919900", "29919800", None, "Android", "fresh"),
-            ("android/29900000", "29919800", None, "Android", "update"),
-            ("android/29900000", None, None, "Android", None),
+            ("android/202611181859", NEWEST, None, "Android", "current"),
+            ("android/202611191257", NEWEST, None, "Android", "fresh"),
+            ("android/202611160001", NEWEST, None, "Android", "update"),  # RC8 and older: a fixed build
+            ("android/202611160001", None, None, "Android", None),
+            ("android/29919800", NEWEST, None, "Android", None),  # not a minute: a dev build
         ]:
             r = self.c(app, newest, bot_min)
             self.assertEqual((r["label"], r["state"]), (label, state), app)
@@ -54,12 +54,12 @@ class ClassifyTests(unittest.TestCase):
 
     def test_android_builds_are_compared_only_with_android(self):
         us = lambda *p: [{"id": i, "app": a, "device_list": []} for i, a in p]
-        out = {"live": {"users": us(("a", "android/29900000"), ("b", "android/29919800"), ("c", "android/29919800"),
-                                    ("d", "android/29930000"), ("e", "android/202611160001"), ("f", "ios/202611181859"))}}
+        out = {"live": {"users": us(("a", "android/202611160001"), ("b", "android/202611200930"), ("c", "android/202611200930"),
+                                    ("d", "android/202611201200"), ("e", "android/1"), ("f", "ios/202611181859"))}}
         b = users.app_builds(out)
-        self.assertEqual([b[f"android/{n}"]["state"] for n in (29900000, 29919800, 29930000)], ["update", "current", "fresh"])
-        self.assertIsNone(b["android/202611160001"]["state"])
-        self.assertEqual(b["android/202611160001"]["title"], "Android dev build")
+        self.assertEqual([b[f"android/{n}"]["state"] for n in (202611160001, 202611200930, 202611201200)], ["update", "current", "fresh"])
+        self.assertIsNone(b["android/1"]["state"])
+        self.assertEqual(b["android/1"]["title"], "Android dev build 1")
         self.assertEqual(b["ios/202611181859"]["state"], "current")  # alone on iOS, not judged against Android
 
     def test_without_any_build_of_two_users_the_highest_is_current(self):

@@ -165,10 +165,10 @@ without a path unit, run the collector manually after each request to supply fre
 ## App versions
 
 The collector (no network) states each reported app (`ios/202611191257`: every TestFlight build is its UTC minute) in
-`app_builds` of `users.json`. Current is the highest iOS build reported by at least two distinct users (if none has two, the highest build);
+`app_builds` of `users.json`. Current is, per platform, the highest build (iOS and Android: its UTC minute) reported by at least two distinct users (if none has two, the highest build);
 a build only one user has is "fresh" (counts as current, tooltip "fresh: only 1 user so far"), an older one has an update. Internal testers (on newer main builds) do not move "current" and are never shown with an
-update; their tooltip says "internal tester". `ios/1` is a dev build; YoGPT is compared with its deploy; Android and
-the CLI are unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an
+update; their tooltip says "internal tester". `ios/1` is a dev build; YoGPT is compared with its deploy; the CLI is
+unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an
 update is out, plain when unknown, with the builds in its tooltip. Builds below `YO_MIN_APP` count as update. The App
 versions card counts current, update and unknown per platform. App Store releases will be added the same way later.
 admin.py keeps, beside the state counts in `version-days.json`, the devices per build seen today (`apps_today`, the CLI

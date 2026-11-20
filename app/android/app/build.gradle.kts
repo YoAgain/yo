@@ -1,9 +1,17 @@
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.Properties
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+// Yo-App "android/<build>": the build's UTC minute (YYYYMMDDHHMM) as iOS and the CLI; CI sets YO_BUILD, a local build
+// takes the minute it is configured in.
+val yoBuild = providers.environmentVariable("YO_BUILD").getOrElse(
+    DateTimeFormatter.ofPattern("yyyyMMddHHmm").withZone(ZoneOffset.UTC).format(Instant.now()))
+    .also { require(Regex("\\d{12}").matches(it)) { "YO_BUILD '$it' is not YYYYMMDDHHMM" } }
 // Firebase normally gets these resources from the Google Services plugin. Emit them only when google-services.json
 // (ignored: CI writes it from the secret GOOGLE_SERVICES_JSON, a dev copies it; README: Push) is present, so builds
 // without Firebase use the same variant. Each variant takes the client of its own package: release app.justyo.android,
@@ -40,7 +48,7 @@ android {
         versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")  // debug and the device QA build: the dev hub
-        buildConfigField("String", "YO_APP", "\"android/202611160001\"")
+        buildConfigField("String", "YO_APP", "\"android/$yoBuild\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
     signingConfigs {

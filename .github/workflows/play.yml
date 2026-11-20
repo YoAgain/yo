@@ -82,6 +82,7 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           export JAVA_HOME="$HOME/Android/jdk" ANDROID_HOME="$HOME/Android/sdk" ANDROID_SDK_ROOT="$HOME/Android/sdk"
           . app/android/dev/env.sh
+          export YO_BUILD=$(date -u +%Y%m%d%H%M)  # the Yo-App build: the UTC minute, as iOS and the CLI
           cd app/android
           nice -n 10 ./gradlew --max-workers=4 :app:bundleRelease "-PyoVersionCode=$(( $(date +%s) / 60 ))" "${version[@]}"
           aab=app/build/outputs/bundle/release/app-release.aab

@@ -592,16 +592,14 @@ def updates(previous=None, now=None):
     return data
 
 
-# ---- App versions: current is the highest iOS build that at least two users report -------------------------------
-# Every TestFlight build is "yyyymmddHHMM"; anything else iOS reports (xtool's "1") is a dev build. A build only one
-# user has is "fresh": everyone on the previous build stays "current". Once a second user has it, it becomes the
-# baseline and older builds are "update". If no build has two users, the highest build is the baseline (single-user
-# builds are then simply current). The team's own users count like any other. No network.
-IOS_BUILD = re.compile(r"\d{12}")
-# Android Play builds report the CI versionCode (minutes since the epoch, "android/29919800"); the dev app sends a
-# fixed 12-digit "android/2026…" and stays unknown. The same rule as iOS, computed per platform on its own builds.
-ANDROID_BUILD = re.compile(r"\d{1,10}")
-BUILD = {"ios": IOS_BUILD, "android": ANDROID_BUILD}
+# ---- App versions: current is the highest build that at least two users report, per platform -------------------
+# Every TestFlight and Play build is its UTC minute "yyyymmddHHMM"; anything else (xtool's "1") is a dev build. A
+# build only one user has is "fresh": everyone on the previous build stays "current". Once a second user has it, it
+# becomes the baseline and older builds are "update". If no build has two users, the highest build is the baseline
+# (single-user builds are then simply current). The team's own users count like any other. Each platform is judged
+# on its own builds. No network.
+STORE_BUILD = re.compile(r"\d{12}")
+BUILD = {"ios": STORE_BUILD, "android": STORE_BUILD}
 
 
 def classify(app, newest=None, bot_min=None) -> dict:
@@ -620,10 +618,8 @@ def classify(app, newest=None, bot_min=None) -> dict:
         return {"label": name, "state": None, "title": f"{name} build {b}"}
     name, store = ("iOS", "TestFlight") if platform == "ios" else ("Android", "Play")
     if not BUILD[platform].fullmatch(b):
-        return {"label": name, "state": None, "title": "Android dev build" if platform == "android" else f"iOS dev build {b} (dev/push.sh)"}
-    n = int(b) if platform == "android" else b
-    top = (int(newest) if platform == "android" else newest) if newest else None
-    state = None if not newest else "fresh" if n > top else "current" if n == top else "update"
+        return {"label": name, "state": None, "title": f"{name} dev build {b}" + (" (dev/push.sh)" if platform == "ios" else "")}
+    state = None if not newest else "fresh" if b > newest else "current" if b == newest else "update"
     note = "; fresh: only 1 user so far" if state == "fresh" else f"; current {newest}" if newest and newest != b else ""
     return {"label": name, "state": state, "title": f"{store} build {b}" + note}
 
@@ -645,7 +641,7 @@ def app_builds(out) -> dict:
     newest = {}
     for p, builds in users_of.items():
         two = [b for b, ids in builds.items() if len(ids) >= 2]
-        newest[p] = max(two or builds, key=int if p == "android" else str)
+        newest[p] = max(two or builds)
     bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
     return {a: classify(a, newest.get(a.partition("/")[0]), bot) for a in seen}
 
