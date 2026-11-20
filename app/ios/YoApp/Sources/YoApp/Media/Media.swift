@@ -147,7 +147,9 @@ struct StoredMedia: Codable, Sendable {
   var media: YoMedia { YoMedia(id: id, key: key, sha256: sha256, size: size, width: width, height: height) }
 }
 
-/// Outgoing media, kept on disk until the hub has the blob and the Yo is sent; none is given up. Uploads run a few
+/// Outgoing media, kept on disk until the hub has the blob and the Yo is sent; none is given up, also not one from the
+/// camera: a try that failed keeps it (across restarts too), its bar says "Not Sent · Tap to Retry" (`unsentTo`) and
+/// the banner why (`Problems`); "not now" tries again by itself, a refusal waits for the tap. Uploads run a few
 /// side by side without holding the core; the Yos to each friend go in the order taken, each once its upload and
 /// those before it are done. A Yo resent after a crash goes once: the core knows its blob's id.
 @MainActor @Observable
@@ -167,11 +169,19 @@ final class MediaOutbox {
     var uploaded: Bool?
     /// Builds before this one held an item until its undo ended; one found after a restart is discarded.
     var held: Bool?
-    /// Camera attempts never retry after a failure or restart.
+    /// Builds before this one dropped a camera photo after one failed try; it is kept now like any other.
     var singleAttempt: Bool?
+    /// Refused for good once: waits for a tap (`retryNow`), never dropped.
+    var failed: Bool?
+    /// A try of it did not go: its bar says so until it went.
+    var missed: Bool?
   }
 
   private(set) var waiting = 0
+  /// Recipients (user id, or name before the first Yo) with something that did not go at its last try.
+  private(set) var unsentTo: Set<String> = []
+  /// A photo or video that did not go at first went now (`to`, its kind): its bar tells it.
+  @ObservationIgnored var wentLater: (@MainActor (String, MediaFile.Kind) -> Void)?
   /// Events the core returned while sending go to the inbox; awaited before the next core call.
   @ObservationIgnored var received: (@MainActor ([YoEvent], [YoContact], YoClient) async -> Void)?
   /// Counts sign-outs.
@@ -224,10 +234,10 @@ final class MediaOutbox {
         guard MediaStorage.quarantine(Self.index) else { return false }
       }
     }
-    items = read.filter { $0.held != true && $0.singleAttempt != true }
-    for gone in read where gone.held == true || gone.singleAttempt == true { try? FileManager.default.removeItem(at: Self.blob(gone.id)) }
+    items = read.filter { $0.held != true }
+    for gone in read where gone.held == true { try? FileManager.default.removeItem(at: Self.blob(gone.id)) }
     loaded = true
-    waiting = items.count
+    note()
     if legacy { save() }
     return true
   }
@@ -236,9 +246,16 @@ final class MediaOutbox {
   @discardableResult
   private func save() -> Bool {
     guard loaded else { return false }
-    waiting = items.count
+    note()
     guard let json = try? JSONEncoder().encode(items), let data = ManifestSeal.seal(json) else { return false }
     return ManifestSeal.write(data, to: Self.index)
+  }
+
+  /// What waits, and for whom something did not go.
+  private func note() {
+    waiting = items.count
+    let unsent = Set(items.filter { $0.missed == true }.map(\.to))
+    if unsent != unsentTo { unsentTo = unsent }
   }
 
   /// From `client`, the account the gesture began in. True once blob and queue are on disk. An `id` already in line
@@ -260,7 +277,6 @@ final class MediaOutbox {
     var item = Item(
       id: id, owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
       durationMs: file.durationMs, created: at)
-    item.singleAttempt = oneShot[id] != nil ? true : nil
     let blob = Self.blob(item.id)
     guard await MediaStorage.write(sealed.ciphertext, to: blob, .completeFileProtectionUntilFirstUserAuthentication)
     else {
@@ -282,7 +298,8 @@ final class MediaOutbox {
     return true
   }
 
-  /// Camera stacks enter only after undo ends; a failed attempt is erased, not retried.
+  /// Camera stacks enter only after undo ends. True once it went; false when its first try did not (it stays in line
+  /// and goes later, or at a tap: never dropped).
   func sendOnce(
     _ file: MediaFile, to friend: String, from client: YoClient, accounts: AccountStore, at: Date
   ) async -> Bool {
@@ -298,13 +315,6 @@ final class MediaOutbox {
     }
   }
 
-  func discard(_ id: UUID) {
-    guard let at = items.firstIndex(where: { $0.id == id }) else { return }
-    items.remove(at: at)
-    try? FileManager.default.removeItem(at: Self.blob(id))
-    oneShot.removeValue(forKey: id)?.resume(returning: false)
-    save()
-  }
 
   /// Signed out (the files went with MediaStorage.clearAll).
   func clear() {
@@ -315,6 +325,7 @@ final class MediaOutbox {
     items = []
     loaded = false
     waiting = 0
+    unsentTo = []
     wake?.cancel()
   }
 
@@ -328,13 +339,15 @@ final class MediaOutbox {
     Task {
       defer {
         running = false
-        // A stopped flush must not retain failed camera media or leave its caller waiting.
-        for id in Array(oneShot.keys) where items.contains(where: { $0.id == id }) { discard(id) }
+        // A stopped flush leaves no caller waiting: what it did not send stays in line.
+        for id in Array(oneShot.keys) where items.contains(where: { $0.id == id }) {
+          oneShot.removeValue(forKey: id)?.resume(returning: false)
+        }
         // Signed out and in meanwhile: the new account's queue goes now.
         if generation != self.generation && !items.isEmpty { flush(accounts: accounts) }
       }
       while let client = accounts.client, !HubTransport.unsupported {
-        let uploads = Array(items.filter { $0.uploaded != true && $0.next <= .now }.prefix(Self.together))
+        let uploads = Array(items.filter { $0.uploaded != true && $0.failed != true && $0.next <= .now }.prefix(Self.together))
         guard !uploads.isEmpty || !releasable().isEmpty else { break }
         let tasks = uploads.map { item in Task { await self.upload(item, client: client, generation: generation) } }
         for (item, task) in zip(uploads, tasks) {
@@ -364,7 +377,7 @@ final class MediaOutbox {
     var blocked: Set<String> = []
     return items.filter { item in
       guard !blocked.contains(item.to) else { return false }
-      guard item.uploaded == true, item.next <= .now else {
+      guard item.uploaded == true, item.failed != true, item.next <= .now else {
         blocked.insert(item.to)
         return false
       }
@@ -375,26 +388,34 @@ final class MediaOutbox {
   /// False: stop (this phone was replaced, or this build is too old).
   private func settle(_ item: Item, _ outcome: Outcome, client: YoClient, accounts: AccountStore) -> Bool {
     guard let at = items.firstIndex(where: { $0.id == item.id }) else { return true }
-    if oneShot[item.id] != nil, outcome != .uploaded {
-      let completion = oneShot.removeValue(forKey: item.id)
-      items.remove(at: at)
-      try? FileManager.default.removeItem(at: Self.blob(item.id))
-      save()
-      completion?.resume(returning: outcome == .sent)
-      if outcome == .replaced { accounts.replaced(client); return false }
-      return outcome != .stopped
+    // The camera's caller hears of the first try that ends: sent, or not (then it stays in line all the same).
+    if outcome != .uploaded { oneShot.removeValue(forKey: item.id)?.resume(returning: outcome == .sent) }
+    let retry: @MainActor () -> Void = { [weak self] in self?.retryNow() }
+    switch outcome {
+    case .later(let problem):
+      Problems.shared.report(problem, retry: retry)
+    case .refused(let problem):
+      Problems.shared.report(problem == .failed ? .notSent : problem, retry: retry)
+    case .sent:
+      if items[at].missed == true { wentLater?(item.to, item.kind) }
+    default:
+      break
     }
-    if outcome == .dropped { SendFailure.shared.show() }
     switch outcome {
     case .sent, .dropped:
       items.remove(at: at)
       let blob = Self.blob(item.id)
       Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
+    case .refused:
+      // Never dropped: kept until a tap on its bar (or the banner) tries it again.
+      items[at].failed = true
+      items[at].missed = true
     case .uploaded:
       items[at].uploaded = true
       items[at].tries = 0
       items[at].next = .distantPast
     case .later:
+      items[at].missed = true
       items[at].tries += 1
       items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
     case .held:
@@ -411,7 +432,7 @@ final class MediaOutbox {
 
   private func scheduleWake() {
     wake?.cancel()
-    guard let next = items.map(\.next).filter({ $0 > .now }).min() else { return }
+    guard let next = items.filter({ $0.failed != true }).map(\.next).filter({ $0 > .now }).min() else { return }
     wake = Task { [weak self] in
       try? await Task.sleep(for: .seconds(max(1, next.timeIntervalSinceNow)))
       guard !Task.isCancelled, let self, let accounts = self.accounts else { return }
@@ -420,22 +441,35 @@ final class MediaOutbox {
   }
 
   /// `held`: friend blocked or new key unconfirmed (spec 4.8, 3.4); goes after `retryNow`, as the core's outbox does.
-  private enum Outcome { case uploaded, sent, later, held, dropped, replaced, stopped }
+  /// `dropped`: not this account's any more (signed out, another account); `refused`: kept until a tap.
+  private enum Outcome: Equatable {
+    case uploaded, sent, held, dropped, replaced, stopped
+    case later(ProductProblem)
+    case refused(ProductProblem)
+  }
 
   /// A local re-check only; nothing goes to the hub.
   private static let heldSeconds: TimeInterval = 60
 
-  /// A friend unblocked or their new key confirmed.
-  func retryNow() {
-    for at in items.indices { items[at].next = .distantPast }
+  /// A friend unblocked or their new key confirmed, or a tap on a bar that says "Not Sent · Tap to Retry" (`to`: only
+  /// that recipient's).
+  func retryNow(to: String? = nil) {
+    for at in items.indices where to == nil || items[at].to == to {
+      items[at].next = .distantPast
+      items[at].failed = nil
+    }
+    save()
     if let accounts { flush(accounts: accounts) }
   }
+
+  /// Whether something for `to` waits after a failed try.
+  func hasUnsent(to: String) -> Bool { unsentTo.contains(to) }
 
   /// The chat first (a new friend's opens now), then the upload outside the client's lock.
   private func upload(_ item: Item, client: YoClient, generation: Int) async -> Outcome {
     let media = item.media.media
     let blob = Self.blob(item.id)
-    return await outcome(strict: oneShot[item.id] != nil) {
+    return await outcome {
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
       let (events, contacts) = try await Hub.run {
         (try client.uploadMediaTo(target: sendTarget(to: item.to), media: media, ciphertext: try Data(contentsOf: blob)),
@@ -450,7 +484,7 @@ final class MediaOutbox {
   private func send(_ item: Item, client: YoClient, generation: Int) async -> Outcome {
     guard generation == self.generation else { return .dropped }
     let media = item.media.media
-    return await outcome(strict: oneShot[item.id] != nil) {
+    return await outcome {
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
       let (events, after) = try await Hub.run {
         switch item.kind {
@@ -463,22 +497,21 @@ final class MediaOutbox {
     }
   }
 
-  private func outcome(strict: Bool = false, _ work: () async throws -> Outcome) async -> Outcome {
+  private func outcome(_ work: () async throws -> Outcome) async -> Outcome {
     do {
       return try await work()
     } catch YoError.Replaced {
       return .replaced
     } catch YoError.Outdated {
-      if strict { return .dropped }
       return .sent  // the friend's app too old: the Yo waits in the core's outbox until they update
     } catch YoError.Refused(let status) where status == 426 {
       return .stopped  // this build too old: kept, for the build after it
     } catch YoError.Blocked, YoError.Unconfirmed {
       return .held  // kept until they are unblocked or their key confirmed, never dropped
     } catch let error as YoError where retryLater(error: error) {
-      return .later
+      return .later(Problems.problem(of: error))
     } catch {
-      return .dropped  // not on Yo, or refused for good
+      return .refused(Problems.problem(of: error))  // not on Yo, or refused for good: kept for a tap
     }
   }
 }

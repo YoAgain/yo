@@ -16,6 +16,8 @@ extension FriendList {
       var modelMarkCount = 0
       var modelMediaSign = ""
       var modelPaused = false
+      /// Something to it did not go: a tap retries it (the core's `ListRow.unsent`).
+      var modelUnsent = false
       /// What the bar's one line tells (the core's): the title, or the Yos that came after it.
       var modelLine: ListLine = .title
       /// Photos and videos on their way out; the ring at the bar's left undoes them.
@@ -62,6 +64,11 @@ extension FriendList {
     tapped(friend.key)
     // A request asks first (spec 4.10): a tap on its bar is the yes.
     if friend.request { chooseRequest(friend, yes: true); return }
+    // "Not Sent · Tap to Retry": the tap sends what waits for it again, not one more.
+    if bars.of(friend).modelUnsent, !cameraOn || picked.isEmpty, swiped == nil {
+      retryUnsent(friend)
+      return
+    }
 
     // Firing back into a group: its senders' lines stay longer, so the bar does not shrink under the finger.
     if friend.group != nil { publish(listModel.keepAlive(now: listNow, id: friend.key.uuidString)) }
@@ -133,6 +140,31 @@ extension FriendList {
     }
   }
 
+  /// What did not go to `friend` goes again now: photos and videos in line, and Yos kept in the inbox.
+  func retryUnsent(_ friend: Friend) {
+    Haptic.tap()
+    outbox.retryNow(to: friend.target)
+    if inbox.unsentBars.contains(friend.key) { inbox.resume(accounts: accounts, friends: friends) }
+    Problems.shared.resolve(.notSent)
+  }
+
+  /// The bars of what waits after a failed try (photos, videos, Yos) say so until it went; one that went later
+  /// tells it.
+  func syncUnsent() {
+    var now: Set<String> = []
+    for friend in friends.all {
+      if outbox.unsentTo.contains(friend.target) || inbox.unsentBars.contains(friend.key) {
+        now.insert(friend.key.uuidString)
+      }
+    }
+    let before = listMedia.unsent
+    guard now != before else { return }
+    listMedia.unsent = now
+    for id in now.subtracting(before) { publish(listModel.unsent(now: listNow, id: id, on: true)) }
+    for id in before.subtracting(now) { publish(listModel.unsent(now: listNow, id: id, on: false)) }
+    if now.isEmpty { Problems.shared.resolve(.notSent) }
+  }
+
   /// The first Yo ever sent from this phone: what the friend gets, and how to get a Yo back with notifications off.
   func sentYo() async {
     guard !UserDefaults.standard.bool(forKey: Self.firstYoKey) else { return }
@@ -159,7 +191,14 @@ extension FriendList {
   func stage(
     _ file: MediaFile, to friend: Friend, from client: YoClient?, at: Date
   ) async -> Prepared? {
-    guard !Task.isCancelled, let client, client === accounts.client else { return nil }
+    guard !Task.isCancelled else { return nil }
+    // Taken right after a cold start: it waits a moment for the core of the same account, it is not lost.
+    var client = client
+    if client == nil, let account = accounts.account?.userID {
+      let soon = await accounts.clientSoon(seconds: 5) { accounts.account?.userID == account }
+      if accounts.account?.userID == account { client = soon }
+    }
+    guard let client, client === accounts.client else { return nil }
     let outbox = outbox
     return Prepared(
       send: {
@@ -423,7 +462,10 @@ extension FriendList {
   }
 
   func showSent(to friend: Friend, _ text: String, thenOnTop: Bool = false) {
-    if text == BarSendText.notSent, cameraOn { SendFailure.shared.show(name: friend.name, retry: { outbox.retryNow() }) }
+    // Never silent: the banner says why (a problem told already, such as "No Connection", stays).
+    if text == BarSendText.notSent, Problems.shared.text == nil {
+      Problems.shared.report(.notSent, retry: { retryUnsent(friend) })
+    }
     let id = friend.key.uuidString
     let snapshot: ListSnapshot
     switch text {

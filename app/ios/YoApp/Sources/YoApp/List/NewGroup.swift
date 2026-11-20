@@ -116,6 +116,7 @@ struct NewGroupSheet: View {
         dismiss()
       } catch {
         failed = true
+        Problems.shared.report(error)
       }
       creating = false
     }

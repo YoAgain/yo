@@ -23,7 +23,11 @@ struct FriendList: View {
   @Environment(Friends.self) var friends
   @Environment(MediaOutbox.self) var outbox
 
-  final class MediaInputCache { var each: [String: [Bool]] = [:] }
+  final class MediaInputCache {
+    var each: [String: [Bool]] = [:]
+    /// The bars last told "Not Sent · Tap to Retry" (`syncUnsent`).
+    var unsent: Set<String> = []
+  }
   @State var listMedia = MediaInputCache()
   @State var listModel = DeleteNotice.shared.model
   @State var listOrder: [String] = []
@@ -229,7 +233,7 @@ struct FriendList: View {
 
   /// A request answered: yes makes a contact (or joins the group); no takes the bar off the list.
   func answer(_ bar: Friend, yes: Bool) {
-    guard let client = accounts.client else { return }
+    guard let client = accounts.client else { return Problems.shared.report(.failed) }
     Task {
       if yes {
         let events: [YoEvent]?
@@ -240,6 +244,7 @@ struct FriendList: View {
           }
         } catch {
           events = nil
+          Problems.shared.report(error)
           Logger(subsystem: "app.justyo", category: "requests").error(
             "accept \(bar.group == nil ? "contact" : "group", privacy: .public): \(String(describing: error), privacy: .public)")
         }
@@ -256,12 +261,14 @@ struct FriendList: View {
           await sentYo()
         }
       } else if let group = bar.group {
-        if let events = try? await Hub.run({ try client.leaveGroup(group: group) }) {
-          await inbox.absorb(events, client: client, friends: friends)
-        }
-        if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+        await leaveGroup(group, client: client)
       } else {
-        try? await Hub.run { try client.decline(who: bar.target) }
+        do {
+          try await Hub.run { try client.decline(who: bar.target) }
+        } catch {
+          Problems.shared.report(error)
+          return  // still asking: the request stays, to answer again
+        }
         withAnimation(.snappy) { friends.remove(bar) }
       }
     }
@@ -688,7 +695,13 @@ struct FriendList: View {
     let name = name.trimmingCharacters(in: .whitespaces)
     guard let id = bar.group, let client = accounts.client, !name.isEmpty else { return }
     Task {
-      guard let events = try? await Hub.run({ try client.renameGroup(group: id, name: Self.groupName(name)) }) else { return }
+      let events: [YoEvent]
+      do {
+        events = try await Hub.run { try client.renameGroup(group: id, name: Self.groupName(name)) }
+      } catch {
+        Problems.shared.report(error)
+        return
+      }
       await inbox.absorb(events, client: client, friends: friends)
       if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
       let renamed = friends.all.first { $0.group == id } ?? bar
@@ -711,22 +724,25 @@ struct FriendList: View {
       if let notice = await GroupNotice.send([.user(GroupNotice.me(accounts)), " left ", .group(bar.name)], to: bar, accounts: accounts, outbox: outbox) {
         for _ in 0..<60 where outbox.isWaiting(notice) { try? await Task.sleep(for: .milliseconds(500)) }
       }
-      if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
-        await inbox.absorb(events, client: client, friends: friends)
-      }
-      if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+      await leaveGroup(id, client: client)
     }
+  }
+
+  /// Out of a group at the hub, then the list as the core has it; a failure is said, the group stays.
+  func leaveGroup(_ id: String, client: YoClient) async {
+    do {
+      let events = try await Hub.run { try client.leaveGroup(group: id) }
+      await inbox.absorb(events, client: client, friends: friends)
+    } catch {
+      Problems.shared.report(error)
+    }
+    if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
   }
 
   /// A group of this account alone, deleted: left without a picture (nobody would see it), its bar gone.
   func deleteEmpty(_ bar: Friend) {
     guard let id = bar.group, let client = accounts.client else { return }
-    Task {
-      if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
-        await inbox.absorb(events, client: client, friends: friends)
-      }
-      if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
-    }
+    Task { await leaveGroup(id, client: client) }
   }
 
   func remove(_ friend: Friend) {
@@ -742,7 +758,7 @@ struct FriendList: View {
         try await accounts.report(friend.user ?? friend.name, reason: reason)
         blocking = (friend, true)
       } catch {
-        problem = ("Unable to Report", error.localizedDescription)
+        Problems.shared.report(error)
       }
     }
   }
@@ -753,7 +769,7 @@ struct FriendList: View {
         try await accounts.setBlocked(friend.user ?? friend.name, true)
         withAnimation(.snappy) { friends.setBlocked(friend, true) }
       } catch {
-        problem = ("Unable to Block", error.localizedDescription)
+        Problems.shared.report(error)
       }
     }
   }

@@ -1,7 +1,7 @@
 //! The product rules (`yo_product`) for Swift, under the names the app has always used.
 
 use yo_product::list::Kind;
-use yo_product::{self as product, ActivityPlace, Direction, Language, LastActivity, Outcome, Text, WidgetFriend};
+use yo_product::{self as product, ActivityPlace, Direction, Language, LastActivity, Outcome, Problem, Text, WidgetFriend};
 
 #[uniffi::remote(Enum)]
 #[uniffi(name = "ProductLanguage")]
@@ -21,6 +21,11 @@ pub enum Text {
     SentVideo,
     Sending,
     NotSent,
+    NotSentRetry,
+    WaitingToSend,
+    ServerUnreachable,
+    TooManyTries,
+    SomethingWentWrong,
     Canceled,
     NoAnswer,
     NoAnswerYet,
@@ -97,6 +102,54 @@ pub enum Text {
     AccountBackup,
     Done,
     ShowOrSaveKey,
+}
+
+/// Why a user action did not happen: the one red banner's words (`product_problem_text`).
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductProblem")]
+pub enum Problem {
+    NoConnection,
+    ServerUnreachable,
+    TooManyTries,
+    NeedsUpdate,
+    NotOnYo,
+    Blocked,
+    NotSent,
+    Waiting,
+    Failed,
+}
+
+#[uniffi::export]
+pub fn product_problem_text(problem: Problem, lang: Language) -> String {
+    problem.text(lang).into()
+}
+
+/// Whether it goes by itself once the hub answers again (the banner hides then).
+#[uniffi::export]
+pub fn product_problem_passing(problem: Problem) -> bool {
+    problem.passing()
+}
+
+/// What a core error means for the user: every action's failure goes to the banner through this one mapping.
+#[uniffi::export]
+pub fn product_problem_of(error: &crate::YoError) -> Problem {
+    use crate::YoError as E;
+    match error {
+        E::Network { .. } => Problem::NoConnection,
+        E::Refused { status } => product::problem_of_refusal(*status).unwrap_or(Problem::Failed),
+        E::NotOnYo => Problem::NotOnYo,
+        E::Blocked => Problem::Blocked,
+        _ => Problem::Failed,
+    }
+}
+
+/// The same for a transport's own failure (no `YoError`): no answer at all, or an HTTP status.
+#[uniffi::export]
+pub fn product_problem_of_status(status: Option<u16>) -> Option<Problem> {
+    match status {
+        None => Some(Problem::NoConnection),
+        Some(status) => product::problem_of_refusal(status),
+    }
 }
 
 #[uniffi::remote(Enum)]

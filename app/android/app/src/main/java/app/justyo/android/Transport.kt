@@ -32,7 +32,7 @@ class HubTransport(private val reached: (Boolean) -> Unit = {}, private val unsu
             client.newCall(request.build()).execute().use { response ->
                 if (Lat.on) Lat.mark("http $method ${path.substringBefore('?').take(24)} ${response.protocol} ${response.code} ${(System.nanoTime() - started) / 1_000_000}ms")
                 if (response.code == 426) { stopped.set(true); unsupported() }
-                reached(true)
+                reached(true); Problems.answered(response.code)
                 val input = response.body
                 require(input.contentLength() <= MAX_ANSWER) { "Answer too large" }
                 val bytes = input.byteStream().use { stream ->

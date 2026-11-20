@@ -32,6 +32,7 @@ pub struct Row {
     pub count: u32,
     pub request: bool,
     pub sending: bool,
+    pub unsent: bool,
     pub undo_deadline: Option<u64>,
     pub yo_title: String,
     pub yo_count: u32,
@@ -163,6 +164,10 @@ impl YoList {
     }
     pub fn send_failed(&self, now: u64, id: String, text: String) -> Snapshot {
         self.apply(now, Input::SendFailed { id, text })
+    }
+    /// Something kept for this bar has not gone (`on`), or nothing waits any more: "Not Sent · Tap to Retry" stays.
+    pub fn unsent(&self, now: u64, id: String, on: bool) -> Snapshot {
+        self.apply(now, Input::Unsent { id, on })
     }
     pub fn send_undone(&self, now: u64, id: String) -> Snapshot {
         self.apply(now, Input::SendUndone(id))

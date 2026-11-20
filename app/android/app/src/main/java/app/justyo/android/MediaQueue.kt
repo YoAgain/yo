@@ -24,8 +24,10 @@ import java.io.ByteArrayOutputStream
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** `missed`: a try failed and it is tried again; `failed`: the hub refused it for good, kept until a tap retries it. */
 private data class Outgoing(val id: String, val owner: String, val target: String, val media: YoMedia,
-    val video: Boolean, val duration: Int, val held: Boolean = true, val uploaded: Boolean = false)
+    val video: Boolean, val duration: Int, val held: Boolean = true, val uploaded: Boolean = false,
+    val missed: Boolean = false, val failed: Boolean = false)
 data class UndoStack(
     val count: Int, val until: Long, val duration: Long, val video: Boolean = false,
     val kind: ListKind = ListKind.YO, val pausedRemaining: Long? = null,
@@ -64,12 +66,24 @@ class MediaQueue(
     suspend fun thumbnail(id: String,incoming: Boolean=false): ByteArray? = gate.withLock { vault.read(if(incoming) "in-thumb-$id" else "thumb-$id") }
     var sent: ((String, Boolean)->Unit)? = null
     var sendYo: (suspend (Friend) -> Unit)? = null
+    /** A target with media that did not go (on) or nothing waiting for it any more (off): its bar says so. */
+    var unsent: ((String, Boolean) -> Unit)? = null
+    private var unsentTargets = emptySet<String>()
+    /** A tap on the bar or the banner: the wait between tries ends now. */
+    private val nudge = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private fun publishUnsent() {
+        val now = outgoing.filter { it.missed || it.failed }.map { it.target }.toSet()
+        val before = unsentTargets; unsentTargets = now
+        (now - before).forEach { unsent?.invoke(it, true) }
+        (before - now).forEach { unsent?.invoke(it, false) }
+    }
     suspend fun load() = gate.withLock {
         if (loaded) return@withLock
         // Parse failures propagate. A damaged manifest is never read as an empty queue.
         outgoing = vault.read("outbox")?.let { data -> JSONArray(String(data)).objects().map { j ->
             Outgoing(j.getString("id"), j.getString("owner"), j.getString("target"), mediaFrom(j.getJSONObject("media")),
-                j.getBoolean("video"), j.getInt("duration"), j.getBoolean("held"), j.getBoolean("uploaded"))
+                j.getBoolean("video"), j.getInt("duration"), j.getBoolean("held"), j.getBoolean("uploaded"),
+                j.optBoolean("missed"), j.optBoolean("failed"))
         } }.orEmpty()
         incoming = vault.read("received")?.let { data -> JSONArray(String(data)).objects().map { j ->
             Received(j.getString("id"), j.getString("target"), j.getString("sender"), mediaFrom(j.getJSONObject("media")),
@@ -80,13 +94,13 @@ class MediaQueue(
         for (seen in incoming.filter { it.consumed }) { vault.delete(receivedFile(seen.id));vault.delete("in-thumb-${seen.id}") }
         incoming = incoming.filter { !it.consumed }
         loaded = true
-        saveOut(); saveIn();publishPreviews()
+        saveOut(); saveIn();publishPreviews();publishUnsent()
     }
     private fun saveOut() {
         check(loaded)
         vault.write("outbox", JSONArray(outgoing.map { item -> JSONObject().put("id",item.id).put("owner",item.owner)
             .put("target",item.target).put("media",mediaJson(item.media)).put("video",item.video).put("duration",item.duration)
-            .put("held",item.held).put("uploaded",item.uploaded) }).toString().toByteArray())
+            .put("held",item.held).put("uploaded",item.uploaded).put("missed",item.missed).put("failed",item.failed) }).toString().toByteArray())
     }
     private fun saveIn() {
         check(loaded)
@@ -195,6 +209,28 @@ class MediaQueue(
         yoStacks.remove(target)
         publishStacks()
     }
+    /** What did not go to `target` (all, without one) is tried again now, also what the hub refused before. */
+    suspend fun retry(target: String? = null) {
+        load()
+        gate.withLock {
+            if (outgoing.none { it.failed && (target == null || it.target == target) }) return@withLock
+            outgoing = outgoing.map { if (it.failed && (target == null || it.target == target)) it.copy(failed = false) else it }
+            saveOut()
+        }
+        nudge.trySend(Unit); wake()
+    }
+    /** A try that failed: kept on disk in any case. One that may go later (no connection, the hub busy) is tried again
+     *  with backoff; one the hub refused waits for a tap. The bar says "Not Sent · Tap to Retry", the banner why. */
+    private suspend fun missed(item: Outgoing, error: Exception, version: Int) {
+        val problem = Problems.problemOf(error).let { if (it == ProductProblem.FAILED) ProductProblem.NOT_SENT else it }
+        val passing = productProblemPassing(problem)
+        gate.withLock {
+            if (version != generation) return@withLock
+            outgoing = outgoing.map { if (it.id == item.id) it.copy(missed = true, failed = !passing) else it }
+            saveOut(); publishUnsent()
+        }
+        Problems.report(problem) { scope.launch { retry() } }
+    }
     fun wake() {
         if (!flushRequested.compareAndSet(false, true)) return
         scope.launch(Dispatchers.IO) {
@@ -206,14 +242,15 @@ class MediaQueue(
                 var pause = 1000L
                 while (isActive && version == generation) {
                     val c = client() ?: break
+                    // One refused for good waits for a tap; it holds back what came after it to the same target.
                     val items = gate.withLock { outgoing }
                     val pending = gate.withLock { incoming.filter { !it.ready && !it.consumed } }
-                    if (items.isEmpty() && pending.isEmpty()) break
+                    if (items.none { !it.failed && it.owner == c.userId() } && pending.isEmpty()) break
                     var progress = false
                     // Upload independently, but emit messages below in manifest/target order.
                     val slots = Semaphore(3)
                     coroutineScope {
-                        items.filter { !it.uploaded && it.owner == c.userId() }.map { item ->
+                        items.filter { !it.uploaded && !it.failed && it.owner == c.userId() }.map { item ->
                             async(Dispatchers.IO) { slots.withPermit {
                                 if(c !== client() || version != generation) return@withPermit
                                 try {
@@ -224,7 +261,7 @@ class MediaQueue(
                                             outgoing=outgoing.map { if(it.id==item.id) it.copy(uploaded=true) else it }; saveOut()
                                         }
                                     }
-                                } catch(e: CancellationException) { throw e } catch(_: Exception) { /* Retry with backoff. */ }
+                                } catch(e: CancellationException) { throw e } catch(e: Exception) { missed(item, e, version) }
                             } }
                         }.awaitAll()
                     }
@@ -234,7 +271,7 @@ class MediaQueue(
                         try {
                             if (item.owner != c.userId()) continue
                             val latest = gate.withLock { outgoing.firstOrNull { it.id == item.id } }
-                            if (latest == null || latest.held || !latest.uploaded) { blockedTargets += item.target; continue }
+                            if (latest == null || latest.held || !latest.uploaded || latest.failed) { blockedTargets += item.target; continue }
                             val events = c.send(sendTarget(item.target),
                                 if (item.video) MessageKind.Video(item.media, item.duration.toUInt()) else MessageKind.Photo(item.media))
                             absorb(c, events)
@@ -244,13 +281,13 @@ class MediaQueue(
                                 saveOut()
                                 vault.delete("out-${item.id}")
                                 vault.delete("thumb-${item.id}")
-                                publishPreviews()
+                                publishPreviews(); publishUnsent()
                                 outgoing.none { it.target == item.target }
                             }
                             if (last != null && c === client()) sent?.invoke(item.target, last)
                             progress = true
                         } catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { blockedTargets += item.target }
+                        catch (e: Exception) { blockedTargets += item.target; missed(item, e, version) }
                     }
                     for (item in pending) {
                         if (c !== client() || version != generation) break
@@ -270,7 +307,7 @@ class MediaQueue(
                         } catch (e: CancellationException) { throw e } catch (_: Exception) { }
                     }
                     if (progress) pause=1000 else pause=(pause*2).coerceAtMost(30000)
-                    delay(pause)
+                    if (withTimeoutOrNull(pause) { nudge.receive() } != null) pause=1000
                 }
             } finally { flushGate.unlock() }
         }
@@ -313,6 +350,7 @@ class MediaQueue(
         yoReleases.values.forEach { it.cancel() }; yoReleases.clear()
         mediaStacks.clear(); yoStacks.clear()
         outgoing=emptyList(); incoming=emptyList(); loaded=false; stacks.value=emptyMap();previews.value=emptyMap(); downloadChanges.update { it + 1 }
+        unsentTargets=emptySet()
     }
     suspend fun stageCard(context: Context, target: String, text: String,users: List<String>,groups: List<String>): String {
         val bitmap=androidx.core.graphics.createBitmap(1080,1080)

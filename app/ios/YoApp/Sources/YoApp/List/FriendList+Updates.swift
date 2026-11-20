@@ -43,6 +43,15 @@ extension FriendList {
       .onChange(of: listFriends, initial: true) { syncListFriends() }
       .onChange(of: inbox.memberNames) { syncSenderNames() }
       .onChange(of: inbox.mediaChanges) { syncListMedia() }
+      .onChange(of: outbox.unsentTo, initial: true) { syncUnsent() }
+      .onChange(of: inbox.unsentBars) { syncUnsent() }
+      .onAppear {
+        // A photo or video that did not go at first and went now: its bar tells it.
+        outbox.wentLater = { to, kind in
+          guard let friend = friends.all.first(where: { $0.target == to }) else { return }
+          showSent(to: friend, kind == .video ? BarSendText.sentVideo : BarSendText.sentPhoto, thenOnTop: true)
+        }
+      }
       .onChange(of: scenePhase, initial: true) { publish(listModel.foreground(now: listNow, active: scenePhase == .active)) }
       // A Yo sent from outside the list (Action button, Control Center, Siri, a notification's Yo Back): on top.
       .task { IntentSent.listen(); takeIntentSent() }
@@ -205,6 +214,7 @@ extension FriendList {
       let paused = !row.clockRunning
       let pauseChanged = bar.modelPaused != paused
       if pauseChanged { bar.modelPaused = paused }
+      if bar.modelUnsent != row.unsent { bar.modelUnsent = row.unsent }
       if bar.modelLine != row.line { bar.modelLine = row.line }
       let previous = landings[friend.name]
       if row.yoCount > 0 {

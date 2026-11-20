@@ -1,0 +1,70 @@
+package app.justyo.android
+
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import uniffi.yo.*
+
+/**
+ * Why a user action did not happen, said in the one banner above the list (the "Offline" line; offline wins, as the
+ * core decides). Every action that needs the hub reports its failure here, never nowhere. The same problem shows once
+ * (again: its clock starts over). One that goes by itself (no connection, the hub busy, waiting to send) stays until
+ * the hub answers again or what waits went; any other hides after 6 s. A tap on the banner tries the newest one again.
+ */
+object Problems {
+    private class Entry(val retry: (() -> Unit)?, var expiry: Job?)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val active = LinkedHashMap<ProductProblem, Entry>()
+    private val shown = MutableStateFlow<String?>(null)
+    /** The banner's words now: the newest problem's. */
+    val text = shown.asStateFlow()
+
+    fun report(problem: ProductProblem, retry: (() -> Unit)? = null) = synchronized(active) {
+        active.remove(problem)?.expiry?.cancel()
+        val entry = Entry(retry, null)
+        active[problem] = entry
+        if (!productProblemPassing(problem)) entry.expiry = scope.launch { delay(6000); resolve(problem, entry) }
+        publish()
+    }
+
+    /** A failure as the person reads it: a core error by the core's own mapping, no answer as "No Connection". */
+    fun report(error: Throwable, retry: (() -> Unit)? = null) {
+        if (error is CancellationException) return
+        report(problemOf(error), retry)
+    }
+
+    fun problemOf(error: Throwable): ProductProblem = when (error) {
+        is YoException -> productProblemOf(error)
+        is java.io.IOException -> ProductProblem.NO_CONNECTION
+        else -> ProductProblem.FAILED
+    }
+
+    fun resolve(problem: ProductProblem) = synchronized(active) {
+        val entry = active.remove(problem) ?: return@synchronized
+        entry.expiry?.cancel(); publish()
+    }
+
+    private fun resolve(problem: ProductProblem, entry: Entry) = synchronized(active) {
+        if (active[problem] === entry) { active.remove(problem); publish() }
+    }
+
+    /** The hub answered (`status`): no connection and an unreachable hub are over; a 2xx also ends "Too Many Tries". */
+    fun answered(status: Int) {
+        if (status >= 500 || status == 429) return
+        resolve(ProductProblem.NO_CONNECTION); resolve(ProductProblem.SERVER_UNREACHABLE)
+        if (status in 200..299) resolve(ProductProblem.TOO_MANY_TRIES)
+    }
+
+    /** The banner tapped: the newest problem's own retry; false when it has none. */
+    fun retry(): Boolean {
+        val retry = synchronized(active) { active.values.lastOrNull()?.retry } ?: return false
+        retry(); return true
+    }
+
+    /** Signed out: nothing of the account before is left to tell. */
+    fun clear() = synchronized(active) {
+        active.values.forEach { it.expiry?.cancel() }; active.clear(); publish()
+    }
+
+    private fun publish() { shown.value = active.keys.lastOrNull()?.let { productProblemText(it, Words) } }
+}

@@ -36,14 +36,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     val transport = HubTransport(reached = { connection.reached(it) }) { mutable.update { it.copy(update = true) } }
     /** Offline as iOS says it: no network, or the hub not reached, for 4 s on end (a first second without is nothing);
-     *  a send that failed while online says "Failed to Send" for 5 s, a tap on it tries again. */
+     *  else what an action ran into (`Problems`), a tap on it tries again. */
     private inner class Connection {
         @Volatile var local = false
         @Volatile var remote = false
         @Volatile var offline = false
-        @Volatile var failure: String? = null
         private var pending: Job? = null
-        private var expiry: Job? = null
         fun reached(ok: Boolean) {
             // Any answer of the hub counts for Status' "Connected" (a long poll answers only after 25 s).
             if (ok) { val now = System.currentTimeMillis(); if (now - (state.value.lastSync ?: 0) > 5000) mutable.update { it.copy(lastSync = now) } }
@@ -55,18 +53,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (offline || pending?.isActive == true) return
             pending = scope.launch { delay(4000); offline = local || remote; show() }
         }
-        @Synchronized fun failed(name: String?) {
-            expiry?.cancel()
-            expiry = scope.launch {
-                delay(1000)
-                if (offline) return@launch
-                failure = productFailedToSend(name, Words); show()
-                delay(5000)
-                failure = null; show()
-            }
-        }
-        @Synchronized fun foreground() { remote = false; pending?.cancel(); pending = null; offline = false; failure = null; settle(); show() }
-        fun show() = present { connectivity(it, offline, failure) }
+        @Synchronized fun foreground() { remote = false; pending?.cancel(); pending = null; offline = false; settle(); show() }
+        fun show() = present { connectivity(it, offline, Problems.text.value) }
     }
     private val connection by lazy { Connection() }
     private var backgroundSince = 0L
@@ -77,6 +65,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     internal val pendingShares=PendingShares(context,vault,changes) { sessionId }
     private val accountTurn = Mutex()
     private val sending = mutableMapOf<String, Mutex>()
+    /** Yos that did not go, by target (`unsent-yos`): the bar says "Not Sent · Tap to Retry" until a tap sent them. */
+    private val unsentYos = mutableMapOf<String, Int>()
+    /** Targets with media that did not go (`MediaQueue.unsent`), under the same lock. */
+    private val mediaUnsent = mutableSetOf<String>()
     private var list = YoList()
     private var listJob: Job? = null
     private val listLock = Any()
@@ -115,7 +107,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             }
         }
         snapshot.committedDeletes.forEach { id ->
-            state.value.friends.firstOrNull { it.key==id }?.let { friend -> scope.launch(Dispatchers.IO) { remove(friend) } }
+            state.value.friends.firstOrNull { it.key==id }?.let { friend -> command { remove(friend) } }
         }
         listJob?.cancel()
         listJob = snapshot.nextTick?.let { at -> scope.launch(Dispatchers.IO) {
@@ -150,6 +142,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private var resuming: Job? = null
     val media = MediaQueue(context,vault, scope, { client }, { sessionId }, { source, events -> absorb(events, source) }, { refreshMedia() }).also { queue ->
         queue.sendYo = { friend -> client?.let { sendNow(friend, it) } }
+        queue.unsent = { target, on -> synchronized(unsentYos) { if (on) mediaUnsent += target else mediaUnsent -= target }; markUnsent(target) }
         queue.sent = { target, last ->
             state.value.friends.firstOrNull { it.target == target }?.let {
                 if (last) showSent(it)
@@ -174,6 +167,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
     }
     fun start() = scope.launch(Dispatchers.IO) {
+        // An action's problem in the banner, and gone from it again.
+        scope.launch { Problems.text.collect { connection.show() } }
         scope.launch(Dispatchers.IO) {
             state.map { it.username to it.friends }.distinctUntilChanged().collect { (_, friends) ->
                 // Shortcut publishing is advisory; launcher rejection must not break the account.
@@ -229,6 +224,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 pin(restored)
                 client = restored; sessionId++
                 mutable.update { it.copy(username = restored.username(), recovery = vault.read("recovery")?.decodeToString()) }
+                loadUnsent()
                 media.load()
                 absorb(restored.savedEvents(), restored)
                 refresh()
@@ -348,9 +344,21 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             .put("sent", s.sent).put("received", s.received).put("invite", s.pendingInvite).put("removed", JSONArray(removedUsers.toList()))
             .put("googleBackup", s.googleBackup).toString().toByteArray())
     }
+    /** A user action: what the hub did not do goes to the banner (`Problems`); this phone's own words to the snackbar,
+     *  and before sign-in everything to the onboarding note. */
     fun command(work: suspend Repository.() -> Unit) = scope.launch(Dispatchers.IO) {
-        try { work() } catch (e: CancellationException) { throw e } catch (e: Exception) {
-            if (e is YoException.Replaced) signOut(replaced = true) else mutable.update { it.copy(error = friendlyError(context,e)) }
+        try { work() } catch (e: CancellationException) { throw e } catch (e: Exception) { failed(e) }
+    }
+    private suspend fun failed(e: Exception) {
+        if (e is YoException.Replaced) signOut(replaced = true)
+        else if (client != null && (e is YoException || e is java.io.IOException)) Problems.report(e)
+        else mutable.update { it.copy(error = friendlyError(context,e)) }
+    }
+    /** The account's contacts and settings to the hub; one not taken is said, and a tap on the banner tries again. */
+    private fun store(c: YoClient) {
+        try { c.writeStorage() } catch (e: Exception) {
+            if (e is YoException.Replaced) throw e
+            Problems.report(e) { command { client?.writeStorage() } }
         }
     }
     suspend fun register(typed: String) = accountTurn.withLock {
@@ -594,6 +602,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                         if (events.isEmpty()) refresh()
                     }
                     mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
+                    if (c.waiting() == 0u) Problems.resolve(ProductProblem.WAITING)
                     media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
                 catch (e: YoException.Replaced) { signOut(replaced = true); break }
@@ -654,8 +663,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         require(name.isNotBlank()) { context.getString(R.string.type_name) }
         if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) error(copy(ProductText.THATS_YOU))
         // Never added unchecked: without the hub's answer the name could be nobody's.
-        val found = try { c.whois(name) ?: error(copy(ProductText.NO_SUCH_USER)) }
-            catch (e: YoException.Network) { error(copy(ProductText.NO_CONNECTION)) }
+        // No answer: the banner says why (`Problems`), the name stays in the field for another try.
+        val found = c.whois(name) ?: error(copy(ProductText.NO_SUCH_USER))
         if (c !== client) return
         val known = known(found.username ?: name, found.user)
         if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return }
@@ -671,7 +680,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (friend.user != null) c.setFriend(friend.user, friend.name, friend.color.toUByte())
             mutable.update { it.copy(friends = listOf(friend) + it.friends) }; listFriends(); persist()
         }
-        c.writeStorage()
+        store(c)
     }
     suspend fun invite(name: String) {
         mutable.update { it.copy(pendingInvite = name) }; changes.withLock { persist() }; consumeInvite()
@@ -689,7 +698,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) { taken(); problem(ProductText.THATS_YOU); return }
         val found = try { c.whois(name) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             if (e is YoException.Replaced) throw e
-            if (e is YoException.Network || e is YoException.Refused) return  // no answer: asked again later
+            // No answer: asked again later, and the banner says why the link did nothing yet.
+            if (e is YoException.Network || e is YoException.Refused) { Problems.report(e) { command { consumeInvite() } }; return }
             taken(); mutable.update { it.copy(error = friendlyError(context, e)) }; return
         }
         if (c !== client || state.value.pendingInvite != name) return
@@ -725,6 +735,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 // The hub has it: the bar says so now; what the send brought along and the bookkeeping follow.
                 showSent(friend)
                 Lat.mark("sent.shown"); Lat.frame("sent")
+                // Taken by the core, not by the hub yet (offline after sealing): "Waiting to Send" until it went.
+                if (c.waiting() > 0u) Problems.report(ProductProblem.WAITING, ::retryNow)
                 absorb(events, c)
                 recordStat(friend,true)
                 changes.withLock { persist() }
@@ -733,34 +745,72 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 }
                 deliverLater(c)
             } catch (e: Exception) {
-                showSent(friend, when (e) {
-                    is YoException.NotOnYo -> copy(ProductText.NOT_ON_YO)
-                    is YoException.GroupEmpty -> copy(ProductText.GROUP_EMPTY)
-                    is YoException.Unconfirmed -> copy(ProductText.CONFIRM_NEW_KEY)
-                    is YoException.Blocked -> copy(ProductText.BLOCKED)
-                    is YoException.Outdated -> copy(ProductText.NEEDS_UPDATE)
-                    else -> copy(ProductText.NOT_SENT)
-                })
+                val reason = when (e) {
+                    is YoException.NotOnYo -> ProductText.NOT_ON_YO
+                    is YoException.GroupEmpty -> ProductText.GROUP_EMPTY
+                    is YoException.Unconfirmed -> ProductText.CONFIRM_NEW_KEY
+                    is YoException.Blocked -> ProductText.BLOCKED
+                    is YoException.Outdated -> ProductText.NEEDS_UPDATE
+                    else -> null
+                }
+                showSent(friend, copy(reason ?: ProductText.NOT_SENT))
                 if (e is YoException.Replaced) throw e
                 if (e is YoException.GroupEmpty) { mutable.update { it.copy(emptyGroup = friend) }; return@withLock }
-                connection.failed(friend.name)
+                // A reason of its own is the bar's clear end; any other Yo is kept for the bar's tap ("Not Sent · Tap
+                // to Retry"), never dropped. The banner says why.
+                if (reason == null) keepUnsent(friend.target, 1)
+                Problems.report(Problems.problemOf(e).let { if (it == ProductProblem.FAILED) ProductProblem.NOT_SENT else it }, ::retryNow)
                 deliverLater(c)
-
             }
         }
     }
-    /** The failure line tapped: what waits goes again now, not after its backoff. */
+    /** The banner tapped: its problem's own retry, else everything that waits goes again now, not after its backoff. */
+    fun bannerTapped() { if (!Problems.retry()) retryNow() }
+    /** What waits goes again now: the core's outbox, every bar's unsent Yos and media. */
     fun retryNow() {
         val c = client ?: return
         retrying?.cancel(); retrying = null
-        deliverLater(c); media.wake(); online.trySend(Unit)
+        deliverLater(c); online.trySend(Unit)
+        val targets = synchronized(unsentYos) { unsentYos.keys.toList() }
+        command { targets.forEach { target -> retryYos(target) }; media.retry() }
+    }
+    /** A tap on a bar that says "Not Sent · Tap to Retry": what waits for it goes now, no new Yo. */
+    fun retryBar(friend: Friend) = command { retryYos(friend.target); media.retry(friend.target) }
+    private suspend fun retryYos(target: String) {
+        val c = client ?: return
+        val friend = state.value.friends.firstOrNull { it.target == target } ?: return
+        val count = synchronized(unsentYos) { unsentYos.remove(target) } ?: return
+        saveUnsent(); markUnsent(target)
+        repeat(count) { sendNow(friend, c) }
+    }
+    private fun keepUnsent(target: String, count: Int) {
+        synchronized(unsentYos) { unsentYos[target] = (unsentYos[target] ?: 0) + count }
+        saveUnsent(); markUnsent(target)
+    }
+    private fun saveUnsent() {
+        val kept = synchronized(unsentYos) { JSONObject(unsentYos.toMap()).toString() }
+        try { vault.write("unsent-yos", kept.toByteArray()) } catch (e: Exception) { android.util.Log.w("Yo", "unsent not saved: ${e::class.simpleName}") }
+    }
+    private fun loadUnsent() {
+        val kept = vault.read("unsent-yos")?.let { JSONObject(String(it)) } ?: return
+        synchronized(unsentYos) { kept.keys().forEach { unsentYos[it] = kept.getInt(it) } }
+        kept.keys().forEach(::markUnsent)
+    }
+    /** The bar of `target` says "Not Sent · Tap to Retry" while a Yo or media for it waits after a failed try. */
+    private fun markUnsent(target: String) {
+        val friend = state.value.friends.firstOrNull { it.target == target } ?: return
+        val on = synchronized(unsentYos) { (unsentYos[target] ?: 0) > 0 || target in mediaUnsent }
+        present { unsent(it, friend.key, on) }
     }
     private fun deliverLater(c: YoClient) {
         if (retrying?.isActive == true) return
         retrying = scope.launch(Dispatchers.IO) {
             var pause = 1000L
             while (c === client && !state.value.update) {
-                try { if (c.waiting() == 0u) break; absorb(c.deliver(), c) } catch (_: Exception) { }
+                try {
+                    if (c.waiting() == 0u) { Problems.resolve(ProductProblem.WAITING); break }
+                    absorb(c.deliver(), c)
+                } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Tried again with backoff; the banner says "Waiting to Send". */ }
                 delay(pause); pause = (pause * 2).coerceAtMost(30000)
             }
         }
@@ -912,11 +962,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         refresh()
     }
     suspend fun remove(friend: Friend) {
+        if (synchronized(unsentYos) { unsentYos.remove(friend.target) } != null) saveUnsent()
         friend.user?.let { client?.removeFriend(it) }
         changes.withLock { friend.user?.let { removedUsers.add(it) }; mutable.update { it.copy(friends = it.friends.filter { f -> f.key != friend.key }) }; listFriends(); persist() }
-        client?.writeStorage()
+        client?.let(::store)
     }
-    suspend fun block(friend: Friend, blocked: Boolean) { client?.setBlocked(friend.target, blocked); refresh(); client?.writeStorage(); media.wake() }
+    suspend fun block(friend: Friend, blocked: Boolean) { client?.setBlocked(friend.target, blocked); refresh(); client?.let(::store); media.wake() }
     suspend fun report(friend: Friend, reason: ReportReason) { client?.report(friend.target, reason, InstallId.current(context)) }
     suspend fun createGroup(name: String, members: List<String>) {
         val c = client ?: return
@@ -993,7 +1044,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         client?.setAppIcon(name)
         mutable.update { it.copy(appIcon = name) }
         changes.withLock { persist() }
-        client?.writeStorage()
+        client?.let(::store)
     }
     suspend fun saveContacts() { client?.writeStorage(); mutable.update { it.copy(notice = context.getString(R.string.contacts_saved)) } }
     suspend fun deleteAccount() {
@@ -1014,6 +1065,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         notifications.clear()
         val old = client; client = null; sessionId++
         listening?.cancel(); listening = null; retrying?.cancel(); retrying = null
+        synchronized(unsentYos) { unsentYos.clear(); mediaUnsent.clear() }; Problems.clear()
         if (registeredPush?.first == sessionId - 1) runCatching { old?.setPush(0u, "") }
         registeredPush = null
         old?.shutdown()

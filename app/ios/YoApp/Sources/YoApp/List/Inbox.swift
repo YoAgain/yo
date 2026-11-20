@@ -204,33 +204,37 @@ final class Inbox {
     lastSend[key] = this
     let problem = await this.value
     if lastSend[key] == this { lastSend[key] = nil }
-    if problem != nil {
+    // Their old app: the bar says "Needs Update" and the Yo waits for it; nothing failed here.
+    if problem != nil, problem != productText(text: .needsUpdate, lang: .english) {
       let retry: (@MainActor () -> Void)?
       if unsent[friend.key] != nil || delivering != nil {
         retry = { self.resume(accounts: accounts, friends: friends) }
       } else { retry = nil }
-      SendFailure.shared.show(name: friend.name, retry: retry)
+      Problems.shared.report(lastProblem ?? .notSent, retry: retry)
     }
+    lastProblem = nil
     return problem
   }
 
   @ObservationIgnored private var lastSend: [String: Task<String?, Never>] = [:]
+  /// Why the last send did not go, for the banner (`Problems`).
+  @ObservationIgnored private var lastProblem: ProductProblem?
 
   enum Lookup {
     /// The name as its owner writes it ("YoGPT").
     case found(user: String, name: String?)
     case noSuchUser
-    /// No answer (offline).
-    case unknown
+    /// No answer (offline, the server): why, for the banner.
+    case unknown(ProductProblem)
   }
 
   func lookUp(_ name: String, accounts: AccountStore) async -> Lookup {
-    guard let client = accounts.client else { return .unknown }
+    guard let client = await accounts.clientSoon(seconds: 3) else { return .unknown(.failed) }
     do {
       guard let found = try await Hub.run({ try client.whois(name: name) }) else { return .noSuchUser }
       return .found(user: found.user, name: found.username)
     } catch {
-      return .unknown
+      return .unknown(Problems.problem(of: error))
     }
   }
 
@@ -269,7 +273,12 @@ final class Inbox {
         return productText(text: .notSent, lang: .english)
       } catch YoError.GroupEmpty {
         return Self.groupEmpty  // nobody left in it: the list offers to delete it
+      } catch let error as YoError where retryLater(error: error) {
+        lastProblem = Problems.problem(of: error)
+        keepAndRetry(friend, accounts: accounts, friends: friends)  // kept and tried again, as a friend's
+        return productText(text: .notSent, lang: .english)
       } catch {
+        lastProblem = Problems.problem(of: error)
         return productText(text: .notSent, lang: .english)
       }
     }
@@ -279,7 +288,11 @@ final class Inbox {
         try Perf.timed("send.core") { (try client.send(target: .contact(id: target), kind: .yo), client.contacts(), client.waiting()) }
       }
       guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
-      if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
+      if waiting > 0 {
+        // The core keeps it and sends it; until the hub took it the banner says so.
+        Problems.shared.report(.waiting, retry: { self.resume(accounts: accounts, friends: friends) })
+        deliverLater(accounts: accounts, friends: friends)
+      }
       if friend.user == nil, let contact = contacts.first(where: { contact in
         contact.handles.contains { Username.skeleton($0) == Username.skeleton(friend.name) }
       }) {
@@ -292,8 +305,10 @@ final class Inbox {
       if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client {
         friends.markGone(contacts)
       }
+      lastProblem = .notOnYo
       return productText(text: .notOnYo, lang: .english)
     } catch YoError.Blocked {
+      lastProblem = .blocked
       return productText(text: .blocked, lang: .english)
     } catch YoError.Outdated {
       // Their app is too old: the Yo waits in the outbox until they update.
@@ -304,16 +319,22 @@ final class Inbox {
       return productText(text: .notSent, lang: .english)
     } catch let error as YoError where retryLater(error: error) {
       // Not now (no network, the hub's limits, a first Yo the core cannot keep yet): kept here and retried.
+      lastProblem = Problems.problem(of: error)
       keepAndRetry(friend, accounts: accounts, friends: friends)
       return productText(text: .notSent, lang: .english)
     } catch {
       Perf.mark("send.refused \(error)")
+      lastProblem = Problems.problem(of: error)
       return productText(text: .notSent, lang: .english)
     }
   }
 
   /// Yos that met "not now" before the core could keep them, by friend.
-  @ObservationIgnored private var unsent: [UUID: (friend: Friend, count: Int)] = [:]
+  @ObservationIgnored private var unsent: [UUID: (friend: Friend, count: Int)] = [:] {
+    didSet { if Set(unsent.keys) != unsentBars { unsentBars = Set(unsent.keys) } }
+  }
+  /// The bars with a Yo kept here that did not go yet: they say "Not Sent · Tap to Retry".
+  private(set) var unsentBars: Set<UUID> = []
   @ObservationIgnored private var resending: Task<Void, Never>?
 
   /// Sends what is kept again after 2 s, then less and less often (up to 30 s).
@@ -361,6 +382,7 @@ final class Inbox {
           continue
         }
         await take(events, contacts: contacts, client: client, friends: friends)
+        if waiting == 0 { Problems.shared.resolve(.waiting) }
         if waiting == 0 && !deliverAgain { break }  // none waits, and no send asked meanwhile
         pause = waiting < before ? 1 : min(pause * 2, 30)  // going out: at the hub's pace; else waiting longer
         before = waiting

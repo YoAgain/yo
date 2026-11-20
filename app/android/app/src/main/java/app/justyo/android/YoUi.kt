@@ -634,6 +634,9 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             name = ""
             focusManager.clearFocus()
             repo.command {
+                // The hub not reached or refusing: the banner says why and the name comes back into the field, for
+                // another try; nothing is added. This phone's own answers ("No Such User", "That's You") in the field.
+                var unreached = false
                 val failure = try {
                     add(submitted)
                     null
@@ -641,12 +644,14 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     throw exception
                 } catch (exception: Exception) {
                     if (exception is uniffi.yo.YoException.Replaced) throw exception
+                    unreached = exception is uniffi.yo.YoException || exception is java.io.IOException
+                    if (unreached) Problems.report(exception)
                     friendlyError(context, exception)
                 }
                 withContext(Dispatchers.Main.immediate) {
                     addingFriend = false
                     lookingUp = null
-                    addError = failure
+                    if (unreached) { if (name.isEmpty()) name = submitted; runCatching { friendFocus.requestFocus() } } else addError = failure
                     if (failure == null && name.isEmpty()) add = false
                 }
             }
@@ -750,6 +755,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     catch(e: Exception) { model.error(e.message ?: uiResources.getString(R.string.ui_couldn_t_take_photo)) }
                 }
             }
+            // "Not Sent · Tap to Retry": what waits for this bar goes again, no new Yo.
+            repo.state.value.listRows[friend.key]?.unsent == true -> repo.retryBar(friend)
             else -> repo.command { send(friend) }
         }
     }
@@ -931,7 +938,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         Column(Modifier.fillMaxSize()) {
         // "Offline" or a failed send (tap: again) above the list, never over its first bar (iOS's top inset).
         androidx.compose.animation.AnimatedVisibility(s.banner != null && s.deletion == null) {
-            ConnectionBanner(s.banner.orEmpty(), onRetry = repo::retryNow)
+            ConnectionBanner(s.banner.orEmpty(), onRetry = repo::bannerTapped)
         }
         LazyColumn(Modifier.fillMaxWidth().weight(1f),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
             if (showNotificationBar && !cameraOn) item(key = "notification-settings") {

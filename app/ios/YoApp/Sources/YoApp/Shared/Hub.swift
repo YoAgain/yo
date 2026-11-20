@@ -122,6 +122,9 @@ final class AppUpdate {
 final class HubTransport: HttpTransport {
   /// After a 426 nothing more is sent by this process; retry loops stop on `unsupported`.
   private static let tooOld = Atomic<Bool>(false)
+  /// The hub answered a request (the app ends its "No Connection" banner, `Problems`); nil in the extensions.
+  nonisolated(unsafe) static var answered: (@Sendable () -> Void)?
+
   static var unsupported: Bool { tooOld.load(ordering: .relaxed) }
 
   let base: URL
@@ -241,6 +244,7 @@ final class HubTransport: HttpTransport {
       }
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500, started: started)
+    if answer.result.status > 0 && answer.result.status < 500 { Self.answered?() }
     if Perf.on {
       let ms = (CACurrentMediaTime() - start) * 1000
       let route = path.split(separator: "/").prefix(2).joined(separator: "/")  // not the ids after it

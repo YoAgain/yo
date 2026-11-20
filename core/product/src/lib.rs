@@ -50,6 +50,11 @@ copy! {
     SentVideo => ("Sent 🎥", "🎥 gesendet"),
     Sending => ("Sending", "Wird gesendet"),
     NotSent => ("Not Sent", "Nicht gesendet"),
+    NotSentRetry => ("Not Sent · Tap to Retry", "Nicht gesendet · Tippen zum Wiederholen"),
+    WaitingToSend => ("Waiting to Send", "Wartet auf Senden"),
+    ServerUnreachable => ("Couldn’t Reach the Server", "Server nicht erreichbar"),
+    TooManyTries => ("Too Many Tries · Wait a Moment", "Zu viele Versuche · Kurz warten"),
+    SomethingWentWrong => ("Something Went Wrong", "Etwas ist schiefgelaufen"),
     Canceled => ("Canceled", "Abgebrochen"),
     NoAnswer => ("No Yo to answer", "Kein Yo zum Antworten"),
     NoAnswerYet => ("No Yo to answer yet.", "Noch kein Yo zum Antworten."),
@@ -126,6 +131,61 @@ copy! {
     AccountBackup => ("Account Backup", "Kontobackup"),
     Done => ("Done", "Fertig"),
     ShowOrSaveKey => ("Show or Save Recovery Key", "Wiederherstellungsschlüssel anzeigen oder sichern"),
+}
+
+/// Why a user action did not happen, for the one red banner at the top (every action reports through it, none fails
+/// silently). `problem_of_refusal` and the apps' error mapping choose it; `text` is what the banner says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Problem {
+    /// No network: nothing reached the hub.
+    NoConnection,
+    /// The hub did not answer as it should (5xx, Cloudflare's 52x/530, a timeout).
+    ServerUnreachable,
+    /// The hub's limits (429): later.
+    TooManyTries,
+    /// This build is too old (426).
+    NeedsUpdate,
+    NotOnYo,
+    Blocked,
+    /// A send that did not go and waits for a tap (its bar says "Not Sent · Tap to Retry").
+    NotSent,
+    /// Sends the hub has not taken yet; they go by themselves (the banner goes when they went).
+    Waiting,
+    /// Refused for good, or something else broke.
+    Failed,
+}
+
+impl Problem {
+    pub fn text(self, lang: Language) -> &'static str {
+        match self {
+            Self::NoConnection => Text::NoConnection,
+            Self::ServerUnreachable => Text::ServerUnreachable,
+            Self::TooManyTries => Text::TooManyTries,
+            Self::NeedsUpdate => Text::NeedsUpdate,
+            Self::NotOnYo => Text::NotOnYo,
+            Self::Blocked => Text::Blocked,
+            Self::NotSent => Text::NotSentRetry,
+            Self::Waiting => Text::WaitingToSend,
+            Self::Failed => Text::SomethingWentWrong,
+        }
+        .get(lang)
+    }
+
+    /// Whether it goes by itself once the hub answers again (the app keeps what it was doing and tries again).
+    pub fn passing(self) -> bool {
+        matches!(self, Self::NoConnection | Self::ServerUnreachable | Self::TooManyTries | Self::Waiting)
+    }
+}
+
+/// The problem an HTTP status from the hub (or Cloudflare in front of it) means; `None` for a success.
+pub fn problem_of_refusal(status: u16) -> Option<Problem> {
+    Some(match status {
+        200..=299 => return None,
+        429 => Problem::TooManyTries,
+        426 => Problem::NeedsUpdate,
+        408 | 500.. => Problem::ServerUnreachable,
+        _ => Problem::Failed,
+    })
 }
 
 /// The onboarding's line for an invite: "Mia invited you".
@@ -623,6 +683,8 @@ mod tests {
         assert_eq!(share_subtitle(1, 0, English), "Tap a name to send this photo.");
         assert_eq!(share_subtitle(1, 1, English), "Tap a name to send these 2.");
         assert_eq!(Text::NotSent.get(German), "Nicht gesendet");
+        assert_eq!(Problem::NotSent.text(English), "Not Sent · Tap to Retry");
+        assert_eq!(Problem::ServerUnreachable.text(German), "Server nicht erreichbar");
     }
 
     #[test]
@@ -663,5 +725,20 @@ mod tests {
         }
         assert_eq!((SHARE_PHOTOS, SHARE_VIDEOS), (10, 1));
         assert_eq!((ACTIVITY_SHOWN_SECS, ACTIVITY_STALE_SECS, WIDGET_SENT_SECS), (3, 30, 3));
+    }
+
+    #[test]
+    fn problems_from_the_hub_and_their_banner_words() {
+        assert_eq!(problem_of_refusal(201), None);
+        assert_eq!(problem_of_refusal(429), Some(Problem::TooManyTries));
+        assert_eq!(problem_of_refusal(426), Some(Problem::NeedsUpdate));
+        for status in [408, 500, 502, 503, 530] {
+            assert_eq!(problem_of_refusal(status), Some(Problem::ServerUnreachable), "{status}");
+        }
+        assert_eq!(problem_of_refusal(400), Some(Problem::Failed));
+        assert!(Problem::NoConnection.passing() && Problem::Waiting.passing());
+        assert!(!Problem::NotSent.passing() && !Problem::Failed.passing());
+        assert_eq!(Problem::NoConnection.text(English), "No Connection");
+        assert_eq!(Problem::Waiting.text(German), "Wartet auf Senden");
     }
 }

@@ -63,7 +63,10 @@ struct BlockedPage: View {
     guard let client = accounts.client else { return }
     requestsOpen = open
     Task { @MainActor in
-      if (try? await Hub.run { try client.setRequestsOpen(open: open) }) == nil {
+      do {
+        try await Hub.run { try client.setRequestsOpen(open: open) }
+      } catch {
+        Problems.shared.report(error)
         requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
       }
     }
@@ -101,6 +104,7 @@ struct BlockedPage: View {
         withAnimation { friends.setBlocked(friend, true) }
       } catch {
         problem = error.localizedDescription
+        Problems.shared.report(error)
       }
     }
   }
@@ -113,6 +117,7 @@ struct BlockedPage: View {
         outbox.retryNow()  // photos taken for them while blocked go now
       } catch {
         problem = error.localizedDescription
+        Problems.shared.report(error)
       }
     }
   }

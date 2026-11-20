@@ -49,7 +49,7 @@ fun GroupSheet(model: YoViewModel, state: AppState, onClose: () -> Unit) = YoSys
             model.repository.command {
                 val success = try { createGroup(groupName, selected); true }
                 catch (e: CancellationException) { throw e }
-                catch (e: Exception) { if (e is YoException.Replaced) throw e; false }
+                catch (e: Exception) { if (e is YoException.Replaced) throw e; Problems.report(e); false }
                 withContext(Dispatchers.Main.immediate) { busy = false; failed = !success; if (success) onClose() }
             }
         }
@@ -137,6 +137,7 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE }
                                     catch (e: CancellationException) { throw e }
                                     catch (e: Exception) {
                                         if (e is YoException.Replaced) throw e
+                                        Problems.report(e)
                                         problem = res.getString(R.string.unable_to_report) to friendlyError(model.getApplication(), e)
                                     } finally { busy = false }
                                 }
@@ -224,7 +225,7 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE }
         repo.command {
             try { groupChange(group, add = add, remove = remove); members = groupMembers(group) }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (e is YoException.Replaced) throw e; failed = true }
+            catch (e: Exception) { if (e is YoException.Replaced) throw e; Problems.report(e); failed = true }
             finally { busy = false }
         }
     }

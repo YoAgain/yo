@@ -107,7 +107,15 @@ extension FriendList {
     Task {
       let problem = await addFriend(name)
       guard submitted == this else { return }  // another name came meanwhile: the field is its
-      if let problem { return say(problem) }
+      if case .unreachable(let why) = problem {
+        // Nothing added, nothing dropped: the banner says why and the name stays in the field for another try.
+        Problems.shared.report(why)
+        hint = nil
+        if newName.isEmpty { newName = name }
+        typing = true
+        return
+      }
+      if case .said(let words) = problem { return say(words) }
       hint = nil
       if newName.isEmpty { adding = false }
     }
@@ -123,8 +131,10 @@ extension FriendList {
       inviting = Invitation(name: name.uppercased(), user: nil, known: false, problem: problem)
     case .known(let friend):
       inviting = Invitation(name: friend.name, user: friend.user, known: true)
+    case .unreachable(let why):
+      Problems.shared.report(why)  // the hub did not answer: said, and asked again later
+      return false
     case .new(let spelled, let user):
-      guard let user else { return false }  // the hub did not answer: ask again later
       inviting = Invitation(name: spelled, user: user, known: false)
     }
     return true
@@ -152,19 +162,21 @@ extension FriendList {
   }
 
   /// A name to add, once the hub said who it is: added as its owner spells it, on top; without an answer, not at all. One already
-  /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or nil.
-  func addFriend(_ name: String) async -> String? {
+  /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or why the hub did not
+  /// answer, or nil.
+  enum AddProblem { case said(String), unreachable(ProductProblem) }
+
+  func addFriend(_ name: String) async -> AddProblem? {
     switch await lookUpFriend(name) {
     case .signedOut: return nil
-    case .problem(let problem): return problem
+    case .problem(let problem): return .said(problem)
+    case .unreachable(let why): return .unreachable(why)
     case .known(let known):
       withAnimation(.snappy) {
         position.scrollTo(id: known.key.uuidString, anchor: .center)
       }
       showSent(to: known, productText(text: .alreadyAdded, lang: .english))
     case .new(let spelled, let user):
-      // Never added unchecked: without the hub's answer the name could be nobody's.
-      guard user != nil else { return productText(text: .noConnection, lang: .english) }
       withAnimation(.snappy) {
         friends.add(spelled, user: user)
         if !scrolled { position.scrollTo(edge: .top) }
@@ -178,8 +190,10 @@ extension FriendList {
     case signedOut
     case problem(String)
     case known(Friend)
-    /// Not on the list yet: as its owner spells it; without a user, the hub did not answer (spelled as typed).
-    case new(String, user: String?)
+    /// Not on the list yet: as its owner spells it, with its user id.
+    case new(String, user: String)
+    /// The hub did not answer (never added unchecked: the name could be nobody's): why.
+    case unreachable(ProductProblem)
   }
 
   func lookUpFriend(_ name: String) async -> Looked {
@@ -191,12 +205,13 @@ extension FriendList {
     guard client === accounts.client else { return .signedOut }
     var user: String?
     var spelled = name
+    var unreachable: ProductProblem?
     switch answer {
     case .noSuchUser: return .problem(ProductText.noSuchUser.english)
     case .found(let found, let owners):
       user = found
       spelled = owners ?? spelled
-    case .unknown: break
+    case .unknown(let why): unreachable = why
     }
     let skeleton = Username.skeleton(spelled)
     if let known = friends.shown.first(where: {
@@ -204,6 +219,7 @@ extension FriendList {
     }) {
       return .known(known)
     }
+    guard let user else { return .unreachable(unreachable ?? .failed) }
     return .new(spelled, user: user)
   }
 

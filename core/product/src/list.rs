@@ -71,6 +71,12 @@ pub enum Input {
         text: String,
     },
     SendUndone(String),
+    /// What the platform keeps for this bar and has not sent (on: something waits, off: none waits any more): the
+    /// bar says "Not Sent · Tap to Retry" whenever it shows its title, until it is off. Never silent, never lost.
+    Unsent {
+        id: String,
+        on: bool,
+    },
     /// Other short platform notices use the same core-owned text/count lifetime.
     Notice {
         id: String,
@@ -111,6 +117,8 @@ pub struct Row {
     pub count: u32,
     pub request: bool,
     pub sending: bool,
+    /// Something to it did not go (`Input::Unsent`): a tap on the bar retries it.
+    pub unsent: bool,
     pub undo_deadline: Option<u64>,
     pub notice_deadline: Option<u64>,
     pub senders: Vec<Sender>,
@@ -185,6 +193,7 @@ struct State {
     media: Vec<Kind>,
     sent: Option<Sent>,
     outgoing: Option<(Kind, u32, u64)>,
+    unsent: bool,
     /// Yos since the bar last showed its name or the user's own send (a friend's count).
     heard: u32,
     /// When a Yo last came and when the bar last told of a send or notice (`List::sequence`): the newer wins.
@@ -343,6 +352,14 @@ impl List {
             }
             Input::SendFailed { id, text } => {
                 self.notice(id, text, false);
+            }
+            Input::Unsent { id, on } => {
+                let state = self.states.entry(id).or_default();
+                state.unsent = on;
+                // The sticky words replace a passing "Not Sent" at once.
+                if on && state.sent.as_ref().is_some_and(|s| s.text == Text::NotSent.get(Language::English)) {
+                    state.sent = None;
+                }
             }
             Input::SendUndone(id) => {
                 self.states.entry(id.clone()).or_default().outgoing = None;
@@ -614,6 +631,10 @@ impl List {
                     title = Text::SentYo.get(Language::English).into();
                     count = n;
                 }
+                if s.unsent && s.outgoing.is_none() && s.sent.is_none() {
+                    title = Text::NotSentRetry.get(Language::English).into();
+                    count = 1;
+                }
                 if self.recording.as_ref() == Some(id) {
                     title = "● Recording".into();
                     count = 1;
@@ -689,6 +710,7 @@ impl List {
                     count,
                     request: f.request,
                     sending: s.outgoing.is_some(),
+                    unsent: s.unsent && !f.request,
                     undo_deadline: s.outgoing.map(|(_, _, until)| until),
                     notice_deadline: s.sent.as_ref().map(|sent| sent.until),
                     senders: if f.request { Vec::new() } else { s.senders.clone() },
@@ -1054,6 +1076,27 @@ mod tests {
         assert_eq!(row(&l, "c").title, "C");
         assert_eq!(order(&l)[0], "b");
         assert!(row(&l, "b").clock_running);
+    }
+    #[test]
+    fn unsent_stays_on_the_bar_until_it_went() {
+        let mut l = model();
+        l.apply(0, Input::SendFailed { id: "c".into(), text: "Not Sent".into() });
+        l.apply(1, Input::Unsent { id: "c".into(), on: true });
+        let r = row(&l, "c");
+        assert_eq!(r.title, "Not Sent · Tap to Retry");
+        assert!(r.unsent);
+        // Long after any notice: still there.
+        l.apply(600_000, Input::Tick);
+        assert_eq!(row(&l, "c").title, "Not Sent · Tap to Retry");
+        // A new send tells itself meanwhile, then the bar tells what still waits.
+        l.apply(600_001, Input::SendFinished { id: "c".into(), kind: Kind::Yo });
+        assert_eq!(row(&l, "c").title, "Sent Yo");
+        l.apply(602_000, Input::Tick);
+        assert_eq!(row(&l, "c").title, "Not Sent · Tap to Retry");
+        l.apply(602_001, Input::Unsent { id: "c".into(), on: false });
+        let r = row(&l, "c");
+        assert_eq!(r.title, "C");
+        assert!(!r.unsent);
     }
     #[test]
     fn request_rows_hide_media_and_counts_until_acceptance() {

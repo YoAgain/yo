@@ -921,9 +921,14 @@ final class AccountStore {
     storageWriteGeneration &+= 1
     storing = Task {
       await before?.value
-      _ = try? await Hub.run {
-        write(client)
-        try client.writeStorage()
+      // A settings or list change that did not reach the hub is said (the core keeps it and writes it later).
+      do {
+        try await Hub.run {
+          write(client)
+          try client.writeStorage()
+        }
+      } catch {
+        Problems.shared.report(error)
       }
     }
   }

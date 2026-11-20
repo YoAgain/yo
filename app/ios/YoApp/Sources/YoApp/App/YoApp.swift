@@ -72,6 +72,7 @@ struct YoApp: App {
     friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
     AppDelegate.silentSync = { await inbox.syncOnce(accounts: accounts, friends: friends) }
     Reconnect.inbox = { inbox.reconnect() }
+    HubTransport.answered = { Problems.hubAnswered() }
     Reconnect.watchPath()
     UNUserNotificationCenter.current().delegate = notifications
     // Not in a launch for an intent, nor before the list.
@@ -90,7 +91,7 @@ struct YoApp: App {
   private func updateBanner() {
     let snapshot = DeleteNotice.shared.model.connectivity(
       now: DeleteNotice.now,
-      offline: Availability.shared.offline, failure: SendFailure.shared.text)
+      offline: Availability.shared.offline, failure: Problems.shared.text)
     if let receive = DeleteNotice.shared.receive { receive(snapshot) }
     else { DeleteNotice.shared.banner = snapshot.banner }
   }
@@ -138,9 +139,9 @@ struct YoApp: App {
           .foregroundStyle(.white)
           .frame(maxWidth: .infinity).frame(height: 36)
           .background(Color.amethyst)
-          .onTapGesture { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { SendFailure.shared.retry?() } }
-          .accessibilityAddTraits(SendFailure.shared.retry == nil ? [] : [.isButton])
-          .accessibilityAction { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { SendFailure.shared.retry?() } }
+          .onTapGesture { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { Problems.shared.retry?() } }
+          .accessibilityAddTraits(Problems.shared.retry == nil ? [] : [.isButton])
+          .accessibilityAction { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { Problems.shared.retry?() } }
           .transition(.opacity)
         }
       }
@@ -149,7 +150,7 @@ struct YoApp: App {
       .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.banner)
       .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.deletion?.id)
       .onChange(of: Availability.shared.offline, initial: true) { _, _ in updateBanner() }
-      .onChange(of: SendFailure.shared.text) { _, _ in updateBanner() }
+      .onChange(of: Problems.shared.text) { _, _ in updateBanner() }
       .task(id: phase) {
         guard phase == .active else { return }
         while !Task.isCancelled {
