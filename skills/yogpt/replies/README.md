@@ -1,9 +1,9 @@
 # YoGPT replies
 
-350 pictures YoGPT sends back: one at random in answer to a photo or video (what it received is discarded unseen), and
-with a chance of 1 in 5 along with an answer to a plain Yo; never one of the last 50 the same sender got. Generated with
+350 pictures YoGPT sends back: one at random in answer to every Yo, photo or video (what it received is discarded
+unseen); never one of the last 50 the same sender got. Generated with
 OpenAI `gpt-image-2` (1024x1536, medium or low), cropped to 9:16 and saved as 720x1280 JPEGs of at most 100 KB, without
-metadata. Photos and videos come with the attachments of spec 5; until then YoGPT answers Yos with Yos only.
+metadata.
 
 - 001–050: "Yo" in all kinds of scenes, 3D renders and photos
 - 051–100: characters saying Yo to each other, art homages

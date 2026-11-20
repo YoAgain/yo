@@ -4,7 +4,7 @@ Bots as small scripts driving [yo](../app/cli) (Python 3, standard library only)
 with `yo send …`, which runs inside the listener. One directory, unit and environment file per bot and hub; the
 server switch from `yo-gpt` is in [app/cli/README.md](../app/cli/README.md).
 
-- [yogpt](yogpt): YoGPT, answers every Yo with a Yo or a few, a photo with a reply picture
+- [yogpt](yogpt): YoGPT, answers every Yo, photo or video with a reply picture
 - [ping](ping): PING, the echo contact: Yos, photos and videos back as they came
 - [pingtest](pingtest): PINGTEST, the round-trip probe the apps measure
 - [status](status): the server's numbers as a picture, sent only to the one user fixed on the server, at the rhythm set on the admin page (Pillow); answers nobody

@@ -18,16 +18,43 @@ import yogpt  # noqa: E402
 
 
 class YoGPTRules(unittest.TestCase):
-    def test_yos_follow_the_table(self):
-        self.assertEqual(sum(yogpt.YOS), 100)
-        counts = [0] * 5
-        for p in range(100):
-            counts[yogpt.yos(p) - 1] += 1
-        self.assertEqual(counts, yogpt.YOS)
+    def test_every_answer_is_one_picture_and_they_vary(self):
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(1, 6):
+                with open(os.path.join(d, f"{i:03}.jpg"), "wb") as f:
+                    f.write(b"x")
+            bot, sent, old = yogpt.YoGPT(d), [], yogpt.yocli.yo
+            yogpt.yocli.yo = lambda *args: sent.append(args)
+            try:
+                for _ in range(10):
+                    bot.answer("u")
+            finally:
+                yogpt.yocli.yo = old
+        self.assertEqual(len(sent), 10, "one message per answer")
+        self.assertTrue(all(a[:3] == ("send", "u", "--photo") for a in sent), "never a plain Yo")
+        names = [os.path.basename(a[3]) for a in sent]
+        self.assertEqual(sorted(names[:5]), [f"{i:03}.jpg" for i in range(1, 6)], "each once before any again")
+        self.assertTrue(all(x != y for x, y in zip(names, names[1:])), "never the same twice in a row")
 
-    def test_one_answer_in_n_carries_a_picture(self):
-        due = lambda every: sum(yogpt.picture_due(roll % max(every, 1), every) for roll in range(100))  # noqa: E731
-        self.assertEqual((due(5), due(1), due(0)), (20, 100, 0))
+    def test_a_plain_yo_only_when_no_picture_can_go(self):
+        sent, old = [], yogpt.yocli.yo
+
+        def refuse_pictures(*args):
+            if "--photo" in args:
+                raise yogpt.yocli.Failed(1, "no pictures now", False)
+            sent.append(args)
+
+        try:
+            yogpt.yocli.yo = lambda *args: sent.append(args)
+            yogpt.YoGPT(None).answer("u")
+            with tempfile.TemporaryDirectory() as d:
+                with open(os.path.join(d, "001.jpg"), "wb") as f:
+                    f.write(b"x")
+                yogpt.yocli.yo = refuse_pictures
+                yogpt.YoGPT(d).answer("u")
+        finally:
+            yogpt.yocli.yo = old
+        self.assertEqual(sent, [("send", "u"), ("send", "u")])
 
     def test_reply_pictures_are_named_by_number_and_read_bounded(self):
         self.assertTrue(yogpt.picture_name("007.jpg") and yogpt.picture_name("200.jpg"))
@@ -97,9 +124,9 @@ class Limits(unittest.TestCase):
         self.assertEqual(len(cooldown.at), 1, "only groups within the window are kept")
 
     def test_a_failed_answer_never_blocks_its_sender(self):
-        bot = yogpt.YoGPT(None, 0)
-        bot.pending["u"] = collections.deque([(False, 0)])
-        bot.answer = lambda to, picture: 1 / 0
+        bot = yogpt.YoGPT(None)
+        bot.pending["u"] = collections.deque([0])
+        bot.answer = lambda to: 1 / 0
         old, yogpt.THINK_MS = yogpt.THINK_MS, (0, 0)
         try:
             bot.answer_pending("u")

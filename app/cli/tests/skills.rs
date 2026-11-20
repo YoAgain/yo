@@ -19,20 +19,36 @@ fn the_skills_rules_hold_without_a_hub() {
     assert!(status.success());
 }
 
-/// Sends a Yo to `name` (once it is there) and collects the answer; returns who answered.
+/// Who sent a Yo or a photo until `quiet` passes without one.
+fn answerers_until_quiet(client: &mut Client, quiet: Duration) -> Vec<String> {
+    let (mut from, mut last) = (Vec::new(), Instant::now());
+    while last.elapsed() < quiet {
+        for event in client.sync(1).unwrap() {
+            if let Event::Message { user, content: Content::Yo | Content::Photo(_), .. } = event {
+                from.push(user);
+                last = Instant::now();
+            }
+        }
+        client.acknowledge_events();
+    }
+    from
+}
+
+/// Sends a Yo to `name` (once it is there) and collects the answer, one picture (a Yo without reply pictures);
+/// returns who answered.
 fn round_trip(client: &mut Client, name: &str) -> Vec<String> {
     let start = Instant::now();
     while client.send_yo(name).is_err() {
         assert!(start.elapsed() < Duration::from_secs(30), "{name} never came");
         std::thread::sleep(Duration::from_millis(200));
     }
-    // Up to 5 Yos at most a second apart, once it is up and has thought (`yogpt` shortens that to 200 ms).
+    // Once it is up and has thought (`yogpt` shortens that to 200 ms).
     let mut from = Vec::new();
     while from.is_empty() {
         assert!(start.elapsed() < Duration::from_secs(60), "no answer from {name}");
-        from = yos_until_quiet(client, Duration::from_secs(3));
+        from = answerers_until_quiet(client, Duration::from_secs(3));
     }
-    assert!((1..=5).contains(&from.len()), "{} Yos back", from.len());
+    assert_eq!(from.len(), 1, "{} answers back", from.len());
     from
 }
 
@@ -90,7 +106,7 @@ fn yogpt_survives_a_hub_connection_refusal() {
     std::thread::sleep(Duration::from_secs(4));
     let _hub = TestHub::start_with(config, &addr);
     assert!(bot.running());
-    let _ = yos_until_quiet(&mut alice, Duration::from_secs(8));
+    let _ = answerers_until_quiet(&mut alice, Duration::from_secs(8));
     let second = round_trip(&mut alice, "YOGPT");
     assert!(second.iter().all(|user| *user == first[0]));
     drop(bot);
@@ -133,22 +149,21 @@ fn yogpt_stops_when_the_hub_no_longer_knows_its_device() {
 }
 
 #[test]
-fn yogpt_answers_a_photo_with_a_picture_and_its_yos_carry_one() {
+fn yogpt_answers_a_yo_and_a_photo_with_a_picture() {
     let hub = TestHub::start();
     let yo = Yo::new(&hub);
     let files: Vec<Vec<u8>> = (1..=3).map(|_| picture_of(5000)).collect();
     let replies = replies(&files);
     let mut alice = someone(&hub);
-    // Every answer with a picture: one of its Yos carries one, from the directory, as it is there.
-    let _bot = yogpt(&yo, &["--replies", replies.to_str().unwrap(), "--picture-every", "1"], &[]);
+    // A Yo answered with one picture, from the directory as it is there, and no Yo.
+    let _bot = yogpt(&yo, &["--replies", replies.to_str().unwrap()], &[]);
     let start = Instant::now();
     while alice.send_yo("YOGPT").is_err() {
         assert!(start.elapsed() < Duration::from_secs(30), "YOGPT never came");
         std::thread::sleep(Duration::from_millis(200));
     }
     let (yos, pictures) = answers_until_quiet(&mut alice, Duration::from_secs(8));
-    assert_eq!(pictures.len(), 1, "{yos} Yos and {} pictures", pictures.len());
-    assert!((0..=4).contains(&yos));
+    assert_eq!((yos, pictures.len()), (0, 1), "{yos} Yos and {} pictures", pictures.len());
     assert!(files.contains(&pictures[0]));
 
     // A photo to it: one picture back. Its blob, fetched into nothing, is acknowledged once: of two fetches one is left.
@@ -226,7 +241,7 @@ fn group_answers(client: &mut Client, group: &str, from: &str, quiet: Duration) 
     (yos, photos)
 }
 
-/// In a group of three, YoGPT answers a Yo into the group, and a photo with a picture; left alone in it, it leaves.
+/// In a group of three, YoGPT answers a Yo and a photo into the group with a picture; left alone in it, it leaves.
 #[test]
 fn yogpt_answers_in_a_group_and_leaves_it_when_alone() {
     let hub = TestHub::start();
@@ -240,7 +255,7 @@ fn yogpt_answers_in_a_group_and_leaves_it_when_alone() {
 
     alice.send_group(&group, Content::Yo).unwrap();
     let (yos, photos) = group_answers(&mut alice, &group, &yogpt, Duration::from_secs(3));
-    assert!((1..=5).contains(&yos) && photos == 0, "{yos} Yos, {photos} pictures into the group");
+    assert_eq!((yos, photos), (0, 1), "{yos} Yos, {photos} pictures into the group");
 
     let (photo, sealed) = media::seal(b"a group photo", 4, 3).unwrap();
     let fetches = alice.group_media_fetches(&group).unwrap();
@@ -277,7 +292,7 @@ fn yogpt_stays_quiet_for_listed_users_and_answers_a_group_once_per_cooldown() {
     let yogpt = round_trip(&mut mia, "YOGPT").remove(0);
 
     leo.send_yo("YOGPT").unwrap();
-    assert!(yos_until_quiet(&mut leo, Duration::from_secs(3)).is_empty(), "a quiet-for sender was answered");
+    assert!(answerers_until_quiet(&mut leo, Duration::from_secs(3)).is_empty(), "a quiet-for sender was answered");
 
     let (group, _) = mia.create_group("Bots", &[yogpt.clone(), leo.user_id().to_string()]).unwrap();
     let _ = leo.sync(0).unwrap();
@@ -289,7 +304,7 @@ fn yogpt_stays_quiet_for_listed_users_and_answers_a_group_once_per_cooldown() {
     // Mia is answered in the group; a second Yo of hers within 30 s is not.
     mia.send_group(&group, Content::Yo).unwrap();
     let (yos, _) = group_answers(&mut mia, &group, &yogpt, Duration::from_secs(3));
-    assert!((1..=5).contains(&yos), "{yos} Yos into the group");
+    assert_eq!(yos, 1, "{yos} Yos into the group (no reply pictures here)");
     mia.send_group(&group, Content::Yo).unwrap();
     let (yos, _) = group_answers(&mut mia, &group, &yogpt, Duration::from_secs(3));
     assert_eq!(yos, 0, "answered the group again within its cooldown");

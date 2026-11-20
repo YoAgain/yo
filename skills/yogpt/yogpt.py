@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""YoGPT: answers every Yo, after a moment (1 to 3 s), with a Yo or a few (one mostly, five at most), keeping the
-rhythm the Yos came in. A photo or video is answered with one reply picture from `--replies` (NNN.jpg, at most
-512 KB, never one of the last 50 that sender got while others are left); a plain Yo carries one only with
-`--picture-every N` (one answer in N). What it is sent is never opened: `yo listen --drain-media` fetches the blobs
-into nothing. In a group it answers into the group, at most once per 30 s; never `--quiet-for` users (other bots).
-It leaves groups it is alone in. Bounded: 200 answers owed to one sender, 32 senders at once; more are dropped.
+"""YoGPT: answers every Yo, photo or video, after a moment (1 to 3 s), with a photo: one reply picture from
+`--replies` (NNN.jpg, at most 512 KB, never one of the last 50 that sender got while others are left), keeping the
+rhythm they came in. A plain Yo goes only when no picture can (none there, the hub taking none now). What it is sent
+is never opened: `yo listen --drain-media` fetches the blobs into nothing. In a group it answers into the group, at
+most once per 30 s; never `--quiet-for` users (other bots). It leaves groups it is alone in. Bounded: 200 answers owed to one sender, 32 senders at once; more are dropped.
 
 The operator's mailbox: `NAME.anything.jpg` put into `$YO_STATE/outbox` goes to NAME as a photo, then the file is
 removed (renamed `.failed` when it could not go). `$YO_STATE/stats.json` says how many people it knows, once a minute.
 
-  YO_STATE=… YO_HUB=… yogpt.py [--replies DIR] [--picture-every N] [--quiet-for A,B]     (once: yo register YOGPT)
+  YO_STATE=… YO_HUB=… yogpt.py [--replies DIR] [--quiet-for A,B]     (once: yo register YOGPT)
 """
 
 import argparse
@@ -25,8 +24,6 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import yocli  # noqa: E402
 
-# How many Yos an answer has, in percent: one mostly, more ever rarer, five at most.
-YOS = [70, 17, 8, 4, 1]
 THINK_MS = tuple(int(v) for v in os.environ.get("YOGPT_THINK_MS", "1000,3000").split(","))
 MAX_GAP_MS = 5000
 GROUP_COOLDOWN = int(os.environ.get("YOGPT_GROUP_COOLDOWN_MS", "30000")) / 1000
@@ -35,21 +32,6 @@ MAX_PICTURE, MAX_PICTURES_LISTED = 512 * 1024, 1000
 RECENT_PICTURES, MAX_REMEMBERED = 50, 1000
 GROUP = "group:"
 draw = random.SystemRandom()
-
-
-def yos(p):
-    """How many Yos for a percentile `p` in 0..100, by `YOS`."""
-    total = 0
-    for i, weight in enumerate(YOS):
-        total += weight
-        if p < total:
-            return i + 1
-    return len(YOS)
-
-
-def picture_due(roll, every):
-    """Whether a roll (uniform in 0..every) gives a picture: one in `every`, none for 0."""
-    return every > 0 and roll == 0
 
 
 def picture_name(name):
@@ -103,34 +85,34 @@ def pick_picture(directory, recent):
 
 
 class YoGPT:
-    def __init__(self, replies, every):
-        self.replies, self.every = replies, every
+    def __init__(self, replies):
+        self.replies = replies
         self.pending, self.recent, self.lock = {}, Recent(), threading.Lock()
         self.dropped, self.answered = yocli.Tally("dropped (too much at once)"), yocli.Tally("answers")
 
-    def offer(self, to, picture, sent_at):
+    def offer(self, to, sent_at):
         """One answer owed to `to` (a user or `group:ID`): in turn after those owed already, each sender on its own."""
         with self.lock:
             owed = self.pending.get(to)
             if owed is not None:
                 if len(owed) < MAX_OWED:
-                    owed.append((picture, sent_at))
+                    owed.append(sent_at)
                 else:
                     self.dropped.add()
                 return
             if len(self.pending) >= MAX_ANSWERING:
                 return self.dropped.add()
-            self.pending[to] = collections.deque([(picture, sent_at)])
+            self.pending[to] = collections.deque([sent_at])
         threading.Thread(target=self.answer_pending, args=(to,), daemon=True).start()
 
     def answer_pending(self, to):
         time.sleep(draw.uniform(*THINK_MS) / 1000)
         while True:
             with self.lock:
-                picture, last = self.pending[to][0]
+                last = self.pending[to][0]
             began = time.monotonic()
             try:
-                self.answer(to, picture)
+                self.answer(to)
             except Exception as error:  # never leaves `pending[to]` behind: this sender would get no answer again
                 with self.lock:
                     self.pending.pop(to, None)
@@ -142,26 +124,19 @@ class YoGPT:
                 if not owed:
                     del self.pending[to]
                     return
-                gap = min(max(owed[0][1] - last, 0), MAX_GAP_MS) / 1000
+                gap = min(max(owed[0] - last, 0), MAX_GAP_MS) / 1000
             time.sleep(max(gap - (time.monotonic() - began), 0))
 
-    def answer(self, to, to_picture):
-        n = 1 if to_picture else yos(draw.randrange(100))
-        with_picture = 0 if to_picture else None
-        if not to_picture and picture_due(draw.randrange(max(self.every, 1)), self.every):
-            with_picture = draw.randrange(n)
-        for i in range(n):
-            try:
-                if i == with_picture:
-                    self.send_picture(to)
-                else:
-                    yocli.yo("send", to)
-            except yocli.Failed as failed:
-                return yocli.log(f"Yo {i + 1} of {n}: {yocli.reason(failed)}")
+    def answer(self, to):
+        """Every answer is one reply picture, to a Yo as to a photo or video."""
+        try:
+            self.send_picture(to)
+        except yocli.Failed as failed:
+            return yocli.log(f"answer: {yocli.reason(failed)}")
         self.answered.add()
 
     def send_picture(self, to):
-        """A Yo with a reply picture; a plain one when there is none or the hub takes no picture now."""
+        """A reply picture; a plain Yo only when there is none or the hub takes no picture now."""
         with self.lock:
             recent = list(self.recent.of(to))
         picked = pick_picture(self.replies, recent) if self.replies else None
@@ -229,13 +204,12 @@ def mailbox(directory, stats):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--replies")
-    parser.add_argument("--picture-every", type=int, default=0)
     parser.add_argument("--quiet-for", action="append", default=[])
     args = parser.parse_args()
     state = os.environ["YO_STATE"]
     me = yocli.registered()["user"]
     quiet = yocli.Quiet(yocli.names(args.quiet_for))
-    bot, cooldown = YoGPT(args.replies, args.picture_every), yocli.Cooldown(GROUP_COOLDOWN)
+    bot, cooldown = YoGPT(args.replies), yocli.Cooldown(GROUP_COOLDOWN)
     quieted, cooled = yocli.Tally("from --quiet-for users not answered"), yocli.Tally("group Yos dropped (cooldown)")
     outbox = os.path.join(state, "outbox")
     threading.Thread(target=mailbox, args=(outbox, os.path.join(state, "stats.json")), daemon=True).start()
@@ -255,7 +229,7 @@ def main():
         if to.startswith(GROUP) and not cooldown.allow(to, time.monotonic()):
             cooled.add()
             continue
-        bot.offer(to, event["content"] != "yo", event["sent_at_ms"])
+        bot.offer(to, event["sent_at_ms"])
 
 
 if __name__ == "__main__":

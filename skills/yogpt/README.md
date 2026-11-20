@@ -1,9 +1,8 @@
 # YoGPT
 
-Answers every Yo after 1 to 3 s with a Yo or a few (one in 70 %, five at most), in the rhythm the Yos came; a photo
-or video with one picture from `--replies` (`NNN.jpg`, at most 512 KB and 1600 px, metadata taken out; never one of
-the last 50 that sender got while others are left). `--picture-every N` adds a picture to one answer in N. What it is
-sent is never opened (`yo listen --drain-media`). In a group it answers into the group, at most once per 30 s, and
+Answers every Yo, photo or video after 1 to 3 s with a photo, in the rhythm they came: one picture from `--replies`
+(`NNN.jpg`, at most 512 KB and 1600 px, metadata taken out; never one of the last 50 that sender got while others are
+left). A plain Yo only when no picture can go (none there, the hub taking none now). What it is sent is never opened (`yo listen --drain-media`). In a group it answers into the group, at most once per 30 s, and
 leaves groups it is alone in. `--quiet-for YOGPT,PING,…` (other bots) are never answered. Bounded: 200 answers owed
 to one sender, 32 senders at once. Logs counts only, never who.
 
