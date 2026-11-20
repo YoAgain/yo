@@ -94,11 +94,15 @@ pub(crate) enum Event {
     BotYo,
     /// A blob a bot account uploaded, out of `media-in` (also counted per bot, `bot-media:LABEL`).
     BotMedia,
+    /// A push folded into a later one by a device's window (1 s, 10 s): not sent of its own.
+    PushFolded,
+    /// A push folded into a later one by the backlog pacing (a device with more than `push_backlog` waiting).
+    PushPaced,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 20] = [
+    const KINDS: [&str; 22] = [
         "yo-in",
         "yo-out",
         "media-in",
@@ -119,6 +123,8 @@ impl Event {
         "account-gone",
         "bot-yo",
         "bot-media",
+        "push-folded",
+        "push-paced",
     ];
 
     /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
@@ -1004,10 +1010,11 @@ mod tests {
         hub.push_paced(wake(), false, window, &runtime);
         settle().await;
         assert_eq!(pushes(&recorder), 1, "a quiet device's first push goes at once");
-        for _ in 0..20 {
-            hub.push_paced(wake(), false, window, &runtime);
+        assert!(!hub.push_paced(wake(), false, window, &runtime), "the first of a window is held, not folded");
+        for _ in 0..19 {
+            assert!(hub.push_paced(wake(), false, window, &runtime), "joins the push held: folded");
         }
-        hub.push_paced(wake(), true, window, &runtime);
+        assert!(hub.push_paced(wake(), true, window, &runtime));
         settle().await;
         assert_eq!(pushes(&recorder), 1, "held for the end of the window");
         tokio::time::sleep(window).await;

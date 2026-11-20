@@ -107,7 +107,7 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   per upload, and `bot-yo` per Yo from the server's own services (sealed, so by address: not per bot).
 - **Push pacing and flood limits** (spec 6.6, 6.7). Pushes are paced per device: one per window at most (contacts 1 s, requests
   10 s; `YO_PUSH_WINDOW_CONTACT_MS`, `YO_PUSH_WINDOW_REQUEST_MS`), what comes meanwhile in one push at its end, a
-  quiet device's at once; past 50 envelopes waiting (`YO_PUSH_BACKLOG`) a device gets one push per 10 minutes (`YO_PUSH_BACKLOG_INTERVAL_S`, 600) until its backlog is down again. Sealed deliveries' envelope bytes into one recipient are a bucket as Signal's inbound
+  quiet device's at once; past 50 envelopes waiting (`YO_PUSH_BACKLOG`) a device gets one push per 10 minutes (`YO_PUSH_BACKLOG_INTERVAL_S`, 600) until its backlog is down again (counted as `push-folded` and `push-paced`, shown in the admin's Push pacing card). Sealed deliveries' envelope bytes into one recipient are a bucket as Signal's inbound
   message bytes (`YO_RECIPIENT_BYTES_BURST_MB`, `YO_RECIPIENT_BYTES_PER_HOUR_MB`, 50 and 50): beyond, `429`
   `recipient` with `Retry-After`, the sender's outbox holds that recipient only. Signed requests are counted per
   sender and hour (`request_hours`, 25 hours) for the admin's "Requests 24h"; sealed deliveries never by sender.

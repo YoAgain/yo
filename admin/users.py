@@ -120,9 +120,17 @@ def has_table(db, table: str) -> bool:
     return db.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()[0] > 0
 
 
+def push_backlog() -> int:
+    """The hub's YO_PUSH_BACKLOG (the admin runs with the same environment file), default 50."""
+    try:
+        return int(os.environ.get("YO_PUSH_BACKLOG", "50"))
+    except ValueError:
+        return 50
+
+
 EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
                "latency-1s", "latency-5s", "latency-60s", "latency-slow", "push-ok", "push-fail",
-               "http", "http-4xx", "http-429", "http-5xx", "account-gone")
+               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced")
 # A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
 BOT_USER = ("EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM devices d"
             " WHERE d.user_id = u.id AND NOT (coalesce(d.app, '') LIKE 'yogpt/%' OR coalesce(d.app, '') LIKE 'cli/%'))")
@@ -372,6 +380,9 @@ def hub(name: str, path: str) -> dict:
             "events": part("events", lambda: events(db, now) if has_table(db, "events") else None),
             # Yos per minute, the last hour, for the header's live strip (see live).
             "live": part("live", lambda: live(db, now) if has_table(db, "events") else None),
+            # Devices in push pacing now: more envelopes waiting than the hub's YO_PUSH_BACKLOG (default 50), a count only.
+            "push_backlog_devices": part("push_backlog_devices", lambda: one(
+                "SELECT count(*) FROM (SELECT 1 FROM messages GROUP BY device_id HAVING count(*) > ?)", push_backlog())),
             "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),

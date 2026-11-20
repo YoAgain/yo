@@ -129,7 +129,10 @@ impl Hub {
                 notify.notify_waiters();
             }
             if !wake.push_token.is_empty() {
-                self.push_paced(wake, urgent, window, runtime);
+                let backlog = wake.waiting > self.config.limits.push_backlog;
+                if self.push_paced(wake, urgent, window, runtime) {
+                    self.count(if backlog { crate::Event::PushPaced } else { crate::Event::PushFolded }, 1);
+                }
             }
         }
     }
@@ -152,9 +155,10 @@ impl Hub {
         urgent: bool,
         window: Duration,
         runtime: &tokio::runtime::Handle,
-    ) {
+    ) -> bool {
         let now = Instant::now();
         let device = wake.device_id;
+        let mut folded = false;
         let mut pushes = self.pushes.lock().unwrap_or_else(PoisonError::into_inner);
         let due = match pushes.get_mut(&device) {
             Some(pushed) => {
@@ -165,9 +169,10 @@ impl Hub {
                         *held = wake;
                         *was_urgent |= urgent;
                         if due >= *held_due {
-                            return;
+                            return true;
                         }
                         *held_due = due.max(now);
+                        folded = true;
                         Some(*held_due)
                     }
                     None if now < due => {
@@ -178,7 +183,7 @@ impl Hub {
                         pushed.at = now;
                         drop(pushes);
                         runtime.spawn(self.clone().push(wake, urgent));
-                        return;
+                        return false;
                     }
                 }
             }
@@ -186,7 +191,7 @@ impl Hub {
                 pushes.insert(device, Pushed { at: now, held: None });
                 drop(pushes);
                 runtime.spawn(self.clone().push(wake, urgent));
-                return;
+                return false;
             }
         };
         drop(pushes);
@@ -208,6 +213,7 @@ impl Hub {
                 hub.push(wake, urgent).await;
             }
         });
+        folded
     }
 
     /// Devices pushed over a minute ago with nothing held: a push to them goes at once anyway.

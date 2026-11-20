@@ -454,6 +454,12 @@ if (document.body.classList.contains("login")) {
       (i) => (ps[i][0] + ps[i][1] ? `${pctText(share(ps[i]))} taken · ${num(ps[i][1])} failed of ${num(ps[i][0] + ps[i][1])}` : "no pushes"),
       `Push: taken by APNs and FCM · ${pctText(share(psAll))} · ${num(psAll[1])} failed (in Errors) · ${span}`, 100);
     if (!(psAll[0] + psAll[1])) none("ps", "pushes");
+    // Push pacing (spec 6.7): the pushes sent per bar; the folded ones in the hover and in two rows of their own.
+    const pf = sums(["push-folded"]), pb = sums(["push-paced"]), pfAll = whole(pf), pbAll = whole(pb), sentAll = psAll[0] + psAll[1];
+    spark("pp", sentAll, ps.map(([a, b]) => a + b), names, (i) => `${num(ps[i][0] + ps[i][1])} pushes sent · ${num(pf[i][0])} folded by the window · ${num(pb[i][0])} by backlog pacing`, `Pushes sent · ${span}`);
+    spark("pf", pfAll[0], pf.map(([n]) => n), names, (i) => `${num(pf[i][0])} pushes folded into a later one by the 1 s window`, `Folded by the window · ${span}`);
+    spark("pb", pbAll[0], pb.map(([n]) => n), names, (i) => `${num(pb[i][0])} pushes folded by the backlog pacing`, `Folded by the backlog pacing · ${span}`);
+    set("pd-n", h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices));
     // Hub errors: 5xx answers per bar (a bar's height its count); their share, 4xx and 429 in the hover.
     const he = sums(["http-5xx", "http", "http-4xx", "http-429"]), heAll = whole(he), rate = ([e, n]) => (n ? (100 * e) / n : 0);
     spark("he", null, he.map(([e]) => e), names,

@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS deliveries_hourly (
 -- Events per minute (minutes since the epoch), a count of each kind and nothing else: no user, device, envelope,
 -- blob or group (6.6). `yo-in` a Yo accepted into an inbox, `yo-out` one a device fetched and acknowledged,
 -- `media-in` a blob uploaded (`media-in-bytes` its bytes), `media-out` a blob fetched, `group-create` a group made;
--- `yo-in-bot`, `latency-*`, `push-ok`/`push-fail`, `http`/`http-4xx`/`http-429`/`http-5xx`, `account-gone` (spec 6.6).
+-- `yo-in-bot`, `latency-*`, `push-ok`/`push-fail`, `push-folded`/`push-paced`, `http`/`http-4xx`/`http-429`/`http-5xx`, `account-gone` (spec 6.6).
 -- Statistics of no one: kept for good, for the operator's page.
 CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
