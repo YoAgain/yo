@@ -39,14 +39,44 @@ struct SettingsView: View {
   @State private var showingDeleteAccount = false
   /// Both heights stay in the sheet's detents all the time; only the selection changes, so the sheet moves with the
   /// system's own detent animation, as when it is dragged.
-  @State private var detent: PresentationDetent = .medium
+  @State private var detent: PresentationDetent = Self.half
+  /// Exactly half of full height (`.medium` is only about half), so full height is known from the first page.
+  private static let half = PresentationDetent.fraction(0.5)
   /// The first page's room left over at half height, given to the profile card so the gap below the last section is
   /// the list's own bottom margin, as at its top. More rows later take it back by themselves.
   @State private var spare: CGFloat = 0
-  @State private var halfHeight: CGFloat?
+  /// The pages are always laid out at the sheet's full height, from its top; at half height the sheet shows their
+  /// upper half. Growing or shrinking the sheet then never lays a page out again, so a page pushed in while the
+  /// sheet grows arrives whole instead of cut at the old height.
+  @State private var fullHeight: CGFloat?
+  @State private var heights = SheetHeights()
 
   private static func detent(for path: [Page]) -> PresentationDetent {
-    path.last.map { $0.fitsHalf ? .medium : .large } ?? .medium
+    path.last.map { $0.fitsHalf ? half : .large } ?? half
+  }
+
+  /// The sheet's visible height, settled or on its way: at half height on the first page it gives full height (twice
+  /// it; the smallest seen, as presenting may pass a taller moment), at full height on a full page the exact value.
+  private func measured(_ visible: CGFloat) {
+    heights.visible = visible
+    guard visible > 100 else { return }
+    if path.isEmpty, detent == Self.half {
+      heights.half = min(heights.half ?? visible, visible)
+    } else if !path.isEmpty, detent == .large {
+      heights.full = max(heights.full ?? 0, visible)
+    }
+    let full = max(((heights.half ?? 0) * 2).rounded(.down), heights.full ?? 0)
+    if full > 0, fullHeight.map({ abs($0 - full) > 0.5 }) ?? true { fullHeight = full }
+    settleSpare()
+  }
+
+  /// The profile card's spare room, taken only while the first page shows at half height.
+  private func settleSpare() {
+    guard path.isEmpty, detent == Self.half, let half = heights.half, abs(heights.visible - half) < 1,
+      let target = heights.spare
+    else { return }
+    let settled = typeSize.isAccessibilitySize ? 0 : target
+    if abs(settled - spare) > 0.5 { spare = settled }
   }
 
   /// Every push and pop goes through here: the page changes and the sheet takes that page's height together, in
@@ -127,16 +157,12 @@ struct SettingsView: View {
       .scrollDisabled(!typeSize.isAccessibilitySize)
       // The room the list leaves empty at half height goes to the profile card (what it already has counted in, so
       // it settles in one step); at Dynamic Type's accessibility sizes the compact row, and the list scrolls.
-      .onScrollGeometryChange(for: [CGFloat].self) {
-        [$0.containerSize.height, $0.containerSize.height - $0.contentInsets.top - $0.contentInsets.bottom - $0.contentSize.height]
+      // The part below the sheet's edge is in the list's bottom inset, so this is the room the sheet shows.
+      .onScrollGeometryChange(for: CGFloat.self) {
+        $0.containerSize.height - $0.contentInsets.top - $0.contentInsets.bottom - $0.contentSize.height
       } action: { _, room in
-        // Only at half height: while a pop shrinks the sheet back, the taller moment is not counted.
-        guard path.isEmpty, detent == .medium, room[0] > 100,
-          room[0] <= (halfHeight ?? room[0]) + 0.5
-        else { return }
-        halfHeight = room[0]
-        let settled = typeSize.isAccessibilitySize ? 0 : max(0, spare + room[1])
-        if abs(settled - spare) > 0.5 { spare = settled }
+        heights.spare = max(0, spare + room)
+        settleSpare()
       }
       // No title and no close button: only the system's grabber, to pull the sheet down and away. The pages pushed
       // in show their bar with the back button.
@@ -169,6 +195,9 @@ struct SettingsView: View {
         .listSectionSpacing(.compact)
       }
     }
+    .frame(height: fullHeight, alignment: .top)
+    .frame(maxHeight: .infinity, alignment: .top)
+    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measured($0) }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
@@ -177,7 +206,7 @@ struct SettingsView: View {
     }
     // Every page scrolls only when it does not fit.
     .scrollBounceBehavior(.basedOnSize)
-    .presentationDetents([.medium, .large], selection: $detent)
+    .presentationDetents([Self.half, .large], selection: $detent)
     // Dragged to the other height by hand, the sheet goes back to the page's own once let go (the selection
     // changes only when the drag ends).
     .onChange(of: detent) { _, now in
@@ -194,4 +223,13 @@ struct SettingsView: View {
       hasRecoveryKey = available
     }
   }
+}
+
+/// The sheet's heights as measured, kept out of the view's state so a sheet on the move redraws nothing.
+@MainActor private final class SheetHeights {
+  var visible: CGFloat = 0
+  var half: CGFloat?
+  var full: CGFloat?
+  /// The profile card's spare room as last measured.
+  var spare: CGFloat?
 }
