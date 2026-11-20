@@ -373,8 +373,15 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
             else { onCode(text); submitTyped(text) }
         }
     }
+    // Many accounts, or the key options opened, can outgrow the screen: the sheet grows to full height at most and the
+    // card scrolls inside it; opened, the passkey and the key field come into view.
+    val scroll = rememberScrollState()
+    LaunchedEffect(open) {
+        if (open) { kotlinx.coroutines.delay(400); scroll.animateScrollTo(scroll.maxValue) }
+    }
     Column(
-        Modifier.fillMaxWidth().navigationBarsPadding().imePadding().then(if (still) Modifier else Modifier.animateContentSize())
+        Modifier.fillMaxWidth().navigationBarsPadding().imePadding().verticalScroll(scroll)
+            .then(if (still) Modifier else Modifier.animateContentSize())
             .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -442,16 +449,17 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                             }
                         }
                     },
+                    // As the key field below it: the passkey and the recovery key are two equal options.
                     enabled = !busy, shape = CircleShape,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
-                        disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f)),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White,
+                        disabledContainerColor = Color.White.copy(alpha = 0.16f), disabledContentColor = Color.White.copy(alpha = 0.6f)),
                 ) {
-                    if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Black, strokeWidth = 2.5.dp)
+                    if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
                     else {
                         Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(22.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text(copy(ProductText.PASSKEY), fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                        Text(copy(ProductText.PASSKEY), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
                 Row(Modifier.clearAndSetSemantics {}, verticalAlignment = Alignment.CenterVertically) {
@@ -479,7 +487,7 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                         keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { submitTyped(code) }),
                     decorationBox = { field ->
-                        Row(Modifier.heightIn(min = 52.dp).background(Color.White.copy(alpha = 0.14f), CircleShape)
+                        Row(Modifier.heightIn(min = 52.dp).background(Color.White.copy(alpha = 0.16f), CircleShape)
                             .padding(start = 18.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.weight(1f)) {
                                 if (code.isEmpty()) Text(placeholder, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,

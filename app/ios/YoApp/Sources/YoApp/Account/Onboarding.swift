@@ -557,64 +557,22 @@ private struct SignInCard: View {
   private var motion: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
 
   var body: some View {
-    VStack(spacing: 12) {
-      Text(ProductText.signIn.english)
-        .font(.yo(28))
-        .padding(.top, 28)
-        .padding(.bottom, 2)
-      if synced.isEmpty {
-        Text(ProductText.noAccountInICloud.english)
-          .font(.subheadline.weight(.semibold))
-          .multilineTextAlignment(.center)
-          .opacity(0.85)
-          .padding(.horizontal, 16)
-          .frame(maxWidth: .infinity, minHeight: 44)
-          .background(.white.opacity(0.16), in: .capsule)
-      } else {
-        ForEach(synced) { account($0) }
+    // Many accounts, or the key options opened, can outgrow the screen: the sheet grows to full height at most and
+    // the card scrolls inside it.
+    ScrollViewReader { proxy in
+      ScrollView {
+        content
       }
-      Button {
-        withAnimation(motion) { opened = !open }
-      } label: {
-        // As the welcome's "Got Yo? Sign In": the quiet question, then the action.
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-          Text(ProductText.notListed.english).font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.85))
-          Text(ProductText.useAKey.english).font(.yo(18))
+      .scrollBounceBehavior(.basedOnSize)
+      .onChange(of: open) { _, now in
+        guard now else { return }
+        // Opened: the passkey and the key field come into view once the sheet has grown.
+        Task {
+          try? await Task.sleep(for: .milliseconds(400))
+          withAnimation(motion) { proxy.scrollTo(Self.options, anchor: .bottom) }
         }
-        .lineLimit(1)
-        .fixedSize()
-        .frame(minHeight: 36)
-        .contentShape(.rect)
       }
-      .buttonStyle(.plain)
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel("Not listed? Use a key: passkey or recovery key")
-      .accessibilityAddTraits(.isButton)
-      .accessibilityValue(open ? "Expanded" : "Collapsed")
-      .accessibilityHint(open ? "Collapses" : "Expands")
-      if open {
-        VStack(spacing: 12) {
-          passkeyButton
-          HStack(spacing: 10) {
-            line
-            Text(ProductText.or.english).font(.subheadline.weight(.semibold)).opacity(0.7)
-            line
-          }
-          .accessibilityHidden(true)
-          keyField
-        }
-        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
-      }
-      Note(keyProblem ?? problem)
     }
-    .padding(.horizontal, 24)
-    .padding(.bottom, 12)
-    .fixedSize(horizontal: false, vertical: true)
-    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { new in
-      if abs(new - height) > 1 { height = new }
-    }
-    .frame(maxHeight: .infinity, alignment: .top)
     .foregroundStyle(.white)
     .task {
       for _ in 0..<5 where synced.isEmpty {
@@ -672,6 +630,70 @@ private struct SignInCard: View {
     .preferredColorScheme(.dark)
   }
 
+  private static let options = "options"
+
+  /// The card itself; its height sets the sheet's (a detent above the screen is held at full height).
+  private var content: some View {
+    VStack(spacing: 12) {
+      Text(ProductText.signIn.english)
+        .font(.yo(28))
+        .padding(.top, 28)
+        .padding(.bottom, 2)
+      if synced.isEmpty {
+        Text(ProductText.noAccountInICloud.english)
+          .font(.subheadline.weight(.semibold))
+          .multilineTextAlignment(.center)
+          .opacity(0.85)
+          .padding(.horizontal, 16)
+          .frame(maxWidth: .infinity, minHeight: 44)
+          .background(.white.opacity(0.16), in: .capsule)
+      } else {
+        ForEach(synced) { account($0) }
+      }
+      Button {
+        withAnimation(motion) { opened = !open }
+      } label: {
+        // As the welcome's "Got Yo? Sign In": the quiet question, then the action.
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+          Text(ProductText.notListed.english).font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.85))
+          Text(ProductText.useAKey.english).font(.yo(18))
+        }
+        .lineLimit(1)
+        .fixedSize()
+        .frame(minHeight: 36)
+        .contentShape(.rect)
+      }
+      .buttonStyle(.plain)
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel("Not listed? Use a key: passkey or recovery key")
+      .accessibilityAddTraits(.isButton)
+      .accessibilityValue(open ? "Expanded" : "Collapsed")
+      .accessibilityHint(open ? "Collapses" : "Expands")
+      if open {
+        VStack(spacing: 12) {
+          passkeyButton
+          HStack(spacing: 10) {
+            line
+            Text(ProductText.or.english).font(.subheadline.weight(.semibold)).opacity(0.7)
+            line
+          }
+          .accessibilityHidden(true)
+          keyField
+        }
+        .id(Self.options)
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+      }
+      Note(keyProblem ?? problem)
+    }
+    .padding(.horizontal, 24)
+    .padding(.bottom, 12)
+    .fixedSize(horizontal: false, vertical: true)
+    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { new in
+      if abs(new - height) > 1 { height = new }
+    }
+  }
+
   private static let mismatch = "That doesn’t match a recovery key. Check it and try again."
 
   private func account(_ item: SyncedAccount.Item) -> some View {
@@ -705,17 +727,19 @@ private struct SignInCard: View {
     } label: {
       Group {
         if signingInBy == .passkey {
-          ProgressView()
+          ProgressView().tint(.white)
         } else {
           Label(ProductText.passkey.english, systemImage: "person.badge.key")
-            .font(.system(.title3, weight: .semibold))
+            .font(.body.weight(.semibold))
         }
       }
-      .frame(maxWidth: .infinity, minHeight: 40)
+      .foregroundStyle(.white)
+      .frame(maxWidth: .infinity, minHeight: 48)
+      .background(.white.opacity(0.16), in: .capsule)
+      .contentShape(.capsule)
     }
-    .buttonStyle(.glassProminent)
-    .tint(.white)
-    .foregroundStyle(.black)
+    // As the key field beside it: the passkey and the recovery key are two equal options.
+    .buttonStyle(.plain)
     .disabled(busy)
   }
 
@@ -773,7 +797,7 @@ private struct SignInCard: View {
     }
     .padding(.trailing, 6)
     .frame(minHeight: 48)
-    .background(.white.opacity(0.14), in: .capsule)
+    .background(.white.opacity(0.16), in: .capsule)
     .disabled(busy)
   }
 
