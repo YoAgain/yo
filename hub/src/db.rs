@@ -283,9 +283,17 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
-    for table in
-        ["backups", "handles", "account_keys", "storage", "contact_keys", "profile_commitments", "blobs", "blob_quota"]
-    {
+    for table in [
+        "backups",
+        "handles",
+        "account_keys",
+        "storage",
+        "contact_keys",
+        "profile_commitments",
+        "blobs",
+        "blob_quota",
+        "request_hours",
+    ] {
         tx.execute(&format!("DELETE FROM {table} WHERE user_id = ?1"), [user])?;
     }
     tx.execute("DELETE FROM reports WHERE reported_id = ?1", [user])?;
@@ -896,6 +904,20 @@ impl Db {
         )?
         .execute(params![hour, n as i64])?;
         conn.prepare_cached("DELETE FROM deliveries_hourly WHERE hour < ?1")?.execute([hour - 8 * 24])?;
+        Ok(())
+    }
+
+    /// One signed request (4.10) a sender sent, counted in its hour; kept 25 hours, for the operator's Users page
+    /// ("Requests 24h"). Only requests: a contact's delivery is sealed and never counted by sender.
+    pub fn count_request(&self, sender: &UserId, now: u64) -> rusqlite::Result<()> {
+        let hour = (now / 3_600_000) as i64;
+        let conn = self.conn();
+        conn.prepare_cached(
+            "INSERT INTO request_hours (user_id, hour, n) VALUES (?1, ?2, 1)
+             ON CONFLICT(user_id, hour) DO UPDATE SET n = n + 1",
+        )?
+        .execute(params![sender, hour])?;
+        conn.prepare_cached("DELETE FROM request_hours WHERE hour < ?1")?.execute([hour - 25])?;
         Ok(())
     }
 

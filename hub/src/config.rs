@@ -16,6 +16,17 @@ pub struct Limits {
     pub deliver_per_ip_minute: u32,
     /// Envelopes a device holds before deliveries to its user are refused; no rate a stranger could spend.
     pub max_pending_per_device: u32,
+    /// Envelope bytes sealed deliveries bring one recipient, from everyone, as Signal's inbound message bytes: a
+    /// bucket of `recipient_bytes_burst`, `recipient_bytes_per_hour` back an hour (spec 6.6); beyond, `429` with
+    /// `Retry-After` for that recipient only. It bounds the inflow, never what waits nor fetching: a phone off for a
+    /// week still gets everything. Blobs count by their own upload limits.
+    pub recipient_bytes_burst: u64,
+    pub recipient_bytes_per_hour: u64,
+    /// One push per device at most every this many ms (spec 6.7): what comes meanwhile goes in one push at the end
+    /// of the window; a quiet device's first push goes at once. A contact's delivery (sealed) and a request's (signed,
+    /// 4.10) each have their own window.
+    pub push_window_contact_ms: u64,
+    pub push_window_request_ms: u64,
     /// Bytes stored without identity, by address: envelopes stay up to `envelope_ttl_days`.
     pub anonymous_bytes_per_ip_hour: u64,
     /// Deliveries are refused (`507`) while the database's disk has less than this free.
@@ -80,6 +91,10 @@ impl Default for Limits {
             signed_per_device_minute: 1200,
             deliver_per_ip_minute: 1000,
             max_pending_per_device: 5000,
+            recipient_bytes_burst: 50 * MIB,
+            recipient_bytes_per_hour: 50 * MIB,
+            push_window_contact_ms: 1000,
+            push_window_request_ms: 10_000,
             anonymous_bytes_per_ip_hour: 64 * MIB,
             db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
@@ -115,6 +130,10 @@ impl Limits {
             identity_lookup_per_device_day: u32::MAX,
             signed_per_device_minute: u32::MAX,
             deliver_per_ip_minute: u32::MAX,
+            recipient_bytes_burst: u64::MAX,
+            // Every push at once: tests count them one by one (pacing has its own tests).
+            push_window_contact_ms: 0,
+            push_window_request_ms: 0,
             anonymous_bytes_per_ip_hour: u64::MAX,
             db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,

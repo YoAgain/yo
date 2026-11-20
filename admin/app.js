@@ -1099,8 +1099,10 @@ if (document.body.classList.contains("login")) {
       cell(tr, u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : el("span", "muted", "–"));
       cell(tr, num(u.devices), "num");
       cell(tr, u.queued ? num(u.queued) : "–", "num muted");
+      // Signed requests to strangers in 24 h (spec 4.10): a flood by a stranger stands out; contacts' are never counted.
+      cell(tr, u.requests_24h ? num(u.requests_24h) : "–", u.requests_24h >= 100 ? "num bad" : "num muted");
     }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 9;
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 10;
   };
 
   // ---- reports: handled is kept by the admin page (done.json); ticked in a user's details
@@ -1121,7 +1123,7 @@ if (document.body.classList.contains("login")) {
     ["Groups", "group", ["zk_groups"]],
     ["Backup", "disk", ["backups"]],
     ["Support and crashes", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_days", "diagnostic_seen", "diagnostic_installs", "todos"]],
-    ["Stats", "chart", ["deliveries_hourly*", "events"]],
+    ["Stats", "chart", ["deliveries_hourly*", "events", "request_hours"]],
   ];
   Object.assign(ICONS, {
     user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
@@ -1178,6 +1180,7 @@ if (document.body.classList.contains("login")) {
     reports: "Users reported by installs (random id, no account), latest per pair",
     settings: "Hub switches, such as name reservation on/off",
     deliveries_hourly: "Deliveries per hour, a count only, 8 days",
+    request_hours: "Signed requests (to strangers) per sender and hour, kept 25 hours",
     _litestream_lock: "Litestream replication bookkeeping (?)",
     _litestream_seq: "Litestream replication bookkeeping (?)",
   };

@@ -163,6 +163,8 @@ pub struct Hub {
     live: tokio::sync::broadcast::Sender<Event>,
     /// Set when the hub shuts down: the live streams end, so a graceful shutdown does not wait for them.
     closing: tokio::sync::watch::Sender<bool>,
+    /// Each device's last push and the one held for the end of its window (spec 6.7, `mail::Pushes`).
+    pushes: Mutex<mail::Pushes>,
     /// Long polls waiting for mail, by device.
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
@@ -226,6 +228,7 @@ impl Hub {
             bot_media: config.bots.iter().map(|_| AtomicU64::new(0)).collect(),
             live: tokio::sync::broadcast::channel(LIVE_QUEUE).0,
             closing: tokio::sync::watch::channel(false).0,
+            pushes: Mutex::default(),
             waiting: Mutex::default(),
             fetching: Arc::default(),
             limiter: Limiter::default(),
@@ -328,6 +331,7 @@ impl Hub {
         loop {
             every.tick().await;
             self.replay.forget_expired(now_ms());
+            self.forget_pushes();
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
             let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;
             if minutes.is_multiple_of(60) {
@@ -875,7 +879,16 @@ mod tests {
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         let runtime = tokio::runtime::Handle::current();
         hub.deliveries
-            .send(Delivery { user: [1; 16], devices_hash, envelope, urgent: true, from_bot: false, stored, runtime })
+            .send(Delivery {
+                user: [1; 16],
+                devices_hash,
+                envelope,
+                urgent: true,
+                from_bot: false,
+                request: false,
+                stored,
+                runtime,
+            })
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), notified).await.expect("its long poll answers");
         assert_eq!(hub.db.fetch(&[1; 16], 10).unwrap().len(), 1);
@@ -892,7 +905,16 @@ mod tests {
         sealed[0] = yo_wire::envelope::SEALED;
         let (envelope, runtime) = (Bytes::from(sealed), tokio::runtime::Handle::current());
         hub.deliveries
-            .send(Delivery { user: [1; 16], devices_hash, envelope, urgent: true, from_bot: true, stored, runtime })
+            .send(Delivery {
+                user: [1; 16],
+                devices_hash,
+                envelope,
+                urgent: true,
+                from_bot: true,
+                request: false,
+                stored,
+                runtime,
+            })
             .unwrap();
         assert!(matches!(outcome.await.unwrap(), Ok(Delivered::Stored(_))));
         let yos: Vec<_> = counted(&hub).into_iter().filter(|(kind, _)| kind.contains("yo")).collect();
@@ -929,5 +951,151 @@ mod tests {
         let body = axum::body::to_bytes(answer.into_body(), usize::MAX).await.unwrap();
         assert_eq!(body.len(), 1000);
         assert_eq!(hub.under_way(), (0, 0), "sent");
+    }
+
+    fn apns_hub(limits: config::Limits) -> (Arc<Hub>, Arc<push::Recorder>) {
+        let apns = config::ApnsConfig {
+            key_pem: include_str!("../../tests/fixtures/test-apns.p8").into(),
+            key_id: "KEYID12345".into(),
+            team_id: "TEAMID1234".into(),
+            topic: "co.justyo.app".into(),
+        };
+        let recorder = Arc::new(push::Recorder::default());
+        let hub = Hub::new(Config { apns: Some(apns), limits, ..Config::for_tests() }, recorder.clone()).unwrap();
+        (hub, recorder)
+    }
+
+    /// LEO with one device that gets pushes; the hash a delivery to it names.
+    fn leo(hub: &Hub, app: Option<&str>) -> [u8; 32] {
+        let device = NewDevice {
+            device_id: [1; 16],
+            device_key: [1; 32],
+            auth_key: [1; 32],
+            registration_id: 1,
+            push_platform: api::PUSH_APNS,
+            push_token: b"a1b2c3".to_vec(),
+            app: app.map(str::to_owned),
+        };
+        let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
+        yo_wire::devices::hash(&[1; 32], &[[1; 32]])
+    }
+
+    fn pushes(recorder: &push::Recorder) -> usize {
+        recorder.sent.lock().unwrap().iter().filter(|r| r.url.contains("/3/device/")).count()
+    }
+
+    /// Spec 6.7: one push per device per window; a quiet device's at once, what comes within the window in one push
+    /// at its end (urgent if any was); a contact's shorter window ends a request's sooner.
+    #[tokio::test]
+    async fn pushes_to_a_device_are_paced_per_window() {
+        let (hub, recorder) = apns_hub(config::Limits::unlimited());
+        let wake = || db::Wake {
+            device_id: [1; 16],
+            push_platform: api::PUSH_APNS,
+            push_token: b"a1b2c3".to_vec(),
+            bot: false,
+        };
+        let runtime = tokio::runtime::Handle::current();
+        let window = Duration::from_millis(400);
+        let settle = || tokio::time::sleep(Duration::from_millis(60));
+        hub.push_paced(wake(), false, window, &runtime);
+        settle().await;
+        assert_eq!(pushes(&recorder), 1, "a quiet device's first push goes at once");
+        for _ in 0..20 {
+            hub.push_paced(wake(), false, window, &runtime);
+        }
+        hub.push_paced(wake(), true, window, &runtime);
+        settle().await;
+        assert_eq!(pushes(&recorder), 1, "held for the end of the window");
+        tokio::time::sleep(window).await;
+        assert_eq!(pushes(&recorder), 2, "one push for all that came within it");
+        let last = recorder.sent.lock().unwrap().last().cloned().unwrap();
+        assert!(last.headers.iter().any(|(k, v)| k == "apns-priority" && v == "10"), "urgent, as one of them was");
+        tokio::time::sleep(window).await;
+        hub.push_paced(wake(), false, window, &runtime);
+        settle().await;
+        assert_eq!(pushes(&recorder), 3, "quiet again: at once");
+
+        // A request's window (long) held, then a contact's delivery (short window): it goes at the short one's end.
+        tokio::time::sleep(window).await;
+        hub.push_paced(wake(), false, window, &runtime);
+        hub.push_paced(wake(), false, Duration::from_secs(30), &runtime);
+        settle().await;
+        assert_eq!(pushes(&recorder), 4);
+        hub.push_paced(wake(), false, Duration::from_millis(100), &runtime);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(pushes(&recorder), 5, "the contact's window ends it");
+        hub.forget_pushes();
+    }
+
+    /// Spec 6.6: the envelope bytes sealed deliveries bring one inbox, from every address together (Signal's
+    /// inbound message bytes): a burst, then their rate an hour; beyond, `429` naming the recipient with
+    /// `Retry-After` in whole minutes (the sender's outbox keeps them). What waits is not capped; fetching is never
+    /// limited; a bot account's inbox is not limited.
+    #[tokio::test]
+    async fn a_recipients_inbound_bytes_are_limited_from_everyone() {
+        use axum::{body::Body, extract::ConnectInfo, http::Request};
+        use tower::ServiceExt;
+        for bot in [false, true] {
+            let limits = config::Limits {
+                recipient_bytes_burst: 3 * 1024,
+                recipient_bytes_per_hour: 60 * 1024,
+                ..config::Limits::unlimited()
+            };
+            let bots = if bot { vec![("YoGPT".to_owned(), [1; 16])] } else { Vec::new() };
+            let hub =
+                Hub::new(Config { bots, limits, ..Config::for_tests() }, Arc::new(push::Recorder::default())).unwrap();
+            let hash = leo(&hub, None);
+            let deliver = |i: u8, size: usize| {
+                let mut sealed = vec![i; size];
+                sealed[0] = yo_wire::envelope::SEALED;
+                let mut request = Request::post(api::deliver_path(&[1; 16]))
+                    .header(api::HEADER_DEVICES, yo_wire::b64(&hash))
+                    .body(Body::from(sealed))
+                    .unwrap();
+                request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([192, 0, 2, i], 1))));
+                hub.router().oneshot(request)
+            };
+            for i in 0..3 {
+                assert_eq!(deliver(i, 1024).await.unwrap().status(), 202, "the burst, from three addresses");
+            }
+            let limited = deliver(9, 1024).await.unwrap();
+            if bot {
+                assert_eq!(limited.status(), 202, "a bot's inbox takes from everyone");
+                continue;
+            }
+            assert_eq!(limited.status(), 429);
+            assert_eq!(limited.headers()["retry-after"], "60", "whole minutes: nothing of the inbox");
+            let body = axum::body::to_bytes(limited.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(&body[..], b"recipient 60", "the client holds this recipient only");
+            // 60 KiB an hour: 1 KiB back in a minute; a small one after a moment's refill only if a token is back.
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            assert_eq!(deliver(10, 1024).await.unwrap().status(), 429, "a second gives 17 bytes back");
+            assert_eq!(hub.db.fetch(&[1; 16], 100).unwrap().len(), 3, "all taken are kept, fetching is free");
+        }
+    }
+
+    /// The operator's "Requests 24h": a signed request counted by its sender in its hour, kept 25 hours.
+    #[test]
+    fn signed_requests_are_counted_by_sender_for_a_day() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let hour = 3_600_000;
+        hub.db.count_request(&[5; 16], 100 * hour).unwrap();
+        hub.db.count_request(&[5; 16], 100 * hour + 1).unwrap();
+        hub.db.count_request(&[6; 16], 120 * hour).unwrap();
+        let rows = |hub: &Hub| -> Vec<(Vec<u8>, i64, i64)> {
+            hub.db
+                .conn()
+                .prepare("SELECT user_id, hour, n FROM request_hours ORDER BY hour")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows(&hub), vec![(vec![5; 16], 100, 2), (vec![6; 16], 120, 1)]);
+        hub.db.count_request(&[6; 16], 126 * hour).unwrap();
+        assert_eq!(rows(&hub), vec![(vec![6; 16], 120, 1), (vec![6; 16], 126, 1)], "older than 25 hours: gone");
     }
 }

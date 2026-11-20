@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS reports (
     PRIMARY KEY (reporter, reported_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
+-- Signed requests (4.10) each sender sent, per hour: a count, nothing of to whom; kept 25 hours, for the operator's
+-- Users page (strangers' floods). Sealed deliveries are never counted by sender (6.6).
+CREATE TABLE IF NOT EXISTS request_hours (
+    user_id BLOB NOT NULL,
+    hour INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (user_id, hour)
+) WITHOUT ROWID;
 -- Deliveries the hub took, per hour: a count, nothing of who or to whom (6.6); kept 8 days, for the operator's page.
 CREATE TABLE IF NOT EXISTS deliveries_hourly (
     hour INTEGER PRIMARY KEY,

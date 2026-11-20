@@ -9,8 +9,9 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use yo_wire::api::{self, HEADER_DEVICES};
 use yo_wire::limits::{self, MAX_INBOX_FETCH};
@@ -34,10 +35,21 @@ pub(crate) struct Delivery {
     pub urgent: bool,
     /// From the operator's bots (the server's own services, or a bot account's request): `bot-yo`, not `yo-in`.
     pub from_bot: bool,
+    /// A request (signed, 4.10): its pushes are paced by the requests' window, a contact's by the contacts'.
+    pub request: bool,
     pub stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
     /// Where its pushes are sent from.
     pub runtime: tokio::runtime::Handle,
 }
+
+/// A device's pushes (spec 6.7): when it was pushed last, and the one held for the end of its window: the device to
+/// push (its latest token), whether any delivery it stands for was urgent, and when it is due.
+pub(crate) struct Pushed {
+    at: Instant,
+    held: Option<(db::Wake, bool, Instant)>,
+}
+
+pub(crate) type Pushes = HashMap<DeviceId, Pushed>;
 
 /// Group commit: what has queued up, in one transaction; then wakes the devices and answers each.
 pub(crate) fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hub: Weak<Hub>) {
@@ -65,7 +77,7 @@ pub(crate) fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, mo
                             },
                             1,
                         );
-                        hub.woken(std::mem::take(devices), delivery.urgent, &delivery.runtime);
+                        hub.woken(std::mem::take(devices), delivery.urgent, delivery.request, &delivery.runtime);
                     }
                     let _ = delivery.stored.send(Ok(outcome));
                 }
@@ -109,16 +121,94 @@ impl Hub {
         Waiter { hub: self, device, notify }
     }
 
-    /// What follows a stored delivery: its devices' long polls answer, and each is pushed (spec 6.7).
-    fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, urgent: bool, runtime: &tokio::runtime::Handle) {
+    /// What follows a stored delivery: its devices' long polls answer, and each is pushed (spec 6.7), paced.
+    fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, urgent: bool, request: bool, runtime: &tokio::runtime::Handle) {
+        let limits = &self.config.limits;
+        let window =
+            Duration::from_millis(if request { limits.push_window_request_ms } else { limits.push_window_contact_ms });
         for wake in devices {
             if let Some(notify) = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).get(&wake.device_id) {
                 notify.notify_waiters();
             }
             if !wake.push_token.is_empty() {
-                runtime.spawn(self.clone().push(wake, urgent));
+                self.push_paced(wake, urgent, window, runtime);
             }
         }
+    }
+
+    /// One push per device per `window` at most (spec 6.7): a quiet device's goes at once; what comes within the
+    /// window after it goes as one push at its end. The push says only "there is mail": the device fetches all.
+    pub(crate) fn push_paced(
+        self: &Arc<Self>,
+        wake: db::Wake,
+        urgent: bool,
+        window: Duration,
+        runtime: &tokio::runtime::Handle,
+    ) {
+        let now = Instant::now();
+        let device = wake.device_id;
+        let mut pushes = self.pushes.lock().unwrap_or_else(PoisonError::into_inner);
+        let due = match pushes.get_mut(&device) {
+            Some(pushed) => {
+                let due = pushed.at + window;
+                match &mut pushed.held {
+                    // Joins the push held; due sooner if its own window ends sooner (a contact's after a request's).
+                    Some((held, was_urgent, held_due)) => {
+                        *held = wake;
+                        *was_urgent |= urgent;
+                        if due >= *held_due {
+                            return;
+                        }
+                        *held_due = due.max(now);
+                        Some(*held_due)
+                    }
+                    None if now < due => {
+                        pushed.held = Some((wake, urgent, due));
+                        Some(due)
+                    }
+                    None => {
+                        pushed.at = now;
+                        drop(pushes);
+                        runtime.spawn(self.clone().push(wake, urgent));
+                        return;
+                    }
+                }
+            }
+            None => {
+                pushes.insert(device, Pushed { at: now, held: None });
+                drop(pushes);
+                runtime.spawn(self.clone().push(wake, urgent));
+                return;
+            }
+        };
+        drop(pushes);
+        let (hub, due) = (self.clone(), due.unwrap_or(now));
+        runtime.spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+            let held = {
+                let mut pushes = hub.pushes.lock().unwrap_or_else(PoisonError::into_inner);
+                pushes.get_mut(&device).and_then(|pushed| match &pushed.held {
+                    // Only the timer of the push held now: one made due sooner has sent it already.
+                    Some((_, _, held_due)) if *held_due == due => {
+                        pushed.at = Instant::now();
+                        pushed.held.take()
+                    }
+                    _ => None,
+                })
+            };
+            if let Some((wake, urgent, _)) = held {
+                hub.push(wake, urgent).await;
+            }
+        });
+    }
+
+    /// Devices pushed over a minute ago with nothing held: a push to them goes at once anyway.
+    pub(crate) fn forget_pushes(&self) {
+        let now = Instant::now();
+        self.pushes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, pushed| pushed.held.is_some() || now.duration_since(pushed.at) < Duration::from_secs(60));
     }
 
     pub(crate) async fn push(self: Arc<Self>, wake: db::Wake, urgent: bool) {
@@ -235,6 +325,17 @@ pub(crate) async fn post_envelope(
     // A request past its buckets waits, for this recipient only (`429` with `Retry-After`); a bot account's never.
     let request = request.filter(|sender| hub.bot(sender).is_none());
     let from_bot = hub.own_service(peer, &headers) || sender.is_some_and(|sender| hub.bot(&sender).is_some());
+    // A contact's delivery: the envelope bytes into the recipient's inbox from everyone (6.6, Signal's inbound
+    // message bytes), not what waits; a bot's inbox and the server's own services pass. `429` naming the recipient,
+    // `Retry-After` in whole minutes: the answer of every limit, telling nothing of the inbox.
+    if request.is_none() && !from_bot && hub.bot(&user).is_none() {
+        let limits = &hub.config.limits;
+        let key = format!("inbound:{}", yo_wire::b64(&user));
+        let (size, per) = (limits.recipient_bytes_burst, limits.recipient_bytes_per_hour);
+        hub.limiter
+            .take_shaped(key, body.len() as u64, size, per, crate::request::HOUR)
+            .map_err(|ms| error::limited("recipient", Some(ms.div_ceil(60_000).clamp(1, 60) * 60_000)))?;
+    }
     if let Some(sender) = &request {
         hub.requests.check(sender, &user, hub.clock_ms()).map_err(|(scope, ms)| error::limited(scope, Some(ms)))?;
     }
@@ -244,13 +345,27 @@ pub(crate) async fn post_envelope(
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
     hub.deliveries
-        .try_send(Delivery { user, devices_hash, envelope: body.clone(), urgent, from_bot, stored, runtime })
+        .try_send(Delivery {
+            user,
+            devices_hash,
+            envelope: body.clone(),
+            urgent,
+            from_bot,
+            request: request.is_some(),
+            stored,
+            runtime,
+        })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
         Delivered::Stored(_) => {
             if let Some(sender) = request {
-                hub.requests.take(&sender, &user, hub.clock_ms());
+                let now = hub.clock_ms();
+                hub.requests.take(&sender, &user, now);
+                // Counted by its sender (the operator's "Requests 24h"); a contact's delivery never is.
+                if let Ok(Err(error)) = hub.blocking(move |hub| hub.db.count_request(&sender, now)).await {
+                    eprintln!("yo-hub: count request: {error}");
+                }
             }
             Ok((StatusCode::ACCEPTED, Vec::new()))
         }

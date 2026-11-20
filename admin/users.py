@@ -5,7 +5,8 @@ page serves after its login. Python's standard library only.
 
 Per user: the name (as the hub keeps it, its skeleton), the user id, when it signed up, when one of its devices was
 last seen (to the day: the hub writes it once a day, spec 6.4), its devices, whether they get pushes, whether the
-account is secured (a backup record) and how many messages wait for it. No IP addresses: the hub never stores them.
+account is secured (a backup record), how many messages wait for it and how many signed requests (to strangers,
+spec 4.10) it sent in the last 24 hours. No IP addresses: the hub never stores them.
 """
 
 import json
@@ -258,6 +259,14 @@ def hub(name: str, path: str) -> dict:
             for uid, created, name, devices, seen, platform, push_token, backup, queued, app
             in db.execute(USERS if has_app else USERS.replace("max(d.app)", "NULL"), (LIMIT,))
         ], [])
+        # Signed requests (spec 4.10) each user sent in the last 24 hours: strangers' floods. The hub counts requests
+        # only, per hour (request_hours, kept 25 hours); a contact's delivery is sealed and never counted by sender.
+        hour = now // 3_600_000
+        requests = dict(part("requests_24h", lambda: db.execute(
+            "SELECT user_id, sum(n) FROM request_hours WHERE hour > ? GROUP BY user_id", (hour - 24,)).fetchall()
+            if has_table(db, "request_hours") else [], []))
+        for u in users:
+            u["requests_24h"] = requests.get(bytes.fromhex(u["id"]), 0)
         # Each user's devices, for the user panel: when added, last seen (to the day), push service, app build.
         device_list = part("device_list", lambda: [
             (uid.hex(), {"created": created, "last_seen": seen, "push": PUSH.get(platform, str(platform)) if has_token else None,

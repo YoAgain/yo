@@ -46,6 +46,29 @@ impl Limiter {
     }
 }
 
+impl Limiter {
+    /// `cost` tokens from the bucket `key`, which holds `size` and gets `per` back every `window`; else none, and
+    /// the ms until there are enough. `u64::MAX`: no limit.
+    pub fn take_shaped(&self, key: String, cost: u64, size: u64, per: u64, window: Duration) -> Result<(), u64> {
+        if size == u64::MAX {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let rate = per.max(1) as f64 / window.as_secs_f64();
+        let cost = (cost as f64).min(size as f64);
+        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        let (tokens, at) = buckets.entry(key).or_insert((size as f64, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(size as f64);
+        *at = now;
+        if *tokens >= cost {
+            *tokens -= cost;
+            Ok(())
+        } else {
+            Err((((cost - *tokens) / rate) * 1000.0).ceil() as u64)
+        }
+    }
+}
+
 /// Places under way by key: a device's inbox requests, a user's uploads, a blob id's upload.
 pub type Places = Mutex<HashMap<[u8; 16], u32>>;
 
