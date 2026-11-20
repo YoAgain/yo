@@ -48,28 +48,36 @@ import XCTest
     let op = c["op"] as? String ?? ""
     switch op {
     case "account-layout":
-      // Start on Account; the rows in order, then each recovery screen and Contacts.
-      let ids = ["account.contacts", "security.accountSync", "security.recoveryKey", "security.passkey"]
-      let rows = ids.map { app.descendants(matching: .any).matching(identifier: $0).firstMatch }
-      for (id, row) in zip(ids, rows) {
-        guard row.waitForExistence(timeout: 5) else { throw Failure(description: "missing \(id)") }
+      // Start on Account; its rows in order, then Account Security's rows, each recovery screen and Contacts.
+      func rowsInOrder(_ ids: [String]) throws -> [XCUIElement] {
+        let rows = ids.map { app.descendants(matching: .any).matching(identifier: $0).firstMatch }
+        for (id, row) in zip(ids, rows) {
+          guard row.waitForExistence(timeout: 5) else { throw Failure(description: "missing \(id)") }
+        }
+        guard zip(rows, rows.dropFirst()).allSatisfy({ $0.frame.minY < $1.frame.minY }) else {
+          throw Failure(description: "row order \(ids)")
+        }
+        return rows
       }
-      guard zip(rows, rows.dropFirst()).allSatisfy({ $0.frame.minY < $1.frame.minY }) else {
-        throw Failure(description: "Account row order")
-      }
-      for (row, title) in [(rows[2], "Your Recovery Key"), (rows[3], "Passkey")] {
+      let accountIds = ["account.contacts", "account.security", "account.signOut"]
+      let securityIds = ["security.accountSync", "security.recoveryKey", "security.passkey"]
+      let account = try rowsInOrder(accountIds)
+      account[1].tap()
+      let security = try rowsInOrder(securityIds)
+      for (row, title) in [(security[1], "Your Recovery Key"), (security[2], "Passkey")] {
         row.tap()
         guard app.staticTexts[title].waitForExistence(timeout: 5) else {
           throw Failure(description: "\(title) screen did not open")
         }
         app.buttons["Done"].tap()
       }
-      rows[0].tap()
+      app.navigationBars.buttons.element(boundBy: 0).tap()
+      account[0].tap()
       guard app.navigationBars["Contacts"].waitForExistence(timeout: 5),
         app.staticTexts["Blocked"].exists
       else { throw Failure(description: "missing Contacts title or Blocked section") }
       app.navigationBars.buttons.element(boundBy: 0).tap()
-      return ["rows": ids]
+      return ["rows": accountIds + securityIds]
     case "camera-add":
       // Begin with camera mode open and the final row visible.
       let add = app.buttons["Add Friend"]

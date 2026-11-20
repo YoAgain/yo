@@ -48,14 +48,14 @@ the Linux build does not run the Simulator UI driver.
   reach the final group, then drag to large and repeat; the large height also stays unchanged.
 - Account uses the account name as its inline title, with no avatar header or QR button. Your Code remains
   reachable from the root profile card's QR button. Rows start with the normal top gap.
-- Account: title = the user's name and a coloured status dot (VoiceOver reads the word). [Contacts, Blocked], then [Security, Manage
-  Account]. Blocked: [Allow Yo Requests, Block Contact…], then Blocked Contacts (tap asks to unblock). Security has no info button; its red 1
-  sits right, before the chevron, while recovery
-  needs attention. Tapping it then opens Secure Your Account directly. With recovery set up, it pushes Security.
-- Security has Account Sync and iCloud Keychain in its first group, Passkey Recovery and Recovery Key in its
-  second, without info buttons. Below: "How Account Security Works" opens a short sheet (iCloud Keychain,
-  Passkey, Recovery Key, end-to-end encryption). Toggles keep their per-method assistants and turning-off
-  confirmation. Showing the recovery key still requires device authentication.
+- Account: title = the user's name and a coloured status dot (VoiceOver reads the word). [Contacts, Blocked], then
+  [Account Security], then [Sign Out] with "Delete Your Account" beneath. Blocked: [Allow Yo Requests, Block
+  Contact…], then Blocked Contacts (tap asks to unblock). Account Security shows a green check when recovery is in
+  place, the red 1 before the chevron while it needs attention; it pushes the Account Security page.
+- Account Security: [Account Backup], then "Account Recovery" (its (i) opens "How Account Recovery Works") with
+  Recovery Key, Passkey and iCloud Keychain and their states, footer "Any one brings your account back on a new
+  phone." Recovery Key and Passkey open their own half-height screens. Showing the recovery key still requires
+  device authentication.
 - The Account Contacts row shows no count; only a red mark when a contact has a real problem.
 - Contacts lists the contacts only (blocking lives in its own Blocked page). A contact opens as a card (no chevron in the list; the sheet is as tall as its
   rows): Verified (toggle, asks first), problem rows only when needed, Sealed Yos, Encryption (On + check;
@@ -64,10 +64,11 @@ the Linux build does not run the Simulator UI driver.
 - Every settings destination keeps the root's small height on push/pop. Only Contacts, Status and Licenses
   show the grabber and can be dragged to large (all open at the small height); all other pages have no grabber and
   no large detent. Eager rows must appear throughout the animation, with no late cells or jumps.
-- UI driver: from Account run `drive.py DIR account-layout`, which checks the row order, opens the Recovery Key
-  and Passkey screens (half height, Done closes) and Contacts. Account identifiers are account.contacts,
-  account.signOut and account.delete. Info buttons use info.<title>. Recovery rows use security.accountSync,
-  security.recoveryKey, security.passkey, security.keychainRecovery and security.howRecoveryWorks.
+- UI driver: from Account run `drive.py DIR account-layout`, which checks the row order, opens Account Security,
+  its Recovery Key and Passkey screens (half height, Done closes) and Contacts. Account identifiers are
+  account.contacts, account.security, account.signOut and account.delete. Info buttons use info.<title>. Account
+  Security (security.page) rows use security.accountSync, security.recoveryKey, security.passkey,
+  security.keychainRecovery and security.howRecoveryWorks.
 - In camera mode, scroll to Add Friend and run `drive.py DIR camera-add`. The + stays in its original
   position, uses the same translucency as friend rows, and opens the name field without taking a photo.
   Check Group and Invite after opening the field. Receive Yos while adding: camera mode must keep row

@@ -196,6 +196,7 @@
     <string name="google_backup_needs_device_backup">Turn on Backup by Google in Android Settings (Google › Backup) first. Your account key goes to Google only inside that end-to-end encrypted backup.</string>
     <string name="google_backup_needs_screen_lock">Set a screen lock in Android Settings first. Without it, Google can’t encrypt your account key end to end.</string>
     <string name="yo_is_updating">Yo is updating…</string>
+    <string name="account_security">Account Security</string>
     <string name="account_backup">Account Backup</string>
     <string name="account_backup_footer">Tap to back up your encrypted contacts and blocked list.</string>
     <string name="account_recovery_explanation">Save your Recovery Key somewhere safe. You can use it to sign in on a new phone. Account Backup saves your encrypted contacts and blocked list. Passkey recovery through Google Password Manager is currently unavailable.</string>

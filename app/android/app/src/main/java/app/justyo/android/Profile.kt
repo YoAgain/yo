@@ -220,7 +220,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         if (intent != null) auth.launch(intent) else { afterAuth = null; model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue)) }
     }
     val passkeyConfigured by produceState(false, s.secured, passkeyPage, passkeyRevision, page) {
-        if (!passkeyPage && s.secured && page in setOf("Account", "Delete Account")) {
+        if (!passkeyPage && s.secured && page in setOf("Account Security", "Delete Account")) {
             value = withContext(Dispatchers.IO) { runCatching { repo.hasRecoveryPasskey() }.getOrDefault(false) }
         }
     }
@@ -240,6 +240,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         page.startsWith("contact:") -> s.friends.firstOrNull { it.key == page.removePrefix("contact:") }?.name.orEmpty()
         else -> stringResource(when (page) {
             "Contacts" -> R.string.ui_contacts
+            "Account Security" -> R.string.account_security
             "Appearance" -> R.string.ui_app_icon
             "Blocked" -> R.string.ui_blocked
             "Block Contact" -> R.string.block_contact
@@ -255,7 +256,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     }
     // What a page's rows mean, behind its (i) instead of under every row (iOS: "How Account Recovery Works").
     val info: String? = when (page) {
-        "Account" -> listOf(
+        "Account Security" -> listOf(
             R.string.account_recovery_explanation,
             when { s.backedUp -> R.string.google_backup_footer
                 s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
@@ -317,13 +318,30 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                             Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends),
                         )
                     }
-                    // iOS AccountPage: who, then recovery and leaving; deleting is a link under them (App Review 5.1.1(v)).
+                    // iOS AccountPage: who, then Account Security and leaving; deleting is a link under them (App Review 5.1.1(v)).
                     shown == "Account" -> {
                         Section(null, null,
                             Setting(stringResource(R.string.ui_contacts), Icons.Default.People,
                                 encrypted?.let { res.getString(R.string.part_of_total, it.first, it.second) }, onClick = { open("Contacts") }),
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
                         )
+                        // Backup and the ways back on a new phone on a page of their own; the row says whether they are in place.
+                        Section(null, null,
+                            Setting(stringResource(R.string.account_security), Icons.Default.Shield,
+                                badge = s.recoveryNeedsAttention, good = if (s.recoveryNeedsAttention) null else true,
+                                onClick = { open("Account Security") }),
+                        )
+                        Section(null, null,
+                            Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
+                        )
+                        TextButton(onClick = { open("Delete Account") }, Modifier.padding(start = 4.dp, bottom = 12.dp)) {
+                            Text(stringResource(R.string.settings_leaving_yo), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium)
+                            Text(" " + stringResource(R.string.settings_delete_your_account), style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                    // iOS AccountSecurityPage: Yo's own backup, then the three ways back on a new phone.
+                    shown == "Account Security" -> {
                         // Yo's own end-to-end encrypted copy of the contacts, groups and settings, on its own.
                         Section(null, null,
                             Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
@@ -355,14 +373,6 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                                 }
                             }),
                         )
-                        Section(null, null,
-                            Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
-                        )
-                        TextButton(onClick = { open("Delete Account") }, Modifier.padding(start = 4.dp, bottom = 12.dp)) {
-                            Text(stringResource(R.string.settings_leaving_yo), color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium)
-                            Text(" " + stringResource(R.string.settings_delete_your_account), style = MaterialTheme.typography.bodyMedium)
-                        }
                     }
                     // iOS BlockedPage: who may ask and blocking one more, then the blocked contacts.
                     shown == "Blocked" -> {

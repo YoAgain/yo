@@ -14,15 +14,9 @@ struct AccountPage: View {
   @State private var deletingAccount = false
   @Binding var showingDelete: Bool
   @State private var deleteProblem: String?
-  @State private var syncFailed = false
-  @State private var showingRecoveryKey = false
-  @State private var showingPasskey = false
-  @State private var showingRecoveryHelp = false
 
-  /// Privacy, backup and recovery, then signing out and deleting (App Review 5.1.1(v)).
+  /// Privacy, then Account Security, then signing out and deleting (App Review 5.1.1(v)).
   var body: some View {
-    let keySaved = account.secured && accounts.wordsSaved && hasRecoveryKey
-    let passkeyOn = account.byPasskey && account.passkeyAuth == true
     Form {
       Section {
         NavigationLink(value: SettingsView.Page.contacts) {
@@ -41,35 +35,19 @@ struct AccountPage: View {
         .accessibilityIdentifier("account.blocked")
       }
       Section {
-        AccountSyncRow(client: accounts.client, failed: $syncFailed)
-          .accessibilityIdentifier("security.accountSync")
-      }
-      Section {
-        RecoveryRow(
-          icon: "key.fill", title: ProductText.recoveryKey.english,
-          value: (keySaved ? ProductText.saved : .notSaved).english,
-          badge: accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey)
-        ) { showingRecoveryKey = true }
-        .accessibilityIdentifier("security.recoveryKey")
-        RecoveryRow(
-          icon: "faceid", title: ProductText.passkey.english, value: (passkeyOn ? ProductText.on : .off).english
-        ) { showingPasskey = true }
-        .accessibilityIdentifier("security.passkey")
-        SecurityRow(
-          icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
-          value: (accounts.keychainRecoveryActive ? ProductText.on : .off).english,
-          done: accounts.keychainRecoveryActive)
-          .accessibilityIdentifier("security.keychainRecovery")
-      } header: {
-        HStack {
-          Text(ProductText.accountRecovery.english)
-          Spacer()
-          Button("How Account Recovery Works", systemImage: "info.circle") { showingRecoveryHelp = true }
-            .labelStyle(.iconOnly)
-            .accessibilityIdentifier("security.howRecoveryWorks")
+        // Backup and the ways back on a new phone, on a page of their own; the row says whether they are in place.
+        NavigationLink(value: SettingsView.Page.security) {
+          LabeledContent {
+            if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
+              RecoveryBadge()
+            } else {
+              Image(systemName: Check.ok.symbol).foregroundStyle(Check.ok.color).accessibilityLabel("Set Up")
+            }
+          } label: {
+            Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
+          }
         }
-      } footer: {
-        Text(ProductText.recoveryFooter.english)
+        .accessibilityIdentifier("account.security")
       }
       Section {
         // App Review 5.1.1(v): deleting is easy to find, no page between.
@@ -121,9 +99,6 @@ struct AccountPage: View {
       $signingOut, title: { _ in "Sign Out?" },
       message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },
       action: { _ in "Sign Out" }, run: { _ in reset() })
-    .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }
-    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
-    .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }) }
   }
 
   private func deletePage(_ account: Account) -> some View {
@@ -200,6 +175,61 @@ struct AccountPage: View {
     Onboarding.signedOutThisRun = true  // no silent sign-in until the next cold start
     dismissSettings()
     accounts.signOut()
+  }
+}
+
+/// Account Security: Yo's own backup, then the ways back on a new phone, each with its state.
+@MainActor
+struct AccountSecurityPage: View {
+  let account: Account
+  let hasRecoveryKey: Bool
+  @Environment(AccountStore.self) private var accounts
+  @State private var syncFailed = false
+  @State private var showingRecoveryKey = false
+  @State private var showingPasskey = false
+  @State private var showingRecoveryHelp = false
+
+  var body: some View {
+    let keySaved = account.secured && accounts.wordsSaved && hasRecoveryKey
+    let passkeyOn = account.byPasskey && account.passkeyAuth == true
+    Form {
+      Section {
+        AccountSyncRow(client: accounts.client, failed: $syncFailed)
+          .accessibilityIdentifier("security.accountSync")
+      }
+      Section {
+        RecoveryRow(
+          icon: "key.fill", title: ProductText.recoveryKey.english,
+          value: (keySaved ? ProductText.saved : .notSaved).english,
+          badge: accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey)
+        ) { showingRecoveryKey = true }
+        .accessibilityIdentifier("security.recoveryKey")
+        RecoveryRow(
+          icon: "faceid", title: ProductText.passkey.english, value: (passkeyOn ? ProductText.on : .off).english
+        ) { showingPasskey = true }
+        .accessibilityIdentifier("security.passkey")
+        SecurityRow(
+          icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
+          value: (accounts.keychainRecoveryActive ? ProductText.on : .off).english,
+          done: accounts.keychainRecoveryActive)
+          .accessibilityIdentifier("security.keychainRecovery")
+      } header: {
+        HStack {
+          Text(ProductText.accountRecovery.english)
+          Spacer()
+          Button("How Account Recovery Works", systemImage: "info.circle") { showingRecoveryHelp = true }
+            .labelStyle(.iconOnly)
+            .accessibilityIdentifier("security.howRecoveryWorks")
+        }
+      } footer: {
+        Text(ProductText.recoveryFooter.english)
+      }
+    }
+    .accessibilityIdentifier("security.page")
+    .navigationTitle("Account Security")
+    .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }
+    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
+    .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }) }
   }
 }
 
