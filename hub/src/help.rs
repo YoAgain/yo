@@ -122,12 +122,27 @@ fn diagnostic(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, body: &[u8
     if !valid {
         return Err(bad());
     }
+    if !worth_keeping(kind, &payload, header(headers, api::HEADER_APP)) {
+        return Ok(StatusCode::NO_CONTENT); // taken: the phone forgets it
+    }
     hub.db.diagnostic(kind, &payload, Some(&install), now_ms())?;
     hub.count(
         if kind == "crash" { crate::Event::Crash } else { crate::Event::Error },
         text("count").and_then(|n| n.parse().ok()).unwrap_or(1),
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Not kept: an error of an older build than the one sending it (the phone was updated, and what that build queued
+/// is known from it already). What the app marks "expected" is kept as counts (`Db::diagnostic`), never a problem.
+fn worth_keeping(kind: &str, payload: &serde_json::Value, sender: Option<&str>) -> bool {
+    let build = |text: Option<&str>| text.and_then(crate::config::app);
+    match (build(payload["app"].as_str()), build(sender)) {
+        (Some((platform, built)), Some((sending, current))) if kind == "error" => {
+            platform != sending || built >= current
+        }
+        _ => true,
+    }
 }
 
 /// `8-4-4-4-12` hex digits.
@@ -137,4 +152,20 @@ fn is_uuid(text: &str) -> bool {
             8 | 13 | 18 | 23 => c == b'-',
             _ => c.is_ascii_hexdigit(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worth_keeping;
+    use serde_json::json;
+
+    #[test]
+    fn only_reports_worth_acting_on_are_kept() {
+        let error = |app: &str| json!({"app": app, "domain": "HTTP", "code": "500", "place": "x"});
+        assert!(worth_keeping("error", &error("ios/5"), Some("ios/5")));
+        assert!(worth_keeping("error", &error("ios/5"), None), "no sender build: kept");
+        assert!(!worth_keeping("error", &error("ios/4"), Some("ios/5")), "an older build's queue");
+        assert!(worth_keeping("error", &error("ios/4"), Some("android/5")));
+        assert!(worth_keeping("crash", &error("ios/4"), Some("ios/5")), "crashes of older builds stay");
+    }
 }

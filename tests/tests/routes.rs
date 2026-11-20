@@ -1121,9 +1121,15 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     let rows = rows.as_array().unwrap();
     let with = |code: &str| rows.iter().find(|r| r["payload"].as_str().unwrap().contains(code)).unwrap().clone();
     assert_eq!((with("timeout")["count"].as_i64(), with("timeout")["installs"].as_i64()), (Some(12), Some(1)));
+    // Expected ones are counted, never an open problem.
     let locked = with("lockedBeforeFirstUnlock");
-    assert_eq!(locked["count"], 10);
-    assert!(locked["payload"].as_str().unwrap().contains(r#""severity":"expected""#));
+    assert_eq!((locked["count"].as_i64(), locked["done"].as_bool()), (Some(10), Some(true)));
+    // A phone updated since sends what its older build queued: taken, not kept.
+    let old = serde_json::json!({"domain":"network", "code":"old", "place":"sync", "app":"ios/0", "os":"26", "model":"iPhone"});
+    let sent = [install(3)[0].clone(), (api::HEADER_APP, "ios/1".into())];
+    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &sent, old.to_string().into_bytes()).0, status::NO_CONTENT);
+    let rows: serde_json::Value = serde_json::from_slice(&raw(&hub, "GET", path, &headers, vec![]).1).unwrap();
+    assert!(!rows.as_array().unwrap().iter().any(|r| r["payload"].as_str().unwrap().contains(r#""code":"old""#)));
     let id = with("timeout")["id"].clone();
     let (status, body) =
         raw(&hub, "PUT", path, &headers, serde_json::json!({"id":id,"done":true}).to_string().into_bytes());

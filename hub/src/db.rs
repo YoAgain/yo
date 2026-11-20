@@ -346,12 +346,15 @@ fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, 
     let signature = yo_wire::b64(&yo_wire::sha256(identity.to_string().as_bytes()));
     // One report may stand for several of the same, counted on the phone (checked on receipt).
     let count = field("count").parse::<i64>().unwrap_or(1).max(1);
+    // "Expected" (the network, an answer the app takes in, iOS taking time back): counts to learn from, never an open
+    // problem, so done from the first report on.
+    let expected = field("severity") == "expected";
     conn.execute(
-        "INSERT INTO diagnostics(kind, signature, count, first_seen, last_seen, app, os, model, payload)
-        VALUES (?1,?2,?8,?3,?3,?4,?5,?6,?7)
+        "INSERT INTO diagnostics(kind, signature, count, first_seen, last_seen, app, os, model, payload, done)
+        VALUES (?1,?2,?8,?3,?3,?4,?5,?6,?7,?9)
         ON CONFLICT(signature) DO UPDATE SET count=count+excluded.count, last_seen=excluded.last_seen,
         app=excluded.app, os=excluded.os, model=excluded.model, payload=excluded.payload",
-        params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string(), count],
+        params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string(), count, expected],
     )?;
     conn.execute(
         "INSERT INTO diagnostic_days(day,kind,count) VALUES (?1,?2,?3)
@@ -406,6 +409,11 @@ impl Db {
              PRAGMA busy_timeout = 5000;",
         )?;
         schema::upgrade(&mut conn)?;
+        // Expected groups are counts, never open problems (`diagnostic_write`): those kept open before are done too.
+        conn.execute(
+            "UPDATE diagnostics SET done = 1 WHERE done = 0 AND json_extract(payload, '$.severity') = 'expected'",
+            [],
+        )?;
         Ok(Db { conn: Mutex::new(conn) })
     }
 
@@ -1705,6 +1713,47 @@ mod tests {
             assert_eq!(todos, [("open task 🎨".into(), 90, None), ("done task".into(), 95, Some(205))]);
             assert_eq!(conn.query_row("SELECT count(*) FROM support_messages", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
             assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
+        }
+    }
+
+    #[test]
+    fn expected_diagnostics_are_counts_not_open_problems() {
+        let path = std::env::temp_dir().join(format!("yo-db-expected-{}.sqlite", std::process::id()));
+        let path = path.to_str().unwrap();
+        let expected = serde_json::json!({"domain": "HTTP", "code": "429", "place": "x", "app": "ios/1",
+            "severity": "expected"});
+        let error = serde_json::json!({"domain": "HTTP", "code": "500", "place": "x", "app": "ios/1"});
+        {
+            let db = Db::open(path).unwrap();
+            db.diagnostic("error", &expected, None, 1).unwrap();
+            db.diagnostic("error", &error, None, 1).unwrap();
+            // As an older hub kept it: open.
+            db.conn().execute("UPDATE diagnostics SET done = 0", []).unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        let done = |code: &str| {
+            db.diagnostics()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["payload"].as_str().unwrap().contains(code))
+                .unwrap()["done"]
+                .clone()
+        };
+        assert_eq!((done("429"), done("500")), (true.into(), false.into()));
+        db.diagnostic(
+            "error",
+            &serde_json::json!({"domain": "a", "code": "1", "place": "x", "app": "ios/1",
+            "severity": "expected"}),
+            None,
+            2,
+        )
+        .unwrap();
+        assert_eq!(done(r#""code":"1""#), true);
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
     }
 

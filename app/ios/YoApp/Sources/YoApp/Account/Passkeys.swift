@@ -81,8 +81,7 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
   func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
     let nsError = error as NSError
     if Self.isCancellation(error) {
-      // The sheet closed by the person (or no passkey to offer): counted, not a problem.
-      CountedErrors.record(domain: ASAuthorizationError.errorDomain, place: "Passkeys", code: "canceled", expected: true)
+      // The sheet closed by the person (or no passkey to offer): their choice, nothing to learn from; not reported.
     } else if nsError.domain.contains("ASCABLE") {
       // A passkey from another device by its QR code: Bluetooth off, the phone out of reach or its side ended.
       CountedErrors.record(domain: nsError.domain, place: "Passkeys", code: String(nsError.code), expected: true)
