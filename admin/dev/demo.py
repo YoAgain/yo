@@ -50,8 +50,8 @@ CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id BLOB NOT 
     received_at INTEGER NOT NULL);
 CREATE TABLE backups (user_id BLOB PRIMARY KEY, locator BLOB UNIQUE, record BLOB NOT NULL, updated_at INTEGER NOT NULL,
     auth_passkey BLOB, auth_code BLOB) WITHOUT ROWID;
-CREATE TABLE reports (reporter_id BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
-    created_at INTEGER NOT NULL, PRIMARY KEY (reporter_id, reported_id)) WITHOUT ROWID;
+CREATE TABLE reports (reporter BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
+    created_at INTEGER NOT NULL, PRIMARY KEY (reporter, reported_id)) WITHOUT ROWID;
 CREATE TABLE deliveries_hourly (hour INTEGER PRIMARY KEY, n INTEGER NOT NULL);
 CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY, current BLOB NOT NULL, requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
 CREATE TABLE storage (user_id BLOB PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID;
@@ -70,7 +70,9 @@ CREATE TABLE diagnostics (id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind 
     done INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE diagnostic_days (day INTEGER NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,kind)) WITHOUT ROWID;
 CREATE TABLE diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id BLOB NOT NULL,
+CREATE TABLE diagnostic_installs (diagnostic_id INTEGER NOT NULL, install BLOB NOT NULL, day INTEGER NOT NULL,
+    PRIMARY KEY (diagnostic_id, install, day)) WITHOUT ROWID;
+CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, install BLOB NOT NULL,
     from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL, created_at INTEGER NOT NULL,
     read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
 CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER);
@@ -282,12 +284,13 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         if c:
             db.execute("INSERT INTO blob_quota VALUES (?,?,?,?)", (u, now // DAY, c, c * rng.randint(400_000, 3_000_000)))
         db.execute("INSERT INTO blob_quota VALUES (?,?,?,?)", (u, now // DAY - 1, rng.randint(1, 6), rng.randint(1, 9) * 1_000_000))
-    # Reports.
+    # Support threads: (u)ser and (t)eam lines, the newest open ones unread; each by a random install id (16 bytes, hub
+    # schema 9), never an account.
+    threads = [rng.randbytes(16) for _ in range(len(SUPPORT) if live else 2)]
+    # Reports: by an install (some of them the support threads'), about a user.
     for reason, age in [(1, 2 * HOUR), (2, 9 * HOUR), (1, DAY + 3 * HOUR), (3, 3 * DAY), (2, 6 * DAY), (1, 10 * DAY)][: 6 if live else 1]:
-        a, b = rng.sample(users, 2)
+        a, b = rng.choice(threads) if rng.random() < 0.5 else rng.randbytes(16), rng.choice(users)
         db.execute("INSERT OR IGNORE INTO reports VALUES (?,?,?,?)", (a, b, reason, now - age))
-    # Support threads: (u)ser and (t)eam lines, the newest open ones unread.
-    threads = rng.sample(users[8:] if live else users, k=len(SUPPORT) if live else 2)
     photo_user = None
     for k, (uid, lines) in enumerate(zip(threads, SUPPORT)):
         t = now - int((k + rng.random()) * (11 * HOUR if k < 5 else DAY))
@@ -300,7 +303,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             answered = any(w == "t" for w, _ in lines[j + 1:])
             done = None if (not team and not answered and k % 3 != 2) else (t + 600_000 if not team else None)
             read = t + rng.randint(5, 120) * 60_000 if team and j < len(lines) - 1 or (team and rng.random() < 0.5) else None
-            db.execute("INSERT INTO support_messages (user_id,from_team,text,created_at,read_at,app_version,done_at) VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO support_messages (install,from_team,text,created_at,read_at,app_version,done_at) VALUES (?,?,?,?,?,?,?)",
                        (uid, int(team), text, t, read if read and read < now else None, newest if not team else "", done))
     for k, (text, flag) in enumerate(TODOS if live else TODOS[:2]):
         at = now - (k + 1) * rng.randint(3 * HOUR, 20 * HOUR)
@@ -348,20 +351,25 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                         ("account-gone", int(rng.random() < (0.004 if live else 0.001)))):
             if n:
                 db.execute("INSERT INTO events VALUES (?,?,?)", (kind, m, n))
-    # Crashes and errors.
+    # Crashes and errors, from a pool of installs (some of them the support threads').
     n_open = 0
+    installs = threads + [rng.randbytes(16) for _ in range(30 if live else 4)]
     for k, (kind, payload) in enumerate(CRASHES if live else CRASHES[:3]):
         first = now - rng.randint(1, 13) * DAY - rng.randint(0, DAY)
         last = min(now - 120_000, first + rng.randint(0, now - first))
         done = int(k in (3, 9))
         n_open += not done
-        db.execute("INSERT INTO diagnostics (kind,signature,count,first_seen,last_seen,app,os,model,payload,done) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        cur = db.execute("INSERT INTO diagnostics (kind,signature,count,first_seen,last_seen,app,os,model,payload,done) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    (kind, hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:24],
                     rng.choice([1, 1, 2, 3, 5, 8, 14, 41, 230]) if payload.get("severity") != "expected" else rng.randint(80, 900),
                     first, last, payload.get("app") or rng.choice(builds[:3]),
                     "" if payload.get("app") else rng.choice(["iOS 26.0.1", "iOS 26.1", "iOS 26.2"]),
                     "" if payload.get("app") else rng.choice(["iPhone15,2", "iPhone14,4", "iPhone16,1", "iPhone17,3", "iPhone13,2"]),
                     json.dumps(payload), done))
+        # Which installs sent it on which day (a few, over its days; at most 90 days back).
+        for _ in range(rng.randint(1, 6 if live else 2)):
+            db.execute("INSERT OR IGNORE INTO diagnostic_installs VALUES (?,?,?)",
+                       (cur.lastrowid, rng.choice(installs), rng.randint(first // DAY, last // DAY)))
     for d in range(now // DAY - 13, now // DAY + 1):
         db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "crash", rng.randint(0, 4 if live else 1)))
         db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "error", rng.randint(2, 30 if live else 3)))
@@ -390,24 +398,23 @@ class FakeHubs:
         with self.lock, self.db(hub) as db:
             parts = suffix.split("/")
             if body is None and method is None and suffix == "messages":
-                rows = [{"user_id": u, "at": a, "unread": n, "name": name} for u, a, n, name in db.execute(
-                    "SELECT hex(s.user_id),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL),"
-                    "(SELECT coalesce(spelling,value) FROM handles WHERE user_id=s.user_id AND kind=2 LIMIT 1) "
-                    "FROM support_messages s WHERE length(s.user_id)>0 GROUP BY s.user_id "
+                rows = [{"install": i, "at": a, "unread": n} for i, a, n in db.execute(
+                    "SELECT lower(hex(s.install)),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL) "
+                    "FROM support_messages s GROUP BY s.install "
                     "ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC")]
                 return rows
             if body is None and method is None and parts[0] == "messages" and len(parts) == 2:
                 user = bytes.fromhex(parts[1])
                 return {"messages": [{"id": i, "from_team": bool(t), "text": x, "created_at": c, "read_at": r, "done_at": d}
                                      for i, t, x, c, r, d in db.execute("SELECT id,from_team,text,created_at,read_at,done_at FROM "
-                                     "support_messages WHERE user_id=? ORDER BY created_at,id", (user,))]}
+                                     "support_messages WHERE install=? ORDER BY created_at,id", (user,))]}
             if parts[0] == "messages" and len(parts) == 2:  # a reply
                 user = bytes.fromhex(parts[1])
-                if not db.execute("SELECT 1 FROM support_messages WHERE user_id=?", (user,)).fetchone():
+                if not db.execute("SELECT 1 FROM support_messages WHERE install=?", (user,)).fetchone():
                     raise OSError("409: no conversation")
-                db.execute("INSERT INTO support_messages (user_id,from_team,text,created_at) VALUES (?,1,?,?)", (user, body, now))
+                db.execute("INSERT INTO support_messages (install,from_team,text,created_at) VALUES (?,1,?,?)", (user, body, now))
             elif parts[0] == "messages" and parts[-1] == "handled":
-                db.execute("UPDATE support_messages SET done_at=? WHERE user_id=? AND from_team=0 AND id<=? AND done_at IS NULL",
+                db.execute("UPDATE support_messages SET done_at=? WHERE install=? AND from_team=0 AND id<=? AND done_at IS NULL",
                            (now, bytes.fromhex(parts[1]), int(body)))
             elif parts[0] == "messages":  # messages/done/<id>
                 db.execute("UPDATE support_messages SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))

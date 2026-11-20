@@ -206,6 +206,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .extra[open] summary::before { content: "▾ "; }
 .extra.alert summary { color: var(--bad); font-weight: 700; }
 .extra-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 6px 0 4px; max-height: 190px; overflow: auto; }
+.extra-grid.one { grid-template-columns: 1fr; }
 .extra h4 { margin: 4px 0 6px; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--amethyst-soft); }
 .drow { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); }
 .drow:first-of-type { border-top: 0; }

@@ -1,17 +1,17 @@
 // Login: a word on why the last try did not work. Dashboard: the server every three seconds, the hubs every ten.
 const $ = (id) => document.getElementById(id);
 
-// <support-list> The support chat's list, pure (admin/test_support.py runs it in node): the people who wrote to the
-// team, "open" (something of theirs not handled yet, the default) or "answered" (nothing open); newest first.
-const supportList = ({ users, threads, filter = "open" }) => {
-  const up = (id) => String(id || "").toUpperCase();
-  const byId = new Map(users.map((u) => [up(u.id), u]));
-  return threads
-    .filter((t) => t.user_id !== "team" && (filter === "open" ? t.unread > 0 : !(t.unread > 0)))
-    .map((t) => { const id = up(t.user_id), user = byId.get(id) || null;
-      return { id, user, name: user ? user.name || "(no name)" : t.name || "Deleted account", thread: t, open: t.unread || 0, at: t.at || 0 }; })
-    .sort((a, b) => b.at - a.at);
-};
+// <support-list> The support chat's list, pure (admin/test_support.py runs it in node): the installs that wrote to
+// the team, "open" (something of theirs not handled yet, the default) or "answered" (nothing open); newest first.
+// A thread is a random install id (32 hex, hub schema 9), never an account: shown by its first 6 hex characters.
+const installShort = (hex) => String(hex || "").slice(0, 6).toLowerCase();
+const supportList = ({ threads, filter = "open" }) => threads
+  .filter((t) => /^[0-9a-f]{32}$/i.test(t.install || "") && (filter === "open" ? t.unread > 0 : !(t.unread > 0)))
+  .map((t) => { const id = t.install.toLowerCase(); return { id, name: installShort(id), thread: t, open: t.unread || 0, at: t.at || 0 }; })
+  .sort((a, b) => b.at - a.at);
+// Crash-free (estimated), in %: 1 - installs with a crash in 7 days / users active in 7 days. Installs are not users
+// (one person, several phones or reinstalls), so an estimate; null without a count (an older hub) or without users.
+const crashFree = (installs, users) => (installs == null || !users ? null : Math.max(0, 100 - (100 * installs) / users));
 // </support-list>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
 const diagInfo = (d) => {
@@ -22,7 +22,6 @@ const diagInfo = (d) => {
   const text = [p.details, p.frames, p.message].filter(Boolean).join("\n\n") || d.payload || "";
   return { title, text, expected: p.severity === "expected" };
 };
-// </support-list>
 
 if (document.body.classList.contains("login")) {
   const q = location.search, note = $("note");
@@ -422,7 +421,7 @@ if (document.body.classList.contains("login")) {
   // Health rows in the counts card, graph only (the value on hover): Delivery (p95 of how long a Yo took to its device),
   // Push (the share the services took), Hub errors (5xx answers), in the range; with nothing counted yet, no bars and
   // "no data yet" in the hover. The rest goes into hovers: Deleted (in the range) and DAU/MAU under Accounts,
-  // retention D1/D7/D30 under Yos, crash-free users with Problems.
+  // retention D1/D7/D30 under Yos, crash-free (est.) with Problems.
   // Speed: how long from the hub taking a Yo to the friend's phone having it, in four buckets; the last one is mostly a
   // phone that was offline (the Yo waited at the hub), not a slow hub.
   const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"];
@@ -462,11 +461,11 @@ if (document.body.classList.contains("login")) {
     // Yos' detail: retention, of the accounts made 1 (7, 30) to 90 days ago those seen that many days after signing up.
     const rt = h.retention || {};
     areaSub.yc = ["d1", "d7", "d30"].map((k) => [`Retention ${k.toUpperCase()}`, rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–", rt[k]?.[1] ? rt[k][0] / rt[k][1] : null]);
-    // Problems' detail: crash-free users, the last 7 days' crash reports against the users seen in them (a crash one
-    // user), and the hub's errors.
+    // Problems' detail: crash-free (est.), the installs with a crash in the last 7 days against the users seen in them,
+    // the plain crash count next to it, and the hub's errors.
     const crashes = (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day > today0() - 7).reduce((n, r) => n + r.count, 0);
-    const wau = h.active_users ?? 0, free = wau ? Math.max(0, 100 - (100 * crashes) / wau) : null;
-    healthData = { span, ps, psAll, he, heAll, names, crashes, wau, free, gone, dau, mau, stick, heRate: rate(heAll) };
+    const wau = h.active_users ?? 0, crashInstalls = h.crash_installs_7d ?? null, free = crashFree(crashInstalls, wau);
+    healthData = { span, ps, psAll, he, heAll, names, crashes, crashInstalls, wau, free, gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; a click opens their detail.
@@ -828,31 +827,27 @@ if (document.body.classList.contains("login")) {
   // ---- support chat (the Database widget, support_messages): the people who wrote on the left, "Open" or
   // "Answered"; the chosen one's conversation on the right, under one line of facts. Each message of theirs is ticked
   // handled by hand; a reply ticks the ones it answers. The to-dos are a table of their own (todos).
-  let supportUser = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
+  let supportInstall = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
   let supportWant = null, listDrawn = "", supportMessages = [], userFilter = "open";
-  const supportGet = async (user) => {
-    const r = await fetch(`/support.json?${new URLSearchParams({ hub: which, ...(user ? { user } : {}) })}`, { cache: "no-store" });
+  const supportGet = async (install) => {
+    const r = await fetch(`/support.json?${new URLSearchParams({ hub: which, ...(install ? { install } : {}) })}`, { cache: "no-store" });
     if (!r.ok) throw new Error("Could not load messages.");
     return r.json();
   };
-  const up = (id) => String(id || "").toUpperCase();
-  const userById = (id) => (last?.[which]?.users || []).find((u) => up(u.id) === up(id));
-  const reportsAbout = (id) => (last?.[which]?.reports || []).filter((r) => up(r.reported) === up(id));
-  const openReports = (id) => reportsAbout(id).filter((r) => !lastDone.has(reportKey(r))).length;
+  const reportsBy = (install) => (last?.[which]?.reports || []).filter((r) => String(r.reporter).toLowerCase() === install);
   const drawList = () => {
     const box = $("person-list"), lastLines = last?.[which]?.support_last || {};
-    const rows = supportList({ users: last?.[which]?.users || [], threads: supportThreads, filter: userFilter });
-    const drawn = JSON.stringify([which, supportUser, userFilter, rows.map((p) => [p.id, p.name, p.open, p.at, lastLines[p.id], openReports(p.id)])]);
+    const rows = supportList({ threads: supportThreads, filter: userFilter });
+    const drawn = JSON.stringify([which, supportInstall, userFilter, rows.map((p) => [p.id, p.open, p.at, lastLines[p.id], reportsBy(p.id).length])]);
     if (drawn === listDrawn && box.childElementCount) return;
     listDrawn = drawn;
     box.replaceChildren();
     for (const p of rows) {
-      const b = el("button", `thread${p.open ? " unread" : ""}${up(supportUser) === p.id ? " on" : ""}`);
-      b.type = "button";
-      // One line: a dot while open, the name, a flag for open reports, the time on the right.
-      const rep = openReports(p.id);
-      b.append(el("i", "odot"), el("b", "name", p.name));
-      if (rep) b.append(el("span", "flag", "⚑"));
+      const b = el("button", `thread${p.open ? " unread" : ""}${supportInstall === p.id ? " on" : ""}`);
+      b.type = "button"; b.title = `Install ${p.id}`;
+      // One line: a dot while open, the install's short id, a flag if it reported someone, the time on the right.
+      b.append(el("i", "odot"), el("b", "name mono", p.name));
+      if (reportsBy(p.id).length) b.append(el("span", "flag", "⚑"));
       b.append(el("time", null, clock(p.at)));
       b.addEventListener("click", () => select(p.id, p.name));
       box.append(b);
@@ -867,10 +862,10 @@ if (document.body.classList.contains("login")) {
   for (const b of document.querySelectorAll("#people .seg [data-filter]")) b.addEventListener("click", () => { setFilter(b.dataset.filter); part(drawList); });
 
   const supportDone = async (ids, done) => {
-    const hub = which, user = supportUser;
+    const hub = which, user = supportInstall;
     try {
       await Promise.all(ids.map((id) => postJSON("/support/done", { hub, id, done })));
-      if (which === hub && supportUser === user) await supportOpen(user);
+      if (which === hub && supportInstall === user) await supportOpen(user);
       await supportRefresh();
     } catch (e) { set("support-error", e.message); }
   };
@@ -895,60 +890,50 @@ if (document.body.classList.contains("login")) {
       box.append(row);
       lastFrom = from;
     }
-    if (atEnd || box.dataset.user !== supportUser) box.scrollTop = box.scrollHeight;
-    box.dataset.user = supportUser;
+    if (atEnd || box.dataset.user !== supportInstall) box.scrollTop = box.scrollHeight;
+    box.dataset.user = supportInstall;
   };
   const growComposer = () => {
     const t = $("support-text");
     if (!t.offsetParent) { t.style.height = ""; return; }
     t.style.height = "auto"; t.style.height = `${Math.min(Math.max(t.scrollHeight, 22), 180)}px`;
   };
-  // The chosen person in one line of facts (the name is on the left); devices and reports folded below.
+  // The chosen install in one line of facts: its short id (the full one on hover), its messages, first and last;
+  // the people it reported folded below, each ticked handled here. Installs are random, no account behind them.
   const drawPerson = () => {
-    const u = supportUser ? userById(supportUser) : null, facts = $("p-facts");
+    const id = supportInstall, facts = $("p-facts");
     facts.replaceChildren();
-    $("p-extra").hidden = !u;
-    if (!u) return;
-    const a = appState(u.app, u.id);
+    $("p-extra").hidden = !id;
+    if (!id) return;
     const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) f.title = title; facts.append(f); };
-    fact("signed up", rel(u.created), "", date(u.created));
-    fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
-    const ai = appInfo(u.app);
-    fact("app", ai ? ai.label : "–", a ? `app-${a}` : "", ai ? `${u.app} · ${appTitle(u.app, u.id)}` : "");
-    fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
-    fact("push", u.push ? "on" : "off", "", "");
-    if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");
+    const mine = supportHub === which ? supportMessages : [], theirs = mine.filter((m) => !m.from_team);
+    fact("install", installShort(id), "mono", `Install ${id} (random, no account)`);
+    fact("messages", num(theirs.length), "", "");
+    if (theirs.length) fact("first", rel(theirs[0].created_at), "", date(theirs[0].created_at));
+    const app = [...theirs].reverse().find((m) => m.app_version)?.app_version;
+    if (app) fact("app", appInfo(app)?.label || app, "", app);
     const more = el("button", "fact more");
     more.type = "button";
     more.addEventListener("click", () => { $("p-extra").open = !$("p-extra").open; more.classList.toggle("open", $("p-extra").open); });
     more.classList.toggle("open", $("p-extra").open);
     facts.append(more);
-    const dev = $("p-devices");
-    dev.replaceChildren();
-    for (const d of u.device_list || []) {
-      const r = el("div", "drow");
-      r.append(Object.assign(el("b", null, d.app ? appInfo(d.app).label : "unknown app"), { title: appTitle(d.app, u.id) }), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
-      r.title = d.app || "";
-      dev.append(r);
-    }
-    if (!dev.childElementCount) dev.append(el("p", "empty", `${u.devices || 0} device${u.devices === 1 ? "" : "s"}`));
     const reps = $("p-reports");
     reps.replaceChildren();
-    const about = reportsAbout(u.id), by = (last?.[which]?.reports || []).filter((r) => up(r.reporter) === up(u.id));
-    for (const [r, dir] of [...about.map((r) => [r, "about"]), ...by.map((r) => [r, "by"])]) {
+    const by = reportsBy(id);
+    for (const r of by) {
       const done = lastDone.has(reportKey(r)), row = el("div", `drow${done ? " done" : ""}`), line = el("span");
-      line.append(reasonTag(r.reason), document.createTextNode(dir === "about" ? ` by ${r.reporter_name ?? r.reporter.slice(0, 8)}` : ` reported ${r.reported_name ?? r.reported.slice(0, 8)}`));
-      if (dir === "about" && r.id != null) row.append(tickButton(done, "Report handled", (d) => reportDone(r, d)));
+      line.append(reasonTag(r.reason), document.createTextNode(` reported ${r.reported_name ?? r.reported.slice(0, 8)}`));
+      if (r.id != null) row.append(tickButton(done, "Report handled", (d) => reportDone(r, d)));
       row.append(line, el("span", "muted", rel(r.at)));
       reps.append(row);
     }
     if (!reps.childElementCount) reps.append(el("p", "empty", "No reports."));
-    const n = openReports(u.id);
-    more.textContent = `${num(u.devices)} device${u.devices === 1 ? "" : "s"} · ${about.length ? `${about.length} report${about.length === 1 ? "" : "s"}${n ? ` (${n} open)` : ""}` : "no reports"}`;
+    const n = by.filter((r) => !lastDone.has(reportKey(r))).length;
+    more.textContent = by.length ? `${by.length} report${by.length === 1 ? "" : "s"}${n ? ` (${n} open)` : ""}` : "no reports";
     more.classList.toggle("alert", n > 0);
   };
   const convoHead = (messages) => {
-    $("support-reply").hidden = !supportUser || !messages.length;
+    $("support-reply").hidden = !supportInstall || !messages.length;
     $("support-text").placeholder = `Reply to ${supportName} (Enter sends, Shift+Enter new line)`;
     growComposer();
   };
@@ -960,19 +945,20 @@ if (document.body.classList.contains("login")) {
     const hub = which;
     if (chosen || supportWant === null) supportWant = user;
     if (chosen) {
-      if (supportUser !== user || supportHub !== hub) {
+      if (supportInstall !== user || supportHub !== hub) {
         $("support-text").value = ""; growComposer(); supportSeen = null; $("support-history").replaceChildren();
         $("support-reply").hidden = true;
       }
-      supportUser = user; supportHub = hub; supportName = title || user;
+      supportInstall = user; supportHub = hub; supportName = title || user;
       part(drawPerson); part(drawList);
     }
     try {
       const data = await supportGet(user);
       if (which !== hub || supportWant !== user) return;
-      supportUser = user; supportHub = hub; supportName = title || supportName || user;
+      supportInstall = user; supportHub = hub; supportName = title || supportName || user;
       supportMessages = data.messages;
       convoHead(data.messages);
+      part(drawPerson);
       const seen = data.messages.map((m) => `${m.id}:${m.read_at ? 1 : 0}:${m.done_at}`).join(",");
       if (seen !== supportSeen) { supportSeen = seen; drawThread(data.messages); }
       if (chosen && !$("support-reply").hidden) $("support-text").focus({ preventScroll: true });
@@ -984,11 +970,11 @@ if (document.body.classList.contains("login")) {
     supportBusy = true;
     const hub = which;
     if (supportHub !== hub) {
-      supportUser = null; supportWant = null; supportSeen = null; $("support-reply").hidden = true;
+      supportInstall = null; supportWant = null; supportSeen = null; $("support-reply").hidden = true;
       $("support-history").replaceChildren();
     }
     try {
-      const threads = (await supportGet()).filter((t) => t.user_id !== "team");
+      const threads = (await supportGet()).filter((t) => /^[0-9a-f]{32}$/i.test(t.install || ""));
       if (hub !== which) return;
       supportThreads = threads;
       // The page title's count: conversations still open, and open crash groups without the expected ones.
@@ -1001,8 +987,8 @@ if (document.body.classList.contains("login")) {
       part(drawPerson);
       // Nothing chosen yet: the newest open conversation, else the newest one.
       if (supportWant === null) {
-        const user = [...threads].sort((a, b) => (b.unread > 0) - (a.unread > 0) || b.at - a.at)[0];
-        if (user) supportOpen(up(user.user_id), userById(user.user_id)?.name || user.name || "Deleted account", true);
+        const t = [...threads].sort((a, b) => (b.unread > 0) - (a.unread > 0) || b.at - a.at)[0];
+        if (t) supportOpen(t.install.toLowerCase(), installShort(t.install), true);
       }
       set("support-error", "");
     } catch (e) { set("support-error", e.message); }
@@ -1010,15 +996,15 @@ if (document.body.classList.contains("login")) {
   };
   const supportSend = async () => {
     const text = $("support-text").value;
-    if (!supportUser || supportHub !== which || !text.trim()) return;
-    const button = $("support-reply").querySelector("button"), user = supportUser, hub = supportHub;
+    if (!supportInstall || supportHub !== which || !text.trim()) return;
+    const button = $("support-reply").querySelector("button"), user = supportInstall, hub = supportHub;
     button.disabled = true;
     try {
-      await postJSON("/support", { hub, user, action: "reply", text });
+      await postJSON("/support", { hub, install: user, action: "reply", text });
       // The reply answers the user's open messages in this thread: they are marked handled.
       const open = which !== hub ? [] : (await supportGet(user)).messages.filter((m) => !m.from_team && m.done_at == null);
       await Promise.all(open.map((m) => postJSON("/support/done", { hub, id: m.id, done: true })));
-      if (which !== hub || supportUser !== user) return;
+      if (which !== hub || supportInstall !== user) return;
       $("support-text").value = ""; growComposer();
       await supportRefresh();
       await supportOpen(user);
@@ -1034,7 +1020,7 @@ if (document.body.classList.contains("login")) {
   setInterval(() => {
     if (document.visibilityState !== "visible") return;
     supportRefresh();
-    if (supportUser && supportHub === which) supportOpen(supportUser);
+    if (supportInstall && supportHub === which) supportOpen(supportInstall);
   }, 4000);
 
   // ---- the team's to-dos (the Database widget, todos): add one, tick it done, delete it -------------------------------
@@ -1119,16 +1105,16 @@ if (document.body.classList.contains("login")) {
   const reasonTag = (reason) => tag(reason, reason === "abuse" ? "bad" : reason === "spam" ? "warn" : "muted");
 
   // ---- database: every table, grouped by topic; reserved names with their switch --------------------------------
-  // Table groups, the main table first, each with a line icon (drawn like the Overview's).
+  // Table groups as the README's endpoint groups ("What the hub knows per endpoint group"), in this order, each table
+  // in its listed order; a name ending in "*" takes every table it starts. Each with a line icon (drawn like the
+  // Overview's). The rest (Litestream's bookkeeping, settings) under Internal.
   const TABLE_GROUPS = [
-    ["Accounts", "user", ["users", "handles", "reserved", "gone", "devices"]],
+    ["Account", "user", ["users", "devices", "handles", "gone", "reserved", "account_keys", "contact_keys", "prekeys", "profile_commitments", "storage"]],
     ["Messages", "mail", ["messages", "blobs", "blob_quota"]],
-    ["Support", "chat", ["support_messages", "todos", "reports"]],
-    ["Errors", "warn", ["diagnostics", "diagnostic_days", "diagnostic_seen"]],
-    ["Keys", "key", ["account_keys", "contact_keys", "prekeys", "profile_commitments"]],
     ["Groups", "group", ["zk_groups"]],
-    ["Account data", "disk", ["backups", "storage"]],
-    ["Stats", "chart", ["events", "deliveries_hourly"]],
+    ["Backup", "disk", ["backups"]],
+    ["Support and crashes", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_days", "diagnostic_seen", "diagnostic_installs", "todos"]],
+    ["Stats", "chart", ["deliveries_hourly*", "events"]],
   ];
   Object.assign(ICONS, {
     user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
@@ -1176,26 +1162,31 @@ if (document.body.classList.contains("login")) {
     zk_groups: "Groups: encrypted state, revision (Signal Groups v2)",
     storage: "Each user's sealed storage, versioned writes",
     backups: "Each user's backup record; it secures the name",
-    support_messages: "Support chat messages",
+    support_messages: "Support chat messages, by random install id (no account)",
     todos: "The team's to-dos",
     diagnostics: "Crash and error reports, one row per signature",
     diagnostic_seen: "Report ids already counted, never counted twice",
     diagnostic_days: "Crashes and errors per day, last 14 days",
-    reports: "Users reported by users, latest per pair",
+    diagnostic_installs: "Which install sent a group on which day, kept 90 days",
+    reports: "Users reported by installs (random id, no account), latest per pair",
     settings: "Hub switches, such as name reservation on/off",
     deliveries_hourly: "Deliveries per hour, a count only, 8 days",
     _litestream_lock: "Litestream replication bookkeeping (?)",
     _litestream_seq: "Litestream replication bookkeeping (?)",
   };
   const tableGroups = (list) => {
-    const byName = new Map(list.map((t) => [t.name, t])), known = new Set();
+    const known = new Set();
     const groups = TABLE_GROUPS.map(([title, ico, names]) => {
-      names.forEach((n) => known.add(n));
-      return [title, ico, names.filter((n) => byName.has(n)).map((n) => byName.get(n))];
+      const ts = names.flatMap((n) => list.filter((t) => !known.has(t.name) && (n.endsWith("*") ? t.name.startsWith(n.slice(0, -1)) : t.name === n))
+        .sort((x, y) => x.name.localeCompare(y.name)));
+      ts.forEach((t) => known.add(t.name));
+      return [title, ico, ts];
     });
     groups.push(["Internal", "gear", list.filter((t) => !known.has(t.name))]);
     return groups.filter(([, , ts]) => ts.length);
   };
+  // Install id columns (help, spec 6.4) in their short form.
+  const INSTALL_COL = /^(install|reporter)$/;
   // A timestamp column (…_at, ms since 1970) as a readable date, the raw value on hover.
   const isTime = (col, v) => /_at$/.test(col) && typeof v === "number" && v > 1e11 && v < 1e14;
   let tableOpen = null, tablesDrawn = "";
@@ -1260,7 +1251,7 @@ if (document.body.classList.contains("login")) {
     side.append(el("div", "tside-h", "Database"));
     for (const [kind, , ts] of tableGroups(list)) {
       side.append(el("div", "tside-k", kind));
-      for (const t of [...ts].sort((x, y) => x.name.localeCompare(y.name))) {
+      for (const t of ts) {
         const b = el("button", `sub raw${t.name === tableOpen ? " on" : ""}`);
         b.type = "button"; b.title = TABLE_INFO[t.name] || t.name;
         b.append(el("span", null, t.name), el("small", null, num(t.count)));
@@ -1319,6 +1310,8 @@ if (document.body.classList.contains("login")) {
             return;
           }
           if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
+          // A random install id (support, reports, diagnostic_installs): its first 6 hex, the full one on hover.
+          else if (INSTALL_COL.test(t.columns[i]) && typeof v === "string" && /^[0-9a-f]{32}$/i.test(v)) cell(tr, installShort(v), "mono", v);
           else if (v != null && PII_COL.test(t.columns[i])) cell(tr, pii(String(v)), "mono", String(v).length > 40 ? String(v) : "");
           else cell(tr, v == null ? "–" : String(v), "mono", v != null && String(v).length > 40 ? String(v) : "");
           tr.lastChild.dataset.col = t.columns[i];
@@ -1969,7 +1962,13 @@ if (document.body.classList.contains("login")) {
       return [
         chartCard("Open", d ? num(d.values[d.values.length - 1]) : "–", d, "bad", go),
         dcard("Came in", num(kinds.reduce((a, [, v]) => a + v, 0)), barRows(kinds.map(([l, v]) => [l, num(v), v / top]))),
-        dcard("Crashes, 7 days", num(hd.crashes), "", kvRows([["Reports carry no user", "counted as sent"]])),
+        // Crash-free (est.): installs with a crash in 7 days against users active in 7 days; installs are not users
+        // (several phones, reinstalls), so an estimate. The plain crash count next to it.
+        dcard("Crash-free (est.)", pctText(hd.free), kvRows([
+          ["Installs with a crash, 7 days", hd.crashInstalls == null ? "– (hub too old)" : num(hd.crashInstalls)],
+          ["Active users, 7 days", num(hd.wau)],
+          ["Crashes, 7 days", num(hd.crashes)]]),
+          note("Estimate: installs with a crash in 7 days vs active users 7 days (an install is not a user).")),
         he && hd.heAll[1] ? chartCard("Hub errors", `${num(hd.heAll[0])} 5xx`, { names: hd.names, values: he.map(([e]) => e),
           tip: (i) => (he[i][1] ? `${num(he[i][0])} 5xx (${pctText(rate(he[i]))}) · ${num(he[i][2])} 4xx · ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers") }, "bad",
         note(`${pctText(hd.heRate)} of ${num(hd.heAll[1])} answers`)) : dcard("Hub errors", null, note("None counted yet in this range.")),
@@ -2107,11 +2106,11 @@ if (document.body.classList.contains("login")) {
         { cls: "cool", sub: bad ? `${num(bad)} failed` : `${pctText((100 * ok) / (ok + bad))} taken`, subCls: bad ? "bad" : "" }) : dcard("Push", null, note("No data yet."));
       return [...one.vr().filter((c) => title(c) !== "Builds"), ...one.pl(), push];
     };
-    // Problems: what users sent (feedback, reports; crash-free users; the way to the chat), errors (the app's crashes
+    // Problems: what users sent (feedback, reports; crash-free (est.); the way to the chat), errors (the app's crashes
     // and errors split, per day as a line over the hub's 5xx answers as bars), delivery.
     DETAIL.pr = () => {
       const h = hubNow, hd = healthData || {}, kinds = Object.fromEntries(problemKinds(h));
-      // Feedback: what users sent, as the overview's rows: feedback and reports per slot, crash-free users.
+      // Feedback: what users sent, as the overview's rows: feedback and reports per slot, crashes and crash-free (est.).
       const h1 = Math.floor(Date.now() / 3600000), t0 = today0(), span = range === 1 ? 24 : range || 30;
       const slots = Array.from({ length: span }, (_, i) => (range === 1 ? h1 - span + 1 + i : t0 - span + 1 + i));
       const slotName = (x) => (range === 1 ? clock(x * 3600000) : dayName(x)), unitMs = range === 1 ? 3600000 : 86400000;
@@ -2123,9 +2122,10 @@ if (document.body.classList.contains("login")) {
         { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const d7 = Array.from({ length: 7 }, (_, i) => t0 - 6 + i), cr = d7.map((d) => (h.diagnostic_days || []).filter((r) => r.day === d && r.kind === "crash").reduce((a, r) => a + r.count, 0));
-          // Crash reports carry no user, so no "crash-free users": the plain count of the last 7 days.
-          return { ico: "warn", label: "Crashes", value: num(hd.crashes), cls: hd.crashes ? "warn" : "", values: cr, scls: "hot",
-            tip: (i) => ({ head: dayName(d7[i]), rows: [{ color: "var(--bad)", label: "Crashes", value: num(cr[i]) }] }) }; })(),
+          // The plain crash count of the last 7 days, crash-free (est.: installs with a crash vs active users) beside it.
+          return { ico: "warn", label: "Crashes", value: `${num(hd.crashes)} · ${pctText(hd.free)} crash-free (est.)`, cls: hd.crashes ? "warn" : "", values: cr, scls: "hot",
+            tip: (i) => ({ head: dayName(d7[i]), rows: [{ color: "var(--bad)", label: "Crashes", value: num(cr[i]) },
+              { ico: "ratio", label: "Crash-free (est., 7 days)", value: `${pctText(hd.free)} · ${num(hd.crashInstalls)} installs with a crash vs ${num(hd.wau)} active users` }] }) }; })(),
       ]);
       // Per day (the app reports per day only): 7 days, 30 for 30 days and Total.
       const len = range === 30 || range === 0 ? 30 : 7, t = today0(), ds = Array.from({ length: len }, (_, i) => t - len + 1 + i);

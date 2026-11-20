@@ -187,7 +187,8 @@ It drops `todos` and backfills user-message `done_at` from existing team read ma
 Schema 7 moves that team thread back into a `todos` table of its own (text and times kept, ids new).
 From the hub's schema 7 the team's to-dos are a table of their own, `todos`, shown raw in the Database widget (Support
 group) with a field to add one, a tick per row and a delete. The support chat (support_messages, Chat view; Feedback
-in Attention, key 2 or `#feedback` opens it) lists the people who wrote, "Open" (something of theirs not handled,
+in Attention, key 2 or `#feedback` opens it) lists the installs that wrote (hub schema 9: a random install id, no
+account; shown by its first 6 hex characters, the people it reported folded under the facts), "Open" (something of theirs not handled,
 the default) or "Answered", newest first; the right side is the conversation under one line of facts. Each of their
 messages is ticked handled by hand; a reply ticks the ones it answers. The list's logic is `supportList` in `app.js`,
 tested in node by `test_support.py` (skipped without node). Errors in Attention open the diagnostics table, open

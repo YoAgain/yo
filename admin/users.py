@@ -43,10 +43,10 @@ ORDER BY max(d.last_seen_at) DESC, u.created_at DESC
 LIMIT ?
 """
 
-# Reports (spec 6.4): who reported whom, why, when; newest first. No content: the hub has none.
+# Reports (spec 6.4): which install reported whom, why, when; newest first. No content: the hub has none. The
+# reporter is a random install id (hub schema 9), never an account: no name to look up.
 REPORTS = """
-SELECT r.reporter_id, (SELECT coalesce(spelling, value) FROM handles WHERE user_id = r.reporter_id AND kind = 2),
-       r.reported_id, (SELECT coalesce(spelling, value) FROM handles WHERE user_id = r.reported_id AND kind = 2),
+SELECT r.reporter, r.reported_id, (SELECT coalesce(spelling, value) FROM handles WHERE user_id = r.reported_id AND kind = 2),
        r.reason, r.created_at
 FROM reports r ORDER BY r.created_at DESC LIMIT ?
 """
@@ -73,7 +73,10 @@ def tables(db) -> list:
     names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
     for name in names:
         q = '"' + name.replace('"', '""') + '"'
-        cur = db.execute(f"SELECT * FROM {q} LIMIT ?", (TABLE_ROWS,))
+        # The Errors tab: each crash or error group with its distinct installs (kept 90 days by the hub).
+        extra = (", (SELECT count(DISTINCT install) FROM diagnostic_installs i WHERE i.diagnostic_id = diagnostics.id) AS installs"
+                 if name == "diagnostics" and "diagnostic_installs" in names else "")
+        cur = db.execute(f"SELECT *{extra} FROM {q} LIMIT ?", (TABLE_ROWS,))
         out.append({"name": name, "columns": [c[0] for c in cur.description],
                     "rows": [[cell_value(v) for v in row] for row in cur],
                     "count": db.execute(f"SELECT count(*) FROM {q}").fetchone()[0]})
@@ -183,10 +186,19 @@ def retention(db, now: int) -> dict:
     return out
 
 
+def crash_installs(db, now: int):
+    """Distinct installs that sent a crash in the last 7 UTC days (today and the 6 before), from diagnostic_installs
+    (hub schema 9); None on an older hub without the table."""
+    if not has_table(db, "diagnostic_installs"):
+        return None
+    return db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                      " WHERE d.kind = 'crash' AND i.day >= ?", (now // DAY_MS - 6,)).fetchone()[0]
+
+
 def open_problems(db, now: int) -> dict:
     spans = []
     if has_table(db, "support_messages"):
-        spans += db.execute("SELECT created_at, done_at FROM support_messages WHERE length(user_id)>0 AND from_team = 0").fetchall()
+        spans += db.execute("SELECT created_at, done_at FROM support_messages WHERE from_team = 0").fetchall()
     if has_table(db, "diagnostics"):
         for first, last, done, payload in db.execute("SELECT first_seen, last_seen, done, payload FROM diagnostics"):
             try:
@@ -241,9 +253,9 @@ def hub(name: str, path: str) -> dict:
         for u in users:
             u["device_list"] = by_user.get(u["id"], [])
         reports = part("reports", lambda: [
-            {"id": a.hex()[:16] + b.hex()[:16], "reporter": a.hex(), "reporter_name": text(an), "reported": b.hex(), "reported_name": text(bn),
+            {"id": a.hex()[:16] + b.hex()[:16], "reporter": a.hex(), "reported": b.hex(), "reported_name": text(bn),
              "reason": REASONS.get(reason, str(reason)), "at": at}
-            for a, an, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "reports") else [])
+            for a, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "reports") else [])
         ], [])
         return {
             "users": users,
@@ -257,13 +269,18 @@ def hub(name: str, path: str) -> dict:
                 for day,kind,count in db.execute("SELECT day,kind,count FROM diagnostic_days ORDER BY day")]
                 if has_table(db,"diagnostic_days") else [], []),
             "diagnostics": part("diagnostics", lambda: [dict(zip(
-                ("id", "kind", "count", "first_seen", "last_seen", "app", "os", "model", "payload", "done"), row))
-                for row in db.execute("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))]
+                ("id", "kind", "count", "first_seen", "last_seen", "app", "os", "model", "payload", "done", "installs"), row))
+                for row in db.execute("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,"
+                    + ("(SELECT count(DISTINCT install) FROM diagnostic_installs i WHERE i.diagnostic_id = diagnostics.id)"
+                       if has_table(db, "diagnostic_installs") else "NULL")
+                    + " FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))]
                 if has_table(db, "diagnostics") else [], []),
+            # Crash-free (estimated) on the page: these installs against the users active in 7 days.
+            "crash_installs_7d": part("crash_installs_7d", lambda: crash_installs(db, now)),
             # Support chat: unread user messages at the end of each of the last 14 UTC days (today: now), oldest
-            # first; and each thread's last line, by the user id's hex (upper case, as the hub's thread list has it).
+            # first; and each thread's last line, by the install id's hex (lower case, as the hub's thread list has it).
             "support_unread_days": part("support_unread_days", lambda: [one(
-                "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
+                "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
                 end, end) for end in (min(now, midnight - (i - 1) * DAY_MS) for i in range(13, -1, -1))]
                 if has_table(db, "support_messages") else [], []),
             # Problems open at each point: user messages not yet handled, crash and error groups not done (from
@@ -277,17 +294,17 @@ def hub(name: str, path: str) -> dict:
                 f"SELECT created_at / ?, count(*) FROM users u WHERE NOT ({BOT_USER}) GROUP BY 1 ORDER BY 1", (DAY_MS,))], []),
             # Messages users wrote to the team per UTC day, the last 365 (today last): Feedback's bars and total.
             "support_days": part("support_days", lambda: [one(
-                "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at >= ? AND created_at < ?",
+                "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at >= ? AND created_at < ?",
                 (midnight - i * DAY_MS), (midnight - (i - 1) * DAY_MS)) for i in range(364, -1, -1)]
                 if has_table(db, "support_messages") else None),
             # Messages users wrote to the team per hour, the last 24 (the current one last): the Feedback card's bars.
             "support_hours": part("support_hours", lambda: [one(
-                "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at >= ? AND created_at < ?",
+                "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at >= ? AND created_at < ?",
                 h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]
                 if has_table(db, "support_messages") else None),
             "support_last": part("support_last", lambda: {h: {"text": text(t)[:160], "team": bool(team)}
                 for h, t, team, _ in db.execute(
-                    "SELECT hex(user_id), text, from_team, max(id) FROM support_messages GROUP BY user_id LIMIT ?", (LIMIT,))}
+                    "SELECT lower(hex(install)), text, from_team, max(id) FROM support_messages GROUP BY install LIMIT ?", (LIMIT,))}
                 if has_table(db, "support_messages") else {}, {}),
             "tables": part("tables", lambda: tables(db), []),
             "total": part("total", lambda: one("SELECT count(*) FROM users")),

@@ -30,6 +30,9 @@ class FeedbackTests(unittest.TestCase):
                 db.execute("CREATE TABLE diagnostic_days(day INTEGER,kind TEXT,count INTEGER)")
                 db.execute("INSERT INTO diagnostic_days VALUES(20000,'crash',2),(20000,'error',20)")
             snapshot = users.hub("live", path)
+            self.assertIsNone(snapshot["crash_installs_7d"])  # an older hub: no diagnostic_installs
+            self.assertIsNone(snapshot["diagnostics"][0]["installs"])
+            self.assertFalse({"diagnostics", "crash_installs_7d", "tables"} & set(snapshot["errors"]))
             self.assertEqual(snapshot["diagnostics_open"], 1)
             self.assertEqual(snapshot["diagnostic_days"], [{"day":20000,"kind":"crash","count":2},{"day":20000,"kind":"error","count":20}])
             rows = snapshot["diagnostics"]
@@ -45,26 +48,67 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(request.method, "PUT")
             self.assertEqual(request.get_header("Yo-admin-token"), "test-token")
 
+    def test_crash_installs_and_installs_per_group(self):
+        users = load("users")
+        today = int(users.time.time() * 1000) // users.DAY_MS
+        a, b, c = b"\x0a" * 16, b"\x0b" * 16, b"\x0c" * 16
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE diagnostics(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
+                db.execute("INSERT INTO diagnostics VALUES(1,'crash',5,1,3,'ios/1','26','iPhone','{}',0),(2,'crash',1,1,2,'ios/1','26','iPhone','{}',0),(3,'error',9,1,4,'ios/1','26','iPhone','{}',0)")
+                db.execute("CREATE TABLE diagnostic_installs(diagnostic_id INTEGER, install BLOB, day INTEGER, PRIMARY KEY(diagnostic_id, install, day))")
+                db.executemany("INSERT INTO diagnostic_installs VALUES(?,?,?)", [
+                    (1, a, today), (1, a, today - 1), (1, b, today - 6),  # a twice, b on the 7th day back: 2
+                    (2, a, today), (2, c, today - 7),                    # c too old for 7 days
+                    (3, c, today)])                                      # an error, no crash
+            snapshot = users.hub("live", path)
+            self.assertEqual(snapshot["crash_installs_7d"], 2)
+            self.assertEqual({d["id"]: d["installs"] for d in snapshot["diagnostics"]}, {1: 2, 2: 2, 3: 1})
+            # The Errors tab (the diagnostics table as it is) gains an installs column.
+            table = next(t for t in snapshot["tables"] if t["name"] == "diagnostics")
+            self.assertEqual(table["columns"][-1], "installs")
+            self.assertEqual(sorted((r[0], r[-1]) for r in table["rows"]), [(1, 2), (2, 2), (3, 1)])
+            self.assertEqual(table["count"], 3)
+
+    def test_reports_by_install_without_a_name(self):
+        users = load("users")
+        install, reported = bytes.fromhex("a3f09c" + "0" * 26), b"\x05" * 16
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE handles(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER)")
+                db.execute("INSERT INTO handles VALUES('eve','Eve',?,2)", (reported,))
+                db.execute("CREATE TABLE reports(reporter BLOB, reported_id BLOB, reason INTEGER, created_at INTEGER, PRIMARY KEY(reporter, reported_id))")
+                db.execute("INSERT INTO reports VALUES(?,?,2,9)", (install, reported))
+            [r] = users.hub("live", path)["reports"]
+            self.assertEqual(r, {"id": install.hex()[:16] + reported.hex()[:16], "reporter": install.hex(),
+                                 "reported": reported.hex(), "reported_name": "Eve", "reason": "abuse", "at": 9})
+            self.assertNotIn("reporter_name", r)
+
     def test_support_unread_days_and_last_line(self):
         users = load("users")
         now = users.time.time() * 1000
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE support_messages(id INTEGER PRIMARY KEY, user_id BLOB, from_team INTEGER, text TEXT, created_at INTEGER, read_at INTEGER, done_at INTEGER)")
+                # Hub schema 9: threads by a random install id (16 bytes), no account.
+                db.execute("CREATE TABLE support_messages(id INTEGER PRIMARY KEY, install BLOB NOT NULL, from_team INTEGER, text TEXT, created_at INTEGER, read_at INTEGER, app_version TEXT, done_at INTEGER)")
                 day = users.DAY_MS
-                db.executemany("INSERT INTO support_messages VALUES(?,?,?,?,?,?,?)", [
-                    (1, b"\x01" * 16, 0, "old, read yesterday", now - 5 * day, now - day, now - day),
-                    (2, b"\x01" * 16, 1, "team answer", now - day + 1000, None, None),
-                    (3, b"\x02" * 16, 0, "still open", now - 3 * day, now - day, None),
-                    (4, b"", 1, "team task", now - 3 * day, None, None)])
+                db.executemany("INSERT INTO support_messages VALUES(?,?,?,?,?,?,?,?)", [
+                    (1, b"\x01" * 16, 0, "old, read yesterday", now - 5 * day, now - day, "ios/1", now - day),
+                    (2, b"\x01" * 16, 1, "team answer", now - day + 1000, None, None, None),
+                    (3, b"\xab" * 16, 0, "still open", now - 3 * day, now - day, "ios/1", None)])
             snapshot = users.hub("live", path)
             days = snapshot["support_unread_days"]
             self.assertEqual(len(days), 14)
             self.assertEqual(days[-1], 1)
             self.assertEqual(max(days), 2)
             self.assertEqual(snapshot["support_last"]["01" * 16], {"text": "team answer", "team": True})
-            self.assertEqual(snapshot["support_last"]["02" * 16]["text"], "still open")
+            self.assertEqual(snapshot["support_last"]["ab" * 16]["text"], "still open")  # lower case, as the hub's list
+            self.assertEqual(sum(snapshot["support_days"]), 2)
+            self.assertEqual(snapshot["problems_open"]["days"][-1], 1)
+            self.assertFalse({k for k in snapshot["errors"] if k.startswith(("support", "problems"))})
 
     def test_migration_resumes_and_remaps_done(self):
         import json
@@ -190,22 +234,27 @@ class ReservedTests(unittest.TestCase):
                     conn.request(method,path,None if data is None else json.dumps(data),headers)
                     response=conn.getresponse(); response.read(); conn.close()
                     return response.status
-                data={"hub":"dev","user":"a"*32,"action":"reply","text":"hello"}
+                data={"hub":"dev","install":"a"*32,"action":"reply","text":"hello"}
                 self.assertEqual(call("POST","/support",data,"https://invalid.example"),403)
                 login.return_value=False
                 self.assertEqual(call("POST","/support",data),401)
                 self.assertEqual(call("GET","/support.json?hub=dev"),401)
                 login.return_value=True
-                for invalid in [{**data,"hub":"other"},{**data,"user":"../x"},{**data,"text":"x"*2001},{**data,"action":"erase"}]:
+                for invalid in [{**data,"hub":"other"},{**data,"install":"../x"},{**data,"install":"a"*31},{"hub":"dev","user":"a"*32,"action":"reply","text":"hello"},{**data,"text":"x"*2001},{**data,"action":"erase"}]:
                     self.assertEqual(call("POST","/support",invalid),400)
                 proxy.assert_not_called()
                 self.assertEqual(call("POST","/support",data),200)
                 proxy.assert_called_with("dev","messages/"+"a"*32,"hello")
-                self.assertEqual(call("GET","/support.json?hub=dev&user="+"a"*32),200)
+                self.assertEqual(call("GET","/support.json?hub=dev&install="+"a"*32),200)
                 proxy.assert_called_with("dev","messages/"+"a"*32)
+                self.assertEqual(call("GET","/support.json?hub=dev&install="+"a"*33),400)
+                self.assertEqual(call("GET","/support.json?hub=dev"),200)
+                proxy.assert_called_with("dev","messages")
+                self.assertEqual(call("POST","/support",{"hub":"dev","install":"a"*32,"action":"handled","through":5}),200)
+                proxy.assert_called_with("dev","messages/"+"a"*32+"/handled","5")
                 self.assertEqual(call("POST","/support/done",{"hub":"dev","id":3,"done":False}),200)
                 proxy.assert_called_with("dev","messages/done/3","0")
-                self.assertEqual(call("GET","/support.json?hub=dev&user=team"),400)  # the to-dos are no thread any more
+                self.assertEqual(call("GET","/support.json?hub=dev&install=team"),400)  # the to-dos are no thread any more
                 self.assertEqual(call("POST","/todos/done",{"hub":"dev","id":3,"done":True}),200)
                 proxy.assert_called_with("dev","todos/3","1")
                 self.assertEqual(call("POST","/todos/delete",{"hub":"dev","id":3}),200)

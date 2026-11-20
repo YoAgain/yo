@@ -736,11 +736,12 @@ class Admin(BaseHTTPRequestHandler):
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
             query = parse_qs(self.path.partition("?")[2])
-            hub, user = query.get("hub", [""])[0], query.get("user", [""])[0]
-            if hub not in ("live", "dev") or (user and not re.fullmatch(r"[0-9a-fA-F]{32}", user)):
+            # A thread is a random install id (16 bytes, 32 hex; hub schema 9), never an account.
+            hub, install = query.get("hub", [""])[0], query.get("install", [""])[0]
+            if hub not in ("live", "dev") or (install and not re.fullmatch(r"[0-9a-fA-F]{32}", install)):
                 return self.send(400, b"Bad request", "text/plain")
             try:
-                result = support_request(hub, "messages" + ("/" + user if user else ""))
+                result = support_request(hub, "messages" + ("/" + install if install else ""))
             except (OSError, ValueError):
                 return self.send(502, b"Hub unavailable", "text/plain")
             return self.send(200, json.dumps(result).encode(), "application/json")
@@ -853,10 +854,10 @@ class Admin(BaseHTTPRequestHandler):
                         raise ValueError()
                     suffix, body = ("messages/done/" if path == "/support/done" else "todos/") + str(data["id"]), "1" if data["done"] else "0"
                 else:
-                    user, action = data["user"], data["action"]
-                    if not isinstance(user, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", user):
+                    install, action = data["install"], data["action"]
+                    if not isinstance(install, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", install):
                         raise ValueError()
-                    suffix = "messages/" + user
+                    suffix = "messages/" + install
                     if action == "reply":
                         body = data["text"]
                         if not isinstance(body, str) or not body.strip() or len(body.encode()) > 2000:
