@@ -21,6 +21,8 @@ fun inviteName(uri: Uri): String? {
         "https", "http" -> uri.pathSegments.firstOrNull()?.takeIf { uri.host?.lowercase() in setOf("justyo.co", "www.justyo.co") }
         else -> null
     }
+    // yo://camera and yo://open are Yo's own (iOS's intents), not names.
+    if (uri.scheme?.lowercase() == "yo" && raw?.lowercase() in setOf("camera", "open")) return null
     return raw?.takeIf { it.isNotBlank() && it.lowercase() !in setOf("privacy", "security") }
 }
 data class Friend(
@@ -61,12 +63,25 @@ data class AppState(
     val lastSync: Long? = null, val firstYo: Boolean = false, val notice: String? = null, val appIcon: String? = null,
     /** A scanned or tapped invite, verified by the hub, waiting for "Add & Yo" (not saved). */
     val invitation: Invitation? = null,
+    /** A contact whose account key changed (spec 3.2), said once in a dialog; `confirm`: their Yos wait for it (was verified). */
+    val keyChanged: KeyChange? = null,
+    /** A group with nobody else in it any more, after a Yo to it: asked whether to delete it (iOS). */
+    val emptyGroup: Friend? = null,
+    /** The list's top line from the core: "Offline", a failed send's words (tap: try again), else none. */
+    val banner: String? = null,
 ) {
+    /** What the list and the screens over it draw: without the counters and clocks every Yo and every sync change
+     *  (stats, last sync). A Yo then recomposes the list once, not three or four times (each 4-16 ms on the A34). */
+    fun forScreen() = copy(sent = 0, received = 0, byFriend = emptyMap(), lastSent = emptyMap(), lastReceived = emptyMap(), lastSync = null)
     /** Wanted in Google's cloud but not there (no screen lock, or Google's backup off): the red dot. Turned off by choice is no warning. */
     val backupMissing: Boolean get() = googleBackup && !backedUp
 }
 
+data class KeyChange(val friend: Friend, val confirm: Boolean)
+
 /** An invite's friend, as the hub spells it: `known` when already on the list. */
-data class Invitation(val name: String, val user: String, val known: Boolean)
+data class Invitation(val name: String, val user: String?, val known: Boolean,
+    /** What is wrong instead ("No Such User", "That’s You"): the dialog says so, with only OK. */
+    val problem: String? = null)
 
 fun JSONObject.longMap(key: String): Map<String,Long> = optJSONObject(key)?.let { values -> values.keys().asSequence().associateWith { values.getLong(it) } }.orEmpty()

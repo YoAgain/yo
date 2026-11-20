@@ -9,7 +9,10 @@ import uniffi.yo.productText
 
 /** Yo's own words come from the core (`yo_product`), in English like iOS. */
 internal val Words = ProductLanguage.ENGLISH
-internal fun copy(text: ProductText) = productText(text, Words)
+/** Fixed for the language: asked of the core once each (a core call allocates JNA structures, ~50 µs on the A34,
+ *  and every bar asked for "Sent Yo!" on each composition of the list). */
+private val texts = java.util.concurrent.ConcurrentHashMap<ProductText, String>()
+internal fun copy(text: ProductText): String = texts.getOrPut(text) { productText(text, Words) }
 
 /** A bar's title: the core's row title, a request's line, or the name (a group's with its #). */
 internal fun rowTitle(row: ListRow?, friend: Friend): String {

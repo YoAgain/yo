@@ -40,6 +40,7 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -302,7 +303,8 @@ internal data class BarContent(
                 listOf(title),
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
-                modifier = receivedModifier,
+                // Gone: still their name (whose bar it is), faded, as iOS; a tap says "Not on Yo".
+                modifier = if (friend.gone && !bar.sent && bar.undo == null) Modifier.graphicsLayer { alpha = 0.55f } else receivedModifier,
             )
             if (showUndo || thumbnails.isNotEmpty()) Box(Modifier.align(start).padding(horizontal = 20.dp)) {
                 OutgoingThumbnail(repo, thumbnails, bar.undo, onUndo)
@@ -327,6 +329,31 @@ internal data class BarContent(
 
 private val CountDigits = Regex("[0-9]+(?=×)")
 
+/**
+ * Widths of bar words, shared by every bar and kept: each bar measured its words again in each composition with its own
+ * measurer (eight entries), and a new bar measured all ten digits first. One measure is 0.3-1 ms of Montserrat on the
+ * A34; a Yo's frame measured a dozen (3-4 ms per changed bar). Main thread only, as composition is.
+ */
+internal class BarMeasure(private val measurer: TextMeasurer) {
+    private val widths = object : LinkedHashMap<Pair<String, TextStyle>, Int>(64, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, TextStyle>, Int>) = size > 512
+    }
+    fun width(text: String, style: TextStyle): Int = widths.getOrPut(text to style) {
+        measurer.measure(text, style, maxLines = 1, softWrap = false).size.width
+    }
+    /** The widest digit: a count's steady block. */
+    val slot by lazy { ('0'..'9').maxOf { width(it.toString(), BarStyle) } }
+}
+
+internal val LocalBarMeasure = staticCompositionLocalOf<BarMeasure?> { null }
+
+/** The list's shared one (FriendList provides it; per density and font scale), else this bar's own. */
+@Composable internal fun rememberBarMeasure(): BarMeasure {
+    LocalBarMeasure.current?.let { return it }
+    val measurer = rememberTextMeasurer(0)
+    return remember(measurer) { BarMeasure(measurer) }
+}
+
 @Composable
 private fun BarWords(text: String, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) =
     BarWords(listOf(text), modifier, startInset, endInset)
@@ -337,14 +364,14 @@ private fun BarWords(text: String, modifier: Modifier = Modifier, startInset: In
  */
 @Composable
 private fun ArrivalWords(senders: List<ListSender>, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) {
-    val measurer = rememberTextMeasurer()
+    val measure = rememberBarMeasure()
     val density = LocalDensity.current
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val one = senders.singleOrNull()
         val line = one?.let { productArrivalLines(it.count.toLong(), it.name, Words).first() }
         // The digits' steady blocks take a little more than the digits themselves.
         val fits = line != null && with(density) {
-            measurer.measure(line, BarStyle, maxLines = 1, softWrap = false).size.width.toDp() + 16.dp
+            measure.width(line, BarStyle).toDp() + 16.dp
         } <= maxWidth - startInset.dp - endInset.dp
         if (fits) BarWords(listOf(line!!), startInset = startInset, endInset = endInset)
         else SenderFlow(senders, startInset = startInset, endInset = endInset)
@@ -357,13 +384,13 @@ private fun ArrivalWords(senders: List<ListSender>, modifier: Modifier = Modifie
  */
 @Composable
 private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) {
-    val measurer = rememberTextMeasurer()
+    val measure = rememberBarMeasure()
     val density = LocalDensity.current
     val style = BarStyle.copy(fontSize = BarSmallFont)
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val room = with(density) { (maxWidth - startInset.dp - endInset.dp).coerceAtLeast(0.dp).toPx() }
         val lines = remember(senders, room, style, density) {
-            fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width.toFloat()
+            fun width(value: String) = measure.width(value, style).toFloat()
             val flow = listSenderFlow(senders, Words)
             listFlowTwoLines(flow, ListFlowWidths(width(flow.prefix), flow.tokens.map(::width), width(flow.separator),
                 width(flow.comma), flow.more.map(::width)), room)
@@ -377,7 +404,7 @@ private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier,
         ) {
             lines.filter { it.isNotEmpty() }.forEach { line ->
                 // Only a name wider than the room even alone (the core places it whole): that line shrinks to fit.
-                val width = measurer.measure(line, style, maxLines = 1, softWrap = false).size.width
+                val width = measure.width(line, style)
                 val scale = if (width > room) (room / width).coerceAtLeast(.5f) else 1f
                 Text(line, style = if (scale < 1f) style.copy(fontSize = BarSmallFont * scale) else style,
                     maxLines = 1, softWrap = false)
@@ -392,9 +419,9 @@ private fun senderLabel(sender: ListSender) =
 /** A title at the small size: one line if it fits, else two in whole words (listWrapTwoLines); never cut. */
 @Composable
 private fun SmallTitle(text: String, room: Float, start: androidx.compose.ui.unit.Dp, end: androidx.compose.ui.unit.Dp) {
-    val measurer = rememberTextMeasurer()
+    val measure = rememberBarMeasure()
     val style = BarStyle.copy(fontSize = BarSmallFont)
-    fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width.toFloat()
+    fun width(value: String) = measure.width(value, style).toFloat()
     val lines = remember(text, room) {
         if (width(text) <= room) listOf(text) else {
             val words = listTitleWords(text)
@@ -426,20 +453,17 @@ private fun BarWords(
     startInset: Int = 20,
     endInset: Int = 20,
 ) {
-    val measurer = rememberTextMeasurer()
+    val measure = rememberBarMeasure()
     val density = LocalDensity.current
     val style = BarStyle
-    // The widest digit, measured once per density/font scale (ten measurements; the measurer's cache holds eight).
-    val slot = remember(measurer, density) {
-        ('0'..'9').maxOf { measurer.measure(it.toString(), style, maxLines = 1, softWrap = false).size.width }
-    }
+    val slot = measure.slot
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val start = startInset.dp
         val end = endInset.dp
         // As iOS's BarRow: the room between both sides, the line in the middle or moved aside as little as it takes
         // (a thumbnail or sign on one side must not cut "Sending Yo!" to "Sending Y…").
         val available = (maxWidth - start - end).coerceAtLeast(0.dp)
-        fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width
+        fun width(value: String) = measure.width(value, style)
         fun parts(value: String): Triple<String, String, String> {
             val count = CountDigits.find(value) ?: return Triple(value, "", "")
             return Triple(value.substring(0, count.range.first), count.value, value.substring(count.range.last + 1))

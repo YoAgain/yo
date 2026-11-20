@@ -2,7 +2,6 @@ package app.justyo.android
 
 import android.content.Context
 import android.media.AudioAttributes
-import android.media.MediaPlayer
 import android.util.Base64
 import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.*
@@ -35,7 +34,42 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             override fun failure(kind: String) = crashes.countStateFailure(kind)
         })
     }
-    val transport = HubTransport { mutable.update { it.copy(update = true) } }
+    val transport = HubTransport(reached = { connection.reached(it) }) { mutable.update { it.copy(update = true) } }
+    /** Offline as iOS says it: no network, or the hub not reached, for 4 s on end (a first second without is nothing);
+     *  a send that failed while online says "Failed to Send" for 5 s, a tap on it tries again. */
+    private inner class Connection {
+        @Volatile var local = false
+        @Volatile var remote = false
+        @Volatile var offline = false
+        @Volatile var failure: String? = null
+        private var pending: Job? = null
+        private var expiry: Job? = null
+        fun reached(ok: Boolean) {
+            // Any answer of the hub counts for Status' "Connected" (a long poll answers only after 25 s).
+            if (ok) { val now = System.currentTimeMillis(); if (now - (state.value.lastSync ?: 0) > 5000) mutable.update { it.copy(lastSync = now) } }
+            if (remote != ok) return; remote = !ok; settle()
+        }
+        fun network(available: Boolean) { local = !available; if (available) remote = false; settle() }
+        @Synchronized fun settle() {
+            if (!local && !remote) { pending?.cancel(); pending = null; if (offline) { offline = false; show() }; return }
+            if (offline || pending?.isActive == true) return
+            pending = scope.launch { delay(4000); offline = local || remote; show() }
+        }
+        @Synchronized fun failed(name: String?) {
+            expiry?.cancel()
+            expiry = scope.launch {
+                delay(1000)
+                if (offline) return@launch
+                failure = productFailedToSend(name, Words); show()
+                delay(5000)
+                failure = null; show()
+            }
+        }
+        @Synchronized fun foreground() { remote = false; pending?.cancel(); pending = null; offline = false; failure = null; settle(); show() }
+        fun show() = present { connectivity(it, offline, failure) }
+    }
+    private val connection by lazy { Connection() }
+    private var backgroundSince = 0L
     @Volatile private var client: YoClient? = null
     @Volatile var sessionId: Long = 0
         private set
@@ -70,7 +104,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             // Merge by key with the latest source, retaining contacts added concurrently with this tick.
             val byKey=state.friends.associateBy { it.key }
             val ordered=if(orderChanged) state.friends.filter { it.key !in order }+order.mapNotNull(byKey::get) else state.friends
-            state.copy(friends=ordered,listRows = steadyRows(state.listRows, snapshot.rows), lockedRow = snapshot.lockedRow,deletion=snapshot.deletion)
+            state.copy(friends=ordered,listRows = steadyRows(state.listRows, snapshot.rows), lockedRow = snapshot.lockedRow,deletion=snapshot.deletion,banner=snapshot.banner)
         }
         if(orderChanged) {
             orderSave?.cancel()
@@ -128,14 +162,17 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             context.getSystemService(android.net.ConnectivityManager::class.java)
                 .registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: android.net.Network) {
+                        // Another network: connections of the one before cannot carry anything any more.
+                        transport.forgetConnections()
+                        connection.network(true)
                         online.trySend(Unit)
                         if (client != null && state.value.pendingInvite != null) command { consumeInvite() }
                         if (foreground && client != null) media.wake()
                     }
+                    override fun onLost(network: android.net.Network) { connection.network(false) }
                 })
         }
     }
-    private val soundPlayers = mutableSetOf<MediaPlayer>()
     fun start() = scope.launch(Dispatchers.IO) {
         scope.launch(Dispatchers.IO) {
             state.map { it.username to it.friends }.distinctUntilChanged().collect { (_, friends) ->
@@ -464,8 +501,23 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         passkeyBackup = !removePasskey && (answer != null || backup?.record?.byPasskey?.isNotEmpty() == true)
         syncItem()
     }
+    /** While Yo is in front, Wi-Fi stays out of power save: an idle phone's radio otherwise sleeps between beacons
+     *  and a Yo's packets wait at the access point (measured up to 400 ms on the A34). Android ends it by itself
+     *  when the screen goes off or Yo leaves the foreground. */
+    private val lowLatency = if (android.os.Build.VERSION.SDK_INT < 29) null else runCatching {
+        context.getSystemService(android.net.wifi.WifiManager::class.java)
+            .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "yo:foreground")
+            .apply { setReferenceCounted(false) }
+    }.getOrNull()
     fun active(on: Boolean) {
         foreground = on
+        runCatching { if (on) lowLatency?.acquire() else lowLatency?.release() }
+        if (on) {
+            // Back after a while: the hub's connections may be gone (the phone slept, the network moved on).
+            if (backgroundSince != 0L && android.os.SystemClock.elapsedRealtime() - backgroundSince > 20_000) transport.forgetConnections()
+            connection.foreground()
+        } else backgroundSince = android.os.SystemClock.elapsedRealtime()
+        if (on) preloadSound()
         present { foreground(it, on) }
         if (on && state.value.updating && !state.value.loading) keepResuming()
         else if (on) command {
@@ -492,11 +544,16 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 try {
                     syncing.withLock {
                         absorb(c.savedEvents(), c)
+                        Lat.mark("sync.wait")
                         val events = c.sync(25u)
+                        Lat.mark("sync.got ${events.size}")
                         if (c === client) absorb(events, c)
+                        Lat.mark("sync.absorbed")
+                        // absorb refreshed the list for events; an empty answer may still have changed the core's lists
+                        if (events.isEmpty()) refresh()
                     }
                     mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
-                    refresh(); media.wake(); pause = 1000
+                    media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
                 catch (e: YoException.Replaced) { signOut(replaced = true); break }
                 catch (_: Exception) { withTimeoutOrNull(pause) { online.receive() }; pause = (pause * 2).coerceAtMost(30000) }
@@ -555,11 +612,13 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val name = usernameCanonical(typed)
         require(name.isNotBlank()) { context.getString(R.string.type_name) }
         if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) error(copy(ProductText.THATS_YOU))
-        val found = try { c.whois(name) ?: error(copy(ProductText.NO_SUCH_USER)) } catch (e: YoException.Network) { null }
+        // Never added unchecked: without the hub's answer the name could be nobody's.
+        val found = try { c.whois(name) ?: error(copy(ProductText.NO_SUCH_USER)) }
+            catch (e: YoException.Network) { error(copy(ProductText.NO_CONNECTION)) }
         if (c !== client) return
-        val known = known(found?.username ?: name, found?.user)
+        val known = known(found.username ?: name, found.user)
         if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return }
-        addFriend(c, found?.username ?: name, found?.user)
+        addFriend(c, found.username ?: name, found.user)
     }
     private fun known(spelled: String, user: String?) = state.value.friends.firstOrNull { it.group == null && !it.gone &&
         ((user != null && it.user == user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
@@ -584,7 +643,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val c = client ?: return
         val name = state.value.pendingInvite ?: return
         val taken = suspend { mutable.update { it.copy(pendingInvite = null) }; changes.withLock { persist() } }
-        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) return taken()
+        // What is wrong with it is said in the invite's dialog, with only OK (as iOS).
+        fun problem(text: ProductText) = mutable.update { it.copy(invitation = Invitation(name.uppercase(), null, false, copy(text))) }
+        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) { taken(); problem(ProductText.THATS_YOU); return }
         val found = try { c.whois(name) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             if (e is YoException.Replaced) throw e
             if (e is YoException.Network || e is YoException.Refused) return  // no answer: asked again later
@@ -592,7 +653,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
         if (c !== client || state.value.pendingInvite != name) return
         taken()
-        if (found == null) { mutable.update { it.copy(error = copy(ProductText.NO_SUCH_USER)) }; return }
+        if (found == null) { problem(ProductText.NO_SUCH_USER); return }
         val spelled = found.username ?: name
         val known = known(spelled, found.user)
         mutable.update { it.copy(invitation = Invitation(known?.name ?: spelled, found.user, known != null)) }
@@ -617,9 +678,13 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         lock.withLock {
             if (c !== client) return
             try {
+                Lat.mark("send.begin")
                 val events = c.send(sendTarget(friend.target), MessageKind.Yo)
-                absorb(events, c)
+                Lat.mark("send.end")
+                // The hub has it: the bar says so now; what the send brought along and the bookkeeping follow.
                 showSent(friend)
+                Lat.mark("sent.shown"); Lat.frame("sent")
+                absorb(events, c)
                 recordStat(friend,true)
                 changes.withLock { persist() }
                 if (vault.read("first-yo") == null) {
@@ -636,10 +701,18 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                     else -> copy(ProductText.NOT_SENT)
                 })
                 if (e is YoException.Replaced) throw e
+                if (e is YoException.GroupEmpty) { mutable.update { it.copy(emptyGroup = friend) }; return@withLock }
+                connection.failed(friend.name)
                 deliverLater(c)
 
             }
         }
+    }
+    /** The failure line tapped: what waits goes again now, not after its backoff. */
+    fun retryNow() {
+        val c = client ?: return
+        retrying?.cancel(); retrying = null
+        deliverLater(c); media.wake(); online.trySend(Unit)
     }
     private fun deliverLater(c: YoClient) {
         if (retrying?.isActive == true) return
@@ -664,14 +737,18 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             lastReceived=if(sent) s.lastReceived else s.lastReceived+(friend.key to time)) }
     }
     private val notifications = YoNotifications(context)
+    /** A Yo shown on a bar while Yo is in front: the list plays its haptic (one per frame at most, as iOS). */
+    val arrivals = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
     private fun arrival(friend: Friend, user: String?, kind: MessageKind, token: String) {
+        Lat.mark("arrival ${token.substringAfterLast('/')}"); Lat.frame("arrival")
         present { received(it, friend.key, when(kind) {
             is MessageKind.Photo -> ListKind.PHOTO
             is MessageKind.Video -> ListKind.VIDEO
             else -> ListKind.YO
         }, token, if(friend.group != null) user else null) }
         recordStat(friend,false)
-        if (foreground) chime()
+        if (foreground) { chime(); arrivals.tryEmit(Unit) }
     }
     suspend fun refresh() = changes.withLock {
         val c = client ?: return@withLock
@@ -703,6 +780,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     suspend fun absorb(events: List<YoEvent>, source: YoClient? = client) {
         if (events.isEmpty() || source == null || source !== client) return
+        val c = source
+        val profiles = events.filterIsInstance<YoEvent.Profile>().associate { it.user to it.name }
         changes.withLock {
             if (source !== client) return
             for (event in events) when (event) {
@@ -710,75 +789,78 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 is YoEvent.NewChat -> removedUsers.remove(event.user)
                 else -> Unit
             }
+            // A Yo from someone already on the list shows at once; the list's refresh (core lists, the encrypted
+            // save) comes after it, not before (it cost 30-60 ms of every arrival).
+            if (events.any { it is YoEvent.Message || it is YoEvent.GroupMessage }) {
+                val contacts = c.contacts().associateBy { it.user }
+                for (event in events) arrive(event, profiles, contacts)
+            }
         }
+        Lat.mark("absorb.refresh")
         refresh()
-        val c = source
+        Lat.mark("absorb.refreshed")
         changes.withLock {
             if (c !== client) return
-            val kept = mutableListOf<YoEvent>()
-            val profiles = events.filterIsInstance<YoEvent.Profile>().associate { it.user to it.name }
             val contacts = c.contacts().associateBy { it.user }
             for (event in events) {
                 if(event is YoEvent.Profile) present { senderNamed(it,event.user,event.name) }
-                val user = when (event) { is YoEvent.Message -> event.user; is YoEvent.GroupMessage -> event.user; is YoEvent.IdentityChanged -> event.user; else -> null }
-                val group = (event as? YoEvent.GroupMessage)?.group
-                val friend = state.value.friends.firstOrNull { if (group != null) it.group == group else user != null && it.user == user }
-                if (event is YoEvent.IdentityChanged && friend != null) {
-                    mutable.update { s -> s.copy(friends = s.friends.map { if (it.key == friend.key) it.copy(keyChanged = true) else it }, notice = "${friend.name} Has a New Key. Compare safety numbers in Profile › Encryption.") }
+                if (event is YoEvent.IdentityChanged) {
+                    val friend = state.value.friends.firstOrNull { it.user == event.user }
+                    if (friend != null) mutable.update { s -> s.copy(friends = s.friends.map { if (it.key == friend.key) it.copy(keyChanged = true) else it },
+                        keyChanged = KeyChange(friend, contacts[event.user]?.unconfirmed == true)) }
                 }
-                val at = when (event) { is YoEvent.Message -> event.sentAtMs; is YoEvent.GroupMessage -> event.sentAtMs; else -> null }
-                val kind = when (event) { is YoEvent.Message -> event.kind; is YoEvent.GroupMessage -> event.kind; else -> null }
-                if (friend != null && at != null && kind != null && !friend.blocked) {
-                    val id = "${friend.target}/$user/$at"
-                    // First save the media descriptor; an unsuccessful save leaves the event in the Rust journal.
-                    media.expect(id, friend.target, user ?: "", kind, at.toLong())
-                    if (seen.add(id)) {
-                        if (seen.size > 2000) seen.remove(seen.first())
-                        arrival(friend, user, kind, id)
-                        if (user != null) {
-                            val contact = contacts[user]
-                            val name = profiles[user]?.takeIf { it.isNotBlank() }
-                                ?: contact?.name?.takeIf { it.isNotBlank() }
-                                ?: contact?.handles?.firstOrNull()
-                                ?: state.value.friends.firstOrNull { it.user == user }?.name?.takeUnless { it == "Yo User" }
-                            if (name == null) {
-                                crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
-                            }
-                            try {
-                                if (!foreground) notifications.show(friend.target, id, name, friend.name.takeIf { group != null }, kind)
-                            } catch (_: SecurityException) {
-                                // Notification permission may be revoked between checking and posting.
-                            }
-                        }
-                    }
-                }
-                kept += event
+                arrive(event, profiles, contacts)
             }
-            persist(); c.acknowledge(kept)
+            persist(); c.acknowledge(events)
         }
         media.wake()
+    }
+    /** A message event's Yo on its bar (once: `seen`), its media expected, a notification in the background. */
+    private suspend fun arrive(event: YoEvent, profiles: Map<String, String>, contacts: Map<String, YoContact>) {
+        val user = when (event) { is YoEvent.Message -> event.user; is YoEvent.GroupMessage -> event.user; else -> return }
+        val group = (event as? YoEvent.GroupMessage)?.group
+        val friend = state.value.friends.firstOrNull { if (group != null) it.group == group else it.user == user } ?: return
+        val at = when (event) { is YoEvent.Message -> event.sentAtMs; is YoEvent.GroupMessage -> event.sentAtMs; else -> return }
+        val kind = when (event) { is YoEvent.Message -> event.kind; is YoEvent.GroupMessage -> event.kind; else -> return }
+        if (friend.blocked) return
+        val id = "${friend.target}/$user/$at"
+        // First save the media descriptor; an unsuccessful save leaves the event in the Rust journal.
+        media.expect(id, friend.target, user, kind, at.toLong())
+        if (!seen.add(id)) return
+        if (seen.size > 2000) seen.remove(seen.first())
+        arrival(friend, user, kind, id)
+        val contact = contacts[user]
+        val name = profiles[user]?.takeIf { it.isNotBlank() }
+            ?: contact?.name?.takeIf { it.isNotBlank() }
+            ?: contact?.handles?.firstOrNull()
+            ?: state.value.friends.firstOrNull { it.user == user }?.name?.takeUnless { it == "Yo User" }
+        if (name == null) {
+            crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
+        }
+        try {
+            if (!foreground) notifications.show(friend.target, id, name, friend.name.takeIf { group != null }, kind,
+                friend.key, client?.userId())
+        } catch (_: SecurityException) {
+            // Notification permission may be revoked between checking and posting.
+        }
     }
     fun click() {
         val audio = context.getSystemService(android.media.AudioManager::class.java)
         if(audio.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL)
             audio.playSoundEffect(android.media.AudioManager.FX_KEY_CLICK)
     }
+    /** The Yo sound, loaded once: a MediaPlayer made per arrival prepared on the main thread (~30-40 ms on the A34),
+     *  exactly while the bar flashed. SoundPool plays from memory, from any thread, at most the core's limit at once. */
+    private val sounds by lazy {
+        val pool = android.media.SoundPool.Builder().setMaxStreams(productSoundLimit().toInt().coerceAtLeast(1))
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build())
+            .build()
+        pool to pool.load(context, R.raw.yo, 1)
+    }
+    fun preloadSound() { scope.launch(Dispatchers.IO) { sounds } }
     private fun chime() {
-        // MediaPlayer callbacks need a looper, even though the inbox runs on IO.
-        scope.launch(Dispatchers.Main.immediate) {
-            synchronized(soundPlayers) {
-                if (soundPlayers.size >= productSoundLimit().toInt()) return@synchronized
-                val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build()
-                val player = MediaPlayer.create(context, R.raw.yo, attributes, 0) ?: return@synchronized
-                fun release() = synchronized(soundPlayers) {
-                    if (soundPlayers.remove(player)) player.release()
-                }
-                soundPlayers += player
-                player.setOnCompletionListener { release() }
-                player.setOnErrorListener { _, _, _ -> release(); true }
-                try { player.start() } catch (_: IllegalStateException) { release() }
-            }
-        }
+        val (pool, yo) = sounds
+        pool.play(yo, 1f, 1f, 1, 0, 1f)
     }
     suspend fun answer(friend: Friend, yes: Boolean, block: Boolean = false) {
         val c = client ?: return
@@ -917,6 +999,15 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     fun clearMessage(message: String) { mutable.update { it.copy(
         error=it.error.takeUnless { text -> text==message },notice=it.notice.takeUnless { text -> text==message }) } }
     fun clearError() { mutable.update { it.copy(error = null, notice = null, firstYo = false) } }
+    fun emptyGroupSeen() { mutable.update { it.copy(emptyGroup = null) } }
+    /** An empty group deleted: left without a notice (nobody would see it), its bar gone. */
+    suspend fun deleteEmptyGroup(friend: Friend) {
+        emptyGroupSeen()
+        val c = client ?: return
+        friend.group?.let { absorb(c.leaveGroup(it), c) }
+        refresh()
+    }
+    fun keyChangeSeen() { mutable.update { it.copy(keyChanged = null) } }
     companion object {
         /** A failed one-time sign-in that is tried again later, not dropped: a network error, a busy hub, a save. */
         fun keepsPendingSignIn(error: Exception) = error is YoException && retryLater(error)

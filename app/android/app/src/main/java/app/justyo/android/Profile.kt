@@ -160,7 +160,9 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
 }
 
 /** Settings (iOS SettingsView): a sheet as high as the page in view, its pages pushed in with a back arrow. */
-@Composable fun ProfileSheet(model: YoViewModel, s: AppState, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
+@Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
+    // The whole state (counters and the last sync included): the list underneath takes it without them.
+    val s by model.repository.state.collectAsStateWithLifecycle()
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     fun hideThen(then: () -> Unit) { scope.launch { sheet.hide() }.invokeOnCompletion { then() } }
@@ -190,6 +192,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     var shownKey by remember { mutableStateOf<String?>(null) }
     var showingInfo by remember { mutableStateOf(false) }
     var unblocking by remember { mutableStateOf<Friend?>(null) }
+    var blockingNew by remember { mutableStateOf<Friend?>(null) }
     var passkeyRevision by remember { mutableIntStateOf(0) }
     val contacts = remember(s.friends) { s.friends.filter { it.group == null && !it.blocked }.sortedBy { it.name.lowercase() } }
     val auth = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -232,6 +235,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
             "Contacts" -> R.string.ui_contacts
             "Appearance" -> R.string.ui_app_icon
             "Blocked" -> R.string.ui_blocked
+            "Block Contact" -> R.string.block_contact
             "Contact Us" -> R.string.ui_yo_team
             "Crash Reports" -> R.string.ui_crash_reports
             "Delete Account" -> R.string.ui_delete_account
@@ -314,7 +318,10 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
                         )
                         Section(null, null,
-                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || s.backupMissing, onClick = { open("Account Recovery") }),
+                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || s.backupMissing, onClick = {
+                                // Neither a passkey nor a saved key (a passkey needs the key here): the two steps at once (iOS).
+                                if (!s.secured) { repo.command { prepareRecovery() }; secure = true } else open("Account Recovery")
+                            }),
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
                         )
                         TextButton(onClick = { open("Delete Account") }, Modifier.padding(start = 4.dp, bottom = 12.dp)) {
@@ -346,20 +353,26 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                                 onChecked = { on -> repo.command { googleBackup(on) } }),
                         )
                     }
-                    // iOS BlockedPage: who may ask, then the blocked contacts.
+                    // iOS BlockedPage: who may ask and blocking one more, then the blocked contacts.
                     shown == "Blocked" -> {
                         Section(null, null,
                             Setting(stringResource(R.string.allow_yo_requests), Icons.Default.PersonAddAlt, checked = s.requestsOpen,
                                 onChecked = { on -> repo.command { settings(requests = on) } }),
+                            Setting(stringResource(R.string.block_contact_more), Icons.Default.Block, onClick = { open("Block Contact") }),
                         )
                         val blocked = s.friends.filter { it.blocked }
-                        if (blocked.isEmpty()) Note(res.getString(R.string.ui_no_blocked_friends))
-                        else Section(stringResource(R.string.blocked_contacts), null,
-                            *blocked.map { friend ->
+                        Section(stringResource(R.string.blocked_contacts), null,
+                            *(if (blocked.isEmpty()) listOf(Setting(stringResource(R.string.no_blocked_contacts)))
+                            else blocked.map { friend ->
                                 Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, value = res.getString(R.string.ui_unblock),
                                     onClick = { unblocking = friend })
-                            }.toTypedArray())
+                            }).toTypedArray())
                     }
+                    shown == "Block Contact" -> Section(null, null,
+                        *(if (contacts.isEmpty()) listOf(Setting(stringResource(R.string.no_contacts)))
+                        else contacts.map { friend ->
+                            Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, onClick = { blockingNew = friend })
+                        }).toTypedArray())
                     shown == "Appearance" -> {
                         IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
                         Section(null, null,
@@ -387,14 +400,23 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                     }
                     shown == "Delete Account" -> DeletePage(model, s, passkeyConfigured, ::authenticate)
                     shown == "Encryption" -> EncryptionPage(model, connected)
+                    // iOS ContactsList: the contacts, then the groups (their members are on the list's own sheet).
                     shown == "Contacts" -> {
-                        if (contacts.isEmpty()) Note(res.getString(R.string.ui_no_chat_yet))
+                        if (contacts.isEmpty()) Note(res.getString(R.string.no_contacts_yet))
                         else Section(null, null, *contacts.map { friend ->
                             Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) },
                                 good = when {
                                     friend.gone || friend.keyChanged -> false
                                     else -> null
                                 }, onClick = { open("contact:${friend.key}") })
+                        }.toTypedArray())
+                        val groups = s.friends.filter { it.group != null }.sortedBy { it.name.lowercase() }
+                        if (groups.isNotEmpty()) Section(stringResource(R.string.contacts_groups), null, *groups.map { group ->
+                            Setting(group.name, leading = {
+                                Box(Modifier.size(40.dp).background(RowColors[Math.floorMod(group.color, RowColors.size)], CircleShape), contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.Groups, null, Modifier.size(22.dp), tint = Color.White)
+                                }
+                            })
                         }.toTypedArray())
                     }
                     shown.startsWith("contact:") -> s.friends.firstOrNull { it.key == shown.removePrefix("contact:") }?.let { friend ->
@@ -407,13 +429,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
 
     if (secure) RecoverySheet(model, s) { secure = false }
     shownKey?.let { key -> RecoveryKeySheet(s.username.orEmpty(), key) { shownKey = null } }
-    if (code) FittedSheet(onDismissRequest = { code = false }) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(stringResource(R.string.ui_your_code), style = MaterialTheme.typography.titleLarge)
-            Qr("https://justyo.co/${Uri.encode(s.username)}", Modifier.padding(24.dp).size(240.dp))
-            Text(s.username.orEmpty(), style = MaterialTheme.typography.headlineSmall.copy(fontFamily = YoFont))
-        }
-    }
+    if (code) YourCodeSheet(s.username.orEmpty()) { code = false }
     if (showingInfo && info != null) AlertDialog(
         onDismissRequest = { showingInfo = false },
         icon = { Icon(Icons.Outlined.Info, null) },
@@ -421,6 +437,16 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         text = { Text(info) },
         confirmButton = { TextButton(onClick = { showingInfo = false }) { Text(stringResource(R.string.ui_done)) } },
     )
+    blockingNew?.let { friend ->
+        AlertDialog(
+            onDismissRequest = { blockingNew = null },
+            title = { Text(res.getString(R.string.block_name, friend.name)) },
+            text = { Text(stringResource(R.string.block_their_yos)) },
+            confirmButton = { TextButton(onClick = { blockingNew = null; repo.command { block(friend, true) } },
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.ui_block)) } },
+            dismissButton = { TextButton(onClick = { blockingNew = null }) { Text(stringResource(R.string.ui_cancel)) } },
+        )
+    }
     unblocking?.let { friend ->
         AlertDialog(
             onDismissRequest = { unblocking = null },
@@ -429,35 +455,70 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
             dismissButton = { TextButton(onClick = { unblocking = null }) { Text(stringResource(R.string.ui_cancel)) } },
         )
     }
+    // iOS: a secured account goes without a word; an unsecured one is told what it loses.
     if (logout) AlertDialog(
         onDismissRequest = { logout = false },
         icon = { Icon(Icons.AutoMirrored.Filled.Logout, null) },
         title = { Text(stringResource(R.string.ui_sign_out_cd2476)) },
-        text = { Text(stringResource(if (s.secured) R.string.ui_sign_back_in_with_your_recovery_key_friends_on_this_phone_are_rem
-            else R.string.ui_your_account_isn_t_secured_without_a_recovery_key_you_won_t_be_ab)) },
-        confirmButton = { TextButton(onClick = { logout = false; repo.command { signOut(byPerson = true); onClose() } }) {
-            Text(stringResource(if (s.secured) R.string.ui_sign_out else R.string.ui_sign_out_anyway))
+        text = if (s.secured) null else { { Text(stringResource(R.string.sign_out_unsecured)) } },
+        confirmButton = { TextButton(onClick = { logout = false; repo.command { signOut(byPerson = true); onClose() } },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+            Text(stringResource(R.string.ui_sign_out))
         } },
         dismissButton = { TextButton(onClick = { logout = false }) { Text(stringResource(R.string.ui_cancel)) } },
     )
+    // A passkey here always rides on a saved recovery key, so only the password manager is left to clean up.
     if (removePasskey) AlertDialog(
         onDismissRequest = { removePasskey = false },
         title = { Text(stringResource(R.string.settings_turn_off_passkey)) },
+        text = { Text(stringResource(R.string.turn_off_passkey_message)) },
         confirmButton = { TextButton(onClick = {
             removePasskey = false
             repo.command { removeRecoveryPasskey(); withContext(Dispatchers.Main) { passkeyRevision++ } }
-        }) { Text(stringResource(R.string.settings_turn_off)) } },
+        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
         dismissButton = { TextButton(onClick = { removePasskey = false }) { Text(stringResource(R.string.ui_cancel)) } },
     )
+    // The old key stops working once a new one is saved: the two steps open with it.
     if (renew) AlertDialog(
         onDismissRequest = { renew = false },
-        title = { Text(stringResource(R.string.ui_create_new_recovery_key_ccd8c2)) },
-        text = { Text(stringResource(R.string.ui_your_current_recovery_key_will_stop_working_after_the_new_on)) },
-        confirmButton = { TextButton(onClick = { renew = false; repo.command { prepareRecovery(true) }; secure = true }) {
-            Text(stringResource(R.string.ui_create_new_recovery_key))
+        title = { Text(stringResource(R.string.turn_off_recovery_key)) },
+        text = { Text(stringResource(if (passkeyConfigured || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
+        confirmButton = { TextButton(onClick = { renew = false; repo.command { prepareRecovery(true) }; secure = true },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+            Text(stringResource(R.string.settings_turn_off))
         } },
         dismissButton = { TextButton(onClick = { renew = false }) { Text(stringResource(R.string.ui_cancel)) } },
     )
+}
+
+/** Your code (iOS YourCodePage): Amethyst, "X wants to Yo", the QR code, the link, and sharing it in the bar. */
+@Composable private fun YourCodeSheet(name: String, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val link = "https://justyo.co/${Uri.encode(name)}"
+    FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.ui_your_code), Modifier.align(Alignment.Center), style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { shareCode(context, name) }, Modifier.align(Alignment.CenterEnd)) {
+                    Icon(Icons.Default.Share, stringResource(R.string.share_your_code))
+                }
+            }
+            BasicText(stringResource(R.string.code_wants_to_yo, name), Modifier.padding(top = 12.dp), maxLines = 1, softWrap = false,
+                style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White, textAlign = TextAlign.Center),
+                autoSize = TextAutoSize.StepBased(minFontSize = 9.sp, maxFontSize = 28.sp))
+            Qr(link, Modifier.padding(vertical = 24.dp).size(260.dp))
+            BasicText(link, maxLines = 1, softWrap = false, style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White),
+                autoSize = TextAutoSize.StepBased(minFontSize = 6.sp, maxFontSize = 28.sp))
+        }
+    }
+}
+
+/** The invite as iOS shares it: "Yo me on Yo: <link>". */
+private fun shareCode(context: Context, name: String) {
+    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+        .putExtra(Intent.EXTRA_TEXT, context.getString(R.string.code_share_text, "https://justyo.co/${Uri.encode(name)}"))
+        .putExtra(Intent.EXTRA_TITLE, context.getString(R.string.code_wants_to_yo, name))
+    context.startActivity(Intent.createChooser(send, context.getString(R.string.share_your_code)))
 }
 
 /** The saved recovery key, shown after the screen lock confirmed it is you: its QR code and its 64 characters. */
@@ -476,7 +537,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     }
 }
 
-@Composable private fun KeyCard(key: String) {
+@Composable private fun KeyCard(key: String, copied: Boolean? = null, onCopy: () -> Unit = {}) {
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Qr(key, Modifier.size(140.dp))
@@ -489,6 +550,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                     }
                 }
             }
+            if (copied != null) TextButton(onClick = onCopy) { Text(stringResource(if (copied) R.string.recovery_copied else R.string.recovery_copy)) }
         }
     }
 }
@@ -538,7 +600,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     Image(painterResource(resource), null, Modifier.size(size.dp).clip(RoundedCornerShape(radius.dp)).background(background))
 }
 
-/** Status (iOS StatusPage): usage, the server and this phone's part, crashes. Tapping the Yos row cycles its view. */
+/** Status (iOS StatusPage): crashes, usage, then the server and this phone's part. Tapping the Yos row cycles its view. */
 @Composable private fun StatusPage(model: YoViewModel, s: AppState, connected: Boolean, open: (String) -> Unit) {
     val repo = model.repository
     val res = LocalResources.current
@@ -550,12 +612,22 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     val notifications by model.notificationsEnabled.collectAsStateWithLifecycle()
     val top = s.byFriend.maxByOrNull { it.value }
     val mostYos = top?.let { most -> s.friends.firstOrNull { it.key == most.key }?.name } ?: "—"
+    Section(stringResource(R.string.status_crashes), null,
+        Setting(stringResource(R.string.ui_send_crashes), Icons.Default.BugReport, checked = crashOn, onChecked = {
+            crashOn = it; repo.crashes.enabled = it
+            if (it) repo.command { crashes.flush() }
+        }),
+        Setting(stringResource(R.string.ui_crash_reports), Icons.Default.Description, onClick = { open("Crash Reports") }),
+    )
     Section(stringResource(R.string.status_usage), null,
         Setting(stringResource(listOf(R.string.status_total_yos, R.string.status_yos, R.string.top_friend)[yosView]), Icons.Default.BarChart,
             listOf("${s.sent + s.received}", "↑${s.sent} · ↓${s.received}", mostYos)[yosView], onClick = { yosView = (yosView + 1) % 3 }),
         Setting(stringResource(R.string.ui_friends), Icons.Default.People, s.friends.count { !it.blocked && it.group == null }.toString()),
     )
     Section(stringResource(R.string.status_server), null,
+        Setting(stringResource(R.string.status_notifications), Icons.Default.Notifications,
+            stringResource(if (notifications) R.string.status_ready else R.string.status_not_allowed), good = notifications,
+            onClick = if (notifications) null else { { openNotificationSettings(context) } }),
         Setting(stringResource(R.string.ui_hub), Icons.Default.Cloud, stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected),
         Setting(stringResource(R.string.ui_round_trip), Icons.Default.Speed,
             if (probing) stringResource(R.string.ui_checking) else trip ?: stringResource(R.string.ui_not_checked), enabled = !probing, onClick = {
@@ -564,17 +636,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                     try { trip = roundTrip()?.let { "$it ms" } ?: res.getString(R.string.ui_no_reply) } finally { probing = false }
                 }
             }),
-        Setting(stringResource(R.string.status_notifications), Icons.Default.Notifications,
-            stringResource(if (notifications) R.string.status_ready else R.string.status_not_allowed), good = notifications,
-            onClick = if (notifications) null else { { openNotificationSettings(context) } }),
         Setting(stringResource(R.string.ui_encryption), Icons.Default.EnhancedEncryption, onClick = { open("Encryption") }),
-    )
-    Section(stringResource(R.string.status_crashes), null,
-        Setting(stringResource(R.string.ui_send_crashes), Icons.Default.BugReport, checked = crashOn, onChecked = {
-            crashOn = it; repo.crashes.enabled = it
-            if (it) repo.command { crashes.flush() }
-        }),
-        Setting(stringResource(R.string.ui_crash_reports), Icons.Default.Description, onClick = { open("Crash Reports") }),
     )
 }
 
@@ -671,9 +733,9 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         Text(stringResource(R.string.settings_delete_your_account), style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
     }
     Section(null, null,
-        Setting(res.getString(R.string.name_freed, s.username.orEmpty()), Icons.Default.PersonOff),
-        Setting(stringResource(R.string.ui_your_friends_can_t_reach_you_anymore), Icons.Default.GroupOff),
-        Setting(stringResource(R.string.ui_this_can_t_be_undone), Icons.Default.WarningAmber),
+        Setting(res.getString(R.string.delete_name_free, s.username.orEmpty()), Icons.Default.PersonOff),
+        Setting(stringResource(R.string.delete_friends_cant_reach), Icons.Default.GroupOff),
+        Setting(stringResource(R.string.delete_cant_undo), Icons.Default.WarningAmber),
         if (passkey) Setting(stringResource(R.string.settings_delete_passkey_yourself), Icons.Default.Key) else null,
     )
     Column(Modifier.fillMaxWidth().bringIntoViewRequester(button), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -712,6 +774,8 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     var revision by remember { mutableIntStateOf(0) }
     var technical by rememberSaveable { mutableStateOf(false) }
     var scanning by remember { mutableStateOf(false) }
+    var confirmingVerify by remember { mutableStateOf(false) }
+    var verifiedMenu by remember { mutableStateOf(false) }
     val details by produceState<ContactDetails?>(null, friend.user, revision) { value = withContext(Dispatchers.IO) { repo.contact(friend) } }
     val state by repo.state.collectAsStateWithLifecycle()
     val current = state.friends.firstOrNull { it.key == friend.key } ?: friend
@@ -736,8 +800,19 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                 details?.safetyCode?.let { Qr(it.toString(Charsets.ISO_8859_1), Modifier.size(150.dp)) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     TextButton(onClick = { scanning = true }) { Text(stringResource(R.string.scan_qr)) }
-                    if (verified) OutlinedButton(onClick = { repo.command { verify(friend, false); revision++ } }) { Text(stringResource(R.string.ui_mark_as_not_verified)) }
-                    else Button(onClick = { repo.command { verify(friend, true); revision++ } }) { Text(stringResource(R.string.ui_mark_as_verified)) }
+                    // iOS: Verified opens a menu with Clear Verification; marking asks first.
+                    if (verified) Box {
+                        TextButton(onClick = { verifiedMenu = true }) {
+                            Icon(Icons.Default.Verified, null, Modifier.size(18.dp), tint = Color(0xFF2ECC71))
+                            Text(stringResource(R.string.verified), Modifier.padding(start = 6.dp), color = Color(0xFF2ECC71))
+                        }
+                        DropdownMenu(verifiedMenu, onDismissRequest = { verifiedMenu = false }) {
+                            DropdownMenuItem(text = { Text(stringResource(R.string.clear_verification), color = MaterialTheme.colorScheme.error) },
+                                leadingIcon = { Icon(Icons.Default.RemoveModerator, null, tint = MaterialTheme.colorScheme.error) },
+                                onClick = { verifiedMenu = false; repo.command { verify(friend, false); revision++ } })
+                        }
+                    }
+                    else Button(onClick = { confirmingVerify = true }) { Text(stringResource(R.string.ui_mark_as_verified)) }
                 }
             }
         }
@@ -766,6 +841,15 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
             )
         }
     }
+    if (confirmingVerify) AlertDialog(
+        onDismissRequest = { confirmingVerify = false },
+        title = { Text(res.getString(R.string.verify_name, friend.name)) },
+        text = { Text(res.getString(R.string.verify_message, friend.name)) },
+        confirmButton = { TextButton(onClick = { confirmingVerify = false; repo.command { verify(friend, true); revision++ } }) {
+            Text(stringResource(R.string.ui_mark_as_verified))
+        } },
+        dismissButton = { TextButton(onClick = { confirmingVerify = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
     if (scanning) QrScanner(onClose = { scanning = false }, onCode = { qr ->
         scanning = false
         repo.command {
@@ -796,8 +880,8 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
 }
 
 /** A step of setting up recovery: its number (a tick once done), its name and line, its button on the right. */
-@Composable private fun RecoveryStep(number: Int, title: String, done: Boolean, action: String, enabled: Boolean, onAction: () -> Unit,
-    line: @Composable () -> Unit) {
+@Composable private fun RecoveryStep(number: Int, title: String, done: Boolean, action: String, doneTitle: String, busy: Boolean, enabled: Boolean,
+    onAction: () -> Unit, line: @Composable () -> Unit = {}) {
     Surface(Modifier.fillMaxWidth().padding(top = 8.dp), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Box(Modifier.size(28.dp).background(if (done) Color(0xFF2ECC71) else Color.White, CircleShape), contentAlignment = Alignment.Center) {
@@ -809,31 +893,42 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                 line()
             }
             if (done) OutlinedButton(onClick = {}, enabled = false, border = androidx.compose.foundation.BorderStroke(1.5.dp, Color.White.copy(alpha = 0.6f)),
-                colors = ButtonDefaults.outlinedButtonColors(disabledContentColor = Color.White)) { Text(action) }
+                colors = ButtonDefaults.outlinedButtonColors(disabledContentColor = Color.White)) { Text(doneTitle) }
             else Button(onClick = onAction, enabled = enabled, colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
-                disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) { Text(action) }
+                disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
+                if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp) else Text(action)
+            }
         }
     }
 }
 
-/** Setting up recovery (iOS SecureNameSheet): save or show the key, or set up a passkey; either one is enough, then Done. */
+/** Setting up recovery (iOS SecureNameSheet): save the key (then Show reveals it), or set up a passkey; either one is enough. */
 @Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     var shown by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
+    // The step at work (1 the key, 2 the passkey): its button spins, the others wait.
+    var busy by remember { mutableStateOf<Int?>(null) }
     var keySaved by remember { mutableStateOf(false) }
     var passkeyDone by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    // Opened on a secured account (for its passkey): the key shown is the one already saved, and a passkey may be set up.
+    LaunchedEffect(s.recovery) {
+        if (s.secured && s.recovery != null && withContext(Dispatchers.IO) { model.repository.savedRecovery() } == s.recovery) keySaved = true
+    }
+    LaunchedEffect(Unit) {
+        if (s.secured && withContext(Dispatchers.IO) { runCatching { model.repository.hasRecoveryPasskey() }.getOrDefault(false) }) passkeyDone = true
+    }
     fun saveWith(write: suspend (java.io.OutputStream, String) -> Unit) = { uri: Uri? ->
         if (uri != null) model.repository.command {
-            busy = true
+            busy = 1
             try {
                 val key = state.value.recovery ?: error(res.getString(R.string.ui_recovery_key_missing))
                 context.contentResolver.openOutputStream(uri)?.use { write(it, key) } ?: error(res.getString(R.string.ui_couldn_t_save_the_recovery_key))
                 keepRecovery(); keySaved = true
-            } finally { busy = false }
+            } finally { busy = null }
         }
         Unit
     }
@@ -851,33 +946,47 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     }
     val key = s.recovery
     val ready = key?.length == 64
-    // The owner's design A (as iOS): Amethyst, the key, two step cards with their state, a white Done.
-    FittedSheet(onDismissRequest = { if (!busy) onClose() }, containerColor = Amethyst, contentColor = Color.White, dragHandle = null) {
+    val idle = busy == null
+    // The owner's design A (as iOS): Amethyst, two step cards with their state, a white Done.
+    FittedSheet(onDismissRequest = { if (idle) onClose() }, containerColor = Amethyst, contentColor = Color.White, dragHandle = null) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally) {
             Box(Modifier.fillMaxWidth()) {
-                FilledTonalIconButton(onClick = onClose, enabled = !busy, modifier = Modifier.align(Alignment.TopEnd),
+                FilledTonalIconButton(onClick = onClose, enabled = idle, modifier = Modifier.align(Alignment.TopEnd),
                     colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White)) {
                     Icon(Icons.Default.Close, stringResource(R.string.ui_close))
                 }
-                Icon(Icons.Default.Key, null, Modifier.align(Alignment.Center).padding(top = 24.dp).size(48.dp))
+                Icon(Icons.Default.Key, null, Modifier.align(Alignment.Center).padding(top = 24.dp).size(64.dp))
             }
-            Text(stringResource(R.string.account_recovery), Modifier.padding(top = 12.dp), style = TextStyle(fontFamily = YoFont, fontSize = 26.sp),
-                textAlign = TextAlign.Center)
+            Text(stringResource(R.string.recovery_setup_title), Modifier.padding(top = 14.dp), style = TextStyle(fontFamily = YoFont, fontSize = 30.sp),
+                textAlign = TextAlign.Center, maxLines = 2)
             Text(stringResource(R.string.recovery_intro), Modifier.padding(top = 6.dp, bottom = 18.dp), textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.85f))
-            RecoveryStep(1, stringResource(R.string.ui_recovery_key), keySaved, stringResource(if (keySaved) R.string.saved else R.string.recovery_save),
-                enabled = ready && !busy, onAction = { sharing = true }) {
-                Text(stringResource(if (shown) R.string.recovery_hide else R.string.recovery_show),
-                    Modifier.clickable(enabled = ready && !busy, role = androidx.compose.ui.semantics.Role.Button) { shown = !shown }.padding(vertical = 2.dp),
-                    style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = if (ready && !busy) 0.9f else 0.5f),
-                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), color = Color.White.copy(alpha = 0.85f))
+            RecoveryStep(1, stringResource(R.string.ui_recovery_key), keySaved, stringResource(R.string.recovery_save), stringResource(R.string.saved),
+                busy = busy == 1, enabled = ready && idle, onAction = { sharing = true }) {
+                // Saved: "Saved · Show" reveals the key (iOS).
+                if (keySaved) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(stringResource(R.string.recovery_saved_dot), style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = 0.85f))
+                    Text(stringResource(if (shown) R.string.recovery_hide else R.string.recovery_show),
+                        Modifier.clickable(enabled = ready && idle, role = androidx.compose.ui.semantics.Role.Button) { shown = !shown },
+                        style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = if (ready && idle) 0.9f else 0.5f),
+                        textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+                }
             }
-            if (shown && key != null) Box(Modifier.padding(top = 8.dp)) { YoSystemTheme { KeyCard(key) } }
-            RecoveryStep(2, stringResource(R.string.recovery_passkey), passkeyDone, stringResource(if (passkeyDone) R.string.recovery_on else R.string.recovery_set_up),
-                enabled = !busy && !passkeyDone, onAction = {
+            if (shown && keySaved && key != null) Box(Modifier.padding(top = 8.dp)) {
+                YoSystemTheme {
+                    KeyCard(key, copied) {
+                        val clip = android.content.ClipData.newPlainText(res.getString(R.string.ui_recovery_key), key.chunked(4).joinToString(" "))
+                        clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+                        context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
+                        copied = true
+                    }
+                }
+            }
+            RecoveryStep(2, stringResource(R.string.recovery_passkey), passkeyDone, stringResource(R.string.recovery_set_up), stringResource(R.string.ui_done),
+                busy = busy == 2, enabled = idle && !passkeyDone, onAction = {
                     scope.launch {
-                        busy = true
+                        busy = 2
                         try {
                             val (name, user) = model.repository.passkeyAccount() ?: return@launch
                             val answer = Passkeys.create(context, name, user)
@@ -885,13 +994,11 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                             passkeyDone = true
                         } catch (e: CancellationException) { throw e } catch (e: Exception) {
                             model.error(e.localizedMessage ?: res.getString(R.string.passkey_prf_required))
-                        } finally { busy = false }
+                        } finally { busy = null }
                     }
-                }) {
-                Text(stringResource(R.string.recovery_passkey_where), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.85f))
-            }
-            // White with a black label: no purple on purple.
-            Button(onClick = onClose, enabled = (keySaved || passkeyDone) && !busy, modifier = Modifier.fillMaxWidth().padding(top = 24.dp).heightIn(min = 52.dp),
+                })
+            // White with a black label: no purple on purple. Done closes at any time (iOS), not while a step works.
+            Button(onClick = onClose, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 24.dp).heightIn(min = 52.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
                     disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
                 Text(stringResource(R.string.ui_done), fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)

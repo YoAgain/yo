@@ -75,6 +75,9 @@ import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOn
 import uniffi.yo.ProductText
 import uniffi.yo.productInvitedYou
 import uniffi.yo.usernameCanonical
@@ -85,7 +88,9 @@ import uniffi.yo.usernameValid
     val uiResources=androidx.compose.ui.platform.LocalResources.current
 
     val repo=model.repository
-    val state by repo.state.collectAsStateWithLifecycle()
+    val screen = remember(repo) { repo.state.map { it.forScreen() }.distinctUntilChanged().flowOn(Dispatchers.Default) }
+    val first = remember(repo) { repo.state.value.forScreen() }
+    val state by screen.collectAsStateWithLifecycle(first)
     val snackbar=remember { SnackbarHostState() }
     LaunchedEffect(state.error,state.notice,state.username,state.broken) {
         val message=if(state.broken || state.username == null) null else state.error ?: state.notice
@@ -105,7 +110,7 @@ import uniffi.yo.usernameValid
             }
             state.broken -> RecoveryRequired(model)
             state.username==null -> Onboarding(model,state)
-            else -> FriendList(model,state)
+            else -> CompositionLocalProvider(LocalBarMeasure provides rememberBarMeasure()) { FriendList(model,state) }
         }
     }
     state.deletion?.let { deletion ->
@@ -116,10 +121,36 @@ import uniffi.yo.usernameValid
     SnackbarHost(snackbar,Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp))
     }
     state.invitation?.let { invitation -> YoSystemTheme { AlertDialog(onDismissRequest=repo::dismissInvite,title={Text(invitation.name)},
-        text={Text(copy(if(invitation.known) ProductText.INVITE_YO else ProductText.INVITE_ADD_YO))},
-        confirmButton={TextButton(onClick={repo.command { acceptInvite(invitation) }}){Text(copy(if(invitation.known) ProductText.YO else ProductText.ADD_AND_YO))}},
-        dismissButton={TextButton(onClick=repo::dismissInvite){Text(copy(ProductText.CANCEL))}}) } }
-    if(state.firstYo) YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()))},confirmButton={TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}}) }
+        text={Text(invitation.problem ?: copy(if(invitation.known) ProductText.INVITE_YO else ProductText.INVITE_ADD_YO))},
+        confirmButton={
+            if (invitation.problem != null) TextButton(onClick=repo::dismissInvite){Text(stringResource(android.R.string.ok))}
+            else TextButton(onClick={repo.command { acceptInvite(invitation) }}){Text(copy(if(invitation.known) ProductText.YO else ProductText.ADD_AND_YO))}
+        },
+        dismissButton=if (invitation.problem != null) null else {{TextButton(onClick=repo::dismissInvite){Text(copy(ProductText.CANCEL))}}}) } }
+    // As iOS: without notifications it offers them, a Yo back would otherwise go unnoticed.
+    val notificationsOn by model.notificationsEnabled.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    if(state.firstYo) YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},
+        text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()) +
+            if (notificationsOn) "" else " " + stringResource(R.string.first_sent_turn_on))},
+        confirmButton={
+            if (notificationsOn) TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}
+            else TextButton(onClick={ repo.clearError(); openNotificationSettings(context) }){Text(copy(ProductText.TURN_ON_NOTIFICATIONS))}
+        },
+        dismissButton=if (notificationsOn) null else {{ TextButton(onClick=repo::clearError){Text(stringResource(R.string.not_now))} }}) }
+    state.emptyGroup?.let { group -> YoSystemTheme { AlertDialog(onDismissRequest=repo::emptyGroupSeen,
+        title={Text(copy(ProductText.GROUP_EMPTY))},
+        text={Text(uiResources.getString(R.string.group_empty_delete, group.name))},
+        confirmButton={TextButton(onClick={ repo.command { deleteEmptyGroup(group) } }){Text(stringResource(R.string.delete_group))}},
+        dismissButton={TextButton(onClick=repo::emptyGroupSeen){Text(stringResource(R.string.ui_cancel))}}) } }
+    state.keyChanged?.let { change -> YoSystemTheme { AlertDialog(onDismissRequest=repo::keyChangeSeen,
+        title={Text(uiResources.getString(R.string.has_a_new_key, change.friend.name))},
+        text={Text(uiResources.getString(R.string.new_key_explanation, change.friend.name))},
+        confirmButton={
+            if (change.confirm) TextButton(onClick={ repo.keyChangeSeen(); repo.command { confirm(change.friend) } }){Text(stringResource(R.string.confirm_new_key))}
+            else TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))}
+        },
+        dismissButton=if (change.confirm) {{ TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))} }} else null) } }
 }
 @Composable fun BrandText(text: String, size: Int, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
     Text(text, modifier, maxLines = maxLines, softWrap = maxLines > 1,
@@ -456,6 +487,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     var group by rememberSaveable { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf("") }
     var addingFriend by remember { mutableStateOf(false) }
+    // While the hub is asked: "NAME…" in the empty field, as iOS; the field takes the next name meanwhile.
+    var lookingUp by remember { mutableStateOf<String?>(null) }
     var addError by remember { mutableStateOf<String?>(null) }
     val friendFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -465,6 +498,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             val submitted = name
             addingFriend = true
             addError = null
+            lookingUp = "${uniffi.yo.usernameCanonical(submitted)}…"
+            name = ""
             focusManager.clearFocus()
             repo.command {
                 val failure = try {
@@ -478,21 +513,23 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 }
                 withContext(Dispatchers.Main.immediate) {
                     addingFriend = false
+                    lookingUp = null
                     addError = failure
-                    name = ""
-                    if (failure == null) add = false
+                    if (failure == null && name.isEmpty()) add = false
                 }
             }
         }
     }
 
     var menu by remember { mutableStateOf<Friend?>(null) }
-    var declined by remember { mutableStateOf<Friend?>(null) }
     var cameraOn by remember { mutableStateOf(false) }
     var cameraVersion by remember { mutableIntStateOf(0) }
     var hintEpoch by remember { mutableIntStateOf(0) }
     var hint by remember { mutableStateOf(false) }
-    var picked by remember { mutableStateOf<Uri?>(null) }
+    // A photo or video went out since the camera opened: its hint is not needed again until the next opening (iOS).
+    var hintNeeded by remember { mutableStateOf(true) }
+    // Up to ten photos and videos from the library, in order (iOS's picker); a tap on a name sends them all.
+    var picked by remember { mutableStateOf<List<Uri>?>(null) }
     var viewing by remember { mutableStateOf<List<Received>?>(null) }
     val heldFinger = remember { HeldFinger() }
     var recording by remember { mutableStateOf<String?>(null) }
@@ -501,18 +538,27 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         cameraOn=result[Manifest.permission.CAMERA]==true
         if(!cameraOn) model.error(uiResources.getString(R.string.ui_allow_camera_access_in_android_settings_to_send_photos))
     }
-    val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked=it; hintEpoch++ }
+    val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { picked=it.takeIf { it.isNotEmpty() }; hintEpoch++ }
     // The value this effect ran with: read in onDispose, the state is already the new one, and opening the camera
     // closed it again at once (the binding was dropped: a black preview, "Couldn't record video", until a flip).
     DisposableEffect(cameraOn) { val wasOn = cameraOn; onDispose { if(wasOn) camera.close() } }
-    LaunchedEffect(cameraOn,hintEpoch,picked) { hint=false; if(cameraOn) { delay(3000); hint=true } }
+    LaunchedEffect(cameraOn) { if (cameraOn) hintNeeded = true }
+    LaunchedEffect(cameraOn,hintEpoch,picked) { hint=false; if(cameraOn && hintNeeded) { delay(3000); hint=true } }
     LaunchedEffect(cameraOn) { repo.camera(cameraOn) }
+    // A Yo landing: a heavy tick, as iOS's arrival haptic (several in one frame play once).
+    LaunchedEffect(repo) { repo.arrivals.collect { view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); withFrameNanos { } } }
+    // The viewer opening: a selection tick.
+    LaunchedEffect(viewing != null) { if (viewing != null) view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
     val stacks by repo.media.undo.collectAsStateWithLifecycle()
     val thumbnails by repo.media.thumbnails.collectAsStateWithLifecycle()
     val friendsByKey = s.friends.associateBy { it.key }
     val friends = (s.listRows.keys.mapNotNull(friendsByKey::get) +
         s.friends.filter { it.key !in s.listRows && it.key != s.deletion?.id }).filterNot { it.blocked }
     val mediaByTarget = s.media.groupBy { it.target }
+    // Two core calls a friend: asked when the friends change, not on each composition of the list.
+    val realFriends = remember(friends) { friends.any {
+        uniffi.yo.productIsRealFriend(uniffi.yo.usernameSkeleton(it.name), it.group != null, it.request, it.blocked, it.gone)
+    } }
     val bars = friends.associate { friend ->
         friend.key to BarContent(friend, s.listRows[friend.key], stacks[friend.target],
             mediaByTarget[friend.target].orEmpty(), recording == friend.key, thumbnails[friend.target].orEmpty())
@@ -545,10 +591,12 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     PredictiveBackHandler(recording!=null) { events -> events.collect { } }
     PredictiveBackHandler(recording==null && (cameraOn || picked!=null)) { events -> events.collect { };cameraOn=false;picked=null }
     fun tap(friend: Friend) {
+        Lat.mark("tap")
         if(importingShares) return
         if (shares.isNotEmpty() && (friend.request || friend.blocked || friend.gone)) return
         if(!touch(friend)) return
         if (friend.request) {
+            view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             repo.command {
                 val session = sessionId
                 answer(friend, true)
@@ -558,9 +606,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
         view.performHapticFeedback(if(android.os.Build.VERSION.SDK_INT>=30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
         hintEpoch++
+        if (cameraOn) hintNeeded = false
         when {
             shares.isNotEmpty() -> model.stage(friend,shares)
-            picked!=null -> { model.stage(friend,listOf(picked!!)); picked=null }
+            picked!=null -> { model.stage(friend,picked!!); picked=null }
             cameraOn -> {
                 val session=repo.sessionId
                 scope.launch {
@@ -576,7 +625,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     // next (press and touch read this composition's heights) and an unchanged bar skips its recomposition.
     val currentPress by rememberUpdatedState<(Friend, Boolean)->Unit>(::press)
     val currentTouch by rememberUpdatedState<(Friend)->Boolean>(::touch)
-    val listObscured = profile || group || menu != null || declined != null || viewing != null
+    val listObscured = profile || group || menu != null || viewing != null
     LaunchedEffect(listState, listObscured) {
         if (listObscured) {
             repo.viewport(emptyList())
@@ -604,6 +653,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
     }
     val edgeCamera by rememberUpdatedState(::toggleCamera)
+    val cameraAsked by model.openCamera.collectAsStateWithLifecycle()
+    LaunchedEffect(cameraAsked) { if (cameraAsked) { model.openCamera.value = false; if (!cameraOn) toggleCamera() } }
     val cameraEdgeOnLeft = cameraOn != s.leftHanded
     val gestureDensity = androidx.compose.ui.platform.LocalDensity.current
     val exclusionWidth = with(gestureDensity) { 28.dp.toPx() }
@@ -633,6 +684,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 if (!finger.pressed) {
                     if (dragging && (inward > size.width * .4f ||
                             velocity.calculateVelocity().x * direction >= 500.dp.toPx())) {
+                        view.performHapticFeedback(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.GESTURE_END else HapticFeedbackConstants.VIRTUAL_KEY)
                         edgeCamera()
                     }
                     break
@@ -647,6 +699,58 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             }
         }
     }
+    fun hold(friend: Friend, held: Boolean) {
+        if(held && touch(friend)) {
+            hintEpoch++
+            hintNeeded = false
+            recording=friend.key
+            repo.recording(friend.key)
+            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            val session=repo.sessionId
+            val pause=scope.launch(start=CoroutineStart.UNDISPATCHED) {
+                repo.media.pause(friend.target,session)
+            }
+            camera.startVideo { uri ->
+                repo.command {
+                    try {
+                        pause.join()
+                        if(uri!=null) model.stage(friend,listOf(uri),true,session).join()
+                        else error(uiResources.getString(R.string.ui_couldn_t_record_video))
+                    } finally {
+                        media.resume(friend.target,session)
+                    }
+                }
+                recording=null
+                repo.recording(null)
+            }
+        } else if(!held && recording==friend.key) {
+            view.performHapticFeedback(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
+            camera.stopVideo()
+        }
+        if(!held) camera.recordZoomEnd()
+    }
+    // One object for every bar's callbacks, the same from one composition to the next: a bar whose content did not
+    // change skips its recomposition when the list recomposes (each Yo, each viewport change), as do its swipe box.
+    val rowActions = remember { RowActions() }
+    rowActions.tap = { currentTap(it) }
+    rowActions.press = { friend, down -> currentPress(friend, down) }
+    // No menu in camera mode (iOS): a long press there is a hold.
+    rowActions.menu = { friend -> if(!cameraOn && !tapLock.locked(friend.key)) menu=friend }
+    rowActions.undo = { friend -> if(currentTouch(friend)) repo.command { cancelMedia(friend) } }
+    rowActions.media = { friend -> heldFinger.point=null;if(currentTouch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() } }
+    rowActions.mediaTouch = { when(it) {
+        is MediaTouch.Moved -> { heldFinger.barBottom=it.barBottom;heldFinger.point=it.point }
+        MediaTouch.Tapped -> heldFinger.point=null
+        MediaTouch.Released -> { heldFinger.point=null;viewing=null }
+    } }
+    // "No" declines at once, as on iOS (a tap's haptic; blocking is the long press's).
+    rowActions.decline = { friend -> if(currentTouch(friend)) { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); repo.command { answer(friend,false) } } }
+    rowActions.hold = ::hold
+    rowActions.holdDrag = { friend, y, top, bottom, height ->
+        if(recording==friend.key && camera.recordZoom(y,top,bottom,height))
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    }
+    rowActions.remove = { friend -> repo.requestRemove(friend) }
     Box(Modifier.fillMaxSize()) {
         if (cameraOn) key(cameraVersion) {
             AndroidView(
@@ -663,7 +767,13 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        picked?.let { PhotoUri(it, Modifier.fillMaxSize()) }
+        picked?.let { items ->
+            // The picked items behind the bars: one fills the screen, more share it in a grid.
+            if (items.size == 1) PhotoUri(items[0], Modifier.fillMaxSize())
+            else Column(Modifier.fillMaxSize()) {
+                items.chunked(2).forEach { pair -> Row(Modifier.weight(1f)) { pair.forEach { PhotoUri(it, Modifier.weight(1f).fillMaxHeight()) } } }
+            }
+        }
         // The picture shows through Amethyst where no bar is, as it shows through each bar's colour (iOS FriendList).
         if (cameraOn) {
             val listTop = WindowInsets.safeDrawing.getTop(LocalDensity.current).toFloat()
@@ -683,85 +793,33 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             }
         }
         Box(Modifier.fillMaxSize().safeDrawingPadding().then(edgeGesture)) {
-        LazyColumn(Modifier.fillMaxSize(),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
-            if (showNotificationBar) item(key = "notification-settings") {
+        Column(Modifier.fillMaxSize()) {
+        // "Offline" or a failed send (tap: again) above the list, never over its first bar (iOS's top inset).
+        androidx.compose.animation.AnimatedVisibility(s.banner != null && s.deletion == null) {
+            ConnectionBanner(s.banner.orEmpty(), onRetry = repo::retryNow)
+        }
+        LazyColumn(Modifier.fillMaxWidth().weight(1f),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
+            if (showNotificationBar && !cameraOn) item(key = "notification-settings") {
                 NotificationSettingsRow { openNotificationSettings(context) }
             }
             items(visible.size,key={visible[it].key}) { index ->
                 val friend = visible[index]
-                val dismiss = rememberSwipeToDismissBoxState(confirmValueChange={ value ->
-                    if(value==SwipeToDismissBoxValue.EndToStart) { repo.requestRemove(friend);false } else true
-                })
-                SwipeToDismissBox(state=dismiss,enableDismissFromStartToEnd=false,enableDismissFromEndToStart=!cameraOn && recording==null && !friend.request,
-                    backgroundContent = {
-                        // Drawn only while the bar is swiped: otherwise every frame painted it under each bar.
-                        val swiping by remember(dismiss) { derivedStateOf { dismiss.dismissDirection != SwipeToDismissBoxValue.Settled } }
-                        if (!cameraOn && swiping) {
-                            Box(
-                                Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 24.dp),
-                                contentAlignment = Alignment.CenterEnd,
-                            ) {
-                                Icon(Icons.Default.Delete, stringResource(R.string.ui_remove))
-                            }
-                        }
-                    },
-                ) {
-                    FriendBar(repo,bars.getValue(friend.key),
-                        rowShade(visible,index),cameraOn,s.leftHanded,
-                        onPress={currentPress(friend,it)},onTap={currentTap(friend)},onMenu={if(!tapLock.locked(friend.key)) menu=friend},
-                        onUndo={if(currentTouch(friend)) repo.command { cancelMedia(friend) }},
-                        onMedia={heldFinger.point=null;if(currentTouch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() }},
-                        onMediaTouch={ when(it) {
-                            is MediaTouch.Moved -> { heldFinger.barBottom=it.barBottom;heldFinger.point=it.point }
-                            MediaTouch.Tapped -> heldFinger.point=null
-                            MediaTouch.Released -> { heldFinger.point=null;viewing=null }
-                        } },
-                        onDecline={if(currentTouch(friend)) declined=friend},
-                        onHold=if(cameraOn && picked==null && shares.isEmpty() && !friend.request) { held ->
-                            if(held && touch(friend)) {
-                                hintEpoch++
-                                recording=friend.key
-                                repo.recording(friend.key)
-                                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                                val session=repo.sessionId
-                                val pause=scope.launch(start=CoroutineStart.UNDISPATCHED) {
-                                    repo.media.pause(friend.target,session)
-                                }
-                                camera.startVideo { uri ->
-                                    repo.command {
-                                        try {
-                                            pause.join()
-                                            if(uri!=null) model.stage(friend,listOf(uri),true,session).join()
-                                            else error(uiResources.getString(R.string.ui_couldn_t_record_video))
-                                        } finally {
-                                            media.resume(friend.target,session)
-                                        }
-                                    }
-                                    recording=null
-                                    repo.recording(null)
-                                }
-                            } else if(!held && recording==friend.key) {
-                                camera.stopVideo()
-                            }
-                            if(!held) camera.recordZoomEnd()
-                        } else null,
-                        onHoldDrag={ y, top, bottom, height ->
-                            if(recording==friend.key && camera.recordZoom(y,top,bottom,height))
-                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                        })
-                }
+                FriendRow(repo, friend, bars.getValue(friend.key), rowShade(visible,index), cameraOn, recording, s.leftHanded,
+                    holdable = cameraOn && picked==null && shares.isEmpty() && !friend.request, actions = rowActions)
             }
             if(!cameraOn) {
                 item {
                     if (add) {
-                        val placeholder = addError ?: stringResource(R.string.ui_name)
+                        val placeholder = lookingUp ?: addError ?: stringResource(R.string.ui_name)
+                        // "No Such User", "That’s You", "No Connection": a moment in the field, then the name prompt again.
+                        LaunchedEffect(addError) { if (addError != null) { delay(1500); addError = null } }
                         val style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White, textAlign = TextAlign.Center)
                         val (nameValue, onName) = nameField(name) { name = it; addError = null }
                         BasicTextField(
                             value = nameValue,
                             onValueChange = onName,
                             singleLine = true,
-                            enabled = !addingFriend,
+                            enabled = true,
                             textStyle = style,
                             cursorBrush = SolidColor(Color.White),
                             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Done),
@@ -791,9 +849,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                         }, onClick = { add = true })
                     }
                 }
-                val hasContacts = friends.any {
-                    uniffi.yo.productIsRealFriend(uniffi.yo.usernameSkeleton(it.name), it.group != null, it.request, it.blocked, it.gone)
-                }
+                val hasContacts = realFriends
                 if (!hasContacts || add) {
                     item {
                         Row {
@@ -816,6 +872,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 }
             }
         }
+        }
         if (!keyboardVisible) Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -824,7 +881,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             val prompt = when {
                 importingShares -> stringResource(R.string.preparing_shared_media)
                 sharing -> stringResource(R.string.share_selected_media)
-                hint && cameraOn && picked != null -> stringResource(R.string.ui_tap_a_name_to_send_this_photo)
+                hint && cameraOn && picked != null -> stringResource(R.string.ui_tap_a_name_to_send_selected_media)
                 hint && cameraOn -> stringResource(R.string.ui_tap_a_name_hold_for_video)
                 else -> null
             }
@@ -840,7 +897,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     if (cameraOn) {
                         FloatingActionButton(
                             onClick = {
-                                if (recording == null) picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                if (recording == null) picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                             },
                             shape = CircleShape,
                             containerColor = glassTint,
@@ -902,18 +959,18 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 val gallerySide = if (mirrored) Alignment.CenterEnd else Alignment.CenterStart
                 val cameraSide = if (mirrored) Alignment.CenterStart else Alignment.CenterEnd
                 Box(Modifier.align(gallerySide)) { controls() }
-                if (cameraOn) {
+                if (cameraOn && camera.zoomChoices.size > 1) {
                     IconButton(
-                        onClick = { camera.zoom() }, enabled = recording == null,
+                        onClick = { view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK); camera.zoom() }, enabled = recording == null,
                         modifier = Modifier.size(44.dp),
                         colors = IconButtonDefaults.iconButtonColors(containerColor = glassTint, contentColor = Color.White),
-                    ) { Text("${camera.zoom.toInt()}×", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                    ) { Text(uniffi.yo.productCameraZoomLabel(camera.zoom.toDouble()) + "×", fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
                 }
                 Row(Modifier.align(cameraSide), horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     if (mirrored) cameraButton()
                     if (cameraOn) IconButton(
-                        onClick = { camera.flip(); cameraVersion++ }, enabled = recording == null,
+                        onClick = { view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); camera.flip(); cameraVersion++ }, enabled = recording == null,
                         modifier = Modifier.size(56.dp),
                         colors = IconButtonDefaults.iconButtonColors(containerColor = glassTint, contentColor = Color.White),
                     ) {
@@ -926,16 +983,13 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
     }
     }
-    if (profile) ProfileSheet(model, s, onClose = { profile = false }, onAddFriends = {
+    if (profile) ProfileSheet(model, onClose = { profile = false }, onAddFriends = {
         profile = false
         add = true
         scope.launch { listState.animateScrollToItem(visible.size + if (showNotificationBar) 1 else 0) }
     })
     if(group) GroupSheet(model,s,onClose={group=false})
-    menu?.let { friend -> FriendMenu(model,s,friend,onClose={menu=null}) }
-    declined?.let { friend -> YoSystemTheme { AlertDialog(onDismissRequest={declined=null;repo.command { answer(friend,false) }},title={Text(uiResources.getString(R.string.block_name ,friend.name))},
-        confirmButton={TextButton(onClick={declined=null;repo.command { answer(friend,false,true) }}){Text(stringResource(R.string.ui_block))}},
-        dismissButton={TextButton(onClick={declined=null;repo.command { answer(friend,false) }}){Text(stringResource(R.string.ui_no))}}) } }
+    menu?.let { friend -> FriendMenu(model,friend,onClose={menu=null}) }
     viewing?.let { queue -> MediaViewer(repo,queue,heldFinger,onClose={viewing=null}) }
 }
 
@@ -945,7 +999,13 @@ fun shareInvite(context: Context,name: String) {
 @Composable fun PhotoUri(uri: Uri,modifier: Modifier=Modifier) {
     val context=LocalContext.current
     var bitmap by remember(uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
-    LaunchedEffect(uri) { bitmap=withContext(Dispatchers.IO) { runCatching { android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(context.contentResolver,uri)) { d,info,_ ->
+    LaunchedEffect(uri) { bitmap=withContext(Dispatchers.IO) { runCatching {
+        if (context.contentResolver.getType(uri)?.startsWith("video/") == true)
+            return@runCatching android.media.MediaMetadataRetriever().run {
+                try { setDataSource(context, uri); getScaledFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 1024, 1024) }
+                finally { release() }
+            }
+        android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(context.contentResolver,uri)) { d,info,_ ->
         val ratio=minOf(1.0,2048.0/maxOf(info.size.width,info.size.height));d.setTargetSize((info.size.width*ratio).toInt().coerceAtLeast(1),(info.size.height*ratio).toInt().coerceAtLeast(1));d.allocator=android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
     } }.getOrNull() } }
     bitmap?.let { Image(it.asImageBitmap(),contentDescription=null,modifier=modifier,contentScale=ContentScale.Crop) }
@@ -1054,5 +1114,66 @@ private fun NameEntry(value: TextFieldValue, onChange: (TextFieldValue) -> Unit,
                 }
             },
         )
+    }
+}
+
+/** A bar's callbacks, kept in one stable object (its fields set by the list on each composition). */
+internal class RowActions {
+    var tap: (Friend) -> Unit = {}
+    var press: (Friend, Boolean) -> Unit = { _, _ -> }
+    var menu: (Friend) -> Unit = {}
+    var undo: (Friend) -> Unit = {}
+    var media: (Friend) -> Unit = {}
+    var mediaTouch: (MediaTouch) -> Unit = {}
+    var decline: (Friend) -> Unit = {}
+    var hold: (Friend, Boolean) -> Unit = { _, _ -> }
+    var holdDrag: (Friend, Float, Float, Float, Float) -> Unit = { _, _, _, _, _ -> }
+    var remove: (Friend) -> Unit = {}
+}
+
+/** One row of the list: the swipe to remove around the bar. Skipped when nothing it shows changed. */
+@Composable internal fun FriendRow(repo: Repository, friend: Friend, bar: BarContent, shade: Color, cameraOn: Boolean, recording: String?,
+    leftHanded: Boolean, holdable: Boolean, actions: RowActions) {
+    val dismiss = rememberSwipeToDismissBoxState(confirmValueChange={ value ->
+        if(value==SwipeToDismissBoxValue.EndToStart) { actions.remove(friend);false } else true
+    })
+    SwipeToDismissBox(state=dismiss,enableDismissFromStartToEnd=false,enableDismissFromEndToStart=!cameraOn && recording==null && !friend.request,
+        backgroundContent = {
+            // Drawn only while the bar is swiped: otherwise every frame painted it under each bar.
+            val swiping by remember(dismiss) { derivedStateOf { dismiss.dismissDirection != SwipeToDismissBoxValue.Settled } }
+            if (!cameraOn && swiping) {
+                Box(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    Icon(Icons.Default.Delete, stringResource(R.string.ui_remove))
+                }
+            }
+        },
+    ) {
+        FriendBar(repo, bar, shade, cameraOn, leftHanded,
+            onPress={actions.press(friend,it)},onTap={actions.tap(friend)},onMenu={actions.menu(friend)},
+            onUndo={actions.undo(friend)},onMedia={actions.media(friend)},onMediaTouch={actions.mediaTouch(it)},
+            onDecline={actions.decline(friend)},
+            onHold=if(holdable) { held -> actions.hold(friend, held) } else null,
+            onHoldDrag={ y, top, bottom, height -> actions.holdDrag(friend, y, top, bottom, height) })
+    }
+}
+
+/** iOS's top line: Amethyst, a red dot, Montserrat; "Offline" with its dots going, a failure tappable to try again. */
+@Composable private fun ConnectionBanner(text: String, onRetry: () -> Unit) {
+    val offline = text == "Offline"
+    val dots by produceState(0, offline) { while (offline) { delay(450); value = (value + 1) % 4 } }
+    Row(
+        Modifier.fillMaxWidth().height(36.dp).background(Amethyst)
+            .then(if (offline) Modifier else Modifier.clickable(onClick = onRetry)),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(7.dp).background(Color.Red, CircleShape))
+        val style = TextStyle(fontFamily = YoFont, fontSize = 16.sp, color = Color.White)
+        Text(text, maxLines = 1, style = style)
+        // The dots in a box of their own width: the word stays where it is while they come and go.
+        if (offline) Box(Modifier.padding(start = 0.dp).width(18.dp).offset(x = (-6).dp)) { Text(".".repeat(dots), maxLines = 1, style = style) }
     }
 }

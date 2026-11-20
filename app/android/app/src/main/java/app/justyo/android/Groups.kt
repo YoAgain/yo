@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -90,80 +91,96 @@ fun GroupSheet(model: YoViewModel, state: AppState, onClose: () -> Unit) = YoSys
     }
 }
 
-private enum class FriendAction { BLOCK, RENAME, LEAVE, REMOVE_MEMBER }
+private enum class FriendAction { BLOCK, RENAME, LEAVE }
 
-/** A long press on a bar: the last Yo, block or report, remove; for a group its members, rename and leave. */
-@Composable fun FriendMenu(model: YoViewModel, s: AppState, friend: Friend, onClose: () -> Unit) = YoSystemTheme {
+/**
+ * A long press on a bar, as iOS's menu: what waits to be sent and the last Yo (greyed), then a friend's Block, Report
+ * (Spam, Abuse, Something Else) and Remove; a group's Members, Rename and Leave. A report asks to block too.
+ */
+@Composable fun FriendMenu(model: YoViewModel, friend: Friend, onClose: () -> Unit) = YoSystemTheme {
+    val s by model.repository.state.collectAsStateWithLifecycle()
     val repo = model.repository
     val res = LocalResources.current
     var action by remember { mutableStateOf<FriendAction?>(null) }
-    var selectedUser by remember { mutableStateOf<String?>(null) }
     var rename by remember { mutableStateOf(friend.name) }
-    var members by remember { mutableStateOf<List<String>?>(null) }
     var busy by remember { mutableStateOf(false) }
-    LaunchedEffect(friend.group) { if (friend.group != null) members = withContext(Dispatchers.IO) { repo.groupMembers(friend) } }
+    var members by remember { mutableStateOf(false) }
+    var reported by remember { mutableStateOf(false) }
+    var problem by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val stacks by repo.media.undo.collectAsStateWithLifecycle()
+    if (members) { GroupMembersSheet(model, friend, onClose = { members = false; onClose() }); return@YoSystemTheme }
     FittedSheet(onDismissRequest = onClose) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
             Text(if (friend.group == null) friend.name else "#" + friend.name.removePrefix("#"), Modifier.padding(start = 8.dp, bottom = 16.dp),
                 style = MaterialTheme.typography.headlineSmall)
-            val format = remember { java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT) }
-            val sent = s.lastSent[friend.key]
-            val received = s.lastReceived[friend.key]
-            val latest = maxOf(sent ?: 0L, received ?: 0L)
-            if (latest > 0) Section(null, null,
-                Setting(stringResource(if (latest == sent) R.string.last_sent else R.string.last_received), Icons.Default.Schedule, format.format(java.util.Date(latest))))
+            val activity = remember(s.lastSent[friend.key], s.lastReceived[friend.key]) {
+                uniffi.yo.productLastActivity(s.lastSent[friend.key], s.lastReceived[friend.key], System.currentTimeMillis(), Words)
+            }
+            val waiting = stacks[friend.target]?.takeIf { it.kind != uniffi.yo.ListKind.YO }?.count?.toInt() ?: 0
+            Section(null, null,
+                if (waiting > 0) Setting(res.getQuantityString(R.plurals.photos_waiting, waiting, waiting), Icons.Default.PhotoLibrary, enabled = false) else null,
+                Setting(activity.text, when (activity.direction) {
+                    uniffi.yo.ProductDirection.SENT -> Icons.Default.ArrowUpward
+                    uniffi.yo.ProductDirection.RECEIVED -> Icons.Default.ArrowDownward
+                    uniffi.yo.ProductDirection.NEVER -> Icons.Default.Schedule
+                }, enabled = false),
+            )
             if (friend.group == null) {
-                Section(null, null,
-                    Setting(stringResource(R.string.ui_block), Icons.Default.Block, onClick = { action = FriendAction.BLOCK }),
+                Section(null, null, Setting(stringResource(R.string.ui_block), Icons.Default.Block, onClick = { action = FriendAction.BLOCK }))
+                Section(stringResource(R.string.report), null,
                     *ReportReason.entries.map { reason ->
                         Setting(stringResource(when (reason) { ReportReason.SPAM -> R.string.report_spam; ReportReason.ABUSE -> R.string.report_abuse; ReportReason.OTHER -> R.string.report_other }),
-                            Icons.Default.Flag, onClick = { repo.command { report(friend, reason); onClose() } })
+                            Icons.Default.Flag, enabled = !busy, onClick = {
+                                busy = true
+                                repo.command {
+                                    try { report(friend, reason); reported = true; action = FriendAction.BLOCK }
+                                    catch (e: CancellationException) { throw e }
+                                    catch (e: Exception) {
+                                        if (e is YoException.Replaced) throw e
+                                        problem = res.getString(R.string.unable_to_report) to friendlyError(model.getApplication(), e)
+                                    } finally { busy = false }
+                                }
+                            })
                     }.toTypedArray(),
                 )
                 Section(null, null,
-                    Setting(stringResource(R.string.ui_remove), Icons.Default.PersonRemove, danger = true, onClick = { repo.requestRemove(friend); onClose() }))
+                    Setting(stringResource(R.string.ui_remove), Icons.Default.Delete, danger = true, onClick = { repo.requestRemove(friend); onClose() }))
             } else {
-                val current = members
-                if (current != null) {
-                    Section(stringResource(R.string.ui_members) + " · " + stringResource(R.string.member_count, current.size), null,
-                        *current.map { user ->
-                            val person = s.friends.firstOrNull { it.user == user }
-                            val name = person?.name ?: s.username.takeIf { user == repo.widgetAccount() } ?: res.getString(R.string.group_unknown_member)
-                            Setting(name, leading = { SettingsAvatar(name, 40) }, value = person?.let { res.getString(R.string.ui_remove) },
-                                onClick = person?.let { { selectedUser = user; action = FriendAction.REMOVE_MEMBER } })
-                        }.toTypedArray())
-                    val candidates = s.friends.filter { it.user != null && it.user !in current && it.group == null && !it.blocked && !it.gone }
-                    if (candidates.isNotEmpty()) Section(null, null, *candidates.map { candidate ->
-                        Setting(res.getString(R.string.add_member, candidate.name), Icons.Default.PersonAdd, enabled = current.size < 20 && !busy, onClick = {
-                            busy = true
-                            repo.command { try { groupChange(friend, add = listOf(candidate.user!!)); members = groupMembers(friend) } finally { busy = false } }
-                        })
-                    }.toTypedArray())
-                }
                 Section(null, null,
-                    Setting(stringResource(R.string.ui_rename), Icons.Default.Edit, onClick = { action = FriendAction.RENAME }),
+                    Setting(stringResource(R.string.ui_members), Icons.Default.Groups, onClick = { members = true }),
+                    Setting(stringResource(R.string.ui_rename), Icons.Default.Edit, onClick = { rename = friend.name; action = FriendAction.RENAME }),
                     Setting(res.getString(R.string.leave_group, friend.name), Icons.AutoMirrored.Filled.ExitToApp, danger = true, onClick = { action = FriendAction.LEAVE }),
                 )
             }
             Spacer(Modifier.height(16.dp))
         }
     }
+    problem?.let { (title, message) ->
+        AlertDialog(onDismissRequest = { problem = null }, title = { Text(title) }, text = { Text(message) },
+            confirmButton = { TextButton(onClick = { problem = null }) { Text(stringResource(android.R.string.ok)) } })
+    }
     action?.let { pending ->
-        val label = stringResource(when (pending) {
-            FriendAction.BLOCK -> R.string.ui_block; FriendAction.RENAME -> R.string.ui_rename
-            FriendAction.LEAVE -> R.string.leave_action; FriendAction.REMOVE_MEMBER -> R.string.ui_remove
-        })
+        val title = when (pending) {
+            FriendAction.BLOCK -> if (reported) stringResource(R.string.thanks_for_reporting) else res.getString(R.string.block_name, friend.name)
+            FriendAction.RENAME -> res.getString(R.string.rename_name, friend.name)
+            FriendAction.LEAVE -> res.getString(R.string.leave_name, friend.name)
+        }
+        val confirm = when (pending) {
+            FriendAction.BLOCK -> res.getString(R.string.block_action_name, friend.name)
+            FriendAction.RENAME -> stringResource(R.string.ui_rename)
+            FriendAction.LEAVE -> stringResource(R.string.leave_action)
+        }
+        val dismissAll = { action = null; if (reported) onClose() }
         AlertDialog(
-            onDismissRequest = { if (!busy) action = null },
-            title = { Text(label) },
+            onDismissRequest = { if (!busy) dismissAll() },
+            title = { Text(title) },
             text = {
                 if (pending == FriendAction.RENAME) OutlinedTextField(rename, { rename = utf8Limit(it, 32) }, singleLine = true,
                     label = { Text(stringResource(R.string.ui_group_name)) })
-                else Text(stringResource(when (pending) {
-                    FriendAction.LEAVE -> R.string.ui_you_won_t_get_its_yos_any_more_a_member_can_add_you_again
-                    FriendAction.REMOVE_MEMBER -> R.string.ui_they_won_t_get_the_group_s_yos_any_more
-                    else -> R.string.ui_you_won_t_get_their_yos_unblock_them_in_your_profile
-                }))
+                else Text(when (pending) {
+                    FriendAction.LEAVE -> stringResource(R.string.ui_you_won_t_get_its_yos_any_more_a_member_can_add_you_again)
+                    else -> if (reported) res.getString(R.string.block_too, friend.name) else stringResource(R.string.ui_you_won_t_get_their_yos_unblock_them_in_your_profile)
+                })
             },
             confirmButton = {
                 TextButton(enabled = !busy && (pending != FriendAction.RENAME || rename.isNotBlank()), onClick = {
@@ -174,14 +191,84 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE, REMOVE_MEMBER }
                                 FriendAction.BLOCK -> block(friend, true)
                                 FriendAction.RENAME -> groupChange(friend, rename = rename)
                                 FriendAction.LEAVE -> groupChange(friend, leave = true)
-                                FriendAction.REMOVE_MEMBER -> selectedUser?.let { groupChange(friend, remove = listOf(it)) }
                             }
                             action = null; onClose()
                         } finally { busy = false }
                     }
-                }) { Text(label) }
+                }) { Text(confirm) }
             },
-            dismissButton = { TextButton(onClick = { action = null }, enabled = !busy) { Text(stringResource(R.string.ui_cancel)) } },
+            dismissButton = { TextButton(onClick = dismissAll, enabled = !busy) {
+                Text(stringResource(if (reported && pending == FriendAction.BLOCK) R.string.not_now else R.string.ui_cancel)) } },
         )
+    }
+}
+
+/** A group's members, as iOS's sheet: this account ticked, each member removable (asked first), friends not in it to
+ *  add (up to 20 in all), a search, Done. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable private fun GroupMembersSheet(model: YoViewModel, group: Friend, onClose: () -> Unit) {
+    val s by model.repository.state.collectAsStateWithLifecycle()
+    val repo = model.repository
+    val res = LocalResources.current
+    var members by remember { mutableStateOf<List<String>?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    var search by remember { mutableStateOf("") }
+    var removing by remember { mutableStateOf<Pair<String, String>?>(null) }
+    LaunchedEffect(group.group) { members = withContext(Dispatchers.IO) { repo.groupMembers(group) } }
+    val me = repo.widgetAccount()
+    fun nameOf(user: String) = s.friends.firstOrNull { it.user == user && it.group == null }?.name
+        ?: s.username.takeIf { user == me } ?: res.getString(R.string.group_unknown_member)
+    fun change(add: List<String> = emptyList(), remove: List<String> = emptyList()) {
+        busy = true; failed = false
+        repo.command {
+            try { groupChange(group, add = add, remove = remove); members = groupMembers(group) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (e is YoException.Replaced) throw e; failed = true }
+            finally { busy = false }
+        }
+    }
+    val current = members.orEmpty()
+    val choices = (current + s.friends.filter { it.group == null && !it.blocked && !it.gone }.mapNotNull { it.user })
+        .distinct().filter { it != me && (search.isBlank() || nameOf(it).contains(search, ignoreCase = true)) }
+        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { nameOf(it) })
+    val focus = LocalFocusManager.current
+    FittedSheet(onDismissRequest = onClose, dragHandle = null) {
+        CenterAlignedTopAppBar(
+            title = { Text(group.name, maxLines = 1) },
+            actions = { TextButton(onClick = onClose) { Text(stringResource(R.string.ui_done)) } },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+            windowInsets = WindowInsets(0),
+        )
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 8.dp)) {
+            TextField(search, { search = it }, Modifier.fillMaxWidth().padding(bottom = 20.dp), singleLine = true,
+                placeholder = { Text(stringResource(R.string.find_group_friends)) }, leadingIcon = { Icon(Icons.Default.Search, null) },
+                shape = CircleShape, colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceBright, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceBright,
+                    focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }))
+            if (members == null) Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { LoadingIndicator() }
+            else {
+                fun row(user: String): Setting {
+                    val selected = user in current
+                    val name = nameOf(user)
+                    return Setting(name, leading = { SettingsAvatar(name, 40) }, checked = selected, checkbox = true,
+                        enabled = !busy && (selected || current.size < 20),
+                        onChecked = { on -> if (on) change(add = listOf(user)) else removing = user to name })
+                }
+                Section(res.getString(R.string.ui_members) + " · " + res.getString(R.string.member_count, current.size), null,
+                    me?.let { Setting(s.username.orEmpty(), leading = { SettingsAvatar(s.username.orEmpty(), 40) }, checked = true, checkbox = true, enabled = false) },
+                    *choices.filter { it in current }.map(::row).toTypedArray())
+                val others = choices.filter { it !in current }
+                if (others.isNotEmpty()) Section(stringResource(R.string.ui_add_friends), null, *others.map(::row).toTypedArray())
+                if (failed) Text(stringResource(R.string.group_change_failed), Modifier.padding(8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    removing?.let { (user, name) ->
+        AlertDialog(onDismissRequest = { removing = null }, title = { Text(res.getString(R.string.remove_name, name)) },
+            text = { Text(stringResource(R.string.ui_they_won_t_get_the_group_s_yos_any_more)) },
+            confirmButton = { TextButton(onClick = { removing = null; change(remove = listOf(user)) }) { Text(res.getString(R.string.remove_action_name, name)) } },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text(stringResource(R.string.ui_cancel)) } })
     }
 }

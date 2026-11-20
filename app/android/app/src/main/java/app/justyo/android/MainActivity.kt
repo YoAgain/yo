@@ -47,7 +47,10 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
             if(importShares==null) runCatching { repository.pendingShares.items() }.getOrNull()?.let { shares.value=it }
         }
     }
+    /** yo://camera: the list opens in camera mode (as iOS's Yo Camera). */
+    val openCamera = MutableStateFlow(false)
     fun intent(intent: Intent) {
+        intent.data?.takeIf { it.scheme?.lowercase() == "yo" && it.host?.lowercase() == "camera" }?.let { openCamera.value = true }
         intent.data?.let { uri -> inviteName(uri)?.let { name -> repository.command { invite(name) } } }
         val streams = when (intent.action) {
             Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
@@ -160,7 +163,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
-        if(BuildConfig.DEBUG && intent.getBooleanExtra("yo_perf",false)) perf=PerfProbe(window)
+        if((BuildConfig.DEBUG || BuildConfig.APPLICATION_ID.endsWith(".soak")) && intent.getBooleanExtra("yo_perf",false)) { perf=PerfProbe(window); Lat.on=true }
         if(savedInstanceState==null) model.intent(intent)
         setContent { YoTheme { YoRoot(model) } }
     }

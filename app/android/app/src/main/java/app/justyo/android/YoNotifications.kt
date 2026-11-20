@@ -43,7 +43,8 @@ internal class YoNotifications(private val context: Context) {
     private val silent = "yo_followups"
 
     @SuppressLint("MissingPermission")
-    fun show(thread: String, id: String, name: String?, group: String?, kind: MessageKind) {
+    /** [friend] and [account]: the bar the Yo landed on, for the notification's "Yo Back" (as iOS's action). */
+    fun show(thread: String, id: String, name: String?, group: String?, kind: MessageKind, friend: String? = null, account: String? = null) {
         if (!manager.areNotificationsEnabled()) return
         manager.createNotificationChannels(listOf(
             NotificationChannel(alert, context.getString(R.string.yo_notification_channel), NotificationManager.IMPORTANCE_DEFAULT).apply {
@@ -73,10 +74,31 @@ internal class YoNotifications(private val context: Context) {
             .setGroup(thread)
             .setGroupAlertBehavior(Notification.GROUP_ALERT_CHILDREN)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-        manager.notify(id, 1, notification(if (children.isEmpty()) alert else silent).setContentTitle(text).build())
+        val single = notification(if (children.isEmpty()) alert else silent).setContentTitle(text)
+        if (friend != null && account != null) {
+            val back = Intent(context, YoBackReceiver::class.java).setAction(YoBackReceiver.ACTION)
+                .putExtra("friend", friend).putExtra("account", account).putExtra("thread", thread)
+            val action = PendingIntent.getBroadcast(context, thread.hashCode(), back, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            single.addAction(Notification.Action.Builder(null as android.graphics.drawable.Icon?, context.getString(R.string.yo_back_action), action).build())
+        }
+        manager.notify(id, 1, single.build())
         manager.notify("summary:$thread", 1, notification(silent).setGroupSummary(true)
             .setContentTitle(text).setNumber(children.size + 1).build())
     }
 
     fun clear() = manager.cancelAll()
+    /** A thread's notifications, once its Yo Back went. */
+    fun clear(thread: String) = manager.activeNotifications
+        .filter { it.notification.group == thread || it.tag == "summary:$thread" }.forEach { manager.cancel(it.tag, it.id) }
+}
+
+/** A notification's "Yo Back": a Yo to the bar it came from, sent in the background like the tile's. */
+class YoBackReceiver : android.content.BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != ACTION) return
+        val friend = intent.getStringExtra("friend") ?: return
+        YoWork.enqueue(context, "send", friend = friend, account = intent.getStringExtra("account"), expedited = true)
+        intent.getStringExtra("thread")?.let { YoNotifications(context).clear(it) }
+    }
+    companion object { const val ACTION = "app.justyo.android.YO_BACK" }
 }

@@ -54,6 +54,14 @@ UniFFI 0.32.2 generates Kotlin names that collide with `AutoCloseable.close` and
 method becomes `shutdown`, the three error payload fields become `detail`. Rust symbols, serialization and APIs
 are unchanged. Generation enables UniFFI’s JNA cleaner for API 28; Java’s Cleaner needs API 33.
 
+## Device benchmarks
+
+`dev/bench.py` measures the QA package on a USB phone against the DEV hub (never the live one): cold start, a peer's
+Yo to the bar's frame (receive), a tap to the "Sent" frame and the peer's receipt (send), and main-thread frames over
+the 120 Hz budget while Yos come and go (Perfetto, `--trace`, needs the Python `perfetto` package). The app writes its
+latency marks (logcat tag `YoLat`, `Lat.kt`) only when launched with `--ez yo_perf true`. Run it before and after a
+change on the same phone and network; the JSON goes to stdout.
+
 ## State, identity, recovery
 
 `CoreState` opens the core's SQLite database (`yo-state-v3.sqlite`) in `noBackupFilesDir`. There is one migration:

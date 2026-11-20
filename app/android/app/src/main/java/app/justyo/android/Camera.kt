@@ -28,8 +28,11 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import uniffi.yo.productRecordZoom
+import uniffi.yo.productCameraZoomChoices
+import uniffi.yo.productCameraZoomNext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.*
@@ -76,6 +79,9 @@ class YoCamera(private val context: Context) {
         private set
     var zoom by mutableFloatStateOf(1f)
         private set
+    /** The zoom button's choices (the core's rule: 1, the ultra wide when the camera goes below 1, 2), as iOS. */
+    var zoomChoices by mutableStateOf(listOf(1.0))
+        private set
     fun bind(owner: LifecycleOwner, view: PreviewView, failed: (String) -> Unit) {
         val request = ++binding
         previewView = view
@@ -101,8 +107,15 @@ class YoCamera(private val context: Context) {
                     .build()
                 val movie = VideoCapture.Builder(recorder).setTargetRotation(rotation)
                     .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY).build()
+                camera?.cameraInfo?.zoomState?.removeObservers(owner)
                 camera=p.bindToLifecycle(owner,selector,preview,photo,movie)
                 image=photo; video=movie; zoom=1f; heldZoomStart=null
+                // The range is known once the camera runs: the choices follow it.
+                camera?.cameraInfo?.zoomState?.observe(owner) { range ->
+                    val least = range.minZoomRatio.toDouble()
+                    val choices = productCameraZoomChoices(least, range.maxZoomRatio.toDouble(), listOfNotNull(least.takeIf { it < 0.95 }))
+                    if (choices != zoomChoices) zoomChoices = choices
+                }
             } catch (error: Exception) {
                 Log.w("YoCamera", "Camera binding failed", error)
                 failed(context.getString(R.string.camera_open_failed))
@@ -138,8 +151,7 @@ class YoCamera(private val context: Context) {
     }
     fun flip() { front=!front }
     fun zoom() {
-        val maximum=camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
-        zoom=if(zoom*2>maximum || zoom>=4f) 1f else zoom*2
+        zoom = productCameraZoomNext(zoomChoices, zoom.toDouble()).toFloat()
         camera?.cameraControl?.setZoomRatio(zoom)
     }
     suspend fun photo(): Uri = withContext(Dispatchers.Main) {

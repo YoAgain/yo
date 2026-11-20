@@ -61,7 +61,14 @@ import uniffi.yo.productWidgetIdSelection
 
 private fun Context.widgetPreferences() = getSharedPreferences("yo-widget", Context.MODE_PRIVATE)
 private fun Friend.widgetName() = if (group == null) name else "#${name.removePrefix("#")}"
-private fun AppState.widgetFriends() = friends.filter { productWidgetEligible(it.blocked, it.request, it.gone) }
+/** The core's rule for the eight combinations, asked once: the widget filtered every friend with a core call on each
+ *  change of the app's state, on the main thread. */
+private val widgetEligible by lazy {
+    BooleanArray(8) { productWidgetEligible(it and 1 != 0, it and 2 != 0, it and 4 != 0) }
+}
+private fun eligible(friend: Friend) =
+    widgetEligible[(if (friend.blocked) 1 else 0) or (if (friend.request) 2 else 0) or (if (friend.gone) 4 else 0)]
+private fun AppState.widgetFriends() = friends.filter(::eligible)
 private const val WidgetSlots = 16
 
 private fun Context.widgetPicks(id: Int, account: String?): List<String> {
@@ -103,9 +110,10 @@ class YoWidget : GlanceAppWidget() {
         provideContent {
             // Only what the widget shows: the app's list changing its state as it scrolls (rows seen, a finger down)
             // redrew every row's bitmap and sent the launcher new RemoteViews, on the main thread, while scrolling.
-            val friends by remember { repo.state.map { it.widgetFriends() to it.username }.distinctUntilChanged().map { it.first } }
+            val friends by remember { repo.state.map { it.friends to it.username }.distinctUntilChanged().map { (all, _) -> all.filter(::eligible) } }
                 .collectAsState(shownAtStart)
             val account = repo.widgetAccount()
+            val sent by WidgetSent.bars.collectAsState()
             val size = LocalSize.current
             val slots = (size.height / 44.dp).toInt().coerceIn(1, WidgetSlots)
             val selected = productWidgetIdSelection(friends.map { it.key }, context.widgetPicks(widgetId, account),
@@ -132,7 +140,8 @@ class YoWidget : GlanceAppWidget() {
                                 .clickable(actionRunCallback<WidgetSend>(actionParametersOf(
                                     WidgetSend.friend to friend.key, WidgetSend.account to account.orEmpty()))),
                                 contentAlignment = WidgetAlignment.Center) {
-                                Words(context, friend.widgetName(), if (single) 28f else font, size.width, rowHeight)
+                                Words(context, if (friend.key in sent) copy(ProductText.SENT_YO) else friend.widgetName(),
+                                    if (single) 28f else font, size.width, rowHeight)
                             }
                         }
                     }
@@ -158,10 +167,20 @@ class YoWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget = YoWidget()
 }
 
+/** Bars a widget tap just sent a Yo to: they say "Sent Yo!" for the core's moment, as iOS's widget. */
+internal object WidgetSent {
+    val bars = kotlinx.coroutines.flow.MutableStateFlow(emptySet<String>())
+}
+
 class WidgetSend : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: ActionParameters) {
         val key = parameters[friend] ?: return
         YoWork.enqueue(context, "send", key, parameters[account])
+        WidgetSent.bars.value += key
+        YoWidget().update(context, glanceId)
+        kotlinx.coroutines.delay(uniffi.yo.productDisplayTiming().widgetSentSecs.toLong() * 1000)
+        WidgetSent.bars.value -= key
+        YoWidget().update(context, glanceId)
     }
 
     companion object {
