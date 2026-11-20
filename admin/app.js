@@ -476,7 +476,7 @@ if (document.body.classList.contains("login")) {
     const cf = h.crash_free?.[String(range)] || null, crashInstalls = cf ? cf[0] : null, seen = cf ? cf[1] : 0;
     const pi = h.problem_installs?.[String(range)] || null, days = { 1: 2, 7: 7, 30: 30, 0: 90 }[range], from = today0() - days + 1;
     const reports = (kind) => (h.diagnostic_days || []).filter((r) => r.day >= from && (!kind || r.kind === kind)).reduce((n, r) => n + r.count, 0);
-    problemTotals = { reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3]], ["Android", pi[4], pi[5]]] : [] };
+    problemTotals = { reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3], pi[4]], ["Android", pi[5], pi[6], pi[7]]] : [] };
     healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
@@ -2346,7 +2346,7 @@ if (document.body.classList.contains("login")) {
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", value: `${num(p.ec.at(-1) + p.cc.at(-1))} causes · ${num(p.er.at(-1) + p.cr.at(-1))} reports · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"} of phones`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+          return { ico: "warn", label: "Errors · Crashes", value: `${p.ec.at(-1) + p.cc.at(-1)} ${p.ec.at(-1) + p.cc.at(-1) === 1 ? "cause" : "causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
             tip: (i) => ({ head: p.names[i], rows: problemRows(p, i) }) }; })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
           title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
@@ -2364,17 +2364,28 @@ if (document.body.classList.contains("login")) {
       })() : dcard("Yo to Yo speed", null, note("No Yos delivered in this range."));
       // Speed two columns wide: the four columns filled without the Errors card (errors are in the Errors view).
       fast.classList.add("wide");
-      // How problems are counted: open causes, the installs behind them, the occurrences (sum of counts), in three steps.
-      const ps = problemSplit(h), last = ps.names.length - 1, pt = problemTotals;
-      const big = el("div", "pbig", `${num(ps.ec[last] + ps.cc[last])} problems · ${pt?.installs == null ? "–" : num(pt.installs)} installs · ${num(ps.er[last] + ps.cr[last])} occurrences`);
-      const pc = (n, d) => (n == null || !d ? "–" : pctText((100 * n) / d));
-      const shares = pt?.installs == null || !pt.seen ? [] : [
-        ["Phones with an error", pc(pt.errInstalls, pt.seen)], ["Phones with a crash", pc(pt.crashInstalls, pt.seen)], ["Phones with neither", pc(pt.seen - pt.installs, pt.seen)],
-        ...pt.platforms.filter(([, , n]) => n).map(([l, hit, n]) => [`${l} phones with a problem`, pc(hit, n)])];
-      const how = dcard("How problems are counted", null, big, shares.length ? kvRows(shares) : null,
-        note("1  Each report is fingerprinted: kind, domain, code, code line and build make one group."),
-        note("2  The same fingerprint is the same group: its count goes up. Installs are random ids, never accounts."),
-        note("3  A ticked group stays closed; the same bug in a new build opens a new group, so a fix that did not work shows up again. A problem is one cause: its groups put together."));
+      // The Problems summary: three numbers, the phones as stacked bars (crash, error, fine), and how a report becomes a problem.
+      const ps = problemSplit(h), last = ps.names.length - 1, pt = problemTotals, many = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
+      const stat = (n, w) => { const d = el("div", "pstat"); d.append(el("b", null, num(n)), el("small", null, `${w}${n === 1 ? "" : "s"}`)); return d; };
+      const stats = el("div", "pstats"); stats.append(stat(ps.ec[last] + ps.cc[last], "Problem"), stat(pt?.installs ?? 0, "Install"), stat(ps.er[last] + ps.cr[last], "Occurrence"));
+      // Phones seen as one bar: crash (red), error only (orange), fine (green); a row each for all, iOS and Android.
+      const pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
+      const phoneBar = (label, seen, any, crash) => {
+        const row = el("div", "hc-plat"), bar = el("span", "hc-pbar dbar"), parts = [["must", crash], ["warm", Math.max(0, any - crash)], ["current", Math.max(0, seen - any)]];
+        for (const [k, v] of parts) if (v) { const x = el("span", k); x.style.flexGrow = v; bar.append(x); }
+        row.append(el("b", null, label), bar, el("span", "hc-pn", seen ? `${pc(crash, seen)} · ${pc(Math.max(0, any - crash), seen)} · ${pc(Math.max(0, seen - any), seen)}` : "–"));
+        return row;
+      };
+      const phones = pt?.installs == null || !pt.seen ? null : el("div", "hc-plats");
+      if (phones) {
+        phones.append(phoneBar("Phones", pt.seen, pt.installs, pt.crashInstalls || 0), ...pt.platforms.filter(([, , n]) => n).map(([l, hit, n, c]) => phoneBar(l, n, hit, c)),
+          cfoot(key("Crash", "", "var(--bad)"), key("Error", "", "#e67e22"), key("Fine", "", "var(--ok)")));
+      }
+      const step = (ico, name, sub) => { const d = el("div", "pstep"); d.append(icon(ico), el("b", null, name), el("small", null, sub)); return d; };
+      const flow = el("div", "pflow");
+      flow.append(step("chat", "Report", "from a phone"), el("span", "parrow", "→"), step("ratio", "Fingerprint", "kind · code · line · build"), el("span", "parrow", "→"),
+        step("chart", "Group", "count ↑"), el("span", "parrow", "→"), step("warn", "Problem", "the cause"));
+      const how = dcard("Problems", null, stats, phones, flow, note("Ticked stays closed · same bug in a new build reopens as a new group"));
       return [how, users, one.dl().find((c) => title(c) === "Delivery"), fast];
     };
     // Server: its four charts, then updates and the services, one card each.

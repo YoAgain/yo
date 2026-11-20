@@ -239,7 +239,9 @@ def problem_installs(db, now: int):
             hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
                              " WHERE i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%'", (first, prefix + "/%")).fetchone()[0]
             seen = db.execute("SELECT count(*) FROM devices WHERE last_seen_at >= ? AND app LIKE ?", (first * DAY_MS, prefix + "/%")).fetchone()[0]
-            out[key] += [hit, seen]
+            crash = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                               " WHERE d.kind = 'crash' AND i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%'", (first, prefix + "/%")).fetchone()[0]
+            out[key] += [hit, seen, crash]
     return out
 
 

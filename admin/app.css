@@ -1003,7 +1003,15 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .dcard h3 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dcard h3 .dot.ok { background: var(--ok); } .dcard h3 .dot.bad { background: var(--bad); }
 .dcard .hc-lines { margin-top: 0; }
-.dcard .pbig { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dcard .pstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; }
+.dcard .pstat b { display: block; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.dcard .pstat small { color: var(--muted); font-size: 11px; }
+.dcard .pflow { display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; margin-top: 4px; }
+.dcard .pstep { display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; flex: 1; min-width: 0; }
+.dcard .pstep .ico { width: 18px; height: 18px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dcard .pstep b { font-size: 12px; } .dcard .pstep small { color: var(--muted); font-size: 10px; }
+.dcard .parrow { color: var(--muted); padding-top: 2px; }
+.hc-pbar .warm, .hc-legend .warm::before { background: #e67e22; }
 .dcard .hc-kv dd { overflow-wrap: anywhere; white-space: pre-line; }
 .dcard .hc-hint { margin-top: auto; }
 .dcard .hc-chart.acc .b:not(.zero) { fill: var(--amethyst-soft); }
