@@ -162,8 +162,8 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     Column(if (height != null) Modifier.height(tallest * height) else Modifier.heightIn(max = tallest), content = content)
 }
 
-/** Settings (iOS SettingsView): two heights only, never measured: the first page at half (it fits), every page pushed
- *  in at full; its pages pushed in with a back arrow. */
+/** Settings (iOS SettingsView): a fixed height per page, never measured: half for the pages that fit there (the first
+ *  page and App Icon), full for every other; its pages pushed in with a back arrow. */
 @Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
     // The whole state (counters and the last sync included): the list underneath takes it without them.
     val s by model.repository.state.collectAsStateWithLifecycle()
@@ -173,10 +173,13 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     // The way here: a contact's page is reached from Contacts.
     val trail = rememberSaveable { mutableStateOf(listOf("Profile")) }
     FittedSheet(onDismissRequest = onClose, state = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        height = if (trail.value.size > 1) 1f else 0.5f) {
+        height = if (trail.value.last() in HalfPages) 0.5f else 1f) {
         Settings(model, s, trail, onClose = { hideThen(onClose) }, onAddFriends = { hideThen(onAddFriends) })
     }
 }
+
+/** The settings pages that fit at half height without scrolling. */
+private val HalfPages = setOf("Profile", "Appearance")
 
 @Composable private fun Settings(model: YoViewModel, s: AppState, trailState: MutableState<List<String>>, onClose: () -> Unit,
     onAddFriends: () -> Unit) {
@@ -305,18 +308,16 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                     }
                 }
                 shown == "Licenses" -> LicensesPage()
+                // At half height the first page never scrolls: the profile card takes the room the rows leave, so the
+                // gap under the last section is the one at the top. Accessibility font sizes keep the compact card and scroll.
+                shown == "Profile" && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp).padding(top = 20.dp)) {
+                    ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true }, Modifier.weight(1f), grow = true)
+                    ProfileRows(s, repo, ::open, onAddFriends)
+                }
                 else -> Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(top = 8.dp)) { when {
                     shown == "Profile" -> {
                         ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true })
-                        Section(null, null,
-                            Setting(stringResource(R.string.ui_app_icon), leading = { AppIconPreview(s.appIcon, 32, 8) }, onClick = { open("Appearance") }),
-                            Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
-                                onChecked = { on -> repo.command { settings(left = on) } }),
-                        )
-                        Section(null, null,
-                            Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
-                            Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends),
-                        )
+                        ProfileRows(s, repo, ::open, onAddFriends)
                     }
                     // iOS AccountPage: who, then Account Security and leaving; deleting is a link under them (App Review 5.1.1(v)).
                     shown == "Account" -> {
@@ -550,20 +551,41 @@ private fun shareCode(context: Context, name: String) {
 
 
 /** The account's card: avatar, the name never cut (it shrinks to half, as on iOS), the red 1 while unsecured, the code. */
-@Composable private fun ProfileCard(s: AppState, onOpen: () -> Unit, onCode: () -> Unit) {
-    Card(onClick = onOpen, modifier = Modifier.fillMaxWidth().padding(bottom = 20.dp), shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) {
+/** The first page's rows under the profile card. */
+@Composable private fun ProfileRows(s: AppState, repo: Repository, open: (String) -> Unit, onAddFriends: () -> Unit) {
+    Section(null, null,
+        Setting(stringResource(R.string.ui_app_icon), leading = { AppIconPreview(s.appIcon, 32, 8) }, onClick = { open("Appearance") }),
+        Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
+            onChecked = { on -> repo.command { settings(left = on) } }),
+    )
+    Section(null, null,
+        Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
+        Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends),
+    )
+}
+
+/** The account's card. Given room (a weight at half height) it grows: the avatar from 64 up to 96 dp, the name with it,
+ *  centred in the card; with none it is the compact card. */
+@Composable private fun ProfileCard(s: AppState, onOpen: () -> Unit, onCode: () -> Unit, modifier: Modifier = Modifier, grow: Boolean = false) {
+    @Composable fun content(avatar: androidx.compose.ui.unit.Dp) {
+        val name = (26 * avatar.value / 64).coerceAtMost(36f).sp
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            SettingsAvatar(s.username.orEmpty(), 64)
+            SettingsAvatar(s.username.orEmpty(), avatar.value.toInt())
             BasicText(
                 s.username.orEmpty(), Modifier.weight(1f),
-                style = TextStyle(fontFamily = YoFont, fontSize = 26.sp, color = MaterialTheme.colorScheme.onSurface),
+                style = TextStyle(fontFamily = YoFont, fontSize = name, color = MaterialTheme.colorScheme.onSurface),
                 maxLines = 1, softWrap = false,
-                autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = 26.sp),
+                autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = name),
             )
             if (s.recoveryNeedsAttention) Badge { Text("1") }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }
+    }
+    Card(onClick = onOpen, modifier = modifier.fillMaxWidth().padding(bottom = 20.dp), shape = MaterialTheme.shapes.extraLarge,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) {
+        if (grow) BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            content((maxHeight - 32.dp).coerceIn(64.dp, 96.dp))
+        } else content(64.dp)
     }
 }
 

@@ -44,8 +44,12 @@ push through APNs (see above), the camera (black; photos come from the library).
 Run on a device or Simulator after changing Settings. These visual checks are pending for the current change;
 the Linux build does not run the Simulator UI driver.
 
-- Open Account from the small root sheet and go back: neither transition changes its height. Scroll Account to
-  reach the final group, then drag to large and repeat; the large height also stays unchanged.
+- Each settings page has a fixed height: half for the first page and App Icon, full for every other (Account,
+  Account Security, Contacts, Your Code, Help & About, Status, About & Licenses). Push from half to full (Help &
+  About, Account): the sheet grows first and the page arrives whole, never cut at the old height or filling in late.
+  Pop back to the first page: it shrinks with the pop, no empty grey.
+- First page at half height: the profile card takes the room left, so the gap under Help/Add Friends equals the
+  gap at the top; at accessibility text sizes the card is compact and the page scrolls.
 - Account uses the account name as its inline title, with no avatar header or QR button. Your Code remains
   reachable from the root profile card's QR button. Rows start with the normal top gap.
 - Account: title = the user's name and a coloured status dot (VoiceOver reads the word). [Contacts, Blocked], then
@@ -61,9 +65,6 @@ the Linux build does not run the Simulator UI driver.
   rows): Verified (toggle, asks first), problem rows only when needed, Sealed Yos, Encryption (On + check;
   folds open: Devices, Identity — Unchanged/Changed — which folds open once more to the keys, one line each, tap
   shows a whole key), Wait 5 s Before Sending (no time setting, no footer).
-- Every settings destination keeps the root's small height on push/pop. Only Contacts, Status and Licenses
-  show the grabber and can be dragged to large (all open at the small height); all other pages have no grabber and
-  no large detent. Eager rows must appear throughout the animation, with no late cells or jumps.
 - UI driver: from Account run `drive.py DIR account-layout`, which checks the row order, opens Account Security,
   its Recovery Key and Passkey screens (half height, Done closes) and Contacts. Account identifiers are
   account.contacts, account.security, account.signOut and account.delete. Info buttons use info.<title>. Account

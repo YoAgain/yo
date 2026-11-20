@@ -30,37 +30,77 @@ struct SettingsView: View {
   @State private var currentIconName = UIApplication.shared.alternateIconName
   enum Page: Hashable {
     case account, security, help, status, contacts, code, licenses, appIcon
+
+    /// Each page's height, fixed here and never measured: half for the pages that fit there without scrolling (the
+    /// first page and App Icon's five icons), full for every other.
+    var fitsHalf: Bool { self == .appIcon }
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
-  /// Two heights, nothing in between and nothing measured: the first page is half the screen (it fits there without
-  /// scrolling), every page pushed in is full height.
-  private var detent: PresentationDetent { path.isEmpty ? .medium : .large }
+  @State private var detent: PresentationDetent = .medium
+  /// A push to a full-height page from a half-height one, waiting for the sheet to stand at full height.
+  @State private var pendingPath: [Page]?
+  /// The first page's room left over at half height, given to the profile card so the gap below the last section is
+  /// the list's own bottom margin, as at its top. More rows later take it back by themselves.
+  @State private var spare: CGFloat = 0
+  @State private var halfHeight: CGFloat?
+
+  private static func detent(for path: [Page]) -> PresentationDetent {
+    path.last.map { $0.fitsHalf ? .medium : .large } ?? .medium
+  }
+
+  /// Every push and pop goes through here. A page laid out while the sheet grows stays cut at the old height and
+  /// fills in late, so a full-height page is pushed only once the sheet has grown (its height changes, below). Going
+  /// back to a half-height page pops and shrinks together: that page fits the top half, nothing of it is cut.
+  private func navigate(to new: [Page]) {
+    let target = Self.detent(for: new)
+    if target == .large, detent != .large {
+      pendingPath = new
+      detent = .large
+      // The sheet's own height change pushes; should none come, push anyway.
+      Task {
+        try? await Task.sleep(for: .milliseconds(400))
+        pushPending()
+      }
+    } else {
+      pendingPath = nil
+      path = new
+      detent = target
+    }
+  }
+
+  private func pushPending() {
+    guard let pending = pendingPath else { return }
+    pendingPath = nil
+    path = pending
+  }
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
   }
 
   var body: some View {
-    NavigationStack(path: $path) {
+    NavigationStack(path: Binding(get: { path }, set: { navigate(to: $0) })) {
       Form {
         if let account = accounts.account {
           Section {
             NavigationLink(value: Page.account) {
+              // The avatar takes the spare room up to 96 pt, the rest pads the row above and below it.
+              let grow = min(spare, 40)
               HStack(spacing: 14) {
-                Avatar(name: account.username, size: 56)
+                Avatar(name: account.username, size: 56 + grow)
                 Text(account.username)
-                  .font(.yo(26, relativeTo: .title2))
+                  .font(.yo(26 + grow * 0.3, relativeTo: .title2))
                   .lineLimit(1)
                   .minimumScaleFactor(0.5)
                 if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) { RecoveryBadge() }
                 Spacer(minLength: 0)
                 YourCodeButton {
                   YourCodePage.prepare(name: account.username)
-                  path.append(.code)
+                  navigate(to: path + [.code])
                 }
               }
-              .padding(.vertical, 2)
+              .padding(.vertical, 2 + (spare - grow) / 2)
             }
           }
           Section {
@@ -97,6 +137,19 @@ struct SettingsView: View {
       // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
+      // The room the list leaves empty at half height goes to the profile card (what it already has counted in, so
+      // it settles in one step); at Dynamic Type's accessibility sizes the compact row, and the list scrolls.
+      .onScrollGeometryChange(for: [CGFloat].self) {
+        [$0.containerSize.height, $0.containerSize.height - $0.contentInsets.top - $0.contentInsets.bottom - $0.contentSize.height]
+      } action: { _, room in
+        // Only at half height: while a pop shrinks the sheet back, the taller moment is not counted.
+        guard path.isEmpty, pendingPath == nil, detent == .medium, room[0] > 100,
+          room[0] <= (halfHeight ?? room[0]) + 0.5
+        else { return }
+        halfHeight = room[0]
+        let settled = typeSize.isAccessibilitySize ? 0 : max(0, spare + room[1])
+        if abs(settled - spare) > 0.5 { spare = settled }
+      }
       // No title and no close button: only the system's grabber, to pull the sheet down and away. The pages pushed
       // in show their bar with the back button.
       .toolbar(.hidden, for: .navigationBar)
@@ -128,6 +181,11 @@ struct SettingsView: View {
         .listSectionSpacing(.compact)
       }
     }
+    // The sheet stands at its new, full height (UIKit sets the final frame as the growth starts): now the page is
+    // pushed and laid out at that height from its first frame.
+    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
+      if new > old { pushPending() }
+    }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
@@ -138,7 +196,7 @@ struct SettingsView: View {
     .scrollBounceBehavior(.basedOnSize)
     .presentationDetents([detent])
     // The grabber on the first page (one height there: it only closes); a page pushed in has its bar instead.
-    .presentationDragIndicator(path.isEmpty ? .visible : .hidden)
+    .presentationDragIndicator(path.isEmpty && pendingPath == nil ? .visible : .hidden)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
     .presentationBackground(Color(.systemGroupedBackground))
     .task(id: "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)") {
