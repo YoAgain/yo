@@ -84,6 +84,11 @@ struct AccountPage: View {
         .tint(Color(.label))
         .disabled(deletingAccount)
         .accessibilityIdentifier("account.signOut")
+        // On the row, so its popover points at Sign Out (on the page it pointed at the title).
+        .confirmDestructive(
+          $signingOut, title: { _ in "Sign Out?" },
+          message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },
+          action: { _ in "Sign Out" }, run: { _ in reset() })
       } footer: {
         // A footer link as iOS Settings writes them, still easy to find (App Review 5.1.1(v)).
         Button {
@@ -139,10 +144,6 @@ struct AccountPage: View {
     .navigationDestination(isPresented: $showingSecurity) {
       AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey)
     }
-    .confirmDestructive(
-      $signingOut, title: { _ in "Sign Out?" },
-      message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },
-      action: { _ in "Sign Out" }, run: { _ in reset() })
   }
 
   private func deletePage(_ account: Account) -> some View {
@@ -204,7 +205,7 @@ struct AccountPage: View {
       try await accounts.deleteAccount()
       reset()
     } catch {
-      deleteProblem = error.localizedDescription
+      deleteProblem = Problems.words(for: error)
     }
   }
 
@@ -258,10 +259,13 @@ struct AccountSecurityPage: View {
             // While on, the eye left of the switch opens the key's screen again, to show or save it.
             if keySaved {
               Spacer()
-              Button(ProductText.showOrSaveKey.english, systemImage: "eye") { showingRecoveryKey = true }
-                .labelStyle(.iconOnly)
+              Button { showingRecoveryKey = true } label: {
+                // The eye alone was a 25 × 15 pt target beside the switch.
+                Image(systemName: "eye").frame(minWidth: 44, minHeight: 44).contentShape(.rect)
+              }
                 .buttonStyle(.borderless)
                 .tint(.amethyst)
+                .accessibilityLabel(ProductText.showOrSaveKey.english)
                 .accessibilityIdentifier("security.showKey")
             }
           }
@@ -291,6 +295,7 @@ struct AccountSecurityPage: View {
           Spacer()
           Button("How Account Recovery Works", systemImage: "info.circle") { showingRecoveryHelp = true }
             .labelStyle(.iconOnly)
+            .contentShape(.rect.inset(by: -13))  // 18 pt drawn, 44 pt to touch, without a taller header
             .accessibilityIdentifier("security.howRecoveryWorks")
         }
       }
@@ -335,7 +340,7 @@ struct AccountSecurityPage: View {
     Task {
       defer { busy = false }
       do { try await work() } catch {
-        if !Passkeys.isCancellation(error) { problem = error.localizedDescription }
+        if !Passkeys.isCancellation(error) { problem = Problems.words(for: error) }
       }
     }
   }

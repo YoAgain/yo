@@ -76,7 +76,10 @@ struct AppIconPage: View {
   private func picture(_ asset: String, side: CGFloat) -> some View {
     AppIconPicture(asset: asset)
       .frame(width: side, height: side)
-      .clipShape(.rect(cornerRadius: 14)).accessibilityHidden(true)
+      .clipShape(.rect(cornerRadius: 14))
+      // The white icons (Negative Yo) keep their edge on the white page.
+      .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(Color(.separator), lineWidth: 0.5) }
+      .accessibilityHidden(true)
   }
 }
 

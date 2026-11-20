@@ -30,6 +30,10 @@ targets:
       - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
       - {path: ../../YoApp/Resources/yo.caf, buildPhase: resources}
       - {path: ../../YoApp/Resources/Licenses.txt, buildPhase: resources}  # dev/licenses.sh, before the build
+      - {path: ../../YoApp/Resources/IconLilac2015@2x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconLilac2015@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconOG2014@2x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconOG2014@3x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconNegative@2x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconNegative@3x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconOriginal@2x.png, buildPhase: resources}
@@ -49,6 +53,9 @@ targets:
         # needs no profile for it): "Yo from …" on a push (simctl push, or APNs' sandbox).
         PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev
         PRODUCT_NAME: YoApp
+        # The generated Info.plist drops Info.plist's versions without these (About showed "?").
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: ../../YoApp/Info.plist
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -67,7 +74,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.notify
         PRODUCT_NAME: YoNotify
         # An extension without versions does not install.
-        MARKETING_VERSION: "1.0"
+        MARKETING_VERSION: "1.0.0"  # as the app
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: ../../YoApp/YoNotify-Info.plist
         GENERATE_INFOPLIST_FILE: YES
@@ -86,7 +93,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.probe
         PRODUCT_NAME: YoNotifyProbe
         GENERATE_INFOPLIST_FILE: YES
-        MARKETING_VERSION: "1.0"
+        MARKETING_VERSION: "1.0.0"  # as the app
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_ENTITLEMENTS: YoNotify.entitlements
   YoDriver:

@@ -2,13 +2,12 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// Blocking: block a contact, refuse strangers, the blocked contacts (spec 4.8); its own page under Yo ID.
+/// Blocking: block a contact, refuse strangers, the blocked contacts (spec 4.8); its own page under Yodentity › the account.
 @MainActor
 struct BlockedPage: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
   @Environment(MediaOutbox.self) private var outbox
-  @State private var problem: String?
   @State private var requestsOpen: Bool?
 
   @State private var unblocking: Friend?
@@ -26,7 +25,6 @@ struct BlockedPage: View {
         guard let client = accounts.client else { return }
         requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
       }
-      .problemAlert($problem)
   }
 
   @ViewBuilder private var sections: some View {
@@ -103,8 +101,7 @@ struct BlockedPage: View {
         try await accounts.setBlocked(friend.user ?? friend.name, true)
         withAnimation { friends.setBlocked(friend, true) }
       } catch {
-        problem = error.localizedDescription
-        Problems.shared.report(error)
+        Problems.shared.report(error)  // the one banner; an alert as well said it twice
       }
     }
   }
@@ -116,8 +113,7 @@ struct BlockedPage: View {
         withAnimation { friends.setBlocked(friend, false) }
         outbox.retryNow()  // photos taken for them while blocked go now
       } catch {
-        problem = error.localizedDescription
-        Problems.shared.report(error)
+        Problems.shared.report(error)  // the one banner; an alert as well said it twice
       }
     }
   }

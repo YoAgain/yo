@@ -222,7 +222,7 @@ struct Onboarding: View {
     do {
       try await accounts.restore(synced: item)
     } catch {
-      problem = error.localizedDescription
+      problem = Problems.words(for: error)
     }
   }
 
@@ -269,7 +269,7 @@ struct Onboarding: View {
     do {
       try await accounts.restore(code: code)
     } catch {
-      problem = error.localizedDescription
+      problem = Problems.words(for: error)
     }
   }
 
@@ -410,6 +410,8 @@ private struct NameField: View {
 
   var body: some View {
     TextField("", text: $name)
+      // The placeholder is drawn over it, so VoiceOver gets the field's name here.
+      .accessibilityLabel(ProductText.username.english)
       .font(.yo(fontSize))
       .tint(.white)
       .multilineTextAlignment(.center)

@@ -67,8 +67,24 @@ struct LicenseContent: Sendable {
         first.hasPrefix("Source: ")
         ? URL(string: String(first.dropFirst("Source: ".count).prefix { $0 != " " })) : nil
       // Licence files centre their headings with spaces: every line starts at the left edge instead.
+      // Their prose is wrapped at about 80 columns, which on a phone left every other line half empty: a line that
+      // follows a long one continues it; short lines (headings, "==", lists' items) stay lines of their own.
       let parts = text.components(separatedBy: "\n\n").dropFirst()
-        .map { $0.split(separator: "\n", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n") }
+        .map { part in
+          var lines: [String] = []
+          var previous = 0
+          for line in part.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = line.trimmingCharacters(in: .whitespaces)
+            let item = line.hasPrefix("-") || line.hasPrefix("*") || line.hasPrefix("(") || line.first?.isNumber == true
+            if previous >= 60, !item, !line.isEmpty, let last = lines.popLast() {
+              lines.append(last + " " + line)
+            } else {
+              lines.append(line)
+            }
+            previous = line.count
+          }
+          return lines.joined(separator: "\n")
+        }
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
       return Self(parts: parts, source: source)

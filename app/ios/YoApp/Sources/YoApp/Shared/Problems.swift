@@ -47,6 +47,13 @@ import YoCore
     return .failed
   }
 
+  /// An error's words for an alert: the core's problem text for a core or network error (its own description is
+  /// the debug form, "YoCore.YoError.Network(message: …)"), else the error's own description.
+  static func words(for error: Error) -> String {
+    guard error is YoError || (error as NSError).domain == NSURLErrorDomain else { return error.localizedDescription }
+    return productProblemText(problem: problem(of: error), lang: .english)
+  }
+
   /// It is over (sent, answered): its banner goes, another's stays.
   func resolve(_ problems: ProductProblem...) {
     guard let shown, problems.contains(shown) else { return }

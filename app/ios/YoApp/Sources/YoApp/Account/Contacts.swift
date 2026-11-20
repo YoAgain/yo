@@ -423,7 +423,7 @@ private struct ContactDetail: View {
       do {
         try await work()
       } catch {
-        problem = error.localizedDescription
+        problem = Problems.words(for: error)
       }
       await load()
     }

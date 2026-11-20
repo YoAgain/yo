@@ -46,7 +46,7 @@ private struct RecoveryScreen<Content: View, Links: View>: View {
               .accessibilityAddTraits(.isHeader)
               .padding(.top, 20)
             Text(line)
-              .font(.system(size: 15, weight: .medium))
+              .font(.subheadline.weight(.medium))  // 15 pt, with Dynamic Type
               .multilineTextAlignment(.center)
               .opacity(0.85)
               .padding(.top, 8)
@@ -94,7 +94,7 @@ private struct RecoveryScreen<Content: View, Links: View>: View {
             .padding(.top, 10)
             HStack(spacing: 10) { links }
               .font(.subheadline.weight(.semibold))
-              .buttonStyle(.plain)
+              .buttonStyle(QuietLink())
               .disabled(busy)
               .padding(.top, 14)
           }
@@ -204,7 +204,7 @@ struct RecoveryKeySheet: View {
       words = try await accounts.newRecoveryKey()
       return true
     } catch {
-      problem = error.localizedDescription
+      problem = Problems.words(for: error)
       return false
     }
   }
@@ -241,7 +241,7 @@ struct RecoveryKeySheet: View {
     do {
       if !secured { try await accounts.keepWords() }
       accounts.markWordsSaved(true)
-    } catch { problem = error.localizedDescription }
+    } catch { problem = Problems.words(for: error) }
   }
 }
 
@@ -311,6 +311,16 @@ struct PasskeySheet: View {
         problem = "That didn’t work. Try again."
       }
     }
+  }
+}
+
+/// A quiet link under the big button, plain as text but 44 pt tall to touch (its text alone was about 20).
+private struct QuietLink: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .frame(minHeight: 44)
+      .contentShape(.rect)
+      .opacity(configuration.isPressed ? 0.5 : 1)
   }
 }
 

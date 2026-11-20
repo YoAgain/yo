@@ -75,13 +75,18 @@ extension FriendList {
     }
     .onChange(of: typing) { _, active in
       HitchScene.event("add block", then: "list")
-      if !active { adding = false }
+      // Return ends the editing too: while a submitted name's hint shows ("Name…", "No Such User") the field stays,
+      // its answer closes it (or brings the keyboard back for another try).
+      if !active && hint == nil { adding = false }
     }
   }
 
   func addAction(_ title: String, icon: String, color: Color) -> some View {
     Label(title, systemImage: icon)
       .font(.yo(22))
+      // Half a row each: with Dynamic Type's large sizes the words shrink instead of ending in "Gro…".
+      .lineLimit(1)
+      .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
       .frame(maxWidth: .infinity)
       .frame(height: Metrics.rowHeight)
@@ -228,6 +233,7 @@ extension FriendList {
     submitted += 1
     let this = submitted
     hint = text
+    UIAccessibility.post(notification: .announcement, argument: text)  // a placeholder alone is not read out
     typing = true  // the keyboard stays, to type the name again
     Task {
       try? await Task.sleep(for: .seconds(1.5))

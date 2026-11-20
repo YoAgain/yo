@@ -36,7 +36,7 @@ struct RecoveryHelpSheet: View {
             "arrow.triangle.2.circlepath.icloud.fill", "Account Backup",
             "Your contacts, groups and settings are kept on Yo’s server, encrypted with a key made from your account key, so a new phone finds them again. Yos, photos and videos aren’t backed up.")
           Text(
-            "Account Backup is end-to-end encrypted. Yo’s server stores them but can’t read them."
+            "Account Backup is end-to-end encrypted. Yo’s server stores it but can’t read it."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)

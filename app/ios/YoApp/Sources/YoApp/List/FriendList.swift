@@ -303,7 +303,7 @@ struct FriendList: View {
           message: {
             $0.reported
               ? "Block \($0.friend.name) too? You won’t get their Yos."
-              : "You won’t get their Yos. Unblock them under Yo ID › Blocked."
+              : "You won’t get their Yos. Unblock them under Yodentity › \(accounts.account?.username ?? "your name") › Blocked."
           },
           action: { "Block \($0.friend.name)" },
           cancel: blocking?.reported == true ? "Not Now" : "Cancel",
@@ -314,6 +314,7 @@ struct FriendList: View {
         ) { bar in
           TextField("Group Name", text: $newGroupName)
           Button("Rename") { renameGroup(bar, to: newGroupName) }
+            .disabled(newGroupName.trimmingCharacters(in: .whitespaces).isEmpty)  // an empty name was dropped unsaid
           Button("Cancel", role: .cancel) {}
         }
         .sheet(item: $membersOf) { bar in GroupMembersSheet(bar: bar).preferredColorScheme(SystemAppearance.scheme) }
