@@ -27,17 +27,6 @@ The apps on top:
 - [app/android](app/android): Kotlin, the Android app
 - [app/cli](app/cli): Rust, the CLI; the bots on it in [skills](skills)
 
-What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
-
-| Group | Who | Endpoints |
-|---|---|---|
-| Messages | anonymous | `inbox`, `blobs` |
-| Groups | anonymous member | `groups` |
-| Public | anonymous | `username`, `backup/{id}`, keys |
-| Account | your device | `register`, `lookup`, `push`, `storage`, `backup` … |
-| Support | your device | `support`, `feedback`, `report` |
-| Crashes | anonymous | `crash`, `errors` |
-
 ### iOS and Android
 
 The same job on each platform, so both apps behave alike.
@@ -55,6 +44,17 @@ The same job on each platform, so both apps behave alike.
 | Shortcuts | App Intents | App shortcuts |
 | Camera | AVFoundation | CameraX |
 | UI | SwiftUI | Material 3 |
+
+What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
+
+| Endpoint group | Endpoints | Type |
+|---|---|---|
+| Messages | `inbox`, `blobs` | anonymous |
+| Groups | `groups` | anonymous member |
+| Public | `username`, `backup/{id}`, keys | anonymous |
+| Account | `register`, `lookup`, `push`, `storage`, `backup` … | your device |
+| Support | `support`, `feedback`, `report` | your device |
+| Crashes | `crash`, `errors` | anonymous |
 
 ### Account Sync
 
