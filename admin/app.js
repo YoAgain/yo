@@ -328,16 +328,20 @@ if (document.body.classList.contains("login")) {
   // One count row: the number, and small bars (one per hour or day, an empty one a faint dash); over the bars, the
   // slot under the pointer or finger shows its time and value in place ("14:00 · 12").
   // CUM: rows whose bars rise with the running total over the range (Media: GB sent so far).
+  // The bars of a row in a W x H box: rounded, small gaps, an empty slot a faint dash (also the live strip's).
+  const bars = (values, W, H, scale) => {
+    const slot = W / values.length, top = scale || Math.max(1, ...values.map((v) => v || 0));
+    return values.map((v, i) => {
+      const h = v ? Math.max(2, (v / top) * (H - 2)) : 1.5;
+      return svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - h).toFixed(1), height: h.toFixed(1), rx: 1.2, class: v ? "b" : "b zero" });
+    });
+  };
   const sparkData = {}, FMT = { md: bytes }, CUM = { md: true };
   const spark = (key, big, values, names, tip, title, scale) => {
     if (CUM[key]) { let t = 0; values = values.map((v) => (v == null ? v : (t += v))); }
     if (big !== null) set(`${key}-n`, big === undefined ? "–" : (FMT[key] || num)(big));
     if (title !== undefined) $(`c-${key}`).dataset.tip = title || "";
-    const node = $(`${key}-spark`), W = 140, H = 28, n = values.length, slot = W / n, top = scale || Math.max(1, ...values.map((v) => v || 0));
-    node.replaceChildren(...values.map((v, i) => {
-      const h = v ? Math.max(2, (v / top) * (H - 2)) : 1.5;
-      return svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - h).toFixed(1), height: h.toFixed(1), rx: 1.2, class: v ? "b" : "b zero" });
-    }));
+    $(`${key}-spark`).replaceChildren(...bars(values, 140, 28, scale));
     sparkData[key] = { values, names, tip, scale, fmt: FMT[key] };
   };
   // The one range of Usage and Attention (1, 7 or 30 days, or 0: since the start), kept in this browser; the switch
@@ -1349,11 +1353,12 @@ if (document.body.classList.contains("login")) {
     if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; }
   };
 
-  // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only). Each
+  // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only), the
+  // last ten minutes as bars. Each
   // new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only) and pops as a spark at once; it tops up
   // the running minute until a refresh has it. Without the stream, new Yos come from the minutes' counts, spread over
   // the refresh. Reduced motion: no sparks.
-  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_RETRY = 10000;
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_RETRY = 10000, LIVE_BARS = 10;
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
   let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null;
   let liveSource = null, liveOpen = false, liveRetry = null;
@@ -1368,8 +1373,6 @@ if (document.body.classList.contains("login")) {
     if (Math.random() < 0.22) { s.textContent = "Yo"; s.classList.add("word"); }
     s.addEventListener("animationend", () => s.remove());
     lane.append(s);
-    const dot = document.querySelector(".live-dot");
-    dot.classList.remove("ping"); void dot.offsetWidth; dot.classList.add("ping");
   };
   // The strip from the last minutes and the Yos streamed since; the running minute never goes down within itself.
   const paintLive = () => {
@@ -1387,12 +1390,8 @@ if (document.body.classList.contains("login")) {
     const hour = m.reduce((a, b) => a + b, 0);
     box.title = `${num(hour)} Yos in the last hour · ${num(m[n - 1])} this minute (bots left out)`;
     box.setAttribute("aria-label", `${rate.toFixed(1)} Yos per minute, ${hour} in the last hour`);
-    // The sparkline: an area and its line, the running minute at the right edge.
-    const g = $("live-spark"), W = 120, H = 24, top = Math.max(1, ...m);
-    const pts = m.map((v, i) => [(i / (n - 1)) * W, H - 1.5 - (v / top) * (H - 4)]);
-    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
-    g.replaceChildren(svg("defs"), svg("path", { class: "la", d: `${line}L${W},${H}L0,${H}Z` }), svg("path", { class: "ll", d: line }));
-    g.firstChild.innerHTML = '<linearGradient id="live-g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".45"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient>';
+    // The last ten minutes as bars like Problems', the running minute (bright) at the right.
+    $("live-spark").replaceChildren(...bars(m.slice(-LIVE_BARS), LIVE_BARS * 10, 24));
   };
   const drawLive = (h) => {
     const d = h?.live;
