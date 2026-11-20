@@ -129,7 +129,14 @@ sealed interface MediaTouch {
             }
             if(viewed.none { it.id==item.id }) viewed+=item
         } catch(e: CancellationException) { throw e }
-        catch(e: Exception) { repo.command { error(uiResources.getString(R.string.ui_couldn_t_open_this_photo_or_video)) };finish() }
+        catch(e: Exception) {
+            // It never opens (a damaged copy, gone from the hub): said, then forgotten like a seen one, and the
+            // next one shows. Kept, it came first in this queue again and again and held back every newer one.
+            android.util.Log.w("YoMedia", "open failed", e)
+            repo.command { error(uiResources.getString(R.string.ui_couldn_t_open_this_photo_or_video)) }
+            if(viewed.none { it.id==item.id }) viewed+=item
+            index++
+        }
     }
     LaunchedEffect(index,held,ready) {
         if(!ready) return@LaunchedEffect

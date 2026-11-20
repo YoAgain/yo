@@ -117,7 +117,10 @@ internal data class BarContent(
     /** The core's one line: the title, or the Yos that came after the last send (never both, a bar never grows). */
     val line: ListLine = if (friend.request) ListLine.Title else row?.line ?: ListLine.Title
     val received = line !is ListLine.Title && !recording
-    val sent = undo != null || row?.title == copy(uniffi.yo.ProductText.SENT_YO) || thumbnails.isNotEmpty()
+    /** Media for it waits after a failed try (no connection, refused): the core's "Not Sent · Tap to Retry", as on
+     *  iOS, not "Sending" for as long as it waits. */
+    val unsent = undo == null && row?.unsent == true
+    val sent = undo != null || row?.title == copy(uniffi.yo.ProductText.SENT_YO) || (thumbnails.isNotEmpty() && !unsent)
     val lines = if (friend.request) 2 else 1
 }
 
@@ -191,7 +194,7 @@ internal data class BarContent(
         ?: maxOf(bar.row?.count?.toLong() ?: 1L, bar.thumbnails.size.toLong(), outgoingCount)
     val title = when {
         bar.recording -> stringResource(R.string.recording)
-        bar.undo != null || bar.thumbnails.isNotEmpty() -> productSendWords(productCounted(count), true, Words)
+        bar.undo != null || (bar.thumbnails.isNotEmpty() && !bar.unsent) -> productSendWords(productCounted(count), true, Words)
         bar.sent -> productSendWords(productCounted(count), false, Words)
         else -> rowTitle(bar.row, friend)
     }

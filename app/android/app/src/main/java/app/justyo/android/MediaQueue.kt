@@ -304,7 +304,7 @@ class MediaQueue(
                                 }
                             } else gate.withLock { incoming = incoming.filter { it.id != item.id }; saveIn() }
                             downloadChanges.update { it + 1 }; progress = true; changed()
-                        } catch (e: CancellationException) { throw e } catch (_: Exception) { }
+                        } catch (e: CancellationException) { throw e } catch (e: Exception) { android.util.Log.w("YoMedia", "fetch failed", e) }
                     }
                     if (progress) pause=1000 else pause=(pause*2).coerceAtMost(30000)
                     if (withTimeoutOrNull(pause) { nudge.receive() } != null) pause=1000
