@@ -38,7 +38,7 @@ android {
         versionCode = providers.gradleProperty("yoVersionCode").map(String::toInt).getOrElse(1)  // rising, from CI
         versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")
+        buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")  // debug and the device QA build: the dev hub
         buildConfigField("String", "YO_APP", "\"android/202611160001\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
@@ -60,6 +60,8 @@ android {
             optimization { enable = true }
             proguardFiles("proguard-rules.pro")
             signingConfig = signingConfigs.findByName("upload")
+            // The store app talks to the live hub, as the iOS App Store and TestFlight build; Hub.kt has its pins.
+            if (!deviceSoak) buildConfigField("String", "HUB", "\"https://hub.justyo.app\"")
         }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }

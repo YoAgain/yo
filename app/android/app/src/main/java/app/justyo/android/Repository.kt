@@ -335,9 +335,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
 
     private fun pin(c: YoClient) {
-        c.setHubKeys(listOf("LPiW1TOvv_ricbn7bXmS_fNdVbgtEw_3o7OdelvEdVo", "nFQuDMd-2Ueoec6oYG-Ty7lHQELq1OHs4TVODmPmryg").map(::decodeUrl))
-        c.setTrustRoots(listOf("kKVskVCuVwESdvLeYWAEVAQmT9mdwvkQ2uhOlnxXO3Q", "Fj-t9EAOsTDPSHPT1Y39FdbcIvl2I7aEEdqlcRAQc0c").map(::decodeUrl))
-        c.setZkParams(decodeUrl(DEV_GROUP_PARAMS))
+        c.setHubKeys(Hub.hubKeys.map(::decodeUrl))
+        c.setTrustRoots(Hub.roots.map(::decodeUrl))
+        c.setZkParams(decodeUrl(Hub.groupParams))
     }
     private suspend fun persist() {
         val s = state.value
@@ -1066,8 +1066,6 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         fun decodeUrl(text: String): ByteArray = Base64.decode(text, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
         fun encode(data: ByteArray): String = Base64.encodeToString(data, Base64.NO_WRAP)
         fun decode(text: String): ByteArray = Base64.decode(text, Base64.DEFAULT)
-        // Public dev hub parameters copied from Hub.swift. No private key is shipped.
-        const val DEV_GROUP_PARAMS = "AABte-FyyNG7G0rm_Swi9dLOf6khh32C0-TmfHELCW5J4k4m_beuhn-LDZ6GFT19xzzza_-DQfEKUPdsKy99Knl4FgkgVTu8j8yZP5JoagLdul10PyCTaUcx649Z-JJuUWidD_T_ZYOgvSS61z9QixJQB6LAB_k0AYFY563qzWItEncY_vD68l2OUM1aTDNuXO6QeT0MgeRwrlsqLhF10C2SMQJotdkaEOGAMdr4E261qG0CNuVEua6ojEXs7BXCOpTIPvZhkxQf6N2-WWXVXyrm65kQSDkE32SYFSTxhP9dNNdVop_SDJE24rMYPJy1SH5DD1gs7Y67w0RNQIooUHmaUn3WlOjHXFMgwHpDDMGlDuMqgEMkz1D-ArhgAoYsXG6LduuWJgSRWi3KED6jZRm2QCUpd_LIkZKR2vmQp_Y68IvRf_myayJE33VuqTbfT0jp9KBeiJuIOdqubZBWb2vG_jI0ihgyFRJPTrFtpW0iv1tpngyN0m7_V3I-jUlzIGQSJRJDvDvlEvKPMDeA9Sc2Nh5tRY3JiMTqcFwCVMsbCujL_mhC4VBfXUFy-urGdLiqdTBZF53mInuT_yR8VFoSPLeTi7mHnRSlACAnh_GFnE80FlbXVEbW8EdMXzwycwLy3GajU4z0wOLmeI58jYlwZw8A-dNcB2CHG4zBwpkTiD2ZHZcdAL4kSljBUqE2Tml9cfKtGzqcvH7zrxOhjCL6Sn9IyV36TVf6lKf-oRjDHsPHP9pSp3apVZfG1dEdRQr2UEvHRHla3C8jQrte8e02zrqQwG0KxsUTueOVgiVsWtaUV3YohIHtxbSUOljwoaA-iRmPQsvUHgcpL2UoOghIMYvKSbwRIde_-NYhyQVSCBpcgz5bhRbHcc-uS_j7Qg"
     }
 }
 class ContactDetails(val contact: YoContact?, val accountKey: String?, val safetyNumber: String?, val sessions: List<YoSession>,

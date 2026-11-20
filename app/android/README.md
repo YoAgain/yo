@@ -4,9 +4,10 @@ Kotlin, Jetpack Compose and Material 3 over the existing Rust core. One activity
 coroutines and CameraX. API 28 minimum; compile/target API 37 (Android 17). Dynamic color is off. The list uses
 Yo’s original Flat UI colors, 90 dp rows, 30 sp Montserrat Bold, Amethyst, and the bundled Yo sound.
 
-This is a development implementation, **not complete iOS parity**. [PARITY.md](PARITY.md) audits each iOS source
-file and records the remaining refinements. No server or Rust source changes. No FCM or passkey capability is
-pretended. This package is `app.justyo.android.dev`, permanently pointed at `https://dev.justyo.app` (the Play build: below).
+This is a development implementation, **not complete iOS parity**. [PARITY.md](PARITY.md) audits each iOS source file
+and records the remaining refinements. No server or Rust source changes. No FCM or passkey capability is pretended.
+This package is `app.justyo.android.dev`, permanently pointed at `https://dev.justyo.app`; the Play build talks to
+`https://hub.justyo.app` (below).
 
 ## Toolchain, without sudo
 
@@ -182,12 +183,16 @@ nice -n 10 ./gradlew --no-daemon --max-workers=4 -Pkotlin.incremental=false asse
 
 ## Google Play
 
-The release build is the store app `app.justyo.android` ("Yo"); debug stays `app.justyo.android.dev` and the device
-QA build `app.justyo.android.dev.soak`. All three talk to the dev hub for now. Play App Signing holds the app signing
-key; the release is signed with the upload key from `keystore.properties` next to `settings.gradle.kts` (ignored:
-`storeFile`, `storePassword`, `keyAlias`, `keyPassword`) or from `YO_UPLOAD_STOREFILE`, `YO_UPLOAD_STOREPASSWORD`,
-`YO_UPLOAD_KEYALIAS` and `YO_UPLOAD_KEYPASSWORD`; without either it stays unsigned. The upload key and its passwords
-are in 1Password (Yo vault, "Yo Android upload key"). Each upload needs a higher `-PyoVersionCode` (minutes since 1970):
+The release build is the store app `app.justyo.android` ("Yo"); debug stays `app.justyo.android.dev` and the device QA
+build `app.justyo.android.dev.soak`. The release talks to the live hub `hub.justyo.app`, as the iOS TestFlight and App
+Store build; debug and device QA stay on the dev hub (`BuildConfig.HUB`; the pins per hub in `Hub.kt`, the same as
+`Hub.swift`). Invite links (`justyo.co/.well-known/assetlinks.json`) and passkeys (the live hub's
+`YO_ASSET_LINKS_FILE`, for the passkey domain justyo.app) name the Play app signing certificate. Play App Signing
+holds the app signing key; the release is signed with the upload key from `keystore.properties` next to
+`settings.gradle.kts` (ignored: `storeFile`, `storePassword`, `keyAlias`, `keyPassword`) or from
+`YO_UPLOAD_STOREFILE`, `YO_UPLOAD_STOREPASSWORD`, `YO_UPLOAD_KEYALIAS` and `YO_UPLOAD_KEYPASSWORD`; without either it
+stays unsigned. The upload key and its passwords are in 1Password (Yo vault, "Yo Android upload key"). Each upload
+needs a higher `-PyoVersionCode` (minutes since 1970):
 
 ```sh
 nice -n 10 ./gradlew :app:bundleRelease -PyoVersionCode=$(( $(date +%s) / 60 ))
