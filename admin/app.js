@@ -1864,7 +1864,7 @@ if (document.body.classList.contains("login")) {
       return [
         chartCard("Open", d ? num(d.values[d.values.length - 1]) : "–", d, "bad", go),
         dcard("Came in", num(kinds.reduce((a, [, v]) => a + v, 0)), barRows(kinds.map(([l, v]) => [l, num(v), v / top]))),
-        dcard("Crash-free users", pctText(hd.free), shareBar((hd.free || 0) / 100), kvRows([["Crashes, 7 days", num(hd.crashes)], ["Users, 7 days", num(hd.wau)]])),
+        dcard("Crashes, 7 days", num(hd.crashes), "", kvRows([["Reports carry no user", "counted as sent"]])),
         he && hd.heAll[1] ? chartCard("Hub errors", `${num(hd.heAll[0])} 5xx`, { names: hd.names, values: he.map(([e]) => e),
           tip: (i) => (he[i][1] ? `${num(he[i][0])} 5xx (${pctText(rate(he[i]))}) · ${num(he[i][2])} 4xx · ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers") }, "bad",
         note(`${pctText(hd.heRate)} of ${num(hd.heAll[1])} answers`)) : dcard("Hub errors", null, note("None counted yet in this range.")),
@@ -2018,7 +2018,8 @@ if (document.body.classList.contains("login")) {
         { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const d7 = Array.from({ length: 7 }, (_, i) => t0 - 6 + i), cr = d7.map((d) => (h.diagnostic_days || []).filter((r) => r.day === d && r.kind === "crash").reduce((a, r) => a + r.count, 0));
-          return { ico: "check", label: "Crash-free", value: pctText(hd.free), cls: hd.free != null && hd.free < 99 ? "warn" : "", values: cr, scls: "hot",
+          // Crash reports carry no user, so no "crash-free users": the plain count of the last 7 days.
+          return { ico: "warn", label: "Crashes", value: num(hd.crashes), cls: hd.crashes ? "warn" : "", values: cr, scls: "hot",
             tip: (i) => ({ head: dayName(d7[i]), rows: [{ color: "var(--bad)", label: "Crashes", value: num(cr[i]) }] }) }; })(),
       ]);
       // Per day (the app reports per day only): 7 days, 30 for 30 days and Total.
