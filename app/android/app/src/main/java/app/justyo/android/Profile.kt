@@ -781,6 +781,8 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     var crashOn by remember { mutableStateOf(repo.crashes.enabled) }
     var yosView by rememberSaveable { mutableIntStateOf(0) }
     val notifications by model.notificationsEnabled.collectAsStateWithLifecycle()
+    val pushSession by repo.pushSession.collectAsStateWithLifecycle()
+    val pushToken = pushSession == repo.sessionId
     val top = s.byFriend.maxByOrNull { it.value }
     val mostYos = top?.let { most -> s.friends.firstOrNull { it.key == most.key }?.name } ?: "—"
     Section(stringResource(R.string.status_crashes), null,
@@ -797,7 +799,8 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     )
     Section(stringResource(R.string.status_server), null,
         Setting(stringResource(R.string.status_notifications), Icons.Default.Notifications,
-            stringResource(if (notifications) R.string.status_ready else R.string.status_not_allowed), good = notifications,
+            stringResource(if (!notifications) R.string.status_not_allowed else if (pushToken) R.string.status_ready else R.string.status_no_token),
+            good = if (!notifications) false else if (pushToken) true else null,
             onClick = if (notifications) null else { { openNotificationSettings(context) } }),
         // As Signal's: a new token to the hub. What failed is said on the row as well: the red banner is under this sheet.
         Setting(copy(ProductText.RENEW_PUSH), value = renewFailed, good = renewFailed?.let { false },

@@ -3,4 +3,8 @@
     <issue id="GradleDependency" severity="ignore" />
     <issue id="NewerVersionAvailable" severity="ignore" />
     <issue id="AndroidGradlePluginVersion" severity="ignore" />
+    <!-- Firebase's resources from google-services.json (build.gradle.kts): FirebaseOptions reads project_id by name. -->
+    <issue id="UnusedResources">
+        <ignore regexp="R\.string\.project_id" />
+    </issue>
 </lint>

@@ -611,6 +611,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
     }
     private var registeredPush: Pair<Long, String>? = null
+    /** The session whose FCM token the hub has: Status says Ready for it, No Token otherwise (as iOS). */
+    val pushSession = MutableStateFlow<Long?>(null)
 
     suspend fun registerPush(token: String, again: Boolean = false) = accountTurn.withLock {
         val c = client ?: return@withLock
@@ -619,6 +621,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             c.setPush(3u, token)
             registeredPush = registration
         }
+        pushSession.value = registration.first
     }
 
     /** Settings › Status › Renew Push Registration (as Signal's): a new FCM token, sent to the hub even if it has the
@@ -1081,7 +1084,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         listening?.cancel(); listening = null; retrying?.cancel(); retrying = null
         synchronized(unsentYos) { unsentYos.clear(); mediaUnsent.clear() }; Problems.clear()
         if (registeredPush?.first == sessionId - 1) runCatching { old?.setPush(0u, "") }
-        registeredPush = null
+        registeredPush = null; pushSession.value = null
         old?.shutdown()
         changes.withLock {
             media.clear(); file.delete(vault.read("state-key")); vault.clear(); seen.clear(); removedUsers.clear(); clearTemporaryMedia()

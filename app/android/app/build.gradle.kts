@@ -4,11 +4,29 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
-// Firebase normally gets these resources from the Google Services plugin. Emit them only
-// when the local Firebase file is present, so CI and builds without Firebase use the same variant.
+// Firebase normally gets these resources from the Google Services plugin. Emit them only when google-services.json
+// (ignored: CI writes it from the secret GOOGLE_SERVICES_JSON, a dev copies it; README: Push) is present, so builds
+// without Firebase use the same variant. Each variant takes the client of its own package: release app.justyo.android,
+// debug app.justyo.android.dev.
 val deviceSoak = providers.gradleProperty("yoDeviceSoak").map(String::toBoolean).getOrElse(false)
 val firebaseConfig = layout.projectDirectory.file("google-services.json")
 val firebaseJson = if (deviceSoak) null else providers.fileContents(firebaseConfig).asText.orNull
+fun firebaseResources(applicationId: String): Map<String, String> {
+    val data = groovy.json.JsonSlurper().parseText(firebaseJson ?: return emptyMap()) as Map<*, *>
+    val project = data["project_info"] as Map<*, *>
+    val client = (data["client"] as List<*>).filterIsInstance<Map<*, *>>().firstOrNull {
+        val info = it["client_info"] as Map<*, *>
+        (info["android_client_info"] as Map<*, *>)["package_name"] == applicationId
+    } ?: error("google-services.json does not contain an Android client for $applicationId")
+    val info = client["client_info"] as Map<*, *>
+    val apiKey = (client["api_key"] as List<*>).first() as Map<*, *>
+    return mapOf(
+        "google_app_id" to info["mobilesdk_app_id"],
+        "gcm_defaultSenderId" to project["project_number"],
+        "project_id" to project["project_id"],
+        "google_api_key" to apiKey["current_key"],
+    ).mapValues { (_, value) -> requireNotNull(value).toString() }
+}
 android {
     namespace = "app.justyo.android"
     compileSdk = 37
@@ -16,23 +34,6 @@ android {
     defaultConfig {
         applicationId = if (deviceSoak) "app.justyo.android.dev.soak" else "app.justyo.android.dev"
         manifestPlaceholders["yoAppLabel"] = if (deviceSoak) "Yo Device QA" else "Yo Dev"
-        if (firebaseJson != null) {
-            val data = groovy.json.JsonSlurper().parseText(firebaseJson) as Map<*, *>
-            val project = data["project_info"] as Map<*, *>
-            val clients = data["client"] as List<*>
-            val client = clients.filterIsInstance<Map<*, *>>().firstOrNull {
-                val info = it["client_info"] as Map<*, *>
-                (info["android_client_info"] as Map<*, *>)["package_name"] == applicationId
-            } ?: error("google-services.json does not contain an Android client for $applicationId")
-            val info = client["client_info"] as Map<*, *>
-            val apiKey = (client["api_key"] as List<*>).first() as Map<*, *>
-            mapOf(
-                "google_app_id" to info["mobilesdk_app_id"],
-                "gcm_defaultSenderId" to project["project_number"],
-                "project_id" to project["project_id"],
-                "google_api_key" to apiKey["current_key"],
-            ).forEach { (key, value) -> resValue("string", key, requireNotNull(value).toString()) }
-        }
         minSdk = 28
         targetSdk = 37
         versionCode = providers.gradleProperty("yoVersionCode").map(String::toInt).getOrElse(1)  // rising, from CI
@@ -110,9 +111,13 @@ dependencies {
 androidComponents {
     onVariants { variant ->
         // The store app (Google Play): its package can never change. Debug and the device QA build keep theirs.
-        if (variant.buildType == "release" && !deviceSoak) {
+        val store = variant.buildType == "release" && !deviceSoak
+        if (store) {
             variant.applicationId.set("app.justyo.android")
             variant.manifestPlaceholders.put("yoAppLabel", "Yo")
+        }
+        firebaseResources(if (store) "app.justyo.android" else android.defaultConfig.applicationId!!).forEach { (key, value) ->
+            variant.resValues.put(variant.makeResValueKey("string", key), com.android.build.api.variant.ResValue(value))
         }
         variant.sources.kotlin?.addStaticSourceDirectory("build/generated/yo")
     }

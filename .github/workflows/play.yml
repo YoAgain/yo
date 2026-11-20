@@ -50,8 +50,12 @@ jobs:
         env:
           UPLOAD_KEYSTORE_B64: ${{ secrets.UPLOAD_KEYSTORE_B64 }}
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           umask 077
+          # Firebase (project Yo Push) for FCM: without it the store app gets no push token, so never ship one without.
+          [ -n "$GOOGLE_SERVICES_JSON" ] || { echo "::error::secret GOOGLE_SERVICES_JSON is missing"; exit 1; }
+          printf '%s' "$GOOGLE_SERVICES_JSON" > app/android/app/google-services.json
           d=$RUNNER_TEMP/play
           mkdir -p "$d"
           printf '%s' "$UPLOAD_KEYSTORE_B64" | base64 -d > "$d/upload.jks"

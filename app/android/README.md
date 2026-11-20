@@ -117,14 +117,28 @@ Wait for `adb shell getprop sys.boot_completed` to return `1` before installing 
 Use a physical Android device for camera hardware, sound, and credential-provider checks.
 Keep captures synthetic and free of recovery keys.
 
+## Push
+
+FCM through the Firebase project **Yo Push** (`yo-push-97767`), with one Android client per package:
+`app.justyo.android` (release, Google Play) and `app.justyo.android.dev` (debug). Its `google-services.json` is never
+checked in (`app/google-services.json` is ignored): `play.yml` writes it from the secret `GOOGLE_SERVICES_JSON` of the
+environment `play` and fails without it; on a dev machine copy it from the secret store
+(`cp ~/.config/yo-secrets/google-services.json app/google-services.json`). `app/build.gradle.kts` turns it into the
+Firebase resources of each variant's own client. Without the file (pull-request CI, the device QA build) the app
+has no Firebase: it polls in the foreground only and Status says No Token.
+
+The app asks for notifications once (Android 13+) when the friend list first shows, then fetches the FCM token and
+registers it with the hub as `PUSH_FCM` after each sign-in and restore and on `onNewToken`; Settings › Status ›
+Renew Push Registration deletes the token and registers a new one. The hub (`YO_FCM_SERVICE_ACCOUNT_FILE`) sends
+data-only messages (`yo=1`, `urgent`, Android priority HIGH/NORMAL) that `YoMessagingService` turns into a sync.
+
 ## Platform work still needed
 
-Push needs an FCM transport in the hub; only foreground polling runs. Android App Links and passkeys need
+Android App Links and passkeys need
 `assetlinks.json` on the relevant domains with the package/signing certificate. `Passkeys.kt` contains a gated
 Credential Manager PRF assertion path and explicit TODO; it cannot secure or restore an account yet. `yo://NAME`
 works; HTTPS invites are App Links (autoVerify) once justyo.co's assetlinks.json names the release certificate. Shares use ACTION_SEND/ACTION_SEND_MULTIPLE
-(up to ten images or one video) in this activity. A future FCM data-message service replaces iOS’s notification
-service extension; none is registered now. See PARITY for all remaining gaps and validation limits.
+(up to ten images or one video) in this activity. See PARITY for all remaining gaps and validation limits.
 
 ## Live dev-hub smoke test
 
