@@ -114,7 +114,6 @@
 <string name="type_to_confirm">Type %1$s to confirm.</string>
 <string name="compare_safety">Compare this safety number with %1$s in person or on a call.</string>
 <string name="part_of_total">%1$d of %2$d</string>
-<string name="saved">Saved</string>
 <plurals name="media_items"><item quantity="one">%1$d photo or video</item><item quantity="other">%1$d photos or videos</item></plurals>
 <plurals name="undo_seconds"><item quantity="one">Wait %1$d Second</item><item quantity="other">Wait %1$d Seconds</item></plurals>
 <string name="undo_remove">Undo</string>
@@ -178,16 +177,18 @@
 <string name="contact_actions">Contact actions</string>
     <string name="help_and_about">Help &amp; About</string>
     <string name="about_and_licenses">About &amp; Licenses</string>
-    <string name="recovery_show">Show</string>
-    <string name="recovery_hide">Hide</string>
     <string name="recovery_share">Share</string>
-    <string name="recovery_passkey">Passkey</string>
-    <string name="recovery_set_up">Set Up</string>
     <string name="tutorial_tap">Tap to Send Yo</string>
     <string name="tutorial_camera">Swipe for Pictures</string>
     <string name="group_row">Group</string>
-    <string name="account_recovery">Account Recovery</string>
-    <string name="google_backup">Back Up to Google</string>
+    <string name="google_backup_row">Google Backup</string>
+    <string name="google_backup_turn_off">Turn Off Google Backup?</string>
+    <string name="google_backup_needs_screen_lock_short">Needs screen lock</string>
+    <string name="google_backup_turn_on_device_backup">Turn on Backup by Google</string>
+    <string name="passkey_line">Sign in with your screen lock on a new phone. Works with Google Password Manager and some password managers.</string>
+    <string name="passkey_try">Try with Screen Lock</string>
+    <string name="passkey_no_prf">Your password manager can’t do this. Try Google Password Manager.</string>
+    <string name="passkey_try_again">That didn’t work. Try again.</string>
     <string name="google_backup_footer">Your account key is in your Google account, end-to-end encrypted: a new phone signs in by itself.</string>
     <string name="google_backup_off">Your account isn’t backed up. Google encrypts it end to end only with a screen lock: set one in Android Settings, then turn this on.</string>
     <string name="google_backup_turned_off">Your account isn’t backed up to Google. A new phone signs in only with your recovery key.</string>
@@ -224,7 +225,6 @@
     <string name="support_message">Message</string>
     <string name="group_create_failure">The group could not be made. Try again in a moment.</string>
     <string name="group_member_footer">You can add up to 19 friends, plus yourself.</string>
-    <string name="ui_show_recovery_key">Show Recovery Key</string>
     <string name="settings_page_info">About This Page</string>
     <string name="settings_leaving_yo">Leaving Yo for good?</string>
     <string name="allow_yo_requests">Allow Yo Requests</string>
@@ -238,9 +238,7 @@
     <string name="status_notifications">Notifications</string>
     <string name="status_ready">Ready</string>
     <string name="status_not_allowed">Not Allowed</string>
-    <string name="recovery_intro">Either one brings your account back on a new phone.</string>
     <string name="intro_page_of">Page %1$d of %2$d</string>
-    <string name="recovery_save">Save</string>
     <string name="report">Report</string>
     <string name="unable_to_report">Unable to Report</string>
     <string name="thanks_for_reporting">Thanks for Reporting</string>
@@ -263,15 +261,14 @@
     <string name="yo_back_action">Yo Back</string>
     <string name="group_empty_delete">Nobody else is in %1$s any more. Delete it?</string>
     <string name="delete_group">Delete Group</string>
-    <string name="recovery_setup_title">Set Up\nAccount Recovery</string>
-    <string name="recovery_saved_dot">Saved ·</string>
     <string name="recovery_copy">Copy</string>
     <string name="recovery_copied">Copied</string>
     <string name="sign_out_unsecured">Your account isn’t secured. Set up recovery methods to access your account.</string>
-    <string name="turn_off_passkey_message">Delete the passkey in your password manager too.</string>
+    <string name="turn_off_recovery_key_action">Turn Off Recovery Key</string>
     <string name="turn_off_recovery_key">Turn Off Recovery Key?</string>
     <string name="turn_off_recovery_key_message">Your saved recovery key will stop working.</string>
     <string name="turn_off_recovery_key_google">Your saved recovery key will stop working. Only your Google backup will remain. If you lose access to it, you may lose your account.</string>
+    <string name="turn_off_passkey_message">Delete the passkey in your password manager too.</string>
     <string name="delete_name_free">Username “%1$s” is free again.</string>
     <string name="delete_friends_cant_reach">Friends can’t reach you anymore.</string>
     <string name="delete_cant_undo">Can’t be undone.</string>

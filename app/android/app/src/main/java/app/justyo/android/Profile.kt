@@ -144,6 +144,8 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     containerColor: Color = BottomSheetDefaults.ContainerColor,
     contentColor: Color = contentColorFor(containerColor),
     dragHandle: @Composable (() -> Unit)? = { BottomSheetDefaults.DragHandle() },
+    /** A fixed height, as a share of the tallest a sheet may be (iOS's detents), instead of the content's own. */
+    height: Float? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) = ModalBottomSheet(
     onDismissRequest = onDismissRequest, sheetState = state, containerColor = containerColor, contentColor = contentColor,
@@ -156,27 +158,32 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     val screen = with(density) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() }
     val insets = with(density) { (WindowInsets.statusBars.getTop(this) + WindowInsets.navigationBars.getBottom(this)).toDp() }
     val handle = if (dragHandle != null) 48.dp else 0.dp
-    Column(Modifier.heightIn(max = (screen - insets - handle).coerceAtLeast(0.dp)), content = content)
+    val tallest = (screen - insets - handle).coerceAtLeast(0.dp)
+    Column(if (height != null) Modifier.height(tallest * height) else Modifier.heightIn(max = tallest), content = content)
 }
 
-/** Settings (iOS SettingsView): a sheet as high as the page in view, its pages pushed in with a back arrow. */
+/** Settings (iOS SettingsView): two heights only, never measured: the first page at half (it fits), every page pushed
+ *  in at full; its pages pushed in with a back arrow. */
 @Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
     // The whole state (counters and the last sync included): the list underneath takes it without them.
     val s by model.repository.state.collectAsStateWithLifecycle()
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     fun hideThen(then: () -> Unit) { scope.launch { sheet.hide() }.invokeOnCompletion { then() } }
-    FittedSheet(onDismissRequest = onClose, state = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
-        Settings(model, s, onClose = { hideThen(onClose) }, onAddFriends = { hideThen(onAddFriends) })
+    // The way here: a contact's page is reached from Contacts.
+    val trail = rememberSaveable { mutableStateOf(listOf("Profile")) }
+    FittedSheet(onDismissRequest = onClose, state = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        height = if (trail.value.size > 1) 1f else 0.5f) {
+        Settings(model, s, trail, onClose = { hideThen(onClose) }, onAddFriends = { hideThen(onAddFriends) })
     }
 }
 
-@Composable private fun Settings(model: YoViewModel, s: AppState, onClose: () -> Unit, onAddFriends: () -> Unit) {
+@Composable private fun Settings(model: YoViewModel, s: AppState, trailState: MutableState<List<String>>, onClose: () -> Unit,
+    onAddFriends: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     val repo = model.repository
-    // The way here: a contact's page is reached from Contacts.
-    var trail by rememberSaveable { mutableStateOf(listOf("Profile")) }
+    var trail by trailState
     val page = trail.last()
     fun open(next: String) { trail = trail + next }
     val back = { if (trail.size > 1) trail = trail.dropLast(1) else onClose() }
@@ -184,12 +191,12 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     androidx.activity.compose.BackHandler(enabled = trail.size > 1) { trail = trail.dropLast(1) }
 
     var secure by remember { mutableStateOf(false) }
+    var passkeyPage by remember { mutableStateOf(false) }
+    // What the screen lock opens once it confirmed it is you: the recovery key's or the passkey's screen.
+    var afterAuth by remember { mutableStateOf<String?>(null) }
+    var googleOff by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
-    var renew by remember { mutableStateOf(false) }
-    var removePasskey by remember { mutableStateOf(false) }
-    var showingKey by remember { mutableStateOf(false) }
-    var shownKey by remember { mutableStateOf<String?>(null) }
     var showingInfo by remember { mutableStateOf(false) }
     var unblocking by remember { mutableStateOf<Friend?>(null) }
     var blockingNew by remember { mutableStateOf<Friend?>(null) }
@@ -199,20 +206,21 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         if (result.resultCode == Activity.RESULT_OK) {
             when {
                 page == "Delete Account" -> repo.command { deleteAccount(); onClose() }
-                showingKey -> repo.command { val key = savedRecovery(); withContext(Dispatchers.Main) { showingKey = false; shownKey = key } }
+                afterAuth == "passkey" -> passkeyPage = true
                 else -> { repo.command { prepareRecovery() }; secure = true }
             }
-        } else showingKey = false
+        }
+        afterAuth = null
     }
     fun authenticate() {
         @Suppress("DEPRECATION")
         val intent = context.getSystemService(KeyguardManager::class.java).createConfirmDeviceCredentialIntent(
             res.getString(if (page == "Delete Account") R.string.ui_delete_account else R.string.ui_recovery_key),
             res.getString(R.string.ui_confirm_it_s_you))
-        if (intent != null) auth.launch(intent) else { showingKey = false; model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue)) }
+        if (intent != null) auth.launch(intent) else { afterAuth = null; model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue)) }
     }
-    val passkeyConfigured by produceState(false, s.secured, secure, passkeyRevision, page) {
-        if (!secure && s.secured && page in setOf("Account Recovery", "Delete Account")) {
+    val passkeyConfigured by produceState(false, s.secured, passkeyPage, passkeyRevision, page) {
+        if (!passkeyPage && s.secured && page in setOf("Account", "Delete Account")) {
             value = withContext(Dispatchers.IO) { runCatching { repo.hasRecoveryPasskey() }.getOrDefault(false) }
         }
     }
@@ -231,7 +239,6 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         page == "Account" -> s.username.orEmpty()
         page.startsWith("contact:") -> s.friends.firstOrNull { it.key == page.removePrefix("contact:") }?.name.orEmpty()
         else -> stringResource(when (page) {
-            "Account Recovery" -> R.string.account_recovery
             "Contacts" -> R.string.ui_contacts
             "Appearance" -> R.string.ui_app_icon
             "Blocked" -> R.string.ui_blocked
@@ -248,7 +255,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     }
     // What a page's rows mean, behind its (i) instead of under every row (iOS: "How Account Recovery Works").
     val info: String? = when (page) {
-        "Account Recovery" -> listOf(
+        "Account" -> listOf(
             R.string.account_recovery_explanation,
             when { s.backedUp -> R.string.google_backup_footer
                 s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
@@ -317,11 +324,38 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                                 encrypted?.let { res.getString(R.string.part_of_total, it.first, it.second) }, onClick = { open("Contacts") }),
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
                         )
+                        // Yo's own end-to-end encrypted copy of the contacts, groups and settings, on its own.
                         Section(null, null,
-                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || s.backupMissing, onClick = {
-                                // Neither a passkey nor a saved key (a passkey needs the key here): the two steps at once (iOS).
-                                if (!s.secured) { repo.command { prepareRecovery() }; secure = true } else open("Account Recovery")
+                            Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
+                        )
+                        // iOS AccountPage: the three ways back on a new phone, each with its state; the (i) above explains them.
+                        // A passkey here rides on a saved recovery key, so without one its row opens the key's screen.
+                        Section(copy(ProductText.ACCOUNT_RECOVERY), copy(ProductText.RECOVERY_FOOTER),
+                            Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key,
+                                copy(if (s.secured) ProductText.SAVED else ProductText.NOT_SAVED), badge = !s.secured, onClick = {
+                                    if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true }
+                                }),
+                            Setting(copy(ProductText.PASSKEY), Icons.Default.Fingerprint,
+                                copy(if (passkeyConfigured) ProductText.ON else ProductText.OFF), onClick = {
+                                    if (s.secured) { afterAuth = "passkey"; authenticate() } else { repo.command { prepareRecovery() }; secure = true }
+                                }),
+                            // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
+                            Setting(stringResource(R.string.google_backup_row), Icons.Default.Cloud, when {
+                                s.backedUp -> copy(ProductText.ON)
+                                !s.googleBackup -> copy(ProductText.OFF)
+                                s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> stringResource(R.string.google_backup_turn_on_device_backup)
+                                else -> stringResource(R.string.google_backup_needs_screen_lock_short)
+                            }, badge = s.backupMissing, onClick = {
+                                when {
+                                    s.backedUp -> googleOff = true
+                                    !s.googleBackup -> repo.command { googleBackup(true) }
+                                    else -> openSystemSettings(context,
+                                        if (s.backupMissingReason == CloudMissing.DEVICE_BACKUP) "android.settings.BACKUP_AND_RESET_SETTINGS"
+                                        else android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                                }
                             }),
+                        )
+                        Section(null, null,
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
                         )
                         TextButton(onClick = { open("Delete Account") }, Modifier.padding(start = 4.dp, bottom = 12.dp)) {
@@ -329,29 +363,6 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                                 style = MaterialTheme.typography.bodyMedium)
                             Text(" " + stringResource(R.string.settings_delete_your_account), style = MaterialTheme.typography.bodyMedium)
                         }
-                    }
-                    shown == "Account Recovery" -> {
-                        Section(null, null,
-                            Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
-                        )
-                        Section(null, null,
-                            // A valid recovery key shows only after the device confirmed it is you, also on the way to a passkey.
-                            Setting(stringResource(R.string.recovery_passkey), Icons.Default.Fingerprint, checked = passkeyConfigured, onChecked = { on ->
-                                if (!on) removePasskey = true
-                                else if (s.secured) authenticate()
-                                else { repo.command { prepareRecovery() }; secure = true }
-                            }),
-                            // The key's switch, and on the same line the eye that shows it.
-                            Setting(stringResource(R.string.ui_recovery_key), Icons.Default.Key, checked = s.secured,
-                                action = if (s.secured) Icons.Default.Visibility to stringResource(R.string.ui_show_recovery_key) else null,
-                                onAction = { showingKey = true; authenticate() },
-                                onChecked = { on -> if (on) { repo.command { prepareRecovery() }; secure = true } else renew = true }),
-                        )
-                        // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
-                        Section(null, null,
-                            Setting(stringResource(R.string.google_backup), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
-                                onChecked = { on -> repo.command { googleBackup(on) } }),
-                        )
                     }
                     // iOS BlockedPage: who may ask and blocking one more, then the blocked contacts.
                     shown == "Blocked" -> {
@@ -427,8 +438,18 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         }
     }
 
-    if (secure) RecoverySheet(model, s) { secure = false }
-    shownKey?.let { key -> RecoveryKeySheet(s.username.orEmpty(), key) { shownKey = null } }
+    if (secure) RecoverySheet(model, s, passkeyConfigured) { secure = false }
+    if (passkeyPage) PasskeySheet(model, passkeyConfigured, onTurnedOff = { passkeyRevision++ }) { passkeyPage = false; passkeyRevision++ }
+    if (googleOff) AlertDialog(
+        onDismissRequest = { googleOff = false },
+        title = { Text(stringResource(R.string.google_backup_turn_off)) },
+        text = { Text(stringResource(R.string.google_backup_turned_off)) },
+        confirmButton = { TextButton(onClick = { googleOff = false; repo.command { googleBackup(false) } },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+            Text(stringResource(R.string.settings_turn_off))
+        } },
+        dismissButton = { TextButton(onClick = { googleOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
     if (code) YourCodeSheet(s.username.orEmpty()) { code = false }
     if (showingInfo && info != null) AlertDialog(
         onDismissRequest = { showingInfo = false },
@@ -467,28 +488,6 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         } },
         dismissButton = { TextButton(onClick = { logout = false }) { Text(stringResource(R.string.ui_cancel)) } },
     )
-    // A passkey here always rides on a saved recovery key, so only the password manager is left to clean up.
-    if (removePasskey) AlertDialog(
-        onDismissRequest = { removePasskey = false },
-        title = { Text(stringResource(R.string.settings_turn_off_passkey)) },
-        text = { Text(stringResource(R.string.turn_off_passkey_message)) },
-        confirmButton = { TextButton(onClick = {
-            removePasskey = false
-            repo.command { removeRecoveryPasskey(); withContext(Dispatchers.Main) { passkeyRevision++ } }
-        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
-        dismissButton = { TextButton(onClick = { removePasskey = false }) { Text(stringResource(R.string.ui_cancel)) } },
-    )
-    // The old key stops working once a new one is saved: the two steps open with it.
-    if (renew) AlertDialog(
-        onDismissRequest = { renew = false },
-        title = { Text(stringResource(R.string.turn_off_recovery_key)) },
-        text = { Text(stringResource(if (passkeyConfigured || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
-        confirmButton = { TextButton(onClick = { renew = false; repo.command { prepareRecovery(true) }; secure = true },
-            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
-            Text(stringResource(R.string.settings_turn_off))
-        } },
-        dismissButton = { TextButton(onClick = { renew = false }) { Text(stringResource(R.string.ui_cancel)) } },
-    )
 }
 
 /** Your code (iOS YourCodePage): Amethyst, "X wants to Yo", the QR code, the link, and sharing it in the bar. */
@@ -519,22 +518,6 @@ private fun shareCode(context: Context, name: String) {
         .putExtra(Intent.EXTRA_TEXT, context.getString(R.string.code_share_text, "https://justyo.co/${Uri.encode(name)}"))
         .putExtra(Intent.EXTRA_TITLE, context.getString(R.string.code_wants_to_yo, name))
     context.startActivity(Intent.createChooser(send, context.getString(R.string.share_your_code)))
-}
-
-/** The saved recovery key, shown after the screen lock confirmed it is you: its QR code and its 64 characters. */
-@Composable private fun RecoveryKeySheet(name: String, key: String, onClose: () -> Unit) {
-    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    DisposableEffect(lifecycle) {
-        val observer = androidx.lifecycle.LifecycleEventObserver { _, event -> if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) onClose() }
-        lifecycle.lifecycle.addObserver(observer); onDispose { lifecycle.lifecycle.removeObserver(observer) }
-    }
-    FittedSheet(onDismissRequest = onClose) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(stringResource(R.string.ui_recovery_key), style = MaterialTheme.typography.titleLarge)
-            Text(name, Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            KeyCard(key)
-        }
-    }
 }
 
 @Composable private fun KeyCard(key: String, copied: Boolean? = null, onCopy: () -> Unit = {}) {
@@ -568,7 +551,7 @@ private fun shareCode(context: Context, name: String) {
                 maxLines = 1, softWrap = false,
                 autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = 26.sp),
             )
-            if (!s.secured || s.backupMissing) Badge { Text("1") }
+            if (!s.secured) Badge { Text("1") }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }
     }
@@ -879,56 +862,95 @@ private fun shareCode(context: Context, name: String) {
     }
 }
 
-/** A step of setting up recovery: its number (a tick once done), its name and line, its button on the right. */
-@Composable private fun RecoveryStep(number: Int, title: String, done: Boolean, action: String, doneTitle: String, busy: Boolean, enabled: Boolean,
-    onAction: () -> Unit, line: @Composable () -> Unit = {}) {
+/** A step of recovery: its number (a tick once done), its name and state; beneath, its buttons side by side. */
+@Composable private fun RecoveryStep(number: Int, title: String, status: String?, done: Boolean, buttons: @Composable RowScope.() -> Unit = {}) {
     Surface(Modifier.fillMaxWidth().padding(top = 8.dp), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.size(28.dp).background(if (done) Color(0xFF2ECC71) else Color.White, CircleShape), contentAlignment = Alignment.Center) {
-                if (done) Icon(Icons.Default.Check, null, Modifier.size(18.dp), tint = Color.White)
-                else Text("$number", style = TextStyle(fontFamily = YoFont, fontSize = 14.sp, color = Color(0xFF8E44AD)))
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(Modifier.size(26.dp).background(if (done) Color(0xFF2ECC71) else Color.White, CircleShape), contentAlignment = Alignment.Center) {
+                    if (done) Icon(Icons.Default.Check, null, Modifier.size(16.dp), tint = Color.White)
+                    else Text("$number", style = TextStyle(fontFamily = YoFont, fontSize = 13.sp, color = Color(0xFF8E44AD)))
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    if (status != null) Text(status, style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.85f))
+                }
             }
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-                line()
-            }
-            if (done) OutlinedButton(onClick = {}, enabled = false, border = androidx.compose.foundation.BorderStroke(1.5.dp, Color.White.copy(alpha = 0.6f)),
-                colors = ButtonDefaults.outlinedButtonColors(disabledContentColor = Color.White)) { Text(doneTitle) }
-            else Button(onClick = onAction, enabled = enabled, colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
-                disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
-                if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp) else Text(action)
-            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), content = buttons)
         }
     }
 }
 
-/** Setting up recovery (iOS SecureNameSheet): save the key (then Show reveals it), or set up a passkey; either one is enough. */
-@Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit) {
+/** A card's button, as wide as the others: white with a black label (no purple on purple), or outlined in white. */
+@Composable private fun RowScope.StepButton(label: String, icon: ImageVector?, prominent: Boolean = true, busy: Boolean = false,
+    enabled: Boolean = true, onClick: () -> Unit) {
+    val content: @Composable RowScope.() -> Unit = {
+        if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = if (prominent) Color.Black else Color.White, strokeWidth = 2.dp)
+        else {
+            if (icon != null) Icon(icon, null, Modifier.size(18.dp).padding(end = 4.dp))
+            Text(label, maxLines = 1)
+        }
+    }
+    if (prominent) Button(onClick = onClick, enabled = enabled, modifier = Modifier.weight(1f), content = content,
+        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
+            disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f)))
+    else OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.weight(1f), content = content,
+        border = androidx.compose.foundation.BorderStroke(1.5.dp, Color.White.copy(alpha = 0.6f)),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.5f)))
+}
+
+/** The recovery screens (iOS RecoveryScreen): Amethyst at half height, its symbol, title and line, then the cards. */
+@Composable private fun RecoveryScreen(icon: ImageVector, title: String, line: String, idle: Boolean, onClose: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit) {
+    FittedSheet(onDismissRequest = { if (idle) onClose() }, containerColor = Amethyst, contentColor = Color.White, dragHandle = null, height = 0.5f) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.fillMaxWidth()) {
+                FilledTonalIconButton(onClick = onClose, enabled = idle, modifier = Modifier.align(Alignment.TopEnd),
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White)) {
+                    Icon(Icons.Default.Close, stringResource(R.string.ui_close))
+                }
+                Icon(icon, null, Modifier.align(Alignment.Center).padding(top = 16.dp).size(40.dp))
+            }
+            Text(title, Modifier.padding(top = 8.dp), style = TextStyle(fontFamily = YoFont, fontSize = 24.sp), textAlign = TextAlign.Center, maxLines = 2)
+            Text(line, Modifier.padding(top = 4.dp, bottom = 10.dp), textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.bodySmall.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), color = Color.White.copy(alpha = 0.85f))
+            content()
+        }
+    }
+}
+
+/** The white Done at the bottom of a recovery screen: it closes at any time, not while a step works. */
+@Composable private fun RecoveryDone(idle: Boolean, onClose: () -> Unit) =
+    Button(onClick = onClose, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 16.dp).heightIn(min = 48.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
+            disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
+        Text(copy(ProductText.DONE), fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+    }
+
+/** The recovery key (iOS RecoveryKeySheet), from the red badge and the account page: save it, show it. */
+@Composable fun RecoverySheet(model: YoViewModel, s: AppState, passkey: Boolean = false, onClose: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     var shown by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
-    // The step at work (1 the key, 2 the passkey): its button spins, the others wait.
-    var busy by remember { mutableStateOf<Int?>(null) }
+    var busy by remember { mutableStateOf(false) }
     var keySaved by remember { mutableStateOf(false) }
-    var passkeyDone by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    // Opened on a secured account (for its passkey): the key shown is the one already saved, and a passkey may be set up.
+    var turningOff by remember { mutableStateOf(false) }
+    // Opened on a secured account: the key shown is the one already saved.
     LaunchedEffect(s.recovery) {
         if (s.secured && s.recovery != null && withContext(Dispatchers.IO) { model.repository.savedRecovery() } == s.recovery) keySaved = true
     }
-    LaunchedEffect(Unit) {
-        if (s.secured && withContext(Dispatchers.IO) { runCatching { model.repository.hasRecoveryPasskey() }.getOrDefault(false) }) passkeyDone = true
-    }
     fun saveWith(write: suspend (java.io.OutputStream, String) -> Unit) = { uri: Uri? ->
         if (uri != null) model.repository.command {
-            busy = 1
+            busy = true
             try {
                 val key = state.value.recovery ?: error(res.getString(R.string.ui_recovery_key_missing))
                 context.contentResolver.openOutputStream(uri)?.use { write(it, key) } ?: error(res.getString(R.string.ui_couldn_t_save_the_recovery_key))
-                keepRecovery(); keySaved = true
-            } finally { busy = null }
+                if (!keySaved) keepRecovery()
+                keySaved = true
+            } finally { busy = false }
         }
         Unit
     }
@@ -946,65 +968,39 @@ private fun shareCode(context: Context, name: String) {
     }
     val key = s.recovery
     val ready = key?.length == 64
-    val idle = busy == null
-    // The owner's design A (as iOS): Amethyst, two step cards with their state, a white Done.
-    FittedSheet(onDismissRequest = { if (idle) onClose() }, containerColor = Amethyst, contentColor = Color.White, dragHandle = null) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.fillMaxWidth()) {
-                FilledTonalIconButton(onClick = onClose, enabled = idle, modifier = Modifier.align(Alignment.TopEnd),
-                    colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White)) {
-                    Icon(Icons.Default.Close, stringResource(R.string.ui_close))
+    val idle = !busy
+    RecoveryScreen(Icons.Default.Key, copy(ProductText.RECOVERY_KEY_TITLE), copy(ProductText.RECOVERY_KEY_LINE), idle, onClose) {
+        RecoveryStep(1, copy(ProductText.RECOVERY_KEY), copy(if (keySaved) ProductText.SAVED else ProductText.NOT_SAVED_YET), keySaved) {
+            StepButton(copy(if (shown) ProductText.HIDE else ProductText.SHOW), if (shown) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                prominent = false, enabled = ready && idle) { shown = !shown }
+            StepButton(copy(if (keySaved) ProductText.SAVE_AGAIN else ProductText.SAVE), Icons.Default.Share, busy = busy,
+                enabled = ready && idle) { sharing = true }
+        }
+        if (shown && key != null) Box(Modifier.padding(top = 8.dp)) {
+            YoSystemTheme {
+                KeyCard(key, copied) {
+                    val clip = android.content.ClipData.newPlainText(res.getString(R.string.ui_recovery_key), key.chunked(4).joinToString(" "))
+                    clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+                    context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
+                    copied = true
                 }
-                Icon(Icons.Default.Key, null, Modifier.align(Alignment.Center).padding(top = 24.dp).size(64.dp))
-            }
-            Text(stringResource(R.string.recovery_setup_title), Modifier.padding(top = 14.dp), style = TextStyle(fontFamily = YoFont, fontSize = 30.sp),
-                textAlign = TextAlign.Center, maxLines = 2)
-            Text(stringResource(R.string.recovery_intro), Modifier.padding(top = 6.dp, bottom = 18.dp), textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), color = Color.White.copy(alpha = 0.85f))
-            RecoveryStep(1, stringResource(R.string.ui_recovery_key), keySaved, stringResource(R.string.recovery_save), stringResource(R.string.saved),
-                busy = busy == 1, enabled = ready && idle, onAction = { sharing = true }) {
-                // Saved: "Saved · Show" reveals the key (iOS).
-                if (keySaved) Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(stringResource(R.string.recovery_saved_dot), style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = 0.85f))
-                    Text(stringResource(if (shown) R.string.recovery_hide else R.string.recovery_show),
-                        Modifier.clickable(enabled = ready && idle, role = androidx.compose.ui.semantics.Role.Button) { shown = !shown },
-                        style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = if (ready && idle) 0.9f else 0.5f),
-                        textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
-                }
-            }
-            if (shown && keySaved && key != null) Box(Modifier.padding(top = 8.dp)) {
-                YoSystemTheme {
-                    KeyCard(key, copied) {
-                        val clip = android.content.ClipData.newPlainText(res.getString(R.string.ui_recovery_key), key.chunked(4).joinToString(" "))
-                        clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
-                        context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
-                        copied = true
-                    }
-                }
-            }
-            RecoveryStep(2, stringResource(R.string.recovery_passkey), passkeyDone, stringResource(R.string.recovery_set_up), stringResource(R.string.ui_done),
-                busy = busy == 2, enabled = idle && !passkeyDone, onAction = {
-                    scope.launch {
-                        busy = 2
-                        try {
-                            val (name, user) = model.repository.passkeyAccount() ?: return@launch
-                            val answer = Passkeys.create(context, name, user)
-                            withContext(Dispatchers.IO) { model.repository.keepPasskey(answer) }
-                            passkeyDone = true
-                        } catch (e: CancellationException) { throw e } catch (e: Exception) {
-                            model.error(e.localizedMessage ?: res.getString(R.string.passkey_prf_required))
-                        } finally { busy = null }
-                    }
-                })
-            // White with a black label: no purple on purple. Done closes at any time (iOS), not while a step works.
-            Button(onClick = onClose, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 24.dp).heightIn(min = 52.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
-                    disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
-                Text(stringResource(R.string.ui_done), fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
             }
         }
+        RecoveryDone(idle, onClose)
+        // Off: a new key, not saved yet; the saved one stops working once Save brings the new one.
+        if (keySaved) TextButton(onClick = { turningOff = true }, enabled = idle, modifier = Modifier.padding(top = 4.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))) { Text(stringResource(R.string.turn_off_recovery_key_action)) }
     }
+    if (turningOff) AlertDialog(
+        onDismissRequest = { turningOff = false },
+        title = { Text(stringResource(R.string.turn_off_recovery_key)) },
+        text = { Text(stringResource(if (passkey || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
+        confirmButton = { TextButton(onClick = {
+            turningOff = false; keySaved = false; shown = false; copied = false
+            model.repository.command { prepareRecovery(true) }
+        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
+        dismissButton = { TextButton(onClick = { turningOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
     if (sharing) AlertDialog(
         onDismissRequest = { sharing = false },
         icon = { Icon(Icons.Default.Key, null) },
@@ -1025,6 +1021,72 @@ private fun shareCode(context: Context, name: String) {
     )
 }
 
+
+/** The passkey (iOS PasskeySheet), from the account page: create it, then try it once, as not every password manager
+ *  gives the PRF output Yo needs and asking for it up front isn't reliable; on, it can be turned off again. */
+@Composable private fun PasskeySheet(model: YoViewModel, configured: Boolean, onTurnedOff: () -> Unit, onClose: () -> Unit) {
+    val res = LocalResources.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var on by remember(configured) { mutableStateOf(configured) }
+    // Saved in the password manager, not yet tried: its id.
+    var created by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var problem by remember { mutableStateOf<String?>(null) }
+    var turningOff by remember { mutableStateOf(false) }
+    val idle = !busy
+    fun step(work: suspend () -> Unit) = scope.launch {
+        busy = true; problem = null
+        try { work() } catch (e: CancellationException) { throw e } catch (_: androidx.credentials.exceptions.GetCredentialCancellationException) {
+        } catch (_: androidx.credentials.exceptions.CreateCredentialCancellationException) {
+        } catch (_: IllegalArgumentException) { problem = res.getString(R.string.passkey_no_prf)
+        } catch (e: Exception) { problem = e.localizedMessage ?: res.getString(R.string.passkey_try_again)
+        } finally { busy = false }
+    }
+    RecoveryScreen(Icons.Default.Fingerprint, copy(ProductText.PASSKEY), stringResource(R.string.passkey_line), idle, onClose) {
+        RecoveryStep(1, copy(ProductText.CREATE_PASSKEY), if (on || created != null) copy(ProductText.CREATED) else null, on || created != null) {
+            if (!on && created == null) StepButton(copy(ProductText.CREATE), null, busy = busy, enabled = idle) {
+                step {
+                    val (name, user) = model.repository.passkeyAccount() ?: return@step
+                    created = Passkeys.create(context, name, user)
+                }
+            }
+        }
+        RecoveryStep(2, copy(ProductText.TRY_IT_ONCE), copy(ProductText.TRY_IT_ONCE_LINE), on) {
+            if (!on) StepButton(stringResource(R.string.passkey_try), Icons.Default.Fingerprint, busy = busy && created != null,
+                enabled = idle && created != null) {
+                step {
+                    val id = created ?: return@step
+                    val (_, user) = model.repository.passkeyAccount() ?: return@step
+                    val answer = Passkeys.confirm(context, id, user)
+                    withContext(Dispatchers.IO) { model.repository.keepPasskey(answer) }
+                    created = null; on = true
+                }
+            }
+        }
+        problem?.let { Text(it, Modifier.padding(top = 8.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodySmall.copy(
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)) }
+        RecoveryDone(idle, onClose)
+        if (on) TextButton(onClick = { turningOff = true }, enabled = idle, modifier = Modifier.padding(top = 4.dp),
+            colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))) { Text(copy(ProductText.TURN_OFF_PASSKEY)) }
+    }
+    // A passkey here always rides on a saved recovery key, so only the password manager is left to clean up.
+    if (turningOff) AlertDialog(
+        onDismissRequest = { turningOff = false },
+        title = { Text(stringResource(R.string.settings_turn_off_passkey)) },
+        text = { Text(stringResource(R.string.turn_off_passkey_message)) },
+        confirmButton = { TextButton(onClick = {
+            turningOff = false
+            step { withContext(Dispatchers.IO) { model.repository.removeRecoveryPasskey() }; on = false; onTurnedOff() }
+        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
+        dismissButton = { TextButton(onClick = { turningOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
+}
+
+/** A page of Android's own settings, or its first page where this phone has no such page. */
+private fun openSystemSettings(context: Context, action: String) {
+    runCatching { context.startActivity(Intent(action)) }.onFailure { context.startActivity(Intent(android.provider.Settings.ACTION_SETTINGS)) }
+}
 
 fun qrBitmap(text: String,side: Int=512): Bitmap {
     val matrix=QRCodeWriter().encode(text,BarcodeFormat.QR_CODE,side,side,mapOf(com.google.zxing.EncodeHintType.CHARACTER_SET to "ISO-8859-1"))

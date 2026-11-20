@@ -22,7 +22,9 @@ internal object Passkeys {
 
     data class Answer(val user: ByteArray, val prf: ByteArray)
 
-    suspend fun create(context: Context, name: String, user: ByteArray): Answer {
+    /** Saves a new passkey in the password manager; its id, for [confirm]. Not every manager gives the PRF output
+     *  Yo needs, and asking for it up front isn't reliable: it is known only once the passkey is tried. */
+    suspend fun create(context: Context, name: String, user: ByteArray): String {
         val request = JSONObject()
             .put("challenge", challenge())
             .put("rp", JSONObject().put("id", RP).put("name", "Yo"))
@@ -36,7 +38,11 @@ internal object Passkeys {
         val response = CredentialManager.create(context).createCredential(
             context, CreatePublicKeyCredentialRequest(request.toString()),
         ) as CreatePublicKeyCredentialResponse
-        val id = JSONObject(response.registrationResponseJson).getString("id")
+        return JSONObject(response.registrationResponseJson).getString("id")
+    }
+
+    /** The passkey just created, tried once: its PRF output, or the manager can't do it. */
+    suspend fun confirm(context: Context, id: String, user: ByteArray): Answer {
         val answer = assert(context, id, user)
         check(answer.user.contentEquals(user))
         return answer

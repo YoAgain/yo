@@ -48,28 +48,22 @@ import XCTest
     let op = c["op"] as? String ?? ""
     switch op {
     case "account-layout":
-      // Start on Account; exercise the rows and title status button.
-      let ids = ["account.contacts", "account.security", "account.manage"]
+      // Start on Account; the rows in order, then each recovery screen and Contacts.
+      let ids = ["account.contacts", "security.accountSync", "security.recoveryKey", "security.passkey"]
       let rows = ids.map { app.descendants(matching: .any).matching(identifier: $0).firstMatch }
       for (id, row) in zip(ids, rows) {
         guard row.waitForExistence(timeout: 5) else { throw Failure(description: "missing \(id)") }
       }
-      guard zip(rows, rows.dropFirst()).allSatisfy({ $0.frame.minY < $1.frame.minY }),
-        !app.buttons["security.setup"].exists
-      else { throw Failure(description: "Account row order or misplaced setup") }
-      rows[1].tap()
-      if c["unsecured"] as? Bool == true {
-        guard app.staticTexts["Secure Your Account"].waitForExistence(timeout: 5) else {
-          throw Failure(description: "Security did not open setup directly")
-        }
-        return ["rows": ids, "setup": true]
+      guard zip(rows, rows.dropFirst()).allSatisfy({ $0.frame.minY < $1.frame.minY }) else {
+        throw Failure(description: "Account row order")
       }
-      guard app.navigationBars["Security"].waitForExistence(timeout: 5),
-        app.switches["security.passkey"].exists,
-        app.switches["security.recoveryKey"].exists,
-        !app.buttons["security.setup"].exists
-      else { throw Failure(description: "missing security destination or recovery toggles") }
-      app.navigationBars.buttons.element(boundBy: 0).tap()
+      for (row, title) in [(rows[2], "Your Recovery Key"), (rows[3], "Passkey")] {
+        row.tap()
+        guard app.staticTexts[title].waitForExistence(timeout: 5) else {
+          throw Failure(description: "\(title) screen did not open")
+        }
+        app.buttons["Done"].tap()
+      }
       rows[0].tap()
       guard app.navigationBars["Contacts"].waitForExistence(timeout: 5),
         app.staticTexts["Blocked"].exists

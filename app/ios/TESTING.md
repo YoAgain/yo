@@ -64,11 +64,10 @@ the Linux build does not run the Simulator UI driver.
 - Every settings destination keeps the root's small height on push/pop. Only Contacts, Status and Licenses
   show the grabber and can be dragged to large (all open at the small height); all other pages have no grabber and
   no large detent. Eager rows must appear throughout the animation, with no late cells or jumps.
-- UI driver: from Account run `drive.py DIR account-layout unsecured=true`, which checks direct setup.
-  Repeat with `unsecured=false` to check the Security destination, recovery controls, Contacts and Status.
-  Account identifiers are account.security, account.contacts and account.manage. Info buttons use
-  info.<title>. Security rows use security.accountSync, security.keychainRecovery, security.passkey,
-  security.recoveryKey and security.howRecoveryWorks. There is no security.setup button.
+- UI driver: from Account run `drive.py DIR account-layout`, which checks the row order, opens the Recovery Key
+  and Passkey screens (half height, Done closes) and Contacts. Account identifiers are account.contacts,
+  account.signOut and account.delete. Info buttons use info.<title>. Recovery rows use security.accountSync,
+  security.recoveryKey, security.passkey, security.keychainRecovery and security.howRecoveryWorks.
 - In camera mode, scroll to Add Friend and run `drive.py DIR camera-add`. The + stays in its original
   position, uses the same translucency as friend rows, and opens the name field without taking a photo.
   Check Group and Invite after opening the field. Receive Yos while adding: camera mode must keep row

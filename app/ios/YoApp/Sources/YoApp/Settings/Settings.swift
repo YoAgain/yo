@@ -29,7 +29,7 @@ struct SettingsView: View {
   @State private var hasRecoveryKey = true
   @State private var currentIconName = UIApplication.shared.alternateIconName
   enum Page: Hashable {
-    case account, help, status, contacts, signInSecurity, code, licenses, appIcon
+    case account, help, status, contacts, code, licenses, appIcon
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
@@ -109,12 +109,6 @@ struct SettingsView: View {
             if let account = accounts.account {
               AccountPage(
                 account: account, hasRecoveryKey: hasRecoveryKey, dismissSettings: { dismiss() },
-                openSecurity: { path.append(.signInSecurity) }, showingDelete: $showingDeleteAccount)
-            }
-          case .signInSecurity:
-            if let account = accounts.account {
-              AccountPage(
-                account: account, hasRecoveryKey: hasRecoveryKey, securityOnly: true, dismissSettings: { dismiss() },
                 showingDelete: $showingDeleteAccount)
             }
           case .appIcon: AppIconPage()

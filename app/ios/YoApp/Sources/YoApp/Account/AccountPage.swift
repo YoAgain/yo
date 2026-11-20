@@ -7,133 +7,102 @@ import YoCore
 struct AccountPage: View {
   let account: Account
   let hasRecoveryKey: Bool
-  var securityOnly = false
   var dismissSettings: () -> Void
-  /// Pushes Account Recovery through the settings path.
-  var openSecurity: (() -> Void)? = nil
   @Environment(AccountStore.self) private var accounts
   @State private var signingOut: Account?
-  @State private var addingPasskey = false
-  @State private var passkeyProblem: String?
-  @State private var securing = false
-  @State private var showingWords = false
-  @State private var recoveryKey = ""
-  @State private var turningOffPasskey = false
-  @State private var renewingWords = false
   @State private var deleteTyped = ""
   @State private var deletingAccount = false
   @Binding var showingDelete: Bool
   @State private var deleteProblem: String?
   @State private var syncFailed = false
-  @State private var showingSecurity = false
-  /// The guide finished with Done here: Security opens once its sheet is gone.
-  @State private var securityAfterGuide = false
+  @State private var showingRecoveryKey = false
+  @State private var showingPasskey = false
   @State private var showingRecoveryHelp = false
 
-  /// Privacy, security and backup, then signing out and deleting (App Review 5.1.1(v)).
+  /// Privacy, backup and recovery, then signing out and deleting (App Review 5.1.1(v)).
   var body: some View {
+    let keySaved = account.secured && accounts.wordsSaved && hasRecoveryKey
+    let passkeyOn = account.byPasskey && account.passkeyAuth == true
     Form {
-      if securityOnly {
-        securitySection(account)
-      } else {
-        Section {
-          NavigationLink(value: SettingsView.Page.contacts) {
-            LabeledContent {
-              ContactSecurityPage(summaryOnly: true)
-            } label: {
-              Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.green))
-            }
-          }
-          .accessibilityIdentifier("account.contacts")
-          NavigationLink {
-            BlockedPage()
+      Section {
+        NavigationLink(value: SettingsView.Page.contacts) {
+          LabeledContent {
+            ContactSecurityPage(summaryOnly: true)
           } label: {
-            Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
+            Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.green))
           }
-          .accessibilityIdentifier("account.blocked")
         }
-        Section {
-          Button {
-            if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
-              securing = true
-            } else {
-              showSecurity()
-            }
-          } label: {
-            HStack {
-              Label("Account Recovery", systemImage: "lock.fill").labelStyle(Tile(.orange))
-              Spacer(minLength: 8)
-              if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) { RecoveryBadge() }
-            }
-          }
-          .tint(Color(.label))
-          .accessibilityIdentifier("account.security")
-          // App Review 5.1.1(v): deleting is easy to find, no page between.
-          Button {
-            signingOut = account
-          } label: {
-            Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right").labelStyle(Tile(.gray))
-          }
-          .tint(Color(.label))
-          .disabled(addingPasskey || deletingAccount)
-          .accessibilityIdentifier("account.signOut")
-        } footer: {
-          // A footer link as iOS Settings writes them, still easy to find (App Review 5.1.1(v)).
-          Button {
-            showingDelete = true
-          } label: {
-            (Text("Leaving Yo for good? ").foregroundStyle(.secondary)
-              + Text("Delete Your Account").foregroundStyle(Color.amethyst))
-              .font(.footnote)
-          }
-          .buttonStyle(.plain)
-          .disabled(addingPasskey || deletingAccount)
-          .accessibilityLabel("Delete Your Account")
-          .accessibilityIdentifier("account.delete")
+        .accessibilityIdentifier("account.contacts")
+        NavigationLink {
+          BlockedPage()
+        } label: {
+          Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
         }
+        .accessibilityIdentifier("account.blocked")
+      }
+      Section {
+        AccountSyncRow(client: accounts.client, failed: $syncFailed)
+          .accessibilityIdentifier("security.accountSync")
+      }
+      Section {
+        RecoveryRow(
+          icon: "key.fill", title: ProductText.recoveryKey.english,
+          value: (keySaved ? ProductText.saved : .notSaved).english,
+          badge: accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey)
+        ) { showingRecoveryKey = true }
+        .accessibilityIdentifier("security.recoveryKey")
+        RecoveryRow(
+          icon: "faceid", title: ProductText.passkey.english, value: (passkeyOn ? ProductText.on : .off).english
+        ) { showingPasskey = true }
+        .accessibilityIdentifier("security.passkey")
+        SecurityRow(
+          icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
+          value: (accounts.keychainRecoveryActive ? ProductText.on : .off).english,
+          done: accounts.keychainRecoveryActive)
+          .accessibilityIdentifier("security.keychainRecovery")
+      } header: {
+        HStack {
+          Text(ProductText.accountRecovery.english)
+          Spacer()
+          Button("How Account Recovery Works", systemImage: "info.circle") { showingRecoveryHelp = true }
+            .labelStyle(.iconOnly)
+            .accessibilityIdentifier("security.howRecoveryWorks")
+        }
+      } footer: {
+        Text(ProductText.recoveryFooter.english)
+      }
+      Section {
+        // App Review 5.1.1(v): deleting is easy to find, no page between.
+        Button {
+          signingOut = account
+        } label: {
+          Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right").labelStyle(Tile(.gray))
+        }
+        .tint(Color(.label))
+        .disabled(deletingAccount)
+        .accessibilityIdentifier("account.signOut")
+      } footer: {
+        // A footer link as iOS Settings writes them, still easy to find (App Review 5.1.1(v)).
+        Button {
+          showingDelete = true
+        } label: {
+          (Text("Leaving Yo for good? ").foregroundStyle(.secondary)
+            + Text("Delete Your Account").foregroundStyle(Color.amethyst))
+            .font(.footnote)
+        }
+        .buttonStyle(.plain)
+        .disabled(deletingAccount)
+        .accessibilityLabel("Delete Your Account")
+        .accessibilityIdentifier("account.delete")
       }
     }
-    .accessibilityIdentifier(securityOnly ? "security.page" : "account.page")
-    .navigationTitle(securityOnly ? "Account Recovery" : account.username)
+    .accessibilityIdentifier("account.page")
+    .navigationTitle(account.username)
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .principal) {
-        if securityOnly {
-          Text("Account Recovery").font(.headline)
-        } else {
-          RoundTripTitle(name: account.username, client: accounts.client)
-        }
+        RoundTripTitle(name: account.username, client: accounts.client)
       }
-    }
-    .problemAlert($passkeyProblem)
-    .sheet(isPresented: $showingWords) {
-      if let account = accounts.account {
-        RecoveryShowSheet(name: account.username, key: recoveryKey)
-      }
-    }
-    .alert("Turn Off Passkey?", isPresented: $turningOffPasskey) {
-      Button("Turn Off", role: .destructive) { removePasskey() }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(
-        accounts.wordsSaved
-          ? "Delete the passkey in your password manager too."
-          : "Only iCloud Keychain will remain. If you lose access to it, you may lose your account. Delete the passkey in your password manager too."
-      )
-    }
-    .alert("Turn Off Recovery Key?", isPresented: $renewingWords) {
-      Button("Turn Off", role: .destructive) {
-        Task {
-          do { _ = try await accounts.newRecoveryKey() } catch { show(error) }
-        }
-      }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(
-        account.byPasskey && account.passkeyAuth == true
-          ? "Your saved recovery key will stop working."
-          : "Your saved recovery key will stop working. Only iCloud Keychain will remain. If you lose access to it, you may lose your account."
-      )
     }
     // Deleting gets the whole height, its own sheet over the settings.
     .sheet(isPresented: $showingDelete) {
@@ -148,107 +117,13 @@ struct AccountPage: View {
       .presentationDetents([.large])
       .presentationDragIndicator(.hidden)
     }
-    .navigationDestination(isPresented: $showingSecurity) {
-      AccountPage(
-        account: account, hasRecoveryKey: hasRecoveryKey, securityOnly: true,
-        dismissSettings: dismissSettings, showingDelete: $showingDelete)
-    }
     .confirmDestructive(
       $signingOut, title: { _ in "Sign Out?" },
       message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },
       action: { _ in "Sign Out" }, run: { _ in reset() })
-    .interactiveDismissDisabled(addingPasskey)
     .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }
-    .sheet(isPresented: $securing, onDismiss: {
-      if securityAfterGuide {
-        securityAfterGuide = false
-        showSecurity()
-      }
-    }) {
-      // Done lands in Security, where its switches are; opened from Security, it just closes back to it.
-      SecureNameSheet(close: { securing = false }, done: { securityAfterGuide = !securityOnly })
-    }
-  }
-
-  private func showSecurity() {
-    if let openSecurity { openSecurity() } else { showingSecurity = true }
-  }
-
-  @ViewBuilder private func securitySection(_ account: Account) -> some View {
-    let wordsDone = account.secured && accounts.wordsSaved && hasRecoveryKey
-    let passkeyDone = account.byPasskey && account.passkeyAuth == true
-    Section {
-      AccountSyncRow(client: accounts.client, failed: $syncFailed)
-        .accessibilityIdentifier("security.accountSync")
-    }
-    Section {
-      Toggle(
-        isOn: Binding(
-          get: { passkeyDone },
-          set: { if $0 { securing = true } else { turningOffPasskey = true } })
-      ) {
-        Label {
-          Text("Passkey")
-        } icon: { Image(systemName: "faceid") }
-        .labelStyle(Tile(.amethyst))
-      }
-      .accessibilityIdentifier("security.passkey")
-      Toggle(
-        isOn: Binding(
-          get: { wordsDone },
-          set: { if $0 { securing = true } else { renewingWords = true } })
-      ) {
-        Button {
-          if wordsDone { Task { await showRecoveryKey() } }
-        } label: {
-          Label {
-            Text("Recovery Key")
-          } icon: { Image(systemName: "key.fill") }
-          .labelStyle(Tile(.amethyst))
-            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-      }
-      .accessibilityIdentifier("security.recoveryKey")
-      SecurityRow(
-        icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
-        value: accounts.keychainRecoveryActive ? "On" : "Off",
-        done: accounts.keychainRecoveryActive)
-        .accessibilityIdentifier("security.keychainRecovery")
-    } footer: {
-      Button("How Account Recovery Works") { showingRecoveryHelp = true }
-        .font(.footnote)
-        .foregroundStyle(.tint)
-        .accessibilityIdentifier("security.howRecoveryWorks")
-    }
-    .disabled(addingPasskey)
-  }
-
-  private func showRecoveryKey() async {
-    guard await authenticated("Show your recovery key."), let key = RecoveryWords.load() else { return }
-    recoveryKey = key
-    showingWords = true
-  }
-
-  /// One backup change at a time (`addingPasskey` disables the security rows meanwhile).
-  private func removePasskey() {
-    guard !addingPasskey else { return }
-    addingPasskey = true
-    Task {
-      defer { addingPasskey = false }
-      do { try await accounts.removePasskey() } catch { show(error) }
-    }
-  }
-
-  /// A security change failed (not a cancellation, nor a sign-out meanwhile).
-  private func show(_ error: Error) {
-    guard !Passkeys.isCancellation(error) else { return }
-    passkeyProblem =
-      if case .noPRF? = error as? AccountError {
-        "Your password manager can’t do this. Try iCloud Keychain."
-      } else {
-        error.localizedDescription
-      }
+    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
+    .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }) }
   }
 
   private func deletePage(_ account: Account) -> some View {
@@ -329,10 +204,38 @@ struct AccountPage: View {
 }
 
 extension AccountStore {
-  /// Neither the passkey nor a saved recovery key can bring the account back.
+  /// Neither a saved recovery key nor the passkey can bring the account back: the badge asks for the key, which
+  /// alone is enough.
   func recoveryNeedsAttention(hasRecoveryKey: Bool) -> Bool {
     let passkeyOn = account?.byPasskey == true && account?.passkeyAuth == true
     let keyOn = account?.secured == true && wordsSaved && hasRecoveryKey
     return !passkeyOn && !keyOn
+  }
+}
+
+/// A recovery method and its state; a tap opens its screen.
+private struct RecoveryRow: View {
+  let icon: String
+  let title: String
+  let value: String
+  var badge = false
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      LabeledContent {
+        HStack(spacing: 8) {
+          if badge { RecoveryBadge() }
+          Text(value).foregroundStyle(.secondary).lineLimit(1)
+          Image(systemName: "chevron.forward")
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
+        }
+      } label: {
+        Label(title, systemImage: icon).labelStyle(Tile(.amethyst))
+      }
+    }
+    .tint(Color(.label))
   }
 }
