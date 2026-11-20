@@ -1234,3 +1234,9 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .pill-toggle button { min-width: 26px; height: 20px; padding: 0 8px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .pill-toggle button.on { background: var(--amethyst); color: #fff; }
 .pill-toggle button .ico { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* A tile of two columns (double width): the first column is the tile's usual content, the second one its own. */
+.ov .tile.twocol, .ov > .charts > .tile.twocol { grid-column: span 2 !important; display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--gap); height: auto !important; min-height: 210px; }
+.twocol > .tcol { display: flex; flex-direction: column; min-width: 0; }
+.twocol > .tcol .area { flex: 1 1 auto; min-height: 120px; }
+.twocol > .tcol .srows { width: 100%; }
+@media (max-width: 760px) { .ov .tile.twocol { grid-template-columns: minmax(0, 1fr); grid-column: 1 / -1; } }

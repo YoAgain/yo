@@ -555,7 +555,7 @@ if (document.body.classList.contains("login")) {
     const at = () => { const r = node.getBoundingClientRect(); showTip(tv(), r.left + r.width / 2, r.top); };
     node.tabIndex = node.tabIndex < 0 ? 0 : node.tabIndex;
     const mine = () => !pinned || pinned === node;
-    node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !pinned) showTip(tv(), e.clientX, e.clientY); });
+    node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !pinned && !e.target.closest?.("svg.spark")) showTip(tv(), e.clientX, e.clientY); });
     node.addEventListener("pointerleave", () => { if (!pinned) tipBox.hidden = true; });
     node.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && mine()) at(); });
     node.addEventListener("focus", () => { if (!pinned) at(); });
@@ -854,7 +854,8 @@ if (document.body.classList.contains("login")) {
   // ---- overview ---------------------------------------------------------------------------------------------------
   // Active, a tile of the top grid like Sent and Accounts: who was here per day (bars) and the share of them who came
   // back (line); the number and its share of the month in the header, retention and the rest in the hover.
-  let activeSpec = null;
+  let activeSpec = null, drawAccountStatsImpl = null;
+  const drawAccountStats = (h) => drawAccountStatsImpl?.(h);
   const drawActive = (h) => {
     const slot = $("ac-area");
     if (!slot || !h || h.error) return;
@@ -863,12 +864,15 @@ if (document.body.classList.contains("login")) {
     const back = ds.map((d, i) => (active[i] ? (100 * Math.max(0, active[i] - (su.get(d) || 0))) / active[i] : null));
     const ret = Object.fromEntries((areaSub.yc || []).map(([l, v]) => [String(l).replace(/^Retention /, ""), v]));
     const stick = mau ? (100 * (h.active_day || 0)) / mau : null;
-    set("ac-n", num(h.active_day));
-    set("ac-s", `${pctText(stick)} of the month`);
+    set("ac-n", `DAU ${num(h.active_day)} · MAU ${num(mau)}`);
+    set("ac-s", `${pctText(stick)} stickiness`);
     activeSpec = { ds, active, back, su, ret };
-    slot.replaceChildren(liveChart({ bars: active, line: back, from: dayName(ds[0]), to: "today" }, "", null, (i) => { const s = activeSpec;
-      return { head: dayName(s.ds[i]), rows: [{ section: "This day" }, { color: "var(--ok)", label: "Active", value: num(s.active[i]) }, { ico: "user", label: "New", value: num(s.su.get(s.ds[i]) || 0) },
-        { color: "var(--ok)", line: true, label: "Came back", value: pctText(s.back[i]) }, { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: s.ret[k] ?? "–" }))] }; }));
+    // Bars: users seen per day (DAU). The line: the month's users (MAU, the last 30 days), one level: the collector keeps
+    // each day's count, not who, so a rolling MAU per day cannot be told. Daily points on every range (no hourly counts).
+    const level = ds.map(() => mau);
+    slot.replaceChildren(liveChart({ bars: active, line: level, from: dayName(ds[0]), to: "today" }, "", null, (i) => { const s = activeSpec;
+      return { head: dayName(s.ds[i]), rows: [{ section: "This day" }, { color: "var(--ok)", label: "DAU", value: num(s.active[i]) }, { ico: "user", label: "New", value: num(s.su.get(s.ds[i]) || 0) },
+        { color: "var(--ok)", line: true, label: "MAU (30 days, now)", value: num(mau) }, { label: "Stickiness today", value: pctText(stick) }, { label: "Came back", value: pctText(s.back[i]) }, { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: s.ret[k] ?? "–" }))] }; }));
   };
   const reportKey = (r) => `${which}:r${r.id}`;
   let hubNow = null;
@@ -919,6 +923,7 @@ if (document.body.classList.contains("login")) {
       }
     }
     drawActive(h);
+    drawAccountStats(h);
     showOpen();
 
     // Services: the queue at the bottom.
@@ -1910,11 +1915,19 @@ if (document.body.classList.contains("login")) {
     // the like). The builds stay in each slot's `raw` row, for the hover.
     const stateOf = (a) => (belowMin(a) ? "must" : appInfo(a)?.state === "current" ? "current" : appInfo(a)?.state === "fresh" ? "fresh" : appInfo(a)?.state === "update" ? "update" : "unknown");
     const mine = (a) => (plat === "all" ? /^(ios|android)\//.test(String(a)) : String(a).startsWith(`${plat}/`));
-    const bands = REL_STATES.map(([k, name, color]) => ({ k, name, color }));
+    // Update builds each get a band in yellow shades, the newest lightest (at most five, the rest together as "older");
+    // the other states are one band each.
+    const upd = new Map();
+    for (const [, , row] of slots) for (const [ap, c] of Object.entries(row || {})) if (c > 0 && mine(ap) && stateOf(ap) === "update") upd.set(ap, (upd.get(ap) || 0) + c);
+    const updApps = [...upd.keys()].sort((x, y) => buildKey(y).localeCompare(buildKey(x))), ownUpd = updApps.slice(0, 5), YELLOWS = ["#f6dc6b", "#e8c744", "#cdaa2c", "#ac8a21", "#8c6e1a"];
+    const bands = [{ k: "current", name: "Current", color: "var(--ok)" }, { k: "fresh", name: "Fresh", color: "#a3e4b8" },
+      ...ownUpd.map((ap, n) => ({ k: "update", name: buildLabel(ap), color: YELLOWS[n], app: ap })), ...(updApps.length > 5 ? [{ k: "update", name: "older", color: "#6f5714", older: true }] : []),
+      { k: "must", name: "Must update", color: "var(--bad)" }, { k: "unknown", name: "Unknown", color: "var(--muted)" }];
+    const bandOf = (ap) => { const s = stateOf(ap); return s === "update" ? bands.findIndex((b) => b.k === "update" && (b.app === ap || b.older && !ownUpd.includes(ap))) : bands.findIndex((b) => b.k === s); };
     const rows = slots.map(([, , row]) => {
       if (!row) return null;
       const r = bands.map(() => 0);
-      for (const [a, c] of Object.entries(row)) if (mine(a)) r[bands.findIndex((b) => b.k === stateOf(a))] += c;
+      for (const [ap, c] of Object.entries(row)) if (mine(ap)) r[bandOf(ap)] += c;
       return r.some((v) => v) ? r : null;
     });
     return { slots, bands, rows, raw: slots.map(([, , row]) => (row ? Object.entries(row).filter(([a, c]) => mine(a) && c > 0) : [])) };
@@ -2087,16 +2100,30 @@ if (document.body.classList.contains("login")) {
     if (tip) hoverTip(s, values.length, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
     return s;
   };
+  // A sparkline of stacked bars: per slot the series (each 0 to 100) one on the other from the bottom.
+  const stackBars = (series, colors, tip) => {
+    const n = Math.max(1, series[0]?.length || 1), W = 140, H = 28, sl = W / n, s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" });
+    for (let i = 0; i < n; i++) {
+      const g = svg("g", {}); let y = H;
+      series.forEach((v, k) => { const hh = ((v[i] || 0) / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: (i * sl + sl * 0.12).toFixed(1), width: (sl * 0.76).toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: "b", style: `fill:${colors[k]}` })); });
+      if (y === H) g.append(svg("rect", { x: (i * sl + sl * 0.12).toFixed(1), width: (sl * 0.76).toFixed(1), y: H - 1.5, height: 1.5, class: "b zero" }));
+      s.append(g);
+    }
+    if (tip) hoverTip(s, n, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
+    return s;
+  };
   // A card of rows like the overview's: an icon, the label, its value and a sparkline (each slot's popup on hover);
   // a rule before a row marked sep. Rows: { ico, label, value, cls, values, scls, tip, sep }.
   const sparkCard = (title, rows) => {
     const box = el("div", "srows");
     for (const r of rows) {
-      const row = el("div", `srow${r.values || r.bar != null ? "" : " wide"}${r.go ? " go" : ""}`);
+      const row = el("div", `srow${r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
       if (r.values) row.append(sparkBars(r.values, r.scls, r.tip, r.top));
+      else if (r.node) row.append(r.node);
+      else if (r.stack) row.append(stackBars(r.stack, r.stackColors, r.tip));
       else if (r.bar != null) { const b = shareBar(r.bar, "current"); b.classList.add("srow-bar"); row.append(b); }
       box.append(row);
     }
@@ -2105,7 +2132,17 @@ if (document.body.classList.contains("login")) {
   const perfCard = (h) => {
     const d = speedData, tot = (b) => b.reduce((a, v) => a + v, 0), { names, rows } = queueSlots(h);
     return sparkCard("Delivery performance", [
-      { ico: "speed", label: "Speed", value: d && tot(d.all) ? `${pctText(latPct(d.all, 0))} in 1 s` : "–", values: d ? d.lat.map((b) => (tot(b) ? latPct(b, 0) : 0)) : [],
+      { ico: "speed", label: "Speed", value: d && tot(d.all) ? `${pctText(latPct(d.all, 0))} in 1 s` : "–", stack: d ? LAT.map((_, k) => d.lat.map((b) => (tot(b) ? latPct(b, k) : 0))) : [],
+        stackColors: ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"],
+        title: d && tot(d.all) ? (() => {
+          // The whole range: each slot's split into the four buckets as stacked bars, the share within 1 s as the line over them.
+          const W = 240, H = 70, n = d.lat.length, g = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" }), colors = ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"];
+          d.lat.forEach((b, i) => { let y = H; if (!tot(b)) return; LAT.forEach((_, k) => { const hh = (latPct(b, k) / 100) * H; y -= hh; if (hh > 0) g.append(svg("rect", { x: ((i + 0.12) * W) / n, width: (0.76 * W) / n, y, height: hh, fill: colors[k], opacity: ".85" })); }); });
+          g.append(svg("polyline", { fill: "none", stroke: "var(--text)", "stroke-width": 1.5, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round",
+            points: d.lat.map((b, i) => (tot(b) ? `${(((i + 0.5) * W) / n).toFixed(1)},${(H - (latPct(b, 0) / 100) * H).toFixed(1)}` : null)).filter(Boolean).join(" ") }));
+          return { cap: 1, head: `${pctText(latPct(d.all, 0))} in 1 s · ${pctText(latPct(d.all, 0) + latPct(d.all, 1))} in 5 s`, nodes: [g],
+            rows: [...LAT_NAME.map((nm, k) => ({ color: colors[k], label: nm, value: pctText(latPct(d.all, k)) })), { ico: "send", label: "Yos", value: num(tot(d.all)) }] };
+        })() : null,
         tip: (i) => ({ head: d.names[i], rows: tot(d.lat[i]) ? [...LAT_NAME.map((n, k) => ({ color: ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"][k], label: n, value: pctText(latPct(d.lat[i], k)) })),
           { ico: "send", label: "Yos", value: num(tot(d.lat[i])) }] : [{ ico: "send", label: "Yos", value: "none" }] }) },
       { ico: "clock", label: "Queue", value: `${num(h.messages)} Yos`, values: rows.map((r) => r?.[0] || 0), scls: "cool",
@@ -2380,8 +2417,11 @@ if (document.body.classList.contains("login")) {
     };
     // Accounts: activity (who is active, how many stay, how much they send) and the accounts' properties (secured,
     // deleted), as the overview's rows: a label, its value, a sparkline where there is a history, a popup per slot.
-    DETAIL.uc = () => {
-      const h = hubNow, hd = healthData || {}, mau = h.active_month || 0, act = activeIn(), yoN = sumOf(evSlots("yo-in")), t = today0();
+    DETAIL.uc = () => [pushCard(healthData || {})];
+    // The Accounts tile's second column: the stats as the overview's rows (secured bar, new accounts secured, deleted,
+    // Yos per user), each with its history in the hover.
+    const statsRows = (h) => {
+      const hd = healthData || {}, mau = h.active_month || 0, act = activeIn(), yoN = sumOf(evSlots("yo-in")), t = today0();
       const ds = Array.from({ length: 14 }, (_, i) => t - 13 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
       const active = ds.map((d) => (d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0));
       const per = ds.map((d, i) => (active[i] ? (yo.get(d) || 0) / active[i] : 0));
@@ -2389,8 +2429,6 @@ if (document.body.classList.contains("login")) {
       const sc = sparkData.sc, gone = evSlots("account-gone");
       const wk = (h.secured_days || []).slice(-7).filter(Boolean), made = wk.reduce((n, d) => n + d[0], 0), withKey = wk.reduce((n, d) => n + d[1], 0);
       return [
-        // Stats: the rest as the overview's rows: new accounts secured, deleted, Yos per user, retention.
-        sparkCard("Stats", [
           (() => {
             // Secured: accounts with a backup as a share of all accounts (the bar); its line over the last 30 days in the hover.
             const us = h.users || [], dd = Array.from({ length: 30 }, (_, i) => t - 29 + i), end = (d) => (d + 1) * 86400000;
@@ -2402,15 +2440,24 @@ if (document.body.classList.contains("login")) {
             return { ico: "lock", label: "Secured", value: pctText(now), bar: (now || 0) / 100,
               title: { cap: 1, head: "Secured, all accounts", nodes: [g], rows: [{ label: `${dayName(dd[0])} – today`, value: pctText(now) }] } };
           })(),
+          (() => {
+            const plats = platData?.plats || [], all = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0)), bar = platCard().firstChild;
+            bar.classList.add("srow-bar");
+            return { ico: "ios", label: "Devices", value: num(platData?.devices), node: bar,
+              title: { cap: 1, head: "Devices", rows: plats.map(([l, p]) => ({ label: l, value: `${num(p.all)} · ${Math.round((100 * p.all) / all)} %` })) } };
+          })(),
           { ico: "lock", label: "Secured, new", value: made ? pctText((100 * withKey) / made) : "–", values: sc?.values?.map((v) => v || 0),
             tip: sc ? (i) => ({ head: sc.names[i], rows: [{ color: "var(--ok)", label: "Secured of that day's sign-ups", value: pctText(sc.values[i]) }] }) : null },
           { ico: "trash", label: "Deleted", value: num(sumOf(gone)), cls: sumOf(gone) ? "warn" : "", values: gone.values.map((v) => v || 0), scls: "warm",
             tip: (i) => ({ head: gone.names[i], rows: [{ color: "#e67e22", label: "Deleted", value: num(gone.values[i] || 0) }] }) },
           { ico: "send", label: "Yos per user", value: act ? (yoN / act).toFixed(1) : "–", values: per,
             tip: (i) => ({ head: dayName(ds[i]), rows: [{ color: "var(--ok)", label: "Yos per active user", value: per[i] ? per[i].toFixed(1) : "–" }, { ico: "user", label: "Active", value: num(active[i]) }] }) },
-        ]),
-        pushCard(hd),
       ];
+    };
+    drawAccountStatsImpl = (h) => {
+      const slot = $("uc-rows");
+      if (!slot || !h || h.error) return;
+      slot.replaceChildren(sparkCard("Stats", statsRows(h)).querySelector(".srows"));
     };
     // Secured: accounts with a backup, this week's new ones, and the share per sign-up day.
     const securedCard = () => {
@@ -2426,7 +2473,7 @@ if (document.body.classList.contains("login")) {
       return ok + bad ? comboCard("Push", { names: a.names, values: a.values.map((v, i) => (v || 0) + (b.values[i] || 0)) },
         { cls: "cool", sub: bad ? `${num(bad)} failed` : `${pctText((100 * ok) / (ok + bad))} taken`, subCls: bad ? "bad" : "" }) : dcard("Push", null, note("No data yet."));
     };
-    DETAIL.vr = () => [...one.vr().filter((c) => title(c) !== "Builds"), ...one.pl()];
+    DETAIL.vr = () => [...one.vr().filter((c) => title(c) !== "Builds")];
     // Problems: what users sent and what crashed (feedback, reports, crashes, crash-free installs (est.); the way to
     // the chat), delivery and speed. The app's errors are in the Errors view.
     DETAIL.pr = () => {
@@ -2484,7 +2531,7 @@ if (document.body.classList.contains("login")) {
       flow.append(step("chat", "Report", "from a phone"), el("span", "parrow", "→"), step("ratio", "Fingerprint", "kind · code · line · build"), el("span", "parrow", "→"),
         step("chart", "Group", "count ↑"), el("span", "parrow", "→"), step("warn", "Problem", "the cause"));
       const how = dcard("Problems", null, stats, phones, flow, note("Ticked stays closed · same bug in a new build reopens as a new group"));
-      return [how, users, one.dl().find((c) => title(c) === "Delivery"), fast];
+      return [how, users];
     };
 
   }
