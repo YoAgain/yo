@@ -1240,3 +1240,15 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .twocol > .tcol .area { flex: 1 1 auto; min-height: 120px; }
 .twocol > .tcol .srows { width: 100%; }
 @media (max-width: 760px) { .ov .tile.twocol { grid-template-columns: minmax(0, 1fr); grid-column: 1 / -1; } }
+/* Phone: one column, every tile and two-column tile full width, nothing wider than the screen. */
+@media (max-width: 640px) {
+  .ov, .ov.packed { grid-template-columns: minmax(0, 1fr) !important; }
+  .ov > *, .ov > .charts > * { min-width: 0; }
+  .ov .tile.twocol, .ov > .charts > .tile.twocol { grid-column: 1 / -1 !important; grid-template-columns: minmax(0, 1fr) !important; }
+  .twocol > .tcol .area { min-height: 140px; }
+  .srow { grid-template-columns: 20px minmax(0, 1fr) auto 96px; }
+  .srow .sl { overflow: visible; text-overflow: clip; }
+  .dgrid { grid-template-columns: minmax(0, 1fr); }
+  .dcard { min-width: 0; overflow: hidden; }
+}
+.dcard h3 { flex-wrap: wrap; row-gap: 4px; }

@@ -989,6 +989,7 @@ if (document.body.classList.contains("login")) {
       $("c-pl").dataset.tip = plats.map(([l, p]) => `${l} ${num(p.all)}`).join(" · ");
       platData = { plats, min: h.min_app, devices };
       versionsRow(h);
+      drawAccountStats(h);
     }
   };
 
@@ -1956,12 +1957,14 @@ if (document.body.classList.contains("login")) {
     s.append(mark, label(0, d.slots[f0][1], "start"), label(W, d.slots[n - 1][1], "end"));
     // Under the chart the legend (the five newest builds); a click on the chart names that slot's shares instead, a
     // second click on the same slot gives the legend back.
-    const legend = d.bands.filter((b, j) => d.rows.some((r) => r && r[j])).map((b) => key(b.name, "", b.color));
-    const foot = cfoot(legend);
-    foot.classList.add("rlegend");
     const pick = d.rows[have[have.length - 1]], pickAll = pick ? pick.reduce((a, v) => a + v, 0) : 0;
     const share = pickAll ? `${Math.round((100 * (pick[0] + pick[1])) / pickAll)} % current` : "";
-    const card = dcard(titleText, share, s, foot);
+    // No legend: the hover names each band's build with its share at that point.
+    hoverTip(s, n - f0, (k) => {
+      const i = f0 + k, r = d.rows[i], all = r ? r.reduce((x, v) => x + v, 0) : 0;
+      return { head: d.slots[i][1], rows: r ? d.bands.map((b, j) => ({ color: b.color, label: b.name, value: `${Math.round((100 * r[j]) / all)} %` })).filter((x) => x.value !== "0 %").reverse() : [{ label: "Builds", value: "not recorded" }] };
+    });
+    const card = dcard(titleText, share, s);
     return card;
   };
   // A small pill of choices in a card's header (the chosen one lit); `change(value)` when another is chosen.
@@ -2485,14 +2488,23 @@ if (document.body.classList.contains("login")) {
       const fbDays = year(h.support_days), fbHours = last24(h.support_hours);
       const fb = slots.map((x, i) => (range === 1 ? fbHours[i] || 0 : fbDays.get(x) || 0));
       const rp = slots.map((x) => (h.reports || []).filter((r) => Math.floor(r.at / unitMs) === x).length);
-      const users = sparkCard("Feedback", [
+      const users = sparkCard("Problems", [
         { ico: "chat", label: "Feedback", value: num(kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
         { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Errors · Crashes", value: `${p.ec.at(-1) + p.cc.at(-1)} ${p.ec.at(-1) + p.cc.at(-1) === 1 ? "cause" : "causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${p.ec.at(-1) + p.cc.at(-1)} ${p.ec.at(-1) + p.cc.at(-1) === 1 ? "cause" : "causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
             tip: (i) => ({ head: p.names[i], rows: problemRows(p, i) }) }; })(),
+        (() => {
+          // Phones affected as one bar: crash (red), error only (orange), fine (green); iOS and Android in the hover.
+          const pt = problemTotals, pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
+          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Phones affected", value: "–" };
+          const mk = (seen, any, crash) => { const b = el("span", "hc-pbar dbar srow-bar"); for (const [k, v] of [["must", crash], ["warm", Math.max(0, any - crash)], ["current", Math.max(0, seen - any)]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
+          const line = (l, seen, any, crash) => ({ label: l, value: `${pc(crash, seen)} crash · ${pc(Math.max(0, any - crash), seen)} error · ${pc(Math.max(0, seen - any), seen)} fine` });
+          return { ico: "ios", label: "Phones affected", value: pc(pt.installs, pt.seen), node: mk(pt.seen, pt.installs, pt.crashInstalls || 0),
+            title: { cap: 1, head: "Phones affected", rows: [line("All phones", pt.seen, pt.installs, pt.crashInstalls || 0), ...pt.platforms.filter(([, , n]) => n).map(([l, hit, n, c]) => line(l, n, hit, c))] } };
+        })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
           title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
             rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },
@@ -2509,29 +2521,7 @@ if (document.body.classList.contains("login")) {
       })() : dcard("Yo to Yo speed", null, note("No Yos delivered in this range."));
       // Speed two columns wide: the four columns filled without the Errors card (errors are in the Errors view).
       fast.classList.add("wide");
-      // The Problems summary: three numbers, the phones as stacked bars (crash, error, fine), and how a report becomes a problem.
-      const ps = problemSplit(h), last = ps.names.length - 1, pt = problemTotals, many = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
-      const stat = (n, w) => { const d = el("div", "pstat"); d.append(el("b", null, num(n)), el("small", null, `${w}${n === 1 ? "" : "s"}`)); return d; };
-      const stats = el("div", "pstats"); stats.append(stat(ps.ec[last] + ps.cc[last], "Problem"), stat(pt?.installs ?? 0, "Install"), stat(ps.er[last] + ps.cr[last], "Occurrence"));
-      // Phones seen as one bar: crash (red), error only (orange), fine (green); a row each for all, iOS and Android.
-      const pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
-      const phoneBar = (label, seen, any, crash) => {
-        const row = el("div", "hc-plat"), bar = el("span", "hc-pbar dbar"), parts = [["must", crash], ["warm", Math.max(0, any - crash)], ["current", Math.max(0, seen - any)]];
-        for (const [k, v] of parts) if (v) { const x = el("span", k); x.style.flexGrow = v; bar.append(x); }
-        row.append(el("b", null, label), bar, el("span", "hc-pn", seen ? `${pc(crash, seen)} · ${pc(Math.max(0, any - crash), seen)} · ${pc(Math.max(0, seen - any), seen)}` : "–"));
-        return row;
-      };
-      const phones = pt?.installs == null || !pt.seen ? null : el("div", "hc-plats");
-      if (phones) {
-        phones.append(phoneBar("Phones", pt.seen, pt.installs, pt.crashInstalls || 0), ...pt.platforms.filter(([, , n]) => n).map(([l, hit, n, c]) => phoneBar(l, n, hit, c)),
-          cfoot(key("Crash", "", "var(--bad)"), key("Error", "", "#e67e22"), key("Fine", "", "var(--ok)")));
-      }
-      const step = (ico, name, sub) => { const d = el("div", "pstep"); d.append(icon(ico), el("b", null, name), el("small", null, sub)); return d; };
-      const flow = el("div", "pflow");
-      flow.append(step("chat", "Report", "from a phone"), el("span", "parrow", "→"), step("ratio", "Fingerprint", "kind · code · line · build"), el("span", "parrow", "→"),
-        step("chart", "Group", "count ↑"), el("span", "parrow", "→"), step("warn", "Problem", "the cause"));
-      const how = dcard("Problems", null, stats, phones, flow, note("Ticked stays closed · same bug in a new build reopens as a new group"));
-      return [how, users];
+      return [users];
     };
 
   }
