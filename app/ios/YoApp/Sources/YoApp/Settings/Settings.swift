@@ -31,15 +31,15 @@ struct SettingsView: View {
   enum Page: Hashable {
     case account, security, help, status, contacts, code, licenses, appIcon
 
-    /// Each page's height, fixed here and never measured: half for the pages that fit there without scrolling (the
-    /// first page and App Icon's five icons), full for every other.
-    var fitsHalf: Bool { self == .appIcon }
+    /// Each page's height, fixed here and never measured: half for the pages that fit there (the first page,
+    /// Account, its Account Security and App Icon's five icons), full for every other.
+    var fitsHalf: Bool { self == .account || self == .security || self == .appIcon }
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
+  /// Both heights stay in the sheet's detents all the time; only the selection changes, so the sheet moves with the
+  /// system's own detent animation, as when it is dragged.
   @State private var detent: PresentationDetent = .medium
-  /// A push to a full-height page from a half-height one, waiting for the sheet to stand at full height.
-  @State private var pendingPath: [Page]?
   /// The first page's room left over at half height, given to the profile card so the gap below the last section is
   /// the list's own bottom margin, as at its top. More rows later take it back by themselves.
   @State private var spare: CGFloat = 0
@@ -49,30 +49,18 @@ struct SettingsView: View {
     path.last.map { $0.fitsHalf ? .medium : .large } ?? .medium
   }
 
-  /// Every push and pop goes through here. A page laid out while the sheet grows stays cut at the old height and
-  /// fills in late, so a full-height page is pushed only once the sheet has grown (its height changes, below). Going
-  /// back to a half-height page pops and shrinks together: that page fits the top half, nothing of it is cut.
+  /// Every push and pop goes through here: the page changes and the sheet takes that page's height together, in
+  /// one transaction, without waiting for either.
   private func navigate(to new: [Page]) {
     let target = Self.detent(for: new)
-    if target == .large, detent != .large {
-      pendingPath = new
-      detent = .large
-      // The sheet's own height change pushes; should none come, push anyway.
-      Task {
-        try? await Task.sleep(for: .milliseconds(400))
-        pushPending()
-      }
-    } else {
-      pendingPath = nil
+    guard target != detent else {
       path = new
-      detent = target
+      return
     }
-  }
-
-  private func pushPending() {
-    guard let pending = pendingPath else { return }
-    pendingPath = nil
-    path = pending
+    withAnimation(.smooth) {
+      detent = target
+      path = new
+    }
   }
 
   private var currentIconAsset: String {
@@ -143,7 +131,7 @@ struct SettingsView: View {
         [$0.containerSize.height, $0.containerSize.height - $0.contentInsets.top - $0.contentInsets.bottom - $0.contentSize.height]
       } action: { _, room in
         // Only at half height: while a pop shrinks the sheet back, the taller moment is not counted.
-        guard path.isEmpty, pendingPath == nil, detent == .medium, room[0] > 100,
+        guard path.isEmpty, detent == .medium, room[0] > 100,
           room[0] <= (halfHeight ?? room[0]) + 0.5
         else { return }
         halfHeight = room[0]
@@ -181,11 +169,6 @@ struct SettingsView: View {
         .listSectionSpacing(.compact)
       }
     }
-    // The sheet stands at its new, full height (UIKit sets the final frame as the growth starts): now the page is
-    // pushed and laid out at that height from its first frame.
-    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
-      if new > old { pushPending() }
-    }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
@@ -194,9 +177,15 @@ struct SettingsView: View {
     }
     // Every page scrolls only when it does not fit.
     .scrollBounceBehavior(.basedOnSize)
-    .presentationDetents([detent])
-    // The grabber on the first page (one height there: it only closes); a page pushed in has its bar instead.
-    .presentationDragIndicator(path.isEmpty && pendingPath == nil ? .visible : .hidden)
+    .presentationDetents([.medium, .large], selection: $detent)
+    // Dragged to the other height by hand, the sheet goes back to the page's own once let go (the selection
+    // changes only when the drag ends).
+    .onChange(of: detent) { _, now in
+      let own = Self.detent(for: path)
+      if now != own { withAnimation(.smooth) { detent = own } }
+    }
+    // The grabber on the first page; a page pushed in has its bar instead.
+    .presentationDragIndicator(path.isEmpty ? .visible : .hidden)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
     .presentationBackground(Color(.systemGroupedBackground))
     .task(id: "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)") {

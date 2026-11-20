@@ -44,10 +44,10 @@ push through APNs (see above), the camera (black; photos come from the library).
 Run on a device or Simulator after changing Settings. These visual checks are pending for the current change;
 the Linux build does not run the Simulator UI driver.
 
-- Each settings page has a fixed height: half for the first page and App Icon, full for every other (Account,
-  Account Security, Contacts, Your Code, Help & About, Status, About & Licenses). Push from half to full (Help &
-  About, Account): the sheet grows first and the page arrives whole, never cut at the old height or filling in late.
-  Pop back to the first page: it shrinks with the pop, no empty grey.
+- Each settings page has a fixed height: half for the first page, Account, Blocked, Account Security and App Icon,
+  full for Contacts, Your Code, Help & About, Status, About & Licenses. Push from half to full (Help & About): the
+  sheet grows with its own detent animation while the page pushes, no back-and-forth, nothing cut or filling in
+  late. Pop back: it shrinks with the pop. Drag a page to the other height and let go: it returns to its own.
 - First page at half height: the profile card takes the room left, so the gap under Help/Add Friends equals the
   gap at the top; at accessibility text sizes the card is compact and the page scrolls.
 - Account uses the account name as its inline title, with no avatar header or QR button. Your Code remains

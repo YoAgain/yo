@@ -163,7 +163,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
 }
 
 /** Settings (iOS SettingsView): a fixed height per page, never measured: half for the pages that fit there (the first
- *  page and App Icon), full for every other; its pages pushed in with a back arrow. */
+ *  page, Account, Blocked, Account Security and App Icon), full for every other; its pages pushed in with a back arrow. */
 @Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
     // The whole state (counters and the last sync included): the list underneath takes it without them.
     val s by model.repository.state.collectAsStateWithLifecycle()
@@ -179,7 +179,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
 }
 
 /** The settings pages that fit at half height without scrolling. */
-private val HalfPages = setOf("Profile", "Appearance")
+private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security", "Appearance")
 
 @Composable private fun Settings(model: YoViewModel, s: AppState, trailState: MutableState<List<String>>, onClose: () -> Unit,
     onAddFriends: () -> Unit) {
