@@ -79,6 +79,7 @@ impl Device {
             recovery_lookups: (0, 0),
             group_held: Vec::new(),
             deferred: Default::default(),
+            unread: 0,
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id).unwrap();
         Device { account: *account, user, state, records }

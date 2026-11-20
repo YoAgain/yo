@@ -248,7 +248,10 @@ struct YoApp: App {
           }
           outbox.flush(accounts: accounts)
           ShareInbox.take(outbox: outbox, accounts: accounts)
-          if let client = accounts.client { inbox.fetchMedia(client: client) }
+          if let client = accounts.client {
+            inbox.fetchMedia(client: client)
+            Task { _ = try? await Hub.run { client.markRead() } }  // the badge counts from none again
+          }
           // The secure-account reminder of earlier builds, still pending on some phones.
           UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["yo.secure"])
         }

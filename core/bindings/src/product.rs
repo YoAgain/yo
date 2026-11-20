@@ -2,7 +2,8 @@
 
 use yo_product::list::Kind;
 use yo_product::{
-    self as product, ActivityPlace, Direction, Language, LastActivity, Outcome, Problem, Text, WidgetFriend,
+    self as product, ActivityPlace, Direction, Language, LastActivity, NotificationTally, Outcome, Problem, Text,
+    WidgetFriend,
 };
 
 #[uniffi::remote(Enum)]
@@ -278,6 +279,18 @@ pub fn product_notification_id(event_id: String) -> String {
 #[uniffi::export]
 pub fn product_notification_sounds(delivered: Vec<String>, new: Vec<String>) -> Vec<bool> {
     product::notification_sounds(&delivered, &new)
+}
+
+/// One conversation's notification for one fetch: "Yo from Leo", "5× Yo from Leo · 1 photo", "3× Yo in #CREW".
+#[uniffi::export]
+pub fn product_notification_conversation_line(
+    kinds: Vec<Kind>,
+    name: String,
+    group: Option<String>,
+    request: bool,
+    lang: Language,
+) -> String {
+    product::notification_conversation_line(NotificationTally::of(&kinds), &name, group.as_deref(), request, lang)
 }
 
 #[allow(clippy::too_many_arguments)]

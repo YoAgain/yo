@@ -199,13 +199,17 @@ enum ShareBridge {
 
   /// The newest of `new` goes into `content`, each other one is added as its own. Returns the identifiers of the
   /// notifications `content` replaces.
-  static func write(_ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification]) -> [String] {
+  /// `unread`: the core's count of Yos received since the app last showed them, the badge (else the Yo notifications
+  /// on the screen are counted).
+  static func write(
+    _ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification], unread: UInt32? = nil
+  ) -> [String] {
     // Nothing new (a push whose Yos an earlier push or the app took): never one more bare "Yo" (an empty one is not
     // hidden either, without the filtering entitlement), but the newest Yo notification again, quietly, in its place.
-    guard let newest = new.first else { return again(content, over: delivered) }
+    guard let newest = new.first else { return again(content, over: delivered, unread: unread) }
     let shown = delivered.filter { $0.request.content.categoryIdentifier == yoCategory }
-    // As many as there are Yo notifications; opening the app clears both (Inbox.collectDelivered).
-    let badge = NSNumber(value: shown.count + new.count)
+    // The unread Yos; opening the app clears both (Inbox.collectDelivered, YoClient.markRead).
+    let badge = NSNumber(value: unread.map(Int.init) ?? shown.count + new.count)
     // Only the first unread of a thread sounds; the next come quietly while it is on the screen.
     let sounds = productNotificationSounds(delivered: shown.map(\.request.content.threadIdentifier),
       new: new.reversed().map(\.user))
@@ -213,18 +217,29 @@ enum ShareBridge {
     for (other, sound) in zip(new.dropFirst().reversed(), sounds) {
       let own = UNMutableNotificationContent()
       yo(own, other, sounds: sound)
-      own.badge = badge
       UNUserNotificationCenter.current().add(
         UNNotificationRequest(identifier: other.notificationIdentifier, content: own, trigger: nil))
     }
     yo(content, newest, sounds: sounds.last ?? false)
-    content.badge = badge
+    badged(content, badge, set: unread != nil)
     return []
+  }
+
+  /// The core's count is set at once: iOS may post the notifications of several pushes out of order (a burst), and
+  /// the last one posted would set the badge it carries. A count from the screen goes with the notification.
+  private static func badged(_ content: UNMutableNotificationContent, _ badge: NSNumber, set: Bool) {
+    if set {
+      UNUserNotificationCenter.current().setBadgeCount(badge.intValue)
+    } else {
+      content.badge = badge
+    }
   }
 
   /// The newest Yo notification on screen repeated quietly into `content`; returns its identifier to remove. None on
   /// screen: a bare silent "Yo" (an empty one would show "You may have received a Yo").
-  private static func again(_ content: UNMutableNotificationContent, over delivered: [UNNotification]) -> [String] {
+  private static func again(
+    _ content: UNMutableNotificationContent, over delivered: [UNNotification], unread: UInt32?
+  ) -> [String] {
     (content.sound, content.interruptionLevel) = (nil, .passive)
     let yos = delivered.filter {
       $0.request.content.categoryIdentifier == yoCategory && $0.request.content.userInfo["id"] != nil
@@ -237,19 +252,19 @@ enum ShareBridge {
     (content.title, content.subtitle, content.body) = (shown.title, shown.subtitle, shown.body)
     (content.categoryIdentifier, content.threadIdentifier, content.userInfo) =
       (shown.categoryIdentifier, shown.threadIdentifier, shown.userInfo)
-    content.badge = NSNumber(value: yos.count)
+    badged(content, NSNumber(value: unread.map(Int.init) ?? yos.count), set: unread != nil)
     return [newest.request.identifier]
   }
 
   /// Yos the app or share extension took themselves (the service then finds them read); skips ones already shown.
-  static func post(_ yos: [Yos]) async {
+  static func post(_ yos: [Yos], unread: UInt32? = nil) async {
     let center = UNUserNotificationCenter.current()
     let delivered = await center.deliveredNotifications()
     let written = Set(delivered.compactMap { $0.request.content.userInfo["id"] as? String })
     let new = yos.filter { !written.contains($0.id) }.sorted { $0.sentAtMs > $1.sentAtMs }
     guard let newest = new.first else { return }
     let content = UNMutableNotificationContent()
-    _ = write(content, new, over: delivered)
+    _ = write(content, new, over: delivered, unread: unread)
     try? await center.add(UNNotificationRequest(identifier: newest.notificationIdentifier, content: content, trigger: nil))
   }
 }

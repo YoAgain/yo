@@ -213,6 +213,25 @@ fn register_add_a_friend_and_yo_both_ways() {
 }
 
 #[test]
+fn unread_counts_the_yos_received_until_the_app_shows_them() {
+    let hub = TestHub::start();
+    let (a, b) = friends(&hub);
+    b.mark_read();
+    assert_eq!(b.unread(), 0);
+    for _ in 0..3 {
+        a.send_yo(b.user()).unwrap();
+    }
+    assert_eq!(yos(&b.drain(), &a.user()), 3);
+    assert_eq!(b.unread(), 3);
+    a.send_yo(b.user()).unwrap();
+    b.drain();
+    assert_eq!(b.unread(), 4, "counts on until shown");
+    b.mark_read();
+    assert_eq!(b.unread(), 0);
+    assert_eq!(a.unread(), 1, "the Yo B sent while making friends");
+}
+
+#[test]
 fn a_photo_and_a_video_go_as_blobs_and_are_opened_once() {
     let hub = TestHub::start();
     let (a, b) = friends(&hub);

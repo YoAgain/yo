@@ -1156,7 +1156,24 @@ impl Client {
         if user.is_some_and(|u| self.probe_service(u)) {
             return;
         }
+        if matches!(event, Event::Message { .. } | Event::GroupMessage { .. }) {
+            self.state.unread = self.state.unread.saturating_add(1);
+        }
         self.state.events.push(event);
+    }
+
+    /// Yos received since the app last showed them (`mark_read`), whichever process received them: the badge.
+    pub fn unread(&self) -> u32 {
+        self.state.unread
+    }
+
+    /// The app showed every Yo received: the badge is empty.
+    pub fn mark_read(&mut self) -> Result<()> {
+        if self.state.unread == 0 {
+            return Ok(());
+        }
+        self.state.unread = 0;
+        self.persist()
     }
 
     /// Runs `f` as one transaction: on an error, state and sessions are as before. Nothing the hub remembers may run

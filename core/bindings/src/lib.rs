@@ -945,6 +945,16 @@ impl YoClient {
         self.look(|c| c.waiting()).map_or(0, |n| n.try_into().unwrap_or(u32::MAX))
     }
 
+    /// Yos received since the app last showed them, by the app or the notification service: the badge.
+    pub fn unread(&self) -> u32 {
+        self.look(|c| c.unread()).unwrap_or(0)
+    }
+
+    /// The app showed every Yo received: the badge is empty.
+    pub fn mark_read(&self) {
+        _ = self.with(|c| c.mark_read());
+    }
+
     /// These events are shown or stored: they will not come again after a crash.
     pub fn acknowledge(&self, events: Vec<YoEvent>) {
         let mut left = events;

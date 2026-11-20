@@ -289,6 +289,88 @@ pub fn notification_sounds(delivered: &[String], new: &[String]) -> Vec<bool> {
     new.iter().map(|thread| unread.insert(thread.as_str())).collect()
 }
 
+/// The Yos of one conversation that one fetch brought: all of them, and how many of those brought a photo or a
+/// video.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NotificationTally {
+    pub yos: u32,
+    pub photos: u32,
+    pub videos: u32,
+}
+
+impl NotificationTally {
+    pub fn of(kinds: &[list::Kind]) -> Self {
+        let count = |kind| kinds.iter().filter(|&&k| k == kind).count() as u32;
+        Self { yos: kinds.len() as u32, photos: count(list::Kind::Photo), videos: count(list::Kind::Video) }
+    }
+}
+
+/// A count as the language writes it: "1,234" / "1.234".
+fn grouped(count: u32, lang: Language) -> String {
+    let digits = count.to_string();
+    let separator = lang.choose(",", ".");
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push_str(separator);
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// One conversation's notification for what one fetch brought: one Yo as `notification_line` says it ("Yo from Mia
+/// in #Hey 📷"), several counted ("5× Yo from Leo · 1 photo", "3× Yo in #CREW · 1 video"). `name`: the sender;
+/// `group`: the group's name, if it is a group.
+pub fn notification_conversation_line(
+    tally: NotificationTally,
+    name: &str,
+    group: Option<&str>,
+    request: bool,
+    lang: Language,
+) -> String {
+    if tally.yos <= 1 {
+        let kind = match (tally.photos, tally.videos) {
+            (0, 0) => list::Kind::Yo,
+            (_, 0) => list::Kind::Photo,
+            _ => list::Kind::Video,
+        };
+        let from = group.map_or_else(
+            || name.into(),
+            |group| notification_group_name(name, group.strip_prefix('#').unwrap_or(group), lang),
+        );
+        return notification_line(&from, kind, request, lang);
+    }
+    notification_summary_line(tally, name, group, request, lang)
+}
+
+/// A conversation's count notification: "12× Yo from Leo · 2 photos", in a group "12× Yo in #CREW · 1 video",
+/// a request's "12× Yo Request from Leo". `group`: the group's name (one "#", whether it brings its own or not).
+pub fn notification_summary_line(
+    tally: NotificationTally,
+    name: &str,
+    group: Option<&str>,
+    request: bool,
+    lang: Language,
+) -> String {
+    let yos = format!("{}× ", grouped(tally.yos, lang));
+    let mut line = match group {
+        Some(group) => format!("{yos}Yo {} #{}", lang.choose("in", "in"), group.strip_prefix('#').unwrap_or(group)),
+        None if request => format!("{yos}{}", notification_line(name, list::Kind::Yo, true, lang)),
+        None => format!("{yos}{}", arrival_line("Yo", name, lang)),
+    };
+    let media = [
+        (tally.photos, lang.choose("photo", "Foto"), lang.choose("photos", "Fotos")),
+        (tally.videos, lang.choose("video", "Video"), lang.choose("videos", "Videos")),
+    ];
+    for (count, one, many) in media {
+        if count > 0 {
+            line.push_str(&format!(" · {} {}", grouped(count, lang), if count == 1 { one } else { many }));
+        }
+    }
+    line
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Sending,
@@ -610,6 +692,52 @@ mod tests {
         assert_eq!(notification_sounds(&[], &new), [true, true, false]);
         assert_eq!(notification_sounds(&[user], &new), [false, true, false]);
         assert!(notification_sounds(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn notification_line_per_conversation_and_fetch() {
+        assert_eq!(
+            NotificationTally::of(&[Yo, Photo, Video, Photo]),
+            NotificationTally { yos: 4, photos: 2, videos: 1 }
+        );
+        assert_eq!(NotificationTally::of(&[]), NotificationTally::default());
+        let line = |kinds: &[list::Kind], group, lang| {
+            notification_conversation_line(NotificationTally::of(kinds), "Leo", group, false, lang)
+        };
+        assert_eq!(line(&[Yo], None, English), "Yo from Leo");
+        assert_eq!(line(&[Photo], None, English), "Yo from Leo 📷");
+        assert_eq!(line(&[Video], Some("#CREW"), German), "Yo von Leo in #CREW 🎥");
+        assert_eq!(line(&[Yo; 5], None, English), "5× Yo from Leo");
+        assert_eq!(line(&[Yo, Photo, Yo], Some("CREW"), English), "3× Yo in #CREW · 1 photo");
+        assert_eq!(
+            notification_conversation_line(NotificationTally::of(&[Yo]), "Leo", None, true, English),
+            "Yo Request from Leo"
+        );
+        let tally = |yos, photos, videos| NotificationTally { yos, photos, videos };
+        assert_eq!(notification_summary_line(tally(12, 0, 0), "Leo", None, false, English), "12× Yo from Leo");
+        assert_eq!(
+            notification_summary_line(tally(12, 2, 0), "Leo", None, false, English),
+            "12× Yo from Leo · 2 photos"
+        );
+        assert_eq!(
+            notification_summary_line(tally(6, 1, 1), "Leo", None, false, German),
+            "6× Yo von Leo · 1 Foto · 1 Video"
+        );
+        assert_eq!(
+            notification_summary_line(tally(12, 0, 3), "Mia", Some("CREW"), false, English),
+            "12× Yo in #CREW · 3 videos"
+        );
+        assert_eq!(
+            notification_summary_line(tally(12, 2, 0), "Mia", Some("#CREW"), false, German),
+            "12× Yo in #CREW · 2 Fotos"
+        );
+        assert_eq!(notification_summary_line(tally(7, 0, 0), "Leo", None, true, English), "7× Yo Request from Leo");
+        assert_eq!(notification_summary_line(tally(1234, 0, 0), "Leo", None, false, English), "1,234× Yo from Leo");
+        assert_eq!(
+            notification_summary_line(tally(1234567, 0, 0), "Leo", None, false, German),
+            "1.234.567× Yo von Leo"
+        );
+        assert_eq!(grouped(999, German), "999");
     }
 
     #[test]

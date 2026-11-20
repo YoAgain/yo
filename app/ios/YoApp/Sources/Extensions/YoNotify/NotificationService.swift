@@ -22,6 +22,10 @@ final class NotificationService: UNNotificationServiceExtension {
     self.pending = pending
     pending.set(content: content, handler: contentHandler)
     let start = Date.now
+    // Asked at once, beside the fetch, for the sound (the first unread of a conversation sounds); waited for at most
+    // half a second after the fetch, so no Yo waits on a slow answer. The badge is the core's count (YoClient.unread).
+    let listing = Listing()
+    UNUserNotificationCenter.current().getDeliveredNotifications { listing.set($0) }
     DispatchQueue.global(qos: .userInitiated).async {
       pending.lifetime.run {
         switch Self.newest() {
@@ -35,9 +39,11 @@ final class NotificationService: UNNotificationServiceExtension {
           in: events, name: { ShareBridge.name(of: $0, client: client) },
           group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
           ShareBridge.noteLast(senders, client: client)
-          let delivered = Self.delivered()
           // iOS shows the push whatever its content, so it carries the newest Yo; the others are added beside it.
-          let replaced = pending.update { ShareBridge.write($0, senders, over: delivered) } ?? []
+          let replaced = pending.update {
+            ShareBridge.write(
+              $0, senders, over: listing.notifications(waiting: 0.5) ?? [], unread: client.unread())
+          } ?? []
           pending.deliver(replacing: replaced)
         }
         Perf.mark("nse.delivered")
@@ -49,20 +55,28 @@ final class NotificationService: UNNotificationServiceExtension {
     pending.fallback(.timeout)
   }
 
+  /// iOS's list of delivered notifications, once it answered.
+  private final class Listing: @unchecked Sendable {
+    private let lock = NSLock()
+    private let answered = DispatchSemaphore(value: 0)
+    private var answer: [UNNotification]?
+
+    func set(_ notifications: [UNNotification]) {
+      lock.withLock { answer = notifications }
+      answered.signal()
+    }
+
+    /// Nil if iOS has not answered within `seconds` from now.
+    func notifications(waiting seconds: Double) -> [UNNotification]? {
+      if let answer = lock.withLock({ answer }) { return answer }
+      guard answered.wait(timeout: .now() + seconds) == .success else { return nil }
+      answered.signal()
+      return lock.withLock { answer }
+    }
+  }
+
   /// How long the app may hold the state before the push goes out unread.
   static let lockWait = 10.0
-
-  /// Empty if the system does not answer within two seconds.
-  private static func delivered() -> [UNNotification] {
-    final class Found: @unchecked Sendable { var notifications: [UNNotification] = [] }
-    let found = Found()
-    let done = DispatchSemaphore(value: 0)
-    UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
-      found.notifications = delivered
-      done.signal()
-    }
-    return done.wait(timeout: .now() + 2) == .success ? found.notifications : []
-  }
 
   private static func newest() -> Result<(YoClient, [YoEvent]), NotifyFallback.Reason> {
     let client: YoClient

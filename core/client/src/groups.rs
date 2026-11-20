@@ -492,7 +492,7 @@ impl Client {
                     _ => false,
                 };
             if shown {
-                self.state.events.push(event);
+                self.push_event(event);
             }
         }
     }

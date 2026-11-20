@@ -666,11 +666,14 @@ final class Inbox {
     case .background:
       let groups = (try? await Hub.run { try client.groups() }) ?? []
       let requests = (try? await Hub.run { ShareBridge.requests(of: client) }) ?? []
+      let unread = try? await Hub.run { client.unread() }
       await ShareBridge.post(
         ShareBridge.yos(
           in: kept, name: { friend($0).name }, group: { id in groups.first { $0.id == id }?.name ?? "" },
-          requests: requests))
-    case .active: Task { await collectDelivered() }
+          requests: requests), unread: unread)
+    case .active:
+      Task { await collectDelivered() }
+      _ = try? await Hub.run { client.markRead() }  // shown on the list: off the badge
     default: break
     }
     // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.

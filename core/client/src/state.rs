@@ -299,6 +299,9 @@ pub struct State {
     /// Payloads from an unknown device that could not be looked up now: received again later (at most `DEFERRED`).
     #[serde(with = "compact::list")]
     pub deferred: VecDeque<Vec<u8>>,
+    /// Yos received (by the app or the notification service) since the app last showed them: the badge.
+    #[serde(default)]
+    pub unread: u32,
 }
 
 impl Drop for State {
