@@ -250,6 +250,8 @@ final class HubTransport: HttpTransport {
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
     done.wait()
+    let took = started.duration(to: .now).components
+    access?.note(codePlace, seconds: Double(took.seconds) + Double(took.attoseconds) / 1e18)
     if longPoll { Self.polls.withLock { $0.removeAll { $0 === task } } }
     if access?.expired == true {
       // Not reported: the caller tries again in its next turn.

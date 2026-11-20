@@ -133,7 +133,41 @@ precondition((try? waiting.perform { 1 }) == nil)
 waiting.finish()
 session.invalidateAndCancel()
 
+// One waiting in another process goes first: a newcomer lets it (a while), and a waiter says it waits.
+let waitingFile = open(url.path + ".waiting", O_RDWR | O_CREAT, 0o600)
+precondition(waitingFile >= 0)
+func someoneWaits() -> Bool {
+  let free = flock(waitingFile, LOCK_EX | LOCK_NB) == 0
+  if free { flock(waitingFile, LOCK_UN) }
+  return !free
+}
+var began = ProcessInfo.processInfo.systemUptime
+let alone = SharedAccess.take(url)!
+precondition(ProcessInfo.processInfo.systemUptime - began < 0.5, "nobody waiting: taken at once")
+alone.finish()
+precondition(flock(waitingFile, LOCK_SH | LOCK_NB) == 0)
+began = ProcessInfo.processInfo.systemUptime
+let polite = SharedAccess.take(url, within: 3)!
+let yielded = ProcessInfo.processInfo.systemUptime - began
+precondition(yielded >= SharedAccess.yieldMost * 0.9 && yielded < 2.5, "another waiting: let first, then taken")
+polite.finish()
+flock(waitingFile, LOCK_UN)
+precondition(flock(probe, LOCK_EX | LOCK_NB) == 0)
+let gotIt = DispatchSemaphore(value: 0)
+DispatchQueue.global().async {
+  let waiter = SharedAccess.take(url, within: 5)!
+  waiter.finish()
+  gotIt.signal()
+}
+var announced = false
+for _ in 0..<200 where !announced { usleep(10_000); announced = someoneWaits() }
+precondition(announced, "a waiter says it waits")
+flock(probe, LOCK_UN)
+precondition(gotIt.wait(timeout: .now() + 5) == .success)
+precondition(!someoneWaits(), "and stops saying so once it has the lock")
+close(waitingFile)
+
 SharedAccess.hold = { expire in expire(); return {} }
 precondition(SharedAccess.take(url) == nil, "expiry while beginning a task never takes the flock")
 precondition(isFree())
-print("Shared access: refused time, expiry, request budget, disk fencing, request cancellation, extension reuse and contention passed")
+print("Shared access: refused time, expiry, request budget, waiters first, disk fencing, request cancellation, extension reuse and contention passed")
