@@ -10,8 +10,8 @@ struct AppIconPage: View {
   @State private var iconError: String?
   @Environment(\.scenePhase) private var scenePhase
   static let icons: [(name: String?, image: String, label: String)] = [
-    (nil, "IconStandard", "Yo"), ("Negative", "IconNegative", "Negative Yo"),
-    ("Original", "IconOriginal", "Full Color"), ("OG2014", "IconOG2014", "OG 2014"),
+    (nil, "IconStandard", "Yo"), ("Negative", "IconNegative", "Yo!"),
+    ("Original", "IconOriginal", "Just Yo"), ("OG2014", "IconOG2014", "2014"),
     ("Lilac2015", "IconLilac2015", "2015"),
   ]
 

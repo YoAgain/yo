@@ -1,0 +1,109 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.66275,0.42353,0.76863,1.00000",
+          "srgb:0.56078,0.29804,0.67059,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.22353,0.10196,0.29412,1.00000",
+          "srgb:0.10196,0.03922,0.14118,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "Yo",
+      "layers": [
+        {
+          "name": "Yo",
+          "image-name": "Yo.svg",
+          "glass": true,
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,0.80000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,0.95000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-gray:1.00000,0.80000"
+              }
+            }
+          ]
+        }
+      ],
+      "lighting": "individual",
+      "specular": true,
+      "shadow-specializations": [
+        {
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.5
+          }
+        },
+        {
+          "appearance": "dark",
+          "value": {
+            "kind": "layer-color",
+            "opacity": 0.6
+          }
+        }
+      ],
+      "translucency-specializations": [
+        {
+          "value": {
+            "enabled": true,
+            "value": 0.6
+          }
+        },
+        {
+          "appearance": "dark",
+          "value": {
+            "enabled": true,
+            "value": 0.4
+          }
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "iOS"
+    ]
+  }
+}

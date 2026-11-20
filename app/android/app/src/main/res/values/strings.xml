@@ -162,10 +162,10 @@
 <string name="vault_damaged">Damaged vault item</string>
 <string name="sign_in_first">Sign in first</string>
 <string name="photo_unavailable">Photo no longer available</string>
-<string name="icon_negative">Negative Yo</string>
-<string name="icon_original">Full Color</string>
+<string name="icon_negative">Yo!</string>
+<string name="icon_original">Just Yo</string>
 <string name="icon_default">Yo</string>
-<string name="icon_og2014">OG 2014</string>
+<string name="icon_og2014">2014</string>
 <string name="icon_lilac2015">2015</string>
 <string name="with_members">%1$s with %2$s</string>
 <string name="member_added">%1$s added %2$s to %3$s</string>

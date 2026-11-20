@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # actool for the TestFlight build (testflight.yml: ACTOOL=this, REAL_ACTOOL=Xcode's actool). omarchy-apple-dev's
 # compile-app-icon.sh merges actool's partial Info.plist into the app's key by key, so its CFBundleIcons (the primary
-# icon alone) replaces ours and the icons to choose from in Appearance (CFBundleAlternateIcons, loose PNGs at the
-# bundle root) are lost. Alternate icon sets in the asset catalog fail ship.sh's Assets.car check, so the alternates
-# are carried over from the built Info.plist into the partial one here instead, before it is merged.
+# and the alternates compiled from Resources/*.icon, xtool.env's ALTERNATE_APP_ICONS) replaces ours and the other
+# icons to choose from in Appearance (CFBundleAlternateIcons with loose PNGs at the bundle root: OG2014, Lilac2015)
+# are lost. So every alternate of the built Info.plist that actool did not compile is carried over into the partial
+# one here, before it is merged; actool's own entries (CFBundleIconName) win.
 set -euo pipefail
 "${REAL_ACTOOL:?Xcode actool}" "$@"
 bundle= partial=
@@ -21,6 +22,8 @@ built, partial = (plistlib.load(open(p, "rb")) for p in sys.argv[1:])
 for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
     alternates = built.get(key, {}).get("CFBundleAlternateIcons")
     if alternates and key in partial:
-        partial[key].setdefault("CFBundleAlternateIcons", alternates)
+        compiled = partial[key].setdefault("CFBundleAlternateIcons", {})
+        for name, entry in alternates.items():
+            compiled.setdefault(name, entry)
 plistlib.dump(partial, open(sys.argv[2], "wb"))
 PY

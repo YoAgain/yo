@@ -1,0 +1,47 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.66275,0.42353,0.76863,1.00000",
+          "srgb:0.56078,0.29804,0.67059,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.22353,0.10196,0.29412,1.00000",
+          "srgb:0.10196,0.03922,0.14118,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    }
+  ],
+  "groups": [],
+  "supported-platforms": {
+    "squares": [
+      "iOS"
+    ]
+  }
+}
