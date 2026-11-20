@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Yo Dev in the iOS Simulator, on a Mac with Xcode (and XcodeGen, rustup with aarch64-apple-ios-sim):
+# Yo Dev in the iOS Simulator, on a Mac with Xcode (and XcodeGen, protoc, rustup with aarch64-apple-ios-sim):
 #   dev/sim.sh build              the core for the Simulator, then the app and its driver (dev/sim/project.yml)
 #   dev/sim.sh device NAME        a Simulator of that name (iPhone 17 Pro, iOS 26), made once and booted
 #   dev/sim.sh install NAME       the app built last onto it (with YoNotifyProbe)

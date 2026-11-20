@@ -42,6 +42,7 @@ targets:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
       - target: YoNotify
+      - sdk: libsqlite3.tbd  # the core's state (StateDb), as Package.swift links it for YoCore
     settings:
       base:
         # Yo Dev: the dev hub (Hub.isDevApp), with its notification service and Yo Dev's App Group (the Simulator
@@ -60,6 +61,7 @@ targets:
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
+      - sdk: libsqlite3.tbd  # the core's state (StateDb), as Package.swift links it for YoCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.notify
@@ -78,6 +80,7 @@ targets:
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
+      - sdk: libsqlite3.tbd  # the core's state (StateDb), as Package.swift links it for YoCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.probe
