@@ -1055,7 +1055,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .chartw:hover .area > .cfoot { opacity: 1; }
 
 /* The title bar: the Yo logo (live/dev switch) on the left, the range on the right, no box. */
-.ov > .topbar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin: 0 2px -4px; }
+.ov > .topbar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin: 0 2px calc((var(--gap) - 4px) * .1 - 4px); }
 
 /* The third column: two half-height widgets, App (the versions) over Problems; each its chart under its title. The rows
    folded into them (Secured, Platforms, Push, Media, Groups, Speed, Queue, Hub errors) open with them below. */
@@ -1187,7 +1187,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
    new Yo pops as a spark at its "now" end and drifts back into the hour. Transform and opacity only. */
 .ov > .topbar { gap: 14px; }
 .ov > .topbar .range { margin-left: auto; }
-.live { flex: 0 1 300px; min-width: 132px; display: flex; align-items: center; gap: 10px; height: 28px; color: var(--amethyst); }
+.live { flex: 0 1 220px; min-width: 132px; display: flex; align-items: center; gap: 10px; height: 28px; color: var(--amethyst); }
 .live-n { display: flex; align-items: baseline; gap: 3px; font-size: 13px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .live-n span { font-size: 10.5px; font-weight: 700; color: var(--muted); }
 .live-dot { position: relative; align-self: center; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; background: var(--amethyst-soft); box-shadow: 0 0 6px var(--amethyst); }
