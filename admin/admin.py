@@ -559,10 +559,15 @@ def diagnostics_request(hub, data):
 
 
 # The header's live strip (GET /live?hub=): the hub's stream of Yos (Server-Sent Events, one tiny event per Yo, counts
-# only), handed on to the page line by line as it comes, never buffered. Its keep-alive every 15 s keeps the
-# connection (and Cloudflare's) open; a hub silent for longer than LIVE_IDLE is taken as gone.
+# only), handed on to the page line by line as it comes, never buffered nor compressed (no-transform keeps Cloudflare
+# from gzipping it). Its keep-alive every 15 s keeps the connection (and Cloudflare's) open; a hub silent for longer
+# than LIVE_IDLE is taken as gone. A comment never reaches the page's script, so each keep-alive goes on as a "ping"
+# event: the page's watchdog sees the stream alive while no one sends a Yo, and opens it again when the pings stop.
 LIVE_IDLE = 40
-LIVE_HEADERS = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+LIVE_HEADERS = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
+LIVE_PING = b"event: ping\ndata: 1\n"
+# The page's EventSource tries again this soon after a cut (ms), not after its default of a few seconds.
+LIVE_HELLO = b"retry: 2000\n" + LIVE_PING + b"\n"
 
 
 def live_stream(hub: str):
@@ -576,7 +581,7 @@ def live_stream(hub: str):
 def live_relay(source, write) -> None:
     """Every line from the hub to the page at once, until either side goes."""
     for line in iter(source.readline, b""):
-        write(line)
+        write(LIVE_PING if line.startswith(b":") else line)
 
 
 def reserved_names() -> dict:
@@ -802,7 +807,7 @@ class Admin(BaseHTTPRequestHandler):
                     self.wfile.write(line)
                     self.wfile.flush()
                 try:
-                    write(b": hello\n\n")
+                    write(LIVE_HELLO)
                     live_relay(source, write)
                 except OSError:  # the page went (closed, reloaded) or the hub did: the page reconnects on its own
                     pass

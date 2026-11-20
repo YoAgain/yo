@@ -26,7 +26,7 @@ class FakeHub(BaseHTTPRequestHandler):
         self.wfile.write(b'data: {"k":"yo"}\n\n')
         self.wfile.flush()
         FakeHub.seen.wait(5)
-        self.wfile.write(b'data: {"k":"media"}\n\n')
+        self.wfile.write(b':\n\ndata: {"k":"media"}\n\n')  # the hub's keep-alive, then a Yo
 
 
 def serve(server):
@@ -71,18 +71,24 @@ class LiveStreamTests(unittest.TestCase):
                 conn, response = get("/live?hub=live")
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.getheader("Content-Type"), "text/event-stream")
-                self.assertEqual(response.getheader("Cache-Control"), "no-cache")
+                self.assertEqual(response.getheader("Cache-Control"), "no-cache, no-transform")
                 self.assertEqual(response.getheader("X-Accel-Buffering"), "no")
-                lines = []
+                # The hello: a quick retry, and a ping the page's watchdog can see (a comment it could not).
+                self.assertEqual(response.fp.readline(), b"retry: 2000\n")
+                self.assertEqual(response.fp.readline(), b"event: ping\n")
+                lines, pings = [], 0
                 while len(lines) < 1:
                     line = response.fp.readline()
-                    if line.startswith(b"data:"):
+                    if line.startswith(b"data: {"):
                         lines.append(line)
                 FakeHub.seen.set()  # the first Yo came before the hub's answer ended
                 while len(lines) < 2:
                     line = response.fp.readline()
-                    if line.startswith(b"data:"):
+                    self.assertFalse(line.startswith(b":"))  # the keep-alive comes on as a ping event
+                    pings += line == b"event: ping\n"
+                    if line.startswith(b"data: {"):
                         lines.append(line)
+                self.assertEqual(pings, 1)
                 self.assertEqual(lines, [b'data: {"k":"yo"}\n', b'data: {"k":"media"}\n'])
                 self.assertEqual(FakeHub.tokens, ["secret"])
                 conn.close()

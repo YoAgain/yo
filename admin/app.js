@@ -1358,12 +1358,17 @@ if (document.body.classList.contains("login")) {
   // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only), the
   // last ten minutes as bars. Each new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only): a dot
   // leaves the "Yo" logo, arcs over the rate and rains down into the running minute's bar, which then takes it with a
-  // tiny bump. Several at once leave one after another. Without the stream, new Yos come from the minutes' counts,
-  // spread over the refresh. Reduced motion or a hidden page: no dots, the bar at once.
-  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_RETRY = 10000, LIVE_BARS = 10, LIVE_GAP = 170, LIVE_FLY = 1500;
+  // tiny bump. Several at once leave one after another, but none waits longer than LIVE_WAIT: a Yo sent now is seen
+  // now. Without the stream, new Yos come from the minutes' counts, spread over the refresh. Reduced motion or a
+  // hidden page: no dots, the bar at once.
+  // The stream is watched: a Yo or the proxy's ping (every 15 s) keeps it alive; silent for LIVE_DEAD it is taken as
+  // cut (a connection Cloudflare or the network dropped without telling the browser) and opened again, refused it is
+  // tried again sooner, then later (LIVE_RETRY, doubling up to LIVE_RETRY_MAX). While it is away the strip dims.
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_BARS = 10, LIVE_GAP = 170, LIVE_FLY = 1500, LIVE_WAIT = 400;
+  const LIVE_DEAD = 35000, LIVE_RETRY = 2000, LIVE_RETRY_MAX = 30000, LIVE_DIM = 6000;
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
   let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null, liveNext = 0, liveFlying = 0;
-  let liveSource = null, liveOpen = false, liveRetry = null;
+  let liveSource = null, liveOpen = false, liveRetry = null, liveBack = LIVE_RETRY, liveHeard = 0, liveLost = 0;
   const liveStop = () => {
     liveTimers.forEach(clearTimeout);
     liveTimers = [];
@@ -1409,7 +1414,7 @@ if (document.body.classList.contains("login")) {
   const liveSpark = (land = () => {}) => {
     const lane = $("live-lane");
     if (calm.matches || document.visibilityState !== "visible" || lane.childElementCount + liveTimers.length > LIVE_CAP) return land();
-    const now = performance.now(), at = Math.max(now, liveNext);
+    const now = performance.now(), at = Math.max(now, Math.min(liveNext, now + LIVE_WAIT));
     liveNext = at + LIVE_GAP * (0.8 + Math.random() * 0.4);
     liveLater(Math.round(at - now), () => liveFly(() => { land(); liveBump(); }));
   };
@@ -1427,7 +1432,7 @@ if (document.body.classList.contains("login")) {
     const rate = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
     set("live-n", rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1).replace(/\.0$/, ""));
     const hour = m.reduce((a, b) => a + b, 0);
-    box.title = `${num(hour)} Yos in the last hour · ${num(m[n - 1])} this minute (bots left out)`;
+    box.title = `${num(hour)} Yos in the last hour · ${num(m[n - 1])} this minute (bots left out)${box.dataset.state ? ` · ${box.dataset.state}` : ""}`;
     box.setAttribute("aria-label", `${rate.toFixed(1)} Yos per minute, ${hour} in the last hour`);
     // The last ten minutes as bars like Problems', the running minute (bright) at the right.
     $("live-spark").replaceChildren(...bars(m.slice(-LIVE_BARS), LIVE_BARS * 10, 24));
@@ -1450,6 +1455,15 @@ if (document.body.classList.contains("login")) {
     fresh = Math.min(LIVE_CAP, fresh);
     for (let i = 0; i < fresh; i++) liveLater(Math.round(((i + Math.random()) / fresh) * LIVE_SPREAD), () => liveSpark());
   };
+  // The strip dims (a quiet "reconnecting" in its tip) while the stream of a visible page is away.
+  const liveState = () => {
+    const box = $("live"), away = document.visibilityState === "visible" && typeof EventSource !== "undefined" &&
+      !liveOpen && liveLost && Date.now() - liveLost > LIVE_DIM;
+    if (box.classList.contains("away") === !!away) return;
+    box.classList.toggle("away", !!away);
+    box.dataset.state = away ? "live feed reconnecting…" : "";
+    if (liveData) paintLive();
+  };
   const liveClose = () => {
     clearTimeout(liveRetry);
     liveRetry = null;
@@ -1457,16 +1471,31 @@ if (document.body.classList.contains("login")) {
     liveSource = null;
     liveOpen = false;
   };
-  // The stream of the hub shown, while the page is: the browser reconnects on its own after a cut; refused (signed
-  // out, the hub away), it is tried again after a while, the minutes' counts meanwhile.
+  const liveDown = () => {
+    if (liveOpen || !liveLost) liveLost = Date.now();
+    liveOpen = false;
+  };
+  // The stream of the hub shown, while the page is visible; the minutes' counts meanwhile.
   const liveConnect = () => {
     liveClose();
     if (document.visibilityState !== "visible" || typeof EventSource === "undefined") return;
     const hub = which, source = new EventSource(`/live?hub=${hub}`);
     liveSource = source;
-    source.onopen = () => { liveOpen = true; };
+    liveHeard = Date.now();
+    const mine = () => hub === which && source === liveSource;
+    source.onopen = () => {
+      if (!mine()) return;
+      liveOpen = true;
+      liveLost = 0;
+      liveBack = LIVE_RETRY;
+      liveHeard = Date.now();
+      liveState();
+    };
+    source.addEventListener("ping", () => { if (mine()) liveHeard = Date.now(); });
     source.onmessage = () => {
-      if (hub !== which || source !== liveSource) return;
+      if (!mine()) return;
+      liveHeard = Date.now();
+      liveOpen = true;
       liveAdd++;
       if (!liveData) return;
       // Counted on landing: the bar grows by one as each dot comes down.
@@ -1474,16 +1503,33 @@ if (document.body.classList.contains("login")) {
       liveSpark(() => { liveFlying = Math.max(0, liveFlying - 1); paintLive(); });
     };
     source.onerror = () => {
-      liveOpen = false;
-      if (source.readyState === EventSource.CLOSED && source === liveSource) {
+      if (!mine()) return;
+      liveDown();
+      // Refused (signed out, the hub away, a Cloudflare error page): the browser gives up, so try again, later each time.
+      if (source.readyState === EventSource.CLOSED) {
         liveSource = null;
-        liveRetry = setTimeout(liveConnect, LIVE_RETRY);
+        liveRetry = setTimeout(liveConnect, liveBack);
+        liveBack = Math.min(LIVE_RETRY_MAX, liveBack * 2);
       }
+      liveState();
     };
   };
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible") { liveStop(); liveClose(); } else liveConnect();
-  });
+  // The watchdog: a stream silent too long (neither Yo nor ping) is cut and opened again.
+  setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    if (liveSource && Date.now() - liveHeard > LIVE_DEAD) { liveDown(); liveConnect(); }
+    else if (!liveSource && !liveRetry) liveConnect();
+    liveState();
+  }, 5000);
+  // Back on the page (another tab, back from the cache, the network again): a fresh stream; the bars come from
+  // refresh. Wall-clock times: a laptop's sleep counts as silence.
+  const liveWake = () => {
+    if (document.visibilityState !== "visible") { liveStop(); liveClose(); liveLost = 0; liveState(); return; }
+    if (!liveOpen || Date.now() - liveHeard > LIVE_DEAD) { liveBack = LIVE_RETRY; liveConnect(); }
+  };
+  document.addEventListener("visibilitychange", liveWake);
+  addEventListener("pageshow", (e) => { if (e.persisted) liveWake(); });
+  addEventListener("online", () => { liveBack = LIVE_RETRY; liveConnect(); });
   calm.addEventListener?.("change", () => { if (calm.matches) liveStop(); });
   liveConnect();
 

@@ -537,6 +537,28 @@ def loopback(host: str) -> bool:
         return host == "localhost"
 
 
+class FakeLive:
+    """The hub's live stream (/v1/admin/live) as the admin reads it: a Yo every `every` seconds or so (now and then a
+    photo), the hub's keep-alive comment after 15 s without one."""
+
+    def __init__(self, rng: random.Random, every: float):
+        self.rng, self.every, self.lines = rng, every, []
+
+    def readline(self) -> bytes:
+        if not self.lines:
+            wait = self.rng.expovariate(1 / self.every)
+            time.sleep(min(wait, 15))
+            kind = "media" if self.rng.random() < 0.15 else "yo"
+            self.lines = [b":\n", b"\n"] if wait >= 15 else [f'data: {{"k":"{kind}"}}\n'.encode(), b"\n"]
+        return self.lines.pop(0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--demo", action="store_true", help="required: serve without Access or login, fake data only")
@@ -694,6 +716,7 @@ def main():
     admin.reserved_request = hubs.reserved
     admin.diagnostics_request = hubs.diagnostics
     admin.stats = lambda: server.stats(admin.reserved_names())
+    admin.live_stream = lambda hub: FakeLive(rng, 3 if hub == "live" else 40)
     # No Access and no login: everyone who reaches 127.0.0.1 is "demo". POSTs only from this page's own origin.
     origins = {f"http://{args.host}:{args.port}", f"http://localhost:{args.port}", f"http://127.0.0.1:{args.port}"}
     if args.lan:  # every address of this machine on the port

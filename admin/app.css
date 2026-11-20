@@ -1199,6 +1199,9 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .live-strip .b:last-of-type { fill: var(--amethyst-soft); opacity: 1; filter: drop-shadow(0 0 3px var(--amethyst)); }
 .live-strip .b.zero { fill: var(--line); opacity: 1; filter: none; }
 .live-lane { position: absolute; inset: 0; pointer-events: none; }
+/* The stream away (cut, reconnecting): the strip dims a little, the counts still come from the refresh. */
+#live { transition: opacity .6s; }
+#live.away { opacity: .45; }
 .yo-spark { position: absolute; left: 0; top: 0; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: #fff;
   box-shadow: 0 0 0 1px var(--amethyst-soft), 0 0 7px 1.5px var(--amethyst); opacity: 0; will-change: transform, opacity; }
 @media (max-width: 420px) { .ov > .topbar { gap: 10px; } .live { gap: 7px; } .live-strip { width: 90px; } }
