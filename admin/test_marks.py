@@ -167,7 +167,9 @@ class UsersTabCollectorTests(unittest.TestCase):
             self.assertEqual(e["group-create"]["days"], [0] * 11 + [1, 0, 0])
             media = [0] * 365
             media[-21] = 9  # 20 days ago: in the year, not in the 14 days
-            self.assertEqual(e["media-in"], {"hours": [0] * 24, "days": [0] * 14, "today": 0, "total": 9, "year": media})
+            self.assertEqual(e["media-in"], {"hours": [0] * 24, "days": [0] * 14, "today": 0, "minutes": [0] * 60, "total": 9, "year": media})
+            self.assertEqual(len(e["yo-in"]["minutes"]), 60)
+            self.assertEqual(e["yo-in"]["minutes"][-1], 3)  # the current minute last
             self.assertEqual(len(e["yo-in-bot"]["year"]), 365)
             # The bytes uploaded, kept for good like the counts: the Media row's hours, days and total.
             self.assertEqual(e["media-in-bytes"]["hours"][-1], 3_000_000)

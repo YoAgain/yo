@@ -154,9 +154,9 @@ if (document.body.classList.contains("login")) {
   showHub();
   $("hub-word").addEventListener("click", switchHub);
   const setRange = (r) => {
-    if (r === range) return;
-    range = r;
-    try { localStorage.setItem("range", String(range)); } catch {}
+    if (r === rangeKey) return;
+    rangeKey = r; hourView = r === -1; range = hourView ? 1 : r;
+    try { localStorage.setItem("range", String(rangeKey)); } catch {}
     drawRange();
     if (last) render();
   };
@@ -354,9 +354,18 @@ if (document.body.classList.contains("login")) {
   };
   // The one range of Usage and Attention (1, 7 or 30 days, or 0: since the start), kept in this browser; the switch
   // next to the logo.
-  const RANGES = [1, 7, 30, 0];
-  let range = 7;
-  try { const r = localStorage.getItem("range"); if (r !== null && RANGES.includes(+r)) range = +r; } catch {}
+  // 1H (-1) is 1D plus the last hour in five-minute bars wherever the hub counts per minute (the events); the other
+  // charts keep their 1D view, so `range` is 1 then and `hourView` says to use the minutes.
+  const RANGES = [-1, 1, 7, 30, 0];
+  let rangeKey = 7, range = 7, hourView = false;
+  try { const r = localStorage.getItem("range"); if (r !== null && RANGES.includes(+r)) { rangeKey = +r; hourView = rangeKey === -1; range = hourView ? 1 : rangeKey; } } catch {}
+  // An event kind's last hour as twelve five-minute counts (null without minutes); names are the slots' end clocks.
+  const minuteSlots = (k) => {
+    const m = hubNow?.events?.[k]?.minutes;
+    if (!hourView || !Array.isArray(m) || m.length < 60) return null;
+    const end = Math.floor(Date.now() / 60000) * 60000 + 60000;  // the running minute's end; five minutes each, newest last
+    return { values: Array.from({ length: 12 }, (_, b) => m.slice(b * 5, b * 5 + 5).reduce((n, v) => n + (v || 0), 0)), names: Array.from({ length: 12 }, (_, b) => clock(end - (11 - b) * 300000)) };
+  };
   const today0 = () => Math.floor(Date.now() / 86400000);
   // A list of the last days' values (today last) as a map by UTC day.
   const year = (arr) => (Array.isArray(arr) ? new Map(arr.map((v, i) => [today0() - arr.length + 1 + i, v])) : new Map());
@@ -364,9 +373,18 @@ if (document.body.classList.contains("login")) {
   // year). out: a second count for the hover. bad: more is worse (Attention: red bars, a rise in red).
   // hours: the last 24 hours (the current one last) for the 1-day range: a bar per four hours, the total of those 24 hours;
   // a row without hours (the hub keeps errors per day only) shows today's count and no bars.
-  const rangeRow = (key, perDay, word, tip, out, bad, hours, outHours, total) => {
+  const rangeRow = (key, perDay, word, tip, out, bad, hours, outHours, total, minutes) => {
     // No bars where there is nothing to draw (a row kept per day only, over the last 24 hours).
     $(`${key}-spark`).toggleAttribute("hidden", range === 1 && !Array.isArray(hours));
+    if (hourView && minutes) {
+      const ms = minuteSlots(minutes);
+      if (ms) {
+        $(`${key}-spark`).removeAttribute("hidden");
+        spark(key, ms.values.reduce((n, v) => n + v, 0), ms.values, ms.names, (i, v) => `${(FMT[key] || num)(v)}${word ? ` ${word}` : ""}`, `${tip} · last hour, five minutes each`);
+        $(`c-${key}`).classList.toggle("bad-up", !!bad);
+        return;
+      }
+    }
     if (range === 1) {
       // Six blocks of four hours, the current one last.
       const h0 = Math.floor(Date.now() / 3600000) - 23, has = Array.isArray(hours);
@@ -482,9 +500,11 @@ if (document.body.classList.contains("login")) {
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; a click opens their detail.
   const areaData = {};
-  const runningTotal = (perDay, hours, total) => {
+  const runningTotal = (perDay, hours, total, kind) => {
     let names, incs;
-    if (range === 1) {
+    const ms = kind && minuteSlots(kind);
+    if (ms) { names = ms.names; incs = ms.values; }
+    else if (range === 1) {
       const h0 = Math.floor(Date.now() / 3600000) - 23;
       names = Array.from({ length: 24 }, (_, i) => clock((h0 + i + 1) * 3600000));
       incs = Array.isArray(hours) ? hours.slice(-24).map((v) => v || 0) : Array(24).fill(0);
@@ -497,7 +517,7 @@ if (document.body.classList.contains("login")) {
     }
     const values = []; let v = total;
     for (let i = incs.length - 1; i >= 0; i--) { values[i] = v; v -= incs[i]; }
-    return { names, incs, values: [Math.max(0, v), ...values], labels: [range === 1 ? "24 hours ago" : "before", ...names] };
+    return { names, incs, values: [Math.max(0, v), ...values], labels: [ms ? "1 hour ago" : range === 1 ? "24 hours ago" : "before", ...names] };
   };
   // The hover popup of every chart: the slot under the pointer with its values (text "slot · value · value"; the first
   // line bold), beside the pointer; mark(i) highlights that slot in the chart (-1 when the pointer leaves).
@@ -605,7 +625,7 @@ if (document.body.classList.contains("login")) {
     node.setAttribute("viewBox", `0 0 ${W} ${H}`);
     if (combo) {
       const hv = areaHover[key] ?? -1;
-      paintCombo(node, { line: d.values, bars: d.incs, pick: hv, hover: hv, from: range === 1 ? "24 hours ago" : d.names[0], to: range === 1 ? "now" : d.names[d.names.length - 1] });
+      paintCombo(node, { line: d.values, bars: d.incs, pick: hv, hover: hv, from: d.labels?.[0] === "1 hour ago" ? "1 hour ago" : range === 1 ? "24 hours ago" : d.names[0], to: range === 1 ? "now" : d.names[d.names.length - 1] });
       return;
     }
     // No numbers in the plot: the total is the title's, the time is on the axis under the bars.
@@ -616,7 +636,7 @@ if (document.body.classList.contains("login")) {
   // Each curve's legend, under it: what its two lines are.
   const LEGEND = { yc: [["Total", "l-main"], ["Sent", "l-bar"]], uc: [["Total", "l-main"], ["Sign-ups", "l-bar"]] };
   const areaTips = {}, areaHover = {};
-  const areaChart = (key, total, perDay, hours, today) => {
+  const areaChart = (key, total, perDay, hours, today, kind) => {
     set(`${key}-n`, num(total));
     if (!areaTips[key] && $(`${key}-svg`)) {
       areaTips[key] = true;
@@ -628,7 +648,7 @@ if (document.body.classList.contains("login")) {
           { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) }] } : "";
       }, (i) => { areaHover[key] = i; drawArea(key); });
     }
-    areaData[key] = { ...runningTotal(perDay, hours, total || 0), overlay: OVERLAY[key] || null, word: WORD[key] };
+    areaData[key] = { ...runningTotal(perDay, hours, total || 0, kind), overlay: OVERLAY[key] || null, word: WORD[key] };
     drawArea(key);
     // Under the chart, its activity as bars: per hour (1 day), per day (7, 30), per stretch of days (Total).
     const st = $(`${key}-strip`), inc = areaData[key].incs, top = Math.max(1, ...inc), sl = 140 / inc.length;
@@ -689,7 +709,8 @@ if (document.body.classList.contains("login")) {
   const charts = ["yc", "uc"];
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => charts.forEach(drawArea)); charts.forEach((k) => ro.observe($(`${k}-area`))); }
   const drawRange = () => {
-    for (const b of $("range").querySelectorAll("button[data-r]")) { b.classList.toggle("on", +b.dataset.r === range); b.setAttribute("aria-pressed", String(+b.dataset.r === range)); }
+    for (const b of $("range").querySelectorAll("button[data-r]")) { b.classList.toggle("on", +b.dataset.r === rangeKey); b.setAttribute("aria-pressed", String(+b.dataset.r === rangeKey)); }
+    $("range").classList.toggle("hourly", hourView);
   };
   const last24 = (v) => (Array.isArray(v) ? v.slice(-24) : Array(24).fill(null));
   const last14 = (v) => (Array.isArray(v) ? v.slice(-14) : Array(14).fill(null));
@@ -817,15 +838,15 @@ if (document.body.classList.contains("login")) {
       const ev = h.events, ym = (k) => year(ev?.[k]?.year), yh = (k) => ev?.[k]?.hours, yt = (k) => ev?.[k]?.total;
       // Media: the volume uploaded (the hub's media-in-bytes, per hour and day, kept for good); the count is the
       // second line of the Yos chart.
-      rangeRow("md", ym("media-in-bytes"), "", "Media: photos and videos uploaded", null, false, yh("media-in-bytes"), null, yt("media-in-bytes"));
+      rangeRow("md", ym("media-in-bytes"), "", "Media: photos and videos uploaded", null, false, yh("media-in-bytes"), null, yt("media-in-bytes"), "media-in-bytes");
       // Media's running total over Yos on its own scale; in the hover with its share of Yos.
       const mdTotal = yt("media-in") ?? 0, md = runningTotal(ym("media-in"), yh("media-in"), mdTotal);
       seriesChart("ym", { values: md.values, labels: md.labels, word: "media", share: true },
         null);
-      rangeRow("gr", ym("group-create"), "made", "Groups: made", null, false, yh("group-create"), null, yt("group-create"));
+      rangeRow("gr", ym("group-create"), "made", "Groups: made", null, false, yh("group-create"), null, yt("group-create"), "group-create");
       part(() => healthRows(h, ym, yh));
       // Running totals: Yos into users' inboxes (a bot's inbox apart), accounts without bots.
-      areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"), ev?.["yo-in"]?.today ?? 0);
+      areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"), ev?.["yo-in"]?.today ?? 0, "yo-in");
       const sud = new Map(h.signup_days || []);
       areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, sud.get(today0()) ?? 0);
       const dn14 = days14().map(dayName);
@@ -2043,7 +2064,7 @@ if (document.body.classList.contains("login")) {
     return [liveChart({ line: vals, from: dayName(ds[0]), to: "today" }, "", foot, (i) => `${dayName(ds[i])} · ${vals[i] == null ? "–" : vals[i].toFixed(1)}`), foot];
   };
   const shareBar = (f, cls) => { const b = el("span", "hc-pbar dbar"), x = el("span", cls || "current"); x.style.width = `${Math.max(0, Math.min(1, f || 0)) * 100}%`; b.append(x); return b; };
-  const spanWord = () => (range === 1 ? "last 24 hours" : range ? `last ${range} days` : "since the start");
+  const spanWord = () => (hourView ? "last hour (where counted per minute)" : range === 1 ? "last 24 hours" : range ? `last ${range} days` : "since the start");
   // A count kept per day (and per hour for the last 24) over the range: an hour each (1), a day each (7, 30), up to 12
   // stretches (Total).
   const perSlot = (perDay, hours) => {
@@ -2051,7 +2072,7 @@ if (document.body.classList.contains("login")) {
     const slots = rangeSlots(perDay);
     return { names: slots.map(([n]) => n), values: slots.map((s) => slotSum(s, perDay, hours)) };
   };
-  const evSlots = (k) => perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours);
+  const evSlots = (k) => minuteSlots(k) || perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours);
   const sumOf = (d) => d.values.reduce((a, v) => a + (v || 0), 0);
   // Users seen in the range: today (1), 7 days (7), 30 days (30, Total).
   const activeIn = () => (range === 1 ? hubNow?.active_day : range === 7 ? hubNow?.active_users : hubNow?.active_month) ?? 0;
@@ -2487,7 +2508,7 @@ if (document.body.classList.contains("login")) {
   // Keys: 0 switches the hub; 1, 2, 3, 4 the range (1 day, 7 days, 30 days, since the start).
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
-    const n = /^Digit[0-4]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-4]$/.test(e.key) ? Number(e.key) : null;
+    const n = /^Digit[0-5]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-5]$/.test(e.key) ? Number(e.key) : null;
     if (n == null) return;
     e.preventDefault();
     if (n === 0) { switchHub(); return; }

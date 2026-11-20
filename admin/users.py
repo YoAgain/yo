@@ -154,6 +154,12 @@ def events(db, now: int) -> dict:
     for kind, h, n in db.execute("SELECT kind, minute / 60, sum(n) FROM events WHERE minute >= ? GROUP BY 1, 2",
                                  ((day - 13) * 24 * 60,)):
         by_hour.setdefault(kind, {})[h] = n
+    # The last 60 minutes per kind (the current minute last): the page's 1H view.
+    minute = now // 60000
+    by_minute = {}
+    for kind, m, n in db.execute("SELECT kind, minute, sum(n) FROM events WHERE minute > ? AND minute <= ? GROUP BY 1, 2",
+                                 (minute - 60, minute)):
+        by_minute.setdefault(kind, {})[m] = n
     totals = dict(db.execute("SELECT kind, sum(n) FROM events GROUP BY 1").fetchall())
     by_day = {}
     for kind, d, n in db.execute("SELECT kind, minute / 1440, sum(n) FROM events WHERE minute >= ? GROUP BY 1, 2",
@@ -165,7 +171,7 @@ def events(db, now: int) -> dict:
     for kind in EVENT_KINDS + tuple(bots):
         hours = by_hour.get(kind, {})
         days = [sum(n for h, n in hours.items() if h // 24 == d) for d in range(day - 13, day + 1)]
-        out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1],
+        out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1], "minutes": [by_minute.get(kind, {}).get(m, 0) for m in range(minute - 59, minute + 1)],
                      "total": totals.get(kind, 0), "year": [by_day.get(kind, {}).get(d, 0) for d in range(day - 364, day + 1)]}
     return out
 
