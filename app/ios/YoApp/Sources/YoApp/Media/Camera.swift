@@ -258,7 +258,18 @@ final class Camera: NSObject, @unchecked Sendable {
   private func allowHaptics() {
     let audio = AVAudioSession.sharedInstance()
     guard !audio.allowHapticsAndSystemSoundsDuringRecording else { return }
-    _ = Diagnostics.attempt { try audio.setAllowHapticsAndSystemSoundsDuringRecording(true) }
+    do { try audio.setAllowHapticsAndSystemSoundsDuringRecording(true) }
+    catch {
+      // The media services reset or the session ended under it (iOS's, said again at the next start): counted only.
+      let code = (error as NSError).code
+      let passing = [AVAudioSession.ErrorCode.mediaServicesFailed, .expiredSession].map(\.rawValue).contains(code)
+      if passing {
+        CountedErrors.record(domain: (error as NSError).domain, place: "Camera.allowHaptics", code: String(code),
+          expected: true)
+      } else {
+        Diagnostics.record(error)
+      }
+    }
   }
 
   /// Nil when none was recording or it failed.

@@ -186,14 +186,21 @@ final class HubTransport: HttpTransport {
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
     // Only what names nobody goes anonymous (yo_wire::api::anonymous, spec 1).
     let anonymous = !signed && anonymousRequest(method: method, path: path)
+    let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+    let longPoll = method == "GET" && path.hasPrefix("/v1/inbox?wait=")
+    let access = anonymous && route.hasPrefix("/v1/blobs/") && (method == "GET" || method == "DELETE")
+      ? nil : SharedAccess.current
+    // Under the turn the other process waits for this one (SharedAccess.requestBudget); the inbox's wait never runs
+    // in it.
+    if let access, !longPoll || path == "/v1/inbox?wait=0" {
+      request.timeoutInterval = access.requestTimeout(timeout)
+    }
     let task = (anonymous ? Self.anonymousSession : Self.signedSession).dataTask(with: request)
     let diagnosticUpload = path == "/v1/help/error" || path == "/v1/help/crash"
     // Only static route components: never account, blob, group or username path values.
     let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
     // Expected, never reported: our own cancels (too large is reported as 413), the long poll cut off, a username
     // checked while typed, no storage yet.
-    let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
-    let longPoll = method == "GET" && path.hasPrefix("/v1/inbox?wait=")
     let quietErrors: Set<Int> = longPoll
       ? [NSURLErrorCancelled, NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost] : [NSURLErrorCancelled]
     let quietStatus: Set<UInt16> =
@@ -207,6 +214,8 @@ final class HubTransport: HttpTransport {
     if method == "POST", route == "/v1/lookup" || route == "/v1/group-credential" { expectedStatus.insert(404) }
     // No backup behind the passkey or key chosen: shown as such (AccountError.noBackup).
     if method == "GET", route.hasPrefix("/v1/backup/") { expectedStatus.insert(404) }
+    // A photo or video no longer there (its fetches used, or past its days): the core says unavailable, shown so.
+    if method == "GET" || method == "DELETE", route.hasPrefix("/v1/blobs/") { expectedStatus.insert(404) }
     // A name too short (400) or taken (409) at sign-up: the person is told and picks another.
     if method == "POST", route == "/v1/register" { expectedStatus.formUnion([400, 409]) }
     // A conflict the core takes in and goes on from: the storage another write moved on (merged, written again), a
@@ -231,8 +240,6 @@ final class HubTransport: HttpTransport {
       }
       done.signal()
     }
-    let access = anonymous && path.hasPrefix("/v1/blobs/") && (method == "GET" || method == "DELETE")
-      ? nil : SharedAccess.current
     if longPoll { Self.polls.withLock { $0.append(task) } }
     do {
       if let access { try access.start(task) }

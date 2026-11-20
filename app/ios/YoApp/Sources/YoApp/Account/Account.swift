@@ -360,27 +360,40 @@ final class AccountStore {
 
   private enum Unopened: Error { case notNow, gone }
 
+  nonisolated private static func openShared(_ transport: HubTransport) throws -> (YoClient, Data) {
+    try Perf.timed("launch.core.open") { () throws -> (YoClient, Data) in
+      if SharedStateFile.app {
+        // Shared with the extensions: opened without the turn; each step that may write takes it (SharedState.swift).
+        guard let key = try StateKey.shared() else { throw Unopened.gone }
+        let db = try SharedStateFile.database()
+        guard try db.hasState() else { throw Unopened.gone }
+        let client = try YoClient.openDb(
+          transport: transport, db: db, stateKey: key, guest: false, lock: SharedStateFile())
+        Hub.pin(client)
+        return (client, client.accountSecret())
+      }
+      guard StateFile.exists, let key = try StateKey.load() else { throw Unopened.gone }
+      let db = try StateFile.database()
+      guard try db.hasState() else { throw Unopened.gone }
+      let client = try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil)
+      Hub.pin(client)
+      return (client, client.accountSecret())
+    }
+  }
+
   private func openOnce() async throws {
     let userID = account?.userID
     let transport = Hub.transport
-    let (client, secret) = try await Hub.run { () throws -> (YoClient, Data) in
-      try Perf.timed("launch.core.open") { () throws -> (YoClient, Data) in
-        if SharedStateFile.app {
-          // Shared with the extensions: opened without the turn; each step that may write takes it (SharedState.swift).
-          guard let key = try StateKey.shared() else { throw Unopened.gone }
-          let db = try SharedStateFile.database()
-          guard try db.hasState() else { throw Unopened.gone }
-          let client = try YoClient.openDb(
-            transport: transport, db: db, stateKey: key, guest: false, lock: SharedStateFile())
-          Hub.pin(client)
-          return (client, client.accountSecret())
-        }
-        guard StateFile.exists, let key = try StateKey.load() else { throw Unopened.gone }
-        let db = try StateFile.database()
-        guard try db.hasState() else { throw Unopened.gone }
-        let client = try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil)
-        Hub.pin(client)
-        return (client, client.accountSecret())
+    // No state or key under a known account (an app put back, an iCloud Keychain account on a new phone): `open`
+    // tries three times and then signs in again, as the person is shown; counted as expected, not a problem.
+    let (client, secret) = try await Hub.run(reportErrors: false) { () throws -> (YoClient, Data) in
+      do { return try Self.openShared(transport) }
+      catch Unopened.gone {
+        CountedErrors.record(domain: "AccountStore.Unopened", place: "Account.openOnce", code: "gone", expected: true)
+        throw Unopened.gone
+      } catch {
+        Diagnostics.recordUnreported(error)
+        throw error
       }
     }
     guard self.client == nil, account != nil, account?.userID == userID else { return }
@@ -1001,7 +1014,7 @@ final class AccountStore {
   func signOut() {
     guard !updating else { return }
     if let id = account?.userID { SyncedAccount.markSignedOut(id) }
-    reset(fullLocalReset: true)
+    reset(fullLocalReset: true, signedOut: true)
   }
 
   func replaced(_ client: YoClient) {
@@ -1010,10 +1023,14 @@ final class AccountStore {
   }
 
   /// This phone forgets the account (the hub keeps the backup; the iCloud Keychain keeps it for the phone that has it).
-  func reset(fullLocalReset: Bool = false) {
+  /// `signedOut`: this phone's device stays the account's at the hub, so the hub is told to stop waking the phone for
+  /// it (as Android's sign-out); else each of its Yos showed "You may have received a Yo" here.
+  func reset(fullLocalReset: Bool = false, signedOut: Bool = false) {
     Diagnostics.clear()
     if let id = account?.userID { SyncedAccount.left = id; Push.shared.forget(id) }
     let old = client
+    // Started first, so it has the turn before the state goes below (it fails quietly if not).
+    if signedOut, let old { Task.detached(priority: .userInitiated) { _ = try? old.setPush(platform: 0, token: "") } }
     account = nil
     client = nil
     secret = nil

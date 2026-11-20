@@ -20,9 +20,15 @@ final class SharedAccess: @unchecked Sendable {
   static func resetContention() {
     contentionGate.withLock { blockedSince.removeAll() }
   }
-  private static func log(_ reason: String, _ code: Int32, report: Bool = true, file: String = #fileID, line: Int = #line, place: String = #function) {
+  /// `expected`: counted, marked so the admin page leaves it out (iOS took the time back, not a fault of the turn).
+  private static func log(_ reason: String, _ code: Int32, report: Bool = true, expected: Bool = false,
+    file: String = #fileID, line: Int = #line, place: String = #function) {
     #if os(iOS)
-    if report { Diagnostics.record(NSError(domain: "SharedAccess", code: Int(code)), place: place, file: file, line: line) }
+    if expected {
+      CountedErrors.record(domain: "SharedAccess", place: "\(file):\(line) \(place)", code: String(code), expected: true)
+    } else if report {
+      Diagnostics.record(NSError(domain: "SharedAccess", code: Int(code)), place: place, file: file, line: line)
+    }
     #endif
     #if canImport(os)
     Logger(subsystem: "app.justyo", category: "shared-lock").error("\(reason, privacy: .public); errno=\(code, privacy: .public)")
@@ -67,8 +73,15 @@ final class SharedAccess: @unchecked Sendable {
     }
   }
 
+  /// How long the requests of one turn may stand idle in all. The notification service waits 10 s for the turn
+  /// (`NotificationService.lockWait`), the app as long: a request on a dead connection (after a suspension, a network
+  /// change) waited out its full timeout (70 s in the app) under the turn, and the other process gave up (SharedAccess
+  /// 35, the push shown unread, YoSend "open busy"). Cut off, it fails as the network's and goes in a later turn.
+  static let requestBudget: TimeInterval = 6
+
   private let gate = NSLock()
   private let lifetime = SharedAccess.lifetime
+  private var began = ProcessInfo.processInfo.systemUptime
   private let valid: @Sendable () -> Bool
   private let fd: Int32
   private var revoked = false
@@ -77,6 +90,13 @@ final class SharedAccess: @unchecked Sendable {
   var expired: Bool { gate.withLock { revoked } }
   /// Still this process's turn: not taken back, its lock generation current.
   var holds: Bool { gate.withLock { !revoked && valid() } }
+
+  /// The timeout for a request started in this turn: what is left of `requestBudget`, at least a second, at most
+  /// `wanted`.
+  func requestTimeout(_ wanted: TimeInterval) -> TimeInterval {
+    let left = gate.withLock { began } + Self.requestBudget - ProcessInfo.processInfo.systemUptime
+    return min(wanted, max(1, left))
+  }
 
   private init(fd: Int32, valid: @escaping @Sendable () -> Bool) { self.fd = fd; self.valid = valid }
 
@@ -118,6 +138,7 @@ final class SharedAccess: @unchecked Sendable {
       if result == 0 {
         _ = contentionGate.withLock { blockedSince.removeValue(forKey: url.path) }
         guard valid() else { log("lock generation retired", ECANCELED); turn.finish(); return nil }
+        turn.gate.withLock { turn.began = ProcessInfo.processInfo.systemUptime }
         break
       }
       if code == EWOULDBLOCK {
@@ -137,7 +158,8 @@ final class SharedAccess: @unchecked Sendable {
         }
       }
       guard !turn.expired, ProcessInfo.processInfo.systemUptime < deadline, code == EWOULDBLOCK || code == EINTR else {
-        log("lock acquisition failed or timed out", code)
+        // Taken back while waiting (ECANCELED): the background time ended, or the extension's request did.
+        log("lock acquisition failed or timed out", code, expected: code == ECANCELED)
         turn.finish()
         return nil
       }

@@ -56,6 +56,11 @@ precondition(SharedAccess.current == nil)
 let recovered = SharedAccess.take(url)!
 let recoveredValue = try recovered.perform { 42 }
 precondition(recoveredValue == 42)
+// Its requests share one short budget, so the other process waiting for the turn is not kept past its wait by a
+// request on a dead connection; a shorter timeout asked for stays.
+precondition(recovered.requestTimeout(70) <= SharedAccess.requestBudget)
+precondition(recovered.requestTimeout(70) > SharedAccess.requestBudget - 1)
+precondition(recovered.requestTimeout(2) == 2)
 recovered.finish()
 
 // Expiry waits for an atomic disk operation, but never waits for the rest of the core's turn.
@@ -131,4 +136,4 @@ session.invalidateAndCancel()
 SharedAccess.hold = { expire in expire(); return {} }
 precondition(SharedAccess.take(url) == nil, "expiry while beginning a task never takes the flock")
 precondition(isFree())
-print("Shared access: refused time, expiry, disk fencing, request cancellation, extension reuse and contention passed")
+print("Shared access: refused time, expiry, request budget, disk fencing, request cancellation, extension reuse and contention passed")

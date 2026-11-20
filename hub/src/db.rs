@@ -259,6 +259,20 @@ fn prekey(tx: &Transaction<'_>, device: &[u8], kind: i64, take: bool) -> rusqlit
     Ok(found.map(|(id, key, signature)| api::SignedPrekey { id, key: key.into(), signature: signature.into() }))
 }
 
+/// A push token is one app on one phone: another device still holding it (an account signed out of the phone or left
+/// for another one there) is woken with it no more. Else its Yos woke the phone's next account, or none ("You may have
+/// received a Yo" for an account the phone no longer has: NotificationFallback noAccount).
+fn release_push_token(tx: &Transaction<'_>, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<()> {
+    if !token.is_empty() {
+        tx.prepare_cached(
+            "UPDATE devices SET push_platform = 0, push_token = x''
+             WHERE push_platform = ?2 AND push_token = ?3 AND id != ?1",
+        )?
+        .execute(params![device, platform, token])?;
+    }
+    Ok(())
+}
+
 /// Removes a user's devices with their prekeys and envelopes. Their own requests answer 410 from then on.
 fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     tx.execute(
@@ -597,6 +611,7 @@ impl Db {
                     number
                 ],
             )?;
+            release_push_token(tx, &device.device_id, device.push_platform, &device.push_token)?;
             insert_prekeys(tx, &device.device_id, prekeys, most)?;
             let username = username_of(tx, &user)?;
             Ok(Write::Done((user, username, number)))
@@ -1269,13 +1284,20 @@ impl Db {
             .query_row(params![device, ONE_TIME, KYBER], |row| row.get(0))
     }
 
-    /// Sets a device's push token; refused for a device replaced since it authenticated.
+    /// Sets a device's push token, taken from any other device that held it; refused for a device replaced since it
+    /// authenticated.
     pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<Write<()>> {
-        let changed = self.one_changed(
-            "UPDATE devices SET push_platform = ?2, push_token = ?3 WHERE id = ?1",
-            params![device, platform, token],
-        )?;
-        Ok(if changed { Write::Done(()) } else { Write::Refused(Conflict::DeviceGone) })
+        self.write(|tx| {
+            let changed = tx
+                .prepare_cached("UPDATE devices SET push_platform = ?2, push_token = ?3 WHERE id = ?1")?
+                .execute(params![device, platform, token])?
+                == 1;
+            if !changed {
+                return Ok(Write::Refused(Conflict::DeviceGone));
+            }
+            release_push_token(tx, device, platform, token)?;
+            Ok(Write::Done(()))
+        })
     }
 
     /// Clears a push token the push service refused, unless the device set another meanwhile.
@@ -2206,6 +2228,41 @@ mod tests {
             Write::Refused(Conflict::DeviceGone)
         ));
         assert_eq!(db.backup(&first).unwrap().map(|f| f.0).as_deref(), Some(&b"new"[..]));
+    }
+
+    /// A phone signed out of one account and into another (or the same app's token set again) keeps one device woken
+    /// by its token: the device left behind is not pushed to with it any more. Another platform's same bytes, and an
+    /// empty token, are left alone.
+    #[test]
+    fn a_push_token_wakes_one_device() {
+        let db = Db::open(":memory:").unwrap();
+        let token = |n: u8| -> (u8, Vec<u8>) {
+            db.conn()
+                .query_row("SELECT push_platform, push_token FROM devices WHERE id = ?1", [[n; 16]], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap()
+        };
+        user(register(&db, b"ANA", 1, 1, 0));
+        user(register(&db, b"BEN", 2, 2, 0));
+        user(register(&db, b"CAT", 3, 3, 0));
+        assert!(matches!(db.set_push(&[1; 16], 1, b"phone").unwrap(), Write::Done(())));
+        assert!(matches!(db.set_push(&[3; 16], 2, b"phone").unwrap(), Write::Done(())));
+        // Ben on the same phone: Ana's device no longer holds its token; Cat's (another platform) keeps hers.
+        assert!(matches!(db.set_push(&[2; 16], 1, b"phone").unwrap(), Write::Done(())));
+        assert_eq!(token(1), (0, Vec::new()));
+        assert_eq!(token(2), (1, b"phone".to_vec()));
+        assert_eq!(token(3), (2, b"phone".to_vec()));
+        // A registration that brings the token takes it as well.
+        let mut dan = device(4);
+        (dan.push_platform, dan.push_token) = (1, b"phone".to_vec());
+        let skeleton = yo_wire::handle::skeleton("DAN");
+        db.register(skeleton.as_bytes(), "DAN", &[4; 16], &[4; 32], &dan, &prekeys(0), 100, 0).unwrap();
+        assert_eq!(token(2), (0, Vec::new()));
+        assert_eq!(token(4), (1, b"phone".to_vec()));
+        // Signing out sets no token: nobody else's is cleared.
+        assert!(matches!(db.set_push(&[2; 16], 0, b"").unwrap(), Write::Done(())));
+        assert_eq!(token(4), (1, b"phone".to_vec()));
     }
 
     /// What a device writes for its user is checked against the device in the write's own transaction: one replaced

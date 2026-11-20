@@ -79,9 +79,19 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
   }
 
   func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
+    let nsError = error as NSError
     if Self.isCancellation(error) {
       // The sheet closed by the person (or no passkey to offer): counted, not a problem.
       CountedErrors.record(domain: ASAuthorizationError.errorDomain, place: "Passkeys", code: "canceled", expected: true)
+    } else if nsError.domain.contains("ASCABLE") {
+      // A passkey from another device by its QR code: Bluetooth off, the phone out of reach or its side ended.
+      CountedErrors.record(domain: nsError.domain, place: "Passkeys", code: String(nsError.code), expected: true)
+    } else if nsError.domain == ASAuthorizationError.errorDomain, nsError.code == ASAuthorizationError.Code.failed.rawValue {
+      // "Failed" says nothing alone: which step, and the error under it (domain and code only, never its text).
+      let under = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+      let making = controller.authorizationRequests.first is ASAuthorizationPlatformPublicKeyCredentialRegistrationRequest
+      CountedErrors.record(domain: nsError.domain, place: making ? "Passkeys.make" : "Passkeys.ask",
+        code: "1004" + (under.map { " \($0.domain) \($0.code)" } ?? ""))
     } else {
       Diagnostics.record(error)
     }
