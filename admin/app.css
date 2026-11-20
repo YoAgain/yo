@@ -1136,7 +1136,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
   background: var(--card); box-shadow: 0 6px 20px rgba(0, 0, 0, .35); font-size: 12px; font-variant-numeric: tabular-nums; pointer-events: none; white-space: nowrap; }
 .ctip[hidden] { display: none; }
 .ctip b { font-weight: 700; } .ctip span { color: var(--muted); }
-.spark .b.on { opacity: 1 !important; }
+.spark .b.on, .spark g.on .b { opacity: 1 !important; }
 .perf .pv.warn { color: var(--warn); }
 
 /* Sparkline cards: the overview's rows (icon, label, value, sparkline), a rule between groups. */

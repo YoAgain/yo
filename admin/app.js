@@ -1936,12 +1936,18 @@ if (document.body.classList.contains("login")) {
     return { names: ds.map(dayName), rows: ds.map((d) => q[d] || null) };
   };
   // A sparkline like the overview's rows: a bar per slot (the last one full), no axis.
-  const sparkBars = (values, cls, tip) => {
-    const n = Math.max(1, values.length), sl = 140 / n, top = Math.max(1e-9, ...values.map((v) => v || 0));
+  // top: a second list stacked on the first (the first from the bottom in cls, this one above it in red).
+  const sparkBars = (values, cls, tip, top2) => {
+    const n = Math.max(1, values.length), sl = 140 / n, tot = values.map((v, i) => (v || 0) + (top2?.[i] || 0)), top = Math.max(1e-9, ...tot);
     const s = svg("svg", { class: "spark", viewBox: "0 0 140 28", preserveAspectRatio: "none", "aria-hidden": "true" });
+    const rect = (i, y, h, c) => svg("rect", { x: (i * sl + sl * 0.16).toFixed(2), width: (sl * 0.68).toFixed(2), y: y.toFixed(1), height: h.toFixed(1), rx: 1, class: c });
     values.forEach((v, i) => {
-      const h = v ? Math.max(2, (v / top) * 26) : 1.5;
-      s.append(svg("rect", { x: (i * sl + sl * 0.16).toFixed(2), width: (sl * 0.68).toFixed(2), y: (28 - h).toFixed(1), height: h.toFixed(1), rx: 1, class: v ? `b ${cls || ""}`.trim() : "b zero" }));
+      if (!top2) { const h = v ? Math.max(2, (v / top) * 26) : 1.5; s.append(rect(i, 28 - h, h, v ? `b ${cls || ""}`.trim() : "b zero")); return; }
+      const g = svg("g", {}), h = tot[i] ? Math.max(2, (tot[i] / top) * 26) : 1.5, hb = tot[i] ? (h * (v || 0)) / tot[i] : 0;
+      if (!tot[i]) g.append(rect(i, 28 - h, h, "b zero"));
+      if (hb) g.append(rect(i, 28 - hb, hb, `b ${cls || ""}`.trim()));
+      if (h - hb > 0 && tot[i]) g.append(rect(i, 28 - h, h - hb, "b hot"));
+      s.append(g);
     });
     if (tip) hoverTip(s, values.length, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
     return s;
@@ -1955,7 +1961,7 @@ if (document.body.classList.contains("login")) {
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
-      if (r.values) row.append(sparkBars(r.values, r.scls, r.tip));
+      if (r.values) row.append(sparkBars(r.values, r.scls, r.tip, r.top));
       box.append(row);
     }
     return dcard(title, null, box);
@@ -2036,14 +2042,14 @@ if (document.body.classList.contains("login")) {
     const ev = h.events?.crash, t0 = today0(), perDay = (d) => (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day === d).reduce((a, r) => a + r.count, 0);
     if (range === 1 && ev?.total > 0) {
       const h1 = Math.floor(Date.now() / 3600000), values = last24(ev.hours).map((v) => v || 0);
-      return { values, names: values.map((_, i) => clock((h1 - 23 + i) * 3600000)), total: values.reduce((a, v) => a + v, 0), what: "last 24 hours" };
+      return { values, days: null, names: values.map((_, i) => clock((h1 - 23 + i) * 3600000)), total: values.reduce((a, v) => a + v, 0), what: "last 24 hours" };
     }
     const evDays = year(ev?.year), kept = new Set((h.diagnostic_days || []).map((r) => r.day));
     const day = (d) => (kept.has(d) ? perDay(d) : evDays.get(d) || 0);
     const len = range === 1 ? 7 : range || 30, ds = Array.from({ length: len }, (_, i) => t0 - len + 1 + i), values = ds.map(day);
     const total = range === 1 ? perDay(t0) : range ? values.reduce((a, v) => a + v, 0)
       : Math.max((h.diagnostic_days || []).filter((r) => r.kind === "crash").reduce((a, r) => a + r.count, 0), ev?.total || 0);
-    return { values, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
+    return { values, days: ds, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
@@ -2287,9 +2293,12 @@ if (document.body.classList.contains("login")) {
         { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const c = crashSlots(h);
-          // Crash reports per slot (iOS and Android), their count in the range as the number.
-          return { ico: "warn", label: "Crashes", value: num(c.total), cls: c.total ? "warn" : "", values: c.values, scls: "hot",
-            tip: (i) => ({ head: c.names[i], rows: [{ color: "var(--bad)", label: "Crash reports", value: num(c.values[i]) }] }) }; })(),
+          // Errors (orange) and crash reports (red) per slot, stacked. The hub keeps errors per day only: with hourly
+          // crashes (24 hours) the errors have no hours, so the hour shows its crashes and "per day" for errors.
+          const hourly = c.names.length === 24 && range === 1, perDay = (d) => (h.diagnostic_days || []).filter((r) => r.kind === "error" && r.day === d).reduce((a, r) => a + r.count, 0);
+          const days = c.days, er = hourly ? c.values.map(() => 0) : days.map(perDay), errTotal = kinds.Errors || 0;
+          return { ico: "warn", label: "Errors · Crashes", value: `${num(errTotal)} · ${num(c.total)}`, cls: c.total || errTotal ? "warn" : "", values: er, top: c.values, scls: "warm",
+            tip: (i) => ({ head: c.names[i], rows: [{ color: "#e67e22", label: "Errors", value: hourly ? "per day only" : num(er[i]) }, { color: "var(--bad)", label: "Crashes", value: num(c.values[i]) }] }) }; })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
           title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
             rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },
