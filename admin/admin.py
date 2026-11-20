@@ -525,6 +525,27 @@ def diagnostics_request(hub, data):
         return json.load(response)
 
 
+# The header's live strip (GET /live?hub=): the hub's stream of Yos (Server-Sent Events, one tiny event per Yo, counts
+# only), handed on to the page line by line as it comes, never buffered. Its keep-alive every 15 s keeps the
+# connection (and Cloudflare's) open; a hub silent for longer than LIVE_IDLE is taken as gone.
+LIVE_IDLE = 40
+LIVE_HEADERS = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def live_stream(hub: str):
+    if not ADMIN_TOKEN:
+        raise ValueError("YO_ADMIN_TOKEN is not configured")
+    request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/live",
+                                     headers={"Yo-Admin-Token": ADMIN_TOKEN, "Accept": "text/event-stream"})
+    return urllib.request.urlopen(request, timeout=LIVE_IDLE)
+
+
+def live_relay(source, write) -> None:
+    """Every line from the hub to the page at once, until either side goes."""
+    for line in iter(source.readline, b""):
+        write(line)
+
+
 def reserved_names() -> dict:
     return {hub: section("reserved " + hub, lambda hub=hub: reserved_request(hub)) for hub in ("live", "dev")}
 
@@ -723,6 +744,34 @@ class Admin(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 return self.send(502, b"Hub unavailable", "text/plain")
             return self.send(200, json.dumps(result).encode(), "application/json")
+        if path == "/live":
+            if not logged_in:
+                return self.send(401, b"", "text/plain")
+            hub = parse_qs(self.path.partition("?")[2]).get("hub", [""])[0]
+            if hub not in ("live", "dev"):
+                return self.send(400, b"Bad request", "text/plain")
+            if self.command == "HEAD":
+                return self.send(200, b"", LIVE_HEADERS["Content-Type"])
+            try:
+                source = live_stream(hub)
+            except (OSError, ValueError):
+                return self.send(502, b"Hub unavailable", "text/plain")
+            with source:
+                self.close_connection = True
+                self.send_response(200)
+                for k, v in {**HEADERS, **LIVE_HEADERS}.items():
+                    self.send_header(k, v)
+                self.end_headers()
+
+                def write(line: bytes):
+                    self.wfile.write(line)
+                    self.wfile.flush()
+                try:
+                    write(b": hello\n\n")
+                    live_relay(source, write)
+                except OSError:  # the page went (closed, reloaded) or the hub did: the page reconnects on its own
+                    pass
+            return None
         if path == "/done.json":
             if not logged_in:
                 return self.send(401, b"[]", "application/json")

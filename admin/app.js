@@ -136,6 +136,7 @@ if (document.body.classList.contains("login")) {
     which = which === "live" ? "dev" : "live";
     try { localStorage.setItem("hub", which); } catch {}
     showHub();
+    liveConnect();
     if (last) render();
   };
   // The logo is the switch: "Yo" for live, "Dev" for dev.
@@ -1348,11 +1349,14 @@ if (document.body.classList.contains("login")) {
     if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; }
   };
 
-  // ---- live Yos in the title bar: per minute for the last hour (bots left out, counts only); every Yo new since the
-  // last refresh pops as a spark at the strip's "now" end, spread over the refresh interval. Reduced motion: no sparks.
-  const LIVE_SPREAD = 10000, LIVE_CAP = 30;
+  // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only). Each
+  // new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only) and pops as a spark at once; it tops up
+  // the running minute until a refresh has it. Without the stream, new Yos come from the minutes' counts, spread over
+  // the refresh. Reduced motion: no sparks.
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_RETRY = 10000;
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
-  let liveSeen = null, liveTimers = [];
+  let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null;
+  let liveSource = null, liveOpen = false, liveRetry = null;
   const liveStop = () => { liveTimers.forEach(clearTimeout); liveTimers = []; $("live-lane").replaceChildren(); };
   const liveSpark = () => {
     const lane = $("live-lane");
@@ -1367,11 +1371,16 @@ if (document.body.classList.contains("login")) {
     const dot = document.querySelector(".live-dot");
     dot.classList.remove("ping"); void dot.offsetWidth; dot.classList.add("ping");
   };
-  const drawLive = (h) => {
-    const box = $("live"), d = h?.live;
+  // The strip from the last minutes and the Yos streamed since; the running minute never goes down within itself.
+  const paintLive = () => {
+    const box = $("live"), d = liveData;
     box.hidden = !d || !Array.isArray(d.minutes);
-    if (box.hidden) { liveSeen = null; liveStop(); return; }
-    const m = d.minutes, n = m.length, full = m.slice(-6, -1);
+    if (box.hidden) return;
+    const m = d.minutes.slice(), n = m.length, full = m.slice(-6, -1);
+    m[n - 1] += liveAdd;
+    const shown = `${which} ${d.minute}`;
+    if (liveShown?.key === shown) m[n - 1] = Math.max(m[n - 1], liveShown.v);
+    liveShown = { key: shown, v: m[n - 1] };
     // The rate: the last five whole minutes, one decimal below ten.
     const rate = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
     set("live-n", rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1).replace(/\.0$/, ""));
@@ -1384,13 +1393,22 @@ if (document.body.classList.contains("login")) {
     const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
     g.replaceChildren(svg("defs"), svg("path", { class: "la", d: `${line}L${W},${H}L0,${H}Z` }), svg("path", { class: "ll", d: line }));
     g.firstChild.innerHTML = '<linearGradient id="live-g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".45"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient>';
-    // New Yos: per minute, what this refresh counts above the last one (the running minute only on the first look).
+  };
+  const drawLive = (h) => {
+    const d = h?.live;
+    liveData = d && Array.isArray(d.minutes) ? d : null;
+    liveAdd = 0;
+    paintLive();
+    if (!liveData) { liveSeen = null; liveStop(); return; }
+    const m = d.minutes, n = m.length;
+    // New Yos by the minutes: what this refresh counts above the last one (the running minute only on the first look).
+    // The stream, while open, shows them instead.
     const key = `${which}`, byMinute = new Map(m.map((v, i) => [d.minute - (n - 1) + i, v]));
     let fresh = 0;
     if (liveSeen?.key === key) for (const [k, v] of byMinute) fresh += Math.max(0, v - (liveSeen.m.get(k) ?? (k > liveSeen.minute ? 0 : v)));
     else { liveStop(); fresh = m[n - 1]; }
     liveSeen = { key, minute: d.minute, m: byMinute };
-    if (calm.matches || document.visibilityState !== "visible") return;
+    if (liveOpen || calm.matches || document.visibilityState !== "visible") return;
     fresh = Math.min(LIVE_CAP, fresh);
     for (let i = 0; i < fresh; i++) {
       const t = setTimeout(() => { liveTimers = liveTimers.filter((x) => x !== t); liveSpark(); },
@@ -1398,8 +1416,42 @@ if (document.body.classList.contains("login")) {
       liveTimers.push(t);
     }
   };
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "visible") liveStop(); });
+  const liveClose = () => {
+    clearTimeout(liveRetry);
+    liveRetry = null;
+    liveSource?.close();
+    liveSource = null;
+    liveOpen = false;
+  };
+  // The stream of the hub shown, while the page is: the browser reconnects on its own after a cut; refused (signed
+  // out, the hub away), it is tried again after a while, the minutes' counts meanwhile.
+  const liveConnect = () => {
+    liveClose();
+    if (document.visibilityState !== "visible" || typeof EventSource === "undefined") return;
+    const hub = which, source = new EventSource(`/live?hub=${hub}`);
+    liveSource = source;
+    source.onopen = () => { liveOpen = true; };
+    source.onmessage = () => {
+      if (hub !== which || source !== liveSource) return;
+      liveAdd++;
+      if (liveData) {
+        paintLive();
+        if (!calm.matches) liveSpark();
+      }
+    };
+    source.onerror = () => {
+      liveOpen = false;
+      if (source.readyState === EventSource.CLOSED && source === liveSource) {
+        liveSource = null;
+        liveRetry = setTimeout(liveConnect, LIVE_RETRY);
+      }
+    };
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") { liveStop(); liveClose(); } else liveConnect();
+  });
   calm.addEventListener?.("change", () => { if (calm.matches) liveStop(); });
+  liveConnect();
 
   // ---- everything from the collector -------------------------------------------------------------------------------
   const render = () => {

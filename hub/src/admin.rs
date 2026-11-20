@@ -1,18 +1,22 @@
 //! The operator's routes behind `Yo-Admin-Token` (hub/README.md): support threads, the to-dos, diagnostics, reserved
-//! names, deleting a user. Missing, disabled and incorrect credentials all answer `404`.
+//! names, deleting a user, the live strip's stream of Yos. Missing, disabled and incorrect credentials all answer `404`.
 
 use crate::error::{refuse, Res};
 use crate::request::{bad, Hubs, Peer, DAY};
-use crate::{blobs, db, now_ms, Hub};
+use crate::{blobs, db, now_ms, Event, Hub};
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
+use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use bytes::Bytes;
+use futures_core::Stream;
 use serde_json::{json, Value};
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 use yo_wire::{limits, sha256, UserId};
 
 pub(crate) fn routes(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
@@ -27,6 +31,14 @@ pub(crate) fn routes(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
         .route("/v1/admin/diagnostics", get(get_diagnostics).put(put_diagnostics))
         .route("/v1/admin/reserved", get(get_reserved).post(post_reserved).put(put_reserved))
         .route("/v1/admin/reserved/{name}", delete(delete_reserved))
+        .route_layer(axum::middleware::from_fn_with_state(hub.clone(), admin_only))
+}
+
+/// The live strip's stream, apart from the routes above: it stays open, off the blocking places and the request
+/// deadline.
+pub(crate) fn live_route(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
+    Router::new()
+        .route("/v1/admin/live", get(get_live))
         .route_layer(axum::middleware::from_fn_with_state(hub.clone(), admin_only))
 }
 
@@ -148,6 +160,37 @@ async fn post_todo(
     let text = std::str::from_utf8(&body).map_err(|_| bad())?;
     let id = hub.db.todo(text, now_ms())?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+// ---- the live strip ----
+
+/// Server-Sent Events, one per Yo the moment it is counted: `{"k":"yo"}` or `{"k":"media"}`, bots left out, nothing of
+/// who; a comment every 15 s keeps the connection open. Ends when the hub shuts down.
+async fn get_live(State(hub): Hubs) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
+    use tokio::sync::broadcast::error::RecvError;
+    let state = (hub.live.subscribe(), hub.closing.subscribe());
+    let yos = futures_util::stream::unfold(state, |(mut yos, mut closing)| async move {
+        loop {
+            if *closing.borrow_and_update() {
+                return None;
+            }
+            tokio::select! {
+                got = yos.recv() => match got {
+                    Ok(event) => {
+                        let k = if matches!(event, Event::MediaIn) { "media" } else { "yo" };
+                        let event = sse::Event::default().data(format!(r#"{{"k":"{k}"}}"#));
+                        return Some((Ok(event), (yos, closing)));
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return None,
+                },
+                changed = closing.changed() => if changed.is_err() {
+                    return None;
+                },
+            }
+        }
+    });
+    Sse::new(yos).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
 // ---- diagnostics ----

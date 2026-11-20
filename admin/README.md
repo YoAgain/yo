@@ -12,6 +12,9 @@ blurs names and ids for screenshots. The collector (`users.py`) reads SQLite dat
 a JSON snapshot. Yos, Media and Groups read the hub's `events` table (counts per kind and minute, no identifiers). Bots
 (an account whose every device names a `yogpt/` or `cli/` app) are left out of Sign-ups; the hub counts a bot's
 inbox apart (`yo-in-bot`) since that change, so Yos exclude them from then on. To-Dos go through the hub API; message completion lives in the hub; user-report done markers are stored locally.
+The title bar's live strip draws the last hour from `events`; each new Yo arrives at once on `GET /live?hub=`, the
+hub's `/v1/admin/live` stream (Server-Sent Events, its kind only) passed through unbuffered, and pops as a spark;
+without it the page falls back to the 10 s refresh.
 `migrate_todos.py` is the one-time legacy JSON migration.
 
 Protection requires Cloudflare Access in front. The server verifies its JWT signature, issuer, audience

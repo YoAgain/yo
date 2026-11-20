@@ -1162,3 +1162,32 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(rows.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap()["done"], true);
 }
+
+#[test]
+fn the_live_stream_is_the_operators_and_tells_each_yo_at_once() {
+    use std::io::BufRead;
+    let config = Config { admin_token: Some("test-token".into()), ..Config::for_tests() };
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    assert_eq!(raw(&hub, "GET", "/v1/admin/live", &[], vec![]).0, 404);
+    assert_eq!(raw(&hub, "GET", "/v1/admin/live", &[("yo-admin-token", "wrong".into())], vec![]).0, 404);
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap();
+    let stream =
+        client.get(format!("{}/v1/admin/live", hub.url())).header("yo-admin-token", "test-token").send().unwrap();
+    assert_eq!(stream.status().as_u16(), 200);
+    assert!(stream.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    let (a, _, _) = account(&hub);
+    let hash = yo_tests::devices_hash(&hub.url(), a.user_id()).unwrap();
+    let path = api::deliver_path(&user_id(a.user_id()));
+    for i in 0..3u8 {
+        let (code, _) = raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(i));
+        assert_eq!(code, status::ACCEPTED);
+    }
+    // Each Yo as it is counted, long before the minute's flush; its kind only, nothing of who.
+    let events: Vec<String> = std::io::BufReader::new(stream)
+        .lines()
+        .map(Result::unwrap)
+        .filter(|line| line.starts_with("data:"))
+        .take(3)
+        .collect();
+    assert_eq!(events, [r#"data: {"k":"yo"}"#; 3]);
+}

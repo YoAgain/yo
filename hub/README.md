@@ -100,6 +100,11 @@ POST and PUT return the current state; DELETE returns 204, including when the na
 Requires `Yo-Admin-Token`; `user` is its 32 hexadecimal digit user id (as in support routes).
 Returns `204`, or `404` for an unknown user or missing/incorrect admin credentials.
 
+`GET /v1/admin/live` (same token) is a stream (Server-Sent Events): one `data: {"k":"yo"}` or `data: {"k":"media"}`
+per Yo the moment it is counted (`yo-in`, `media-in`; bots left out, nothing of who), a comment every 15 s, from
+memory and without a write. A stream more than 256 Yos behind skips them; it ends when the hub shuts down. The admin
+page's live strip shows each as a spark.
+
 ## Support chat rollout
 
 Back up the hub DB and admin state before rollout. If old dashboard JSON done flags still need

@@ -148,6 +148,11 @@ pub struct Hub {
     /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in`, `yo-in-bot` also into
     /// `deliveries_hourly`) once a minute.
     events: [AtomicU64; Event::KINDS.len()],
+    /// Each Yo (`yo-in`, `media-in`; bots left out) the moment it is counted, for the operator's live strip
+    /// (`/v1/admin/live`): its kind only, nothing of who. Bounded: a stream that falls behind skips what it missed.
+    live: tokio::sync::broadcast::Sender<Event>,
+    /// Set when the hub shuts down: the live streams end, so a graceful shutdown does not wait for them.
+    closing: tokio::sync::watch::Sender<bool>,
     /// Long polls waiting for mail, by device.
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
@@ -166,6 +171,9 @@ pub struct Hub {
     /// How far tests move the clock of sender certificates and of envelopes' arrival.
     shifted_ms: AtomicI64,
 }
+
+/// Yos a live stream may fall behind by before it skips them (`Hub::live`).
+const LIVE_QUEUE: usize = 256;
 
 /// Blocking work at once (`Hub::blocking`): the database is one connection, more would only wait for it.
 const BLOCKING_AT_ONCE: usize = 32;
@@ -205,6 +213,8 @@ impl Hub {
             zk,
             deliveries,
             events: Default::default(),
+            live: tokio::sync::broadcast::channel(LIVE_QUEUE).0,
+            closing: tokio::sync::watch::channel(false).0,
             waiting: Mutex::default(),
             fetching: Arc::default(),
             limiter: Limiter::default(),
@@ -267,7 +277,8 @@ impl Hub {
             .route(api::INBOX, get(mail::get_inbox))
             .route("/v1/blobs/{id}", put(blobs::put_blob).get(blobs::get_blob).delete(blobs::delete_blob))
             .merge(delivering)
-            .merge(synchronous);
+            .merge(synchronous)
+            .merge(admin::live_route(self));
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (spec 7).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
@@ -292,6 +303,11 @@ impl Hub {
     ) -> std::io::Result<()> {
         let pruner = tokio::spawn(self.clone().every_minute());
         let app = self.router().into_make_service_with_connect_info::<SocketAddr>();
+        let hub = self.clone();
+        let shutdown = async move {
+            shutdown.await;
+            hub.closing.send_replace(true);
+        };
         let served = axum::serve(listener, app).with_graceful_shutdown(shutdown).await;
         pruner.abort();
         served
@@ -323,6 +339,11 @@ impl Hub {
     /// One more event of a kind, counted in memory until the next minute's flush.
     pub(crate) fn count(&self, event: Event, n: u64) {
         self.events[event as usize].fetch_add(n, Ordering::Relaxed);
+        if matches!(event, Event::YoIn | Event::MediaIn) && self.live.receiver_count() > 0 {
+            for _ in 0..n.min(LIVE_QUEUE as u64) {
+                let _ = self.live.send(event);
+            }
+        }
     }
 
     /// Yos acknowledged at `now`, accepted at `accepted` (ms): `yo-out`, and how long each took in latency buckets.
