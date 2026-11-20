@@ -392,9 +392,72 @@ pub fn request_row(name: &str, group: bool, lang: Language) -> String {
     }
 }
 
+/// How long ago, as stories say it: "now", "2m", "3h", "1d" (whole minutes, hours, days; the future is now).
+pub fn age(elapsed_ms: i64) -> String {
+    match elapsed_ms.max(0) / 60_000 {
+        0 => "now".into(),
+        minutes @ 1..=59 => format!("{minutes}m"),
+        minutes @ 60..=1439 => format!("{}h", minutes / 60),
+        minutes => format!("{}d", minutes / 1440),
+    }
+}
+
+/// Which way a bar's last Yo went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Sent,
+    Received,
+    Never,
+}
+
+/// A bar's last Yo either way, as its menu (and its swipe) says it: "Yo now", "Yo 7m ago", "No Yo yet". The newer of the
+/// last sent and last received (milliseconds); a tie is the sent one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastActivity {
+    pub text: String,
+    pub direction: Direction,
+}
+
+pub fn last_activity(sent_ms: Option<i64>, received_ms: Option<i64>, now_ms: i64, lang: Language) -> LastActivity {
+    let (at, direction) = match (sent_ms, received_ms) {
+        (None, None) => {
+            return LastActivity { text: lang.choose("No Yo yet", "Noch kein Yo").into(), direction: Direction::Never };
+        }
+        (Some(sent), Some(received)) if received > sent => (received, Direction::Received),
+        (Some(sent), _) => (sent, Direction::Sent),
+        (None, Some(received)) => (received, Direction::Received),
+    };
+    let age = age(now_ms - at);
+    let text = match (age.as_str(), lang) {
+        ("now", Language::English) => "Yo now".into(),
+        ("now", Language::German) => "Yo gerade eben".into(),
+        (_, Language::English) => format!("Yo {age} ago"),
+        (_, Language::German) => format!("Yo vor {age}"),
+    };
+    LastActivity { text, direction }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{list::Kind::*, ActivityPlace::*, Language::*, Outcome::*, *};
+
+    #[test]
+    fn last_activity_says_the_newer_way() {
+        assert_eq!(age(-5), "now");
+        assert_eq!(age(59_999), "now");
+        assert_eq!(age(60_000), "1m");
+        assert_eq!(age(59 * 60_000 + 59_999), "59m");
+        assert_eq!(age(60 * 60_000), "1h");
+        assert_eq!(age(1439 * 60_000), "23h");
+        assert_eq!(age(1440 * 60_000), "1d");
+        let never = last_activity(None, None, 0, English);
+        assert_eq!((never.text.as_str(), never.direction), ("No Yo yet", Direction::Never));
+        let sent = last_activity(Some(1_000), Some(1_000), 7 * 60_000 + 1_000, English);
+        assert_eq!((sent.text.as_str(), sent.direction), ("Yo 7m ago", Direction::Sent));
+        let back = last_activity(Some(0), Some(30_000), 60_000, English);
+        assert_eq!((back.text.as_str(), back.direction), ("Yo now", Direction::Received));
+        assert_eq!(last_activity(None, Some(0), 2 * 86_400_000, German).text, "Yo vor 2d");
+    }
 
     #[test]
     fn count_and_send_copy() {

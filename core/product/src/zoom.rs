@@ -74,6 +74,35 @@ pub fn record_zoom(finger_y: f64, bar_top: f64, bar_bottom: f64, height: f64, st
     start * (most / start).powf(travel)
 }
 
+/// The camera's zoom button's choices, in the wide lens's terms (1 = the wide lens): 1, each lens the camera switches to
+/// (`lenses`, e.g. 0.5 for an ultra wide, 3 for a tele), and 2 on the wide one, as the Camera app offers them; only those
+/// in `least`..=`most`, a tenth apart at least, smallest first. One choice: the button is not shown.
+pub fn camera_choices(least: f64, most: f64, lenses: &[f64]) -> Vec<f64> {
+    let mut choices: Vec<f64> = [1.0, 2.0]
+        .iter()
+        .chain(lenses)
+        .map(|choice| (choice * 10.0).round() / 10.0)
+        .filter(|choice| choice.is_finite() && *choice >= least - 1e-6 && *choice <= most + 1e-6)
+        .collect();
+    choices.sort_by(f64::total_cmp);
+    choices.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    choices
+}
+
+/// The choice after `chosen` (a tap on the button), back to the first after the last.
+pub fn camera_next(choices: &[f64], chosen: f64) -> f64 {
+    choices.iter().copied().find(|choice| *choice > chosen + 0.001).or(choices.first().copied()).unwrap_or(1.0)
+}
+
+/// The button's number: "0.5", "1", "2", "2.5" (no ".0"; the app adds "×").
+pub fn camera_label(choice: f64) -> String {
+    if choice == choice.round() {
+        format!("{}", choice as i64)
+    } else {
+        format!("{:.1}", choice)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +249,20 @@ mod tests {
         assert_eq!(rec(500.0, f64::NAN, 10.0), 1.0);
         assert_eq!(rec(500.0, 1.0, f64::NAN), 1.0);
         assert_eq!(record_zoom(500.0, 380.0, 300.0, 800.0, 1.0, 10.0), 1.0);
+    }
+
+    #[test]
+    fn camera_choices_are_the_lenses_and_twice_the_wide_one() {
+        assert_eq!(camera_choices(0.5, 10.0, &[0.5, 3.0]), vec![0.5, 1.0, 2.0, 3.0]);
+        assert_eq!(camera_choices(1.0, 8.0, &[]), vec![1.0, 2.0]);
+        assert_eq!(camera_choices(1.0, 1.0, &[]), vec![1.0]);
+        assert_eq!(camera_choices(0.6, 8.0, &[0.6, 2.04]), vec![0.6, 1.0, 2.0]);
+        assert_eq!(camera_next(&[0.5, 1.0, 2.0], 1.0), 2.0);
+        assert_eq!(camera_next(&[0.5, 1.0, 2.0], 2.0), 0.5);
+        assert_eq!(camera_next(&[0.5, 1.0, 2.0], 1.4), 2.0);
+        assert_eq!(camera_next(&[], 1.0), 1.0);
+        assert_eq!(camera_label(0.5), "0.5");
+        assert_eq!(camera_label(1.0), "1");
+        assert_eq!(camera_label(2.5), "2.5");
     }
 }

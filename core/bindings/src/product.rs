@@ -1,7 +1,7 @@
 //! The product rules (`yo_product`) for Swift, under the names the app has always used.
 
 use yo_product::list::Kind;
-use yo_product::{self as product, ActivityPlace, Language, Outcome, Text, WidgetFriend};
+use yo_product::{self as product, ActivityPlace, Direction, Language, LastActivity, Outcome, Text, WidgetFriend};
 
 #[uniffi::remote(Enum)]
 #[uniffi(name = "ProductLanguage")]
@@ -90,6 +90,21 @@ pub enum ActivityPlace {
     LockScreen,
 }
 
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductDirection")]
+pub enum Direction {
+    Sent,
+    Received,
+    Never,
+}
+
+#[uniffi::remote(Record)]
+#[uniffi(name = "ProductLastActivity")]
+pub struct LastActivity {
+    pub text: String,
+    pub direction: Direction,
+}
+
 #[uniffi::remote(Record)]
 #[uniffi(name = "ProductWidgetFriend")]
 pub struct WidgetFriend {
@@ -120,6 +135,17 @@ pub fn product_send_words(mark: String, sending: bool, lang: Language) -> String
 #[uniffi::export]
 pub fn product_arrival_lines(count: i64, name: String, lang: Language) -> Vec<String> {
     product::arrival_lines(count, &name, lang)
+}
+
+/// A bar's last Yo either way: "Yo 7m ago" and which way, "No Yo yet".
+#[uniffi::export]
+pub fn product_last_activity(
+    sent_ms: Option<i64>,
+    received_ms: Option<i64>,
+    now_ms: i64,
+    lang: Language,
+) -> LastActivity {
+    product::last_activity(sent_ms, received_ms, now_ms, lang)
 }
 
 #[uniffi::export]
@@ -436,6 +462,24 @@ pub struct ProductHoldZoom {
 pub fn product_hold_zoom(finger_x: f64, finger_y: f64, bar_bottom: f64, width: f64, height: f64) -> ProductHoldZoom {
     let zoom = yo_product::zoom::hold_zoom(finger_x, finger_y, bar_bottom, width, height);
     ProductHoldZoom { scale: zoom.scale, x: zoom.x, y: zoom.y }
+}
+
+/// The camera zoom button's choices (`yo_product::zoom::camera_choices`): 1, the lenses, 2, within the camera's range.
+#[uniffi::export]
+pub fn product_camera_zoom_choices(least: f64, most: f64, lenses: Vec<f64>) -> Vec<f64> {
+    yo_product::zoom::camera_choices(least, most, &lenses)
+}
+
+/// The choice after `chosen`, the first after the last.
+#[uniffi::export]
+pub fn product_camera_zoom_next(choices: Vec<f64>, chosen: f64) -> f64 {
+    yo_product::zoom::camera_next(&choices, chosen)
+}
+
+/// "0.5", "1", "2.5": the zoom button's number.
+#[uniffi::export]
+pub fn product_camera_zoom_label(choice: f64) -> String {
+    yo_product::zoom::camera_label(choice)
 }
 
 /// The recording's zoom (`yo_product::zoom::record_zoom`): the camera's zoom for a filming finger drawn out of its bar.
