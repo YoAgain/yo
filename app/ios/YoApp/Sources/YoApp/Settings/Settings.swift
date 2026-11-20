@@ -91,12 +91,16 @@ struct SettingsView: View {
             }
           }
           Section {
-            NavigationLink(value: Page.help) {
+            // A full page: only its own sheet, no push (a link would also push it into the half sheet).
+            Button {
+              sheet = .help
+            } label: {
               HStack {
                 Label("Help & About", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
                 SupportBadge()
               }
             }
+            .tint(Color(.label))
             // Opens the list's own "+" field, so one learns where friends are added.
             Button {
               listAction(.addContact)
@@ -111,9 +115,12 @@ struct SettingsView: View {
       // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      // No title and no close button: only the system's grabber, to pull the sheet down and away. The pages pushed
-      // in show their bar with the back button.
-      .toolbar(.hidden, for: .navigationBar)
+      // No title and no close button: only the system's grabber, to pull the sheet down and away. The bar stays (empty
+      // and see-through), so a push or pop never changes its height and the pushed page's bar does not jump in; the
+      // list's own top margin goes instead, so the rows stay where they were without the bar.
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbarBackground(.hidden, for: .navigationBar)
+      .contentMargins(.top, 0, for: .scrollContent)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { destination($0) }
@@ -160,7 +167,7 @@ struct SettingsView: View {
         if let account = accounts.account {
           AccountPage(
             account: account, hasRecoveryKey: hasRecoveryKey, dismissSettings: { dismiss() },
-            showingDelete: $showingDeleteAccount)
+            openSheet: { sheet = $0 }, showingDelete: $showingDeleteAccount)
         }
       case .security:
         if let account = accounts.account { AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey) }

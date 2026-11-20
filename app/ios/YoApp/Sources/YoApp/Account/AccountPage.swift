@@ -8,6 +8,8 @@ struct AccountPage: View {
   let account: Account
   let hasRecoveryKey: Bool
   var dismissSettings: () -> Void
+  /// Opens a full page as its own sheet over the half sheet.
+  var openSheet: (SettingsView.Page) -> Void
   @Environment(AccountStore.self) private var accounts
   @State private var signingOut: Account?
   @State private var deleteTyped = ""
@@ -19,13 +21,17 @@ struct AccountPage: View {
   var body: some View {
     Form {
       Section {
-        NavigationLink(value: SettingsView.Page.contacts) {
+        // A full page: only its own sheet, no push into the half sheet.
+        Button {
+          openSheet(.contacts)
+        } label: {
           LabeledContent {
             ContactSecurityPage(summaryOnly: true)
           } label: {
             Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.green))
           }
         }
+        .tint(Color(.label))
         .accessibilityIdentifier("account.contacts")
         NavigationLink {
           BlockedPage()
