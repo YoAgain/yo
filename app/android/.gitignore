@@ -12,3 +12,4 @@ core.*
 !dev/core.sh
 
 /app/google-services.json
+/keystore.properties

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -33,14 +35,33 @@ android {
         }
         minSdk = 28
         targetSdk = 37
-        versionCode = 1
+        versionCode = providers.gradleProperty("yoVersionCode").map(String::toInt).getOrElse(1)  // rising, from CI
         versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")
         buildConfigField("String", "YO_APP", "\"android/202611160001\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
-    buildTypes { release { optimization { enable = true } } }
+    signingConfigs {
+        // The Play upload key (Play App Signing holds the app signing key): keystore.properties next to settings.gradle.kts
+        // (ignored, never checked in) or, in CI, YO_UPLOAD_* from the environment `play`. Without either the release is unsigned.
+        val local = rootProject.file("keystore.properties").takeIf { it.isFile }
+            ?.let { file -> Properties().apply { file.inputStream().use { load(it) } } }
+        val setting = { key: String -> local?.getProperty(key) ?: System.getenv("YO_UPLOAD_" + key.uppercase()) }
+        if (setting("storeFile") != null) create("upload") {
+            storeFile = file(setting("storeFile")!!)
+            storePassword = setting("storePassword")
+            keyAlias = setting("keyAlias")
+            keyPassword = setting("keyPassword")
+        }
+    }
+    buildTypes {
+        release {
+            optimization { enable = true }
+            proguardFiles("proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("upload")
+        }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
     sourceSets["main"].java.directories.add("build/generated/yo")
     sourceSets["main"].jniLibs.directories.add("build/rustJniLibs")
@@ -86,6 +107,11 @@ dependencies {
 }
 androidComponents {
     onVariants { variant ->
+        // The store app (Google Play): its package can never change. Debug and the device QA build keep theirs.
+        if (variant.buildType == "release" && !deviceSoak) {
+            variant.applicationId.set("app.justyo.android")
+            variant.manifestPlaceholders.put("yoAppLabel", "Yo")
+        }
         variant.sources.kotlin?.addStaticSourceDirectory("build/generated/yo")
     }
 }
