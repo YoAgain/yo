@@ -30,9 +30,9 @@ class HelpTests(unittest.TestCase):
                 db.execute("CREATE TABLE diagnostic_days(day INTEGER,kind TEXT,count INTEGER)")
                 db.execute("INSERT INTO diagnostic_days VALUES(20000,'crash',2),(20000,'error',20)")
             snapshot = users.hub("live", path)
-            self.assertIsNone(snapshot["crash_installs_7d"])  # an older hub: no diagnostic_installs
+            self.assertIsNone(snapshot["crash_free"])  # an older hub: no diagnostic_installs
             self.assertIsNone(snapshot["diagnostics"][0]["installs"])
-            self.assertFalse({"diagnostics", "crash_installs_7d", "tables"} & set(snapshot["errors"]))
+            self.assertFalse({"diagnostics", "crash_free", "tables"} & set(snapshot["errors"]))
             self.assertEqual(snapshot["diagnostics_open"], 1)
             self.assertEqual(snapshot["diagnostic_days"], [{"day":20000,"kind":"crash","count":2},{"day":20000,"kind":"error","count":20}])
             rows = snapshot["diagnostics"]
@@ -56,20 +56,28 @@ class HelpTests(unittest.TestCase):
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
                 db.execute("CREATE TABLE diagnostics(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
-                db.execute("INSERT INTO diagnostics VALUES(1,'crash',5,1,3,'ios/1','26','iPhone','{}',0),(2,'crash',1,1,2,'ios/1','26','iPhone','{}',0),(3,'error',9,1,4,'ios/1','26','iPhone','{}',0)")
+                db.execute("INSERT INTO diagnostics VALUES(1,'crash',5,1,3,'ios/1','26','iPhone','{}',0),(2,'crash',1,1,2,'android/1','16','Pixel','{}',0),(3,'error',9,1,4,'ios/1','26','iPhone','{}',0),"
+                           "(4,'crash',1,1,2,'ios/1','macOS 26','Mac','{}',0)")
+                db.execute("CREATE TABLE devices(id BLOB, user_id BLOB, last_seen_at INTEGER, app TEXT)")
+                now = int(users.time.time() * 1000)
+                db.executemany("INSERT INTO devices VALUES(?,?,?,?)", [
+                    (b"1", b"u", now, "ios/1"), (b"2", b"u", now, "android/1"), (b"3", b"v", now, "yogpt/1"),
+                    (b"4", b"w", (today - 1) * users.DAY_MS, "ios/1"), (b"5", b"x", (today - 20) * users.DAY_MS, "ios/1")])
                 db.execute("CREATE TABLE diagnostic_installs(diagnostic_id INTEGER, install BLOB, day INTEGER, PRIMARY KEY(diagnostic_id, install, day))")
                 db.executemany("INSERT INTO diagnostic_installs VALUES(?,?,?)", [
                     (1, a, today), (1, a, today - 1), (1, b, today - 6),  # a twice, b on the 7th day back: 2
                     (2, a, today), (2, c, today - 7),                    # c too old for 7 days
-                    (3, c, today)])                                      # an error, no crash
+                    (3, c, today),                                       # an error, no crash
+                    (4, c, today)])                                      # macOS: left out
             snapshot = users.hub("live", path)
-            self.assertEqual(snapshot["crash_installs_7d"], 2)
-            self.assertEqual({d["id"]: d["installs"] for d in snapshot["diagnostics"]}, {1: 2, 2: 2, 3: 1})
+            # Installs with a crash against the phones seen (bots left out), per range of the page.
+            self.assertEqual(snapshot["crash_free"], {"1": [1, 3], "7": [2, 3], "30": [3, 4], "0": [3, 4]})
+            self.assertEqual({d["id"]: d["installs"] for d in snapshot["diagnostics"]}, {1: 2, 2: 2, 3: 1, 4: 1})
             # The Errors tab (the diagnostics table as it is) gains an installs column.
             table = next(t for t in snapshot["tables"] if t["name"] == "diagnostics")
             self.assertEqual(table["columns"][-1], "installs")
-            self.assertEqual(sorted((r[0], r[-1]) for r in table["rows"]), [(1, 2), (2, 2), (3, 1)])
-            self.assertEqual(table["count"], 3)
+            self.assertEqual(sorted((r[0], r[-1]) for r in table["rows"]), [(1, 2), (2, 2), (3, 1), (4, 1)])
+            self.assertEqual(table["count"], 4)
 
     def test_reports_by_install_without_a_name(self):
         users = load("users")

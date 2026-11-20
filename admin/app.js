@@ -9,8 +9,9 @@ const supportList = ({ threads, filter = "open" }) => threads
   .filter((t) => /^[0-9a-f]{32}$/i.test(t.install || "") && (filter === "open" ? t.unread > 0 : !(t.unread > 0)))
   .map((t) => { const id = t.install.toLowerCase(); return { id, name: installShort(id), thread: t, open: t.unread || 0, at: t.at || 0 }; })
   .sort((a, b) => b.at - a.at);
-// Crash-free (estimated), in %: 1 - installs with a crash in 7 days / users active in 7 days. Installs are not users
-// (one person, several phones or reinstalls), so an estimate; null without a count (an older hub) or without users.
+// Crash-free installs (estimated), in %: 1 - installs with a crash in the range / phones seen in it. The hub has no
+// app start per install id, so the phones seen stand for the installs in use: an estimate; null without a count (an
+// older hub) or without phones.
 const crashFree = (installs, users) => (installs == null || !users ? null : Math.max(0, 100 - (100 * installs) / users));
 // </support-list>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
@@ -470,11 +471,9 @@ if (document.body.classList.contains("login")) {
     // Yos' detail: retention, of the accounts made 1 (7, 30) to 90 days ago those seen that many days after signing up.
     const rt = h.retention || {};
     areaSub.yc = ["d1", "d7", "d30"].map((k) => [`Retention ${k.toUpperCase()}`, rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–", rt[k]?.[1] ? rt[k][0] / rt[k][1] : null]);
-    // Problems' detail: crash-free (est.), the installs with a crash in the last 7 days against the users seen in them,
-    // the plain crash count next to it, and the hub's errors.
-    const crashes = (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day > today0() - 7).reduce((n, r) => n + r.count, 0);
-    const wau = h.active_users ?? 0, crashInstalls = h.crash_installs_7d ?? null, free = crashFree(crashInstalls, wau);
-    healthData = { span, ps, psAll, he, heAll, names, crashes, crashInstalls, wau, free, gone, dau, mau, stick, heRate: rate(heAll) };
+    // Problems' detail: crash-free installs (est.) in the range, the installs with a crash against the phones seen in it.
+    const cf = h.crash_free?.[String(range)] || null, crashInstalls = cf ? cf[0] : null, seen = cf ? cf[1] : 0;
+    healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; a click opens their detail.
@@ -1935,6 +1934,7 @@ if (document.body.classList.contains("login")) {
     for (const r of rows) {
       const row = el("div", `srow${r.values ? "" : " wide"}${r.go ? " go" : ""}`);
       if (r.go) { row.title = r.goTitle || ""; row.addEventListener("click", r.go); }
+      if (r.title) row.title = r.title;
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
       if (r.values) row.append(sparkBars(r.values, r.scls, r.tip));
       box.append(row);
@@ -2010,13 +2010,31 @@ if (document.body.classList.contains("login")) {
     const kept = hubNow.active_days || {}, ds = Array.from({ length: range }, (_, i) => today0() - range + 1 + i);
     return { days: ds, names: ds.map(dayName), values: ds.map((d) => (d === today0() ? Math.max(kept[d] || 0, hubNow.active_day || 0) : kept[d] || 0)) };
   };
-  // Problems that came in over the range, by kind (errors and crashes per day only: today for the last 24 hours).
+  // Crash reports in the range, per slot: per hour for the last 24 hours (the hub's "crash" events), per UTC day
+  // otherwise (diagnostic_days, 14 days kept; older days from the events). A hub that does not count crash events
+  // yet: the last 7 days, today's count as the number.
+  const crashSlots = (h) => {
+    const ev = h.events?.crash, t0 = today0(), perDay = (d) => (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day === d).reduce((a, r) => a + r.count, 0);
+    if (range === 1 && ev?.total > 0) {
+      const h1 = Math.floor(Date.now() / 3600000), values = last24(ev.hours).map((v) => v || 0);
+      return { values, names: values.map((_, i) => clock((h1 - 23 + i) * 3600000)), total: values.reduce((a, v) => a + v, 0), what: "last 24 hours" };
+    }
+    const evDays = year(ev?.year), kept = new Set((h.diagnostic_days || []).map((r) => r.day));
+    const day = (d) => (kept.has(d) ? perDay(d) : evDays.get(d) || 0);
+    const len = range === 1 ? 7 : range || 30, ds = Array.from({ length: len }, (_, i) => t0 - len + 1 + i), values = ds.map(day);
+    const total = range === 1 ? perDay(t0) : range ? values.reduce((a, v) => a + v, 0)
+      : Math.max((h.diagnostic_days || []).filter((r) => r.kind === "crash").reduce((a, r) => a + r.count, 0), ev?.total || 0);
+    return { values, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
+  };
+  // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
     const from = range === 1 ? Date.now() - 86400000 : range ? (today0() - range + 1) * 86400000 : 0, d0 = range === 1 ? today0() : Math.floor(from / 86400000);
     const fb = range === 1 ? last24(h.support_hours).reduce((a, v) => a + (v || 0), 0) : [...year(h.support_days)].filter(([d]) => d >= d0).reduce((a, [, v]) => a + (v || 0), 0);
     const diag = (kind) => (h.diagnostic_days || []).filter((r) => r.kind === kind && r.day >= d0).reduce((a, r) => a + r.count, 0);
-    return [["Feedback", fb], ["Crashes", diag("crash")], ["Errors", diag("error")], ["Reports", (h.reports || []).filter((r) => r.at >= from).length]];
+    return [["Feedback", fb], ["Crashes", crashSlots(h).total], ["Errors", diag("error")], ["Reports", (h.reports || []).filter((r) => r.at >= from).length]];
   };
+  const CRASH_FREE_NOTE = "1 − installs with a crash ÷ phones seen (iOS, Android; no macOS or bots), since the range's first UTC day"
+    + " (24 hours: since yesterday). Estimate: the hub has no app start per install, so the phones seen stand for the installs in use.";
   const DETAIL = {
     yc: () => {
       const h = hubNow, yo = evSlots("yo-in"), md = evSlots("media-in"), n = sumOf(yo), act = activeIn(), ad = activeDays();
@@ -2079,13 +2097,12 @@ if (document.body.classList.contains("login")) {
       return [
         chartCard("Open", d ? num(d.values[d.values.length - 1]) : "–", d, "bad", go),
         dcard("Came in", num(kinds.reduce((a, [, v]) => a + v, 0)), barRows(kinds.map(([l, v]) => [l, num(v), v / top]))),
-        // Crash-free (est.): installs with a crash in 7 days against users active in 7 days; installs are not users
-        // (several phones, reinstalls), so an estimate. The plain crash count next to it.
-        dcard("Crash-free (est.)", pctText(hd.free), kvRows([
-          ["Installs with a crash, 7 days", hd.crashInstalls == null ? "– (hub too old)" : num(hd.crashInstalls)],
-          ["Active users, 7 days", num(hd.wau)],
-          ["Crashes, 7 days", num(hd.crashes)]]),
-          note("Estimate: installs with a crash in 7 days vs active users 7 days (an install is not a user).")),
+        // Crash-free installs (est.): installs with a crash in the range against the phones seen in it.
+        dcard("Crash-free installs (est.)", pctText(hd.free), kvRows([
+          ["Installs with a crash", hd.crashInstalls == null ? "– (hub too old)" : num(hd.crashInstalls)],
+          ["Phones seen (iOS, Android)", num(hd.seen)],
+          ["Crash reports", num(crashSlots(h).total)]]),
+          note(CRASH_FREE_NOTE)),
         he && hd.heAll[1] ? chartCard("Hub errors", `${num(hd.heAll[0])} 5xx`, { names: hd.names, values: he.map(([e]) => e),
           tip: (i) => (he[i][1] ? `${num(he[i][0])} 5xx (${pctText(rate(he[i]))}) · ${num(he[i][2])} 4xx · ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers") }, "bad",
         note(`${pctText(hd.heRate)} of ${num(hd.heAll[1])} answers`)) : dcard("Hub errors", null, note("None counted yet in this range.")),
@@ -2235,8 +2252,8 @@ if (document.body.classList.contains("login")) {
         { cls: "cool", sub: bad ? `${num(bad)} failed` : `${pctText((100 * ok) / (ok + bad))} taken`, subCls: bad ? "bad" : "" }) : dcard("Push", null, note("No data yet."));
       return [...one.vr().filter((c) => title(c) !== "Builds"), ...one.pl(), push];
     };
-    // Problems: what users sent (feedback, reports; crash-free (est.); the way to the chat), errors (the app's crashes
-    // and errors split, per day as a line over the hub's 5xx answers as bars), delivery.
+    // Problems: what users sent and what crashed (feedback, reports, crashes, crash-free installs (est.); the way to
+    // the chat), delivery and speed. The app's errors are in the Errors view.
     DETAIL.pr = () => {
       const h = hubNow, hd = healthData || {}, kinds = Object.fromEntries(problemKinds(h));
       // Feedback: what users sent, as the overview's rows: feedback and reports per slot, crashes and crash-free (est.).
@@ -2250,22 +2267,13 @@ if (document.body.classList.contains("login")) {
         { ico: "chat", label: "Feedback", value: num(kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
         { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
-        (() => { const d7 = Array.from({ length: 7 }, (_, i) => t0 - 6 + i), cr = d7.map((d) => (h.diagnostic_days || []).filter((r) => r.day === d && r.kind === "crash").reduce((a, r) => a + r.count, 0));
-          // The plain crash count of the last 7 days, crash-free (est.: installs with a crash vs active users) beside it.
-          return { ico: "warn", label: "Crashes", value: `${num(hd.crashes)} · ${pctText(hd.free)} crash-free (est.)`, cls: hd.crashes ? "warn" : "", values: cr, scls: "hot",
-            tip: (i) => ({ head: dayName(d7[i]), rows: [{ color: "var(--bad)", label: "Crashes", value: num(cr[i]) },
-              { ico: "ratio", label: "Crash-free (est., 7 days)", value: `${pctText(hd.free)} · ${num(hd.crashInstalls)} installs with a crash vs ${num(hd.wau)} active users` }] }) }; })(),
+        (() => { const c = crashSlots(h);
+          // Crash reports per slot (iOS and Android), their count in the range as the number.
+          return { ico: "warn", label: "Crashes", value: num(c.total), cls: c.total ? "warn" : "", values: c.values, scls: "hot",
+            tip: (i) => ({ head: c.names[i], rows: [{ color: "var(--bad)", label: "Crash reports", value: num(c.values[i]) }] }) }; })(),
+        { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
+          title: `${CRASH_FREE_NOTE}\n${hd.crashInstalls == null ? "The hub keeps no installs per crash yet." : `${num(hd.crashInstalls)} installs with a crash ÷ ${num(hd.seen)} phones seen.`}` },
       ]);
-      // Per day (the app reports per day only): 7 days, 30 for 30 days and Total.
-      const len = range === 30 || range === 0 ? 30 : 7, t = today0(), ds = Array.from({ length: len }, (_, i) => t - len + 1 + i);
-      const app = (d) => (h.diagnostic_days || []).filter((r) => r.day === d).reduce((a, r) => a + r.count, 0);
-      const hub = year(h.events?.["http-5xx"]?.year), crashes = kinds.Crashes || 0, errors = kinds.Errors || 0;
-      const ef = cfoot([key(`App ${num(crashes + errors)}`, null, "var(--bad)"), key(`Hub 5xx ${num(ds.reduce((a, d) => a + (hub.get(d) || 0), 0))}`, "dim", "#e67e22")]);
-      const chart = liveChart({ line: ds.map(app), bars: ds.map((d) => hub.get(d) || 0), from: dayName(ds[0]), to: "today" }, "bad", ef,
-        (i) => ({ head: dayName(ds[i]), rows: [{ color: "var(--bad)", line: true, label: "App crashes and errors", value: num(app(ds[i])) },
-          { color: "#e67e22", label: "Hub 5xx", value: num(hub.get(ds[i]) || 0) }] }));
-      chart.classList.add("l-red");
-      const errs = dcard("Errors", dnums(num(crashes + errors), `${num(crashes)} crashes · ${num(errors)} errors`, "muted"), chart);
       // Yo to Yo speed: from the hub taking a Yo to the friend's phone having it, the share within 1 s per slot as the
       // line over the Yos delivered as bars; within 1 s and within 5 s in the title, every bucket in the popup.
       const sd = speedData, stot = (b) => b.reduce((a, v) => a + v, 0);
@@ -2276,7 +2284,9 @@ if (document.body.classList.contains("login")) {
             ...LAT_NAME.map((n, k) => ({ color: ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"][k], label: n, value: pctText(latPct(sd.lat[i], k)) })),
             { ico: "send", label: "Yos", value: num(stot(sd.lat[i])) }] : [{ ico: "send", label: "Yos", value: "none" }] })));
       })() : dcard("Yo to Yo speed", null, note("No Yos delivered in this range."));
-      return [users, errs, one.dl().find((c) => title(c) === "Delivery"), fast];
+      // Speed two columns wide: the four columns filled without the Errors card (errors are in the Errors view).
+      fast.classList.add("wide");
+      return [users, one.dl().find((c) => title(c) === "Delivery"), fast];
     };
     // Server: its four charts, then updates and the services, one card each.
     DETAIL.server = () => {

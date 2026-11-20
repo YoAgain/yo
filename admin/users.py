@@ -130,7 +130,7 @@ def push_backlog() -> int:
 
 EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
                "latency-1s", "latency-5s", "latency-60s", "latency-slow", "push-ok", "push-fail",
-               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced")
+               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced", "crash")
 # A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
 BOT_USER = ("EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM devices d"
             " WHERE d.user_id = u.id AND NOT (coalesce(d.app, '') LIKE 'yogpt/%' OR coalesce(d.app, '') LIKE 'cli/%'))")
@@ -197,13 +197,29 @@ def retention(db, now: int) -> dict:
     return out
 
 
-def crash_installs(db, now: int):
-    """Distinct installs that sent a crash in the last 7 UTC days (today and the 6 before), from diagnostic_installs
-    (hub schema 9); None on an older hub without the table."""
+# Crash-free installs (estimated) per range of the page ("1" the last 24 hours, "7", "30", "0" Total): UTC days back
+# from today, the 24 hours as today and yesterday (the hub keeps an install's crash by the day only).
+CRASH_FREE_DAYS = {"1": 2, "7": 7, "30": 30, "0": 90}
+# The phone apps: macOS and the bots (YoGPT, the CLI) left out, as on the rest of the page.
+PHONE_APP = "(coalesce({0}, '') LIKE 'ios/%' OR coalesce({0}, '') LIKE 'android/%')"
+
+
+def crash_free(db, now: int):
+    """Per range: [installs that sent a crash, phone devices seen] since the range's first UTC day, both from the
+    phone apps (iOS, Android; not macOS). The hub has no app start per install id, so the devices seen stand for the
+    installs in use (one install, one device): an estimate. None on an older hub without diagnostic_installs."""
     if not has_table(db, "diagnostic_installs"):
         return None
-    return db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
-                      " WHERE d.kind = 'crash' AND i.day >= ?", (now // DAY_MS - 6,)).fetchone()[0]
+    out = {}
+    for key, days in CRASH_FREE_DAYS.items():
+        first = now // DAY_MS - days + 1
+        crashed = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                             f" WHERE d.kind = 'crash' AND i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%'",
+                             (first,)).fetchone()[0]
+        seen = db.execute(f"SELECT count(*) FROM devices WHERE last_seen_at >= ? AND {PHONE_APP.format('app')}",
+                          (first * DAY_MS,)).fetchone()[0]
+        out[key] = [crashed, seen]
+    return out
 
 
 def problem_cause(kind: str, payload: dict):
@@ -310,8 +326,8 @@ def hub(name: str, path: str) -> dict:
                        if has_table(db, "diagnostic_installs") else "NULL")
                     + " FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))]
                 if has_table(db, "diagnostics") else [], []),
-            # Crash-free (estimated) on the page: these installs against the users active in 7 days.
-            "crash_installs_7d": part("crash_installs_7d", lambda: crash_installs(db, now)),
+            # Crash-free installs (estimated) per range: installs with a crash against the phones seen.
+            "crash_free": part("crash_free", lambda: crash_free(db, now)),
             # Support chat: unread user messages at the end of each of the last 14 UTC days (today: now), oldest
             # first; and each thread's last line, by the install id's hex (lower case, as the hub's thread list has it).
             "support_unread_days": part("support_unread_days", lambda: [one(

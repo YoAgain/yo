@@ -170,6 +170,7 @@ Retention: **kept for good**. Linked to account: no.
 | `push-ok`, `push-fail` | APNs/FCM took the push, or failed (a dead token is not counted) |
 | `http`, `http-4xx`, `http-429`, `http-5xx` | every answer, and its class |
 | `account-gone` | an account deleted (by its device or by the operator) |
+| `crash` | an app's crash report (its `count`) |
 
 **Other counters**:
 

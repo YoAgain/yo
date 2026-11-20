@@ -372,7 +372,12 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             db.execute("INSERT OR IGNORE INTO diagnostic_installs VALUES (?,?,?)",
                        (cur.lastrowid, rng.choice(installs), rng.randint(first // DAY, last // DAY)))
     for d in range(now // DAY - 13, now // DAY + 1):
-        db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "crash", rng.randint(0, 4 if live else 1)))
+        crashes = rng.randint(0, 4 if live else 1)
+        db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "crash", crashes))
+        # The same crashes as the hub's "crash" events, at a minute of their day (not after now): per hour on the page.
+        for _ in range(crashes):
+            m = rng.randint(d * 1440, min((d + 1) * 1440, now // 60_000 + 1) - 1)
+            db.execute("INSERT INTO events VALUES (?,?,1) ON CONFLICT(kind, minute) DO UPDATE SET n=n+1", ("crash", m))
         db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "error", rng.randint(2, 30 if live else 3)))
     db.execute("INSERT INTO diagnostic_seen VALUES (?,1)", ("550e8400-e29b-41d4-a716-446655440000",))
     # Reserved names.

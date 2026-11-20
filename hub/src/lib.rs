@@ -98,11 +98,14 @@ pub(crate) enum Event {
     PushFolded,
     /// A push folded into a later one by the backlog pacing (a device with more than `push_backlog` waiting).
     PushPaced,
+    /// An app's crash report (each report's `count`), per minute as the other events: the operator's crashes per hour
+    /// (`diagnostic_days` keeps days only).
+    Crash,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 22] = [
+    const KINDS: [&str; 23] = [
         "yo-in",
         "yo-out",
         "media-in",
@@ -125,6 +128,7 @@ impl Event {
         "bot-media",
         "push-folded",
         "push-paced",
+        "crash",
     ];
 
     /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
@@ -747,6 +751,31 @@ mod tests {
         assert_eq!(Event::http(429).map(|e| Event::KINDS[e as usize]), Some("http-429"));
         assert_eq!(Event::http(503).map(|e| Event::KINDS[e as usize]), Some("http-5xx"));
         assert!(Event::http(204).is_none() && Event::http(304).is_none());
+    }
+
+    /// An app's crash report counts as `crash` by its `count` (per minute, so per hour on the operator's page); an
+    /// error report or a refused one does not.
+    #[tokio::test]
+    async fn crash_reports_are_counted() {
+        use axum::{body::Body, extract::ConnectInfo, http::Request};
+        use tower::ServiceExt;
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let crash = r#"{"app":"ios/202611201000","os":"iOS 26","model":"iPhone","exception":"E","frames":"f","termination":"t""#;
+        for (path, body) in [
+            (api::HELP_CRASH, format!("{crash}}}")),
+            (api::HELP_CRASH, format!("{crash},\"count\":\"3\"}}")),
+            (api::HELP_CRASH, "{}".to_owned()),
+            (api::HELP_ERROR, r#"{"app":"ios/1","os":"o","model":"m","domain":"d","code":"c","place":"p"}"#.to_owned()),
+        ] {
+            let request = Request::post(path)
+                .header(api::HEADER_INSTALL, "ab".repeat(16))
+                .extension(ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9))))
+                .body(Body::from(body))
+                .unwrap();
+            hub.router().oneshot(request).await.unwrap();
+        }
+        let crashes = counted(&hub).into_iter().find(|(kind, _)| kind == "crash");
+        assert_eq!(crashes, Some(("crash".to_owned(), 4)));
     }
 
     /// A push the service refuses: counted, and an error of the hub's own in diagnostics (domain "push", by reason and service,
