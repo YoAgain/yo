@@ -793,14 +793,11 @@ if (document.body.classList.contains("login")) {
     if (h) {
       const node = $("pr-spark"), p = problemSplit(h), sb = sparkBars(p.er, "warm", null, p.cr);
       node.replaceChildren(...sb.childNodes);
-      // The reports per slot as a line over the bars (its own scale).
-      const top = Math.max(1, ...p.rp), pts = p.rp.map((v, i) => `${(((i + 0.5) * 140) / p.rp.length).toFixed(1)},${(26 - (v / top) * 24).toFixed(1)}`).join(" ");
-      node.append(svg("polyline", { points: pts, fill: "none", stroke: "var(--text)", "stroke-width": 1.5, "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke", opacity: ".85", "pointer-events": "none" }));
       node.hidden = false;
       node._split = p;
       if (!node._h) {
         node._h = 1;
-        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: [{ color: "#e67e22", label: "Errors open (causes)", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(q.cr[i]) }, ...problemRows(q, i)] }; },
+        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: problemRows(q, i) }; },
           (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
       }
     }
@@ -2084,7 +2081,8 @@ if (document.body.classList.contains("login")) {
   // The counts of the range's problems: all reports (sum of counts), the installs behind them, their share of the phones seen.
   const problemRows = (q, i) => {
     const t = problemTotals;
-    return [{ label: "Groups", value: num(q.gr[i]) }, { label: "Reports", value: num(q.rp[i]) },
+    return [{ color: "#e67e22", label: "Errors reports", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crash reports", value: num(q.cr[i]) },
+      { label: "Errors open (causes)", value: num(q.ec[i]) }, { label: "Crashes open (causes)", value: num(q.cc[i]) }, { label: "Groups", value: num(q.gr[i]) },
       ...(t ? [{ label: "Installs affected (range)", value: t.installs == null ? "–" : num(t.installs) }, { label: "Of phones seen", value: t.installs == null || !t.seen ? "–" : pctText((100 * t.installs) / t.seen) }] : [])];
   };
   // Open problems per slot, for the Problems tile and its detail row: the error groups (orange) and crash groups (red)
@@ -2092,21 +2090,18 @@ if (document.body.classList.contains("login")) {
   // groups of a kind arrive evenly between the oldest one's first report and now: a rise to today's open count.
   const problemSplit = (h) => {
     const now = Date.now(), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
-    const causes = (kind) => { const m = new Map(); for (const d of open.filter((x) => x.kind === kind)) { const c = diagCause(d); m.set(c, Math.min(m.get(c) ?? Infinity, d.first_seen)); } return [...m.values()].sort((x, y) => x - y); };
-    const all = [...causes("error"), ...causes("crash")], t0 = all.length ? Math.min(...all) : now;
-    const arrive = (kind) => { const l = causes(kind); return l.map((_, i) => t0 + ((i + 1) / l.length) * (now - t0)); };
-    const er = arrive("error"), cr = arrive("crash"), upTo = (l, t) => l.filter((x) => x <= t).length;
-    // Groups (a row per build and line) arrive the same way; reports per slot: the hub's events by the hour, the kept
-    // daily counts otherwise (older days from the events).
-    const gl = open.map((d) => d.first_seen).sort((x, y) => x - y), gs = gl.map((_, i) => t0 + ((i + 1) / gl.length) * (now - t0));
-    const ev = h.events || {}, kept = new Set((h.diagnostic_days || []).map((r) => r.day));
-    const perDay = (d) => (kept.has(d) ? (h.diagnostic_days || []).filter((r) => r.day === d).reduce((n, r) => n + r.count, 0) : (year(ev.error?.year).get(d) || 0) + (year(ev.crash?.year).get(d) || 0));
+    const t0 = open.length ? Math.min(...open.map((d) => d.first_seen)) : now;
+    // Each open group's reports (its count) arrive at an even point of its kind between the oldest group and now.
+    const groups = (kind) => open.filter((d) => d.kind === kind).sort((x, y) => x.first_seen - y.first_seen)
+      .map((d, i, l) => ({ at: t0 + ((i + 1) / l.length) * (now - t0), n: d.count || 0, cause: diagCause(d) }));
+    const eg = groups("error"), cg = groups("crash");
+    const upTo = (l, t) => l.filter((x) => x.at <= t), sum = (l) => l.reduce((n, x) => n + x.n, 0);
     const ends = range === 1 ? Array.from({ length: 24 }, (_, i) => Math.min(now, (Math.floor(now / 3600000) - 22 + i) * 3600000))
       : Array.from({ length: range || 30 }, (_, i) => Math.min(now, (today0() - (range || 30) + 2 + i) * 86400000));
     const names = range === 1 ? ends.map((t, i) => clock((Math.floor(now / 3600000) - 23 + i) * 3600000)) : ends.map((t, i) => dayName(today0() - (range || 30) + 1 + i));
-    const hours = (k) => last24(ev[k]?.hours);
-    const rp = range === 1 ? hours("error").map((v, i) => (v || 0) + (hours("crash")[i] || 0)) : Array.from({ length: range || 30 }, (_, i) => perDay(today0() - (range || 30) + 1 + i));
-    return { names, er: ends.map((t) => upTo(er, t)), cr: ends.map((t) => upTo(cr, t)), gr: ends.map((t) => upTo(gs, t)), rp };
+    const at = (t) => { const e = upTo(eg, t), c = upTo(cg, t); return { er: sum(e), cr: sum(c), ec: new Set(e.map((x) => x.cause)).size, cc: new Set(c.map((x) => x.cause)).size, gr: e.length + c.length }; };
+    const cols = ends.map(at);
+    return { names, er: cols.map((x) => x.er), cr: cols.map((x) => x.cr), ec: cols.map((x) => x.ec), cc: cols.map((x) => x.cc), gr: cols.map((x) => x.gr) };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
@@ -2351,8 +2346,8 @@ if (document.body.classList.contains("login")) {
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", value: `${num(p.er.at(-1) + p.cr.at(-1))} causes · ${num(problemTotals?.reports || 0)} reports · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"} of phones`, cls: p.er.at(-1) + p.cr.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
-            tip: (i) => ({ head: p.names[i], rows: [{ color: "#e67e22", label: "Errors open (causes)", value: num(p.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(p.cr[i]) }, ...problemRows(p, i)] }) }; })(),
+          return { ico: "warn", label: "Problems", value: `${num(p.ec.at(-1) + p.cc.at(-1))} causes · ${num(p.er.at(-1) + p.cr.at(-1))} reports · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"} of phones`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+            tip: (i) => ({ head: p.names[i], rows: problemRows(p, i) }) }; })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
           title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
             rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },
