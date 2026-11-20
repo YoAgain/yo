@@ -15,9 +15,10 @@
      Secured, Platforms, Problems, Queue, Delivery, Push, Hub errors), Server with the services as chips, the detail of
      what was clicked (closed by default), the Database widget below, always open. -->
 <main class="ov" id="overview">
+<div class="topbar full"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="1" title="last 24 hours">1</button><button type="button" data-r="7" class="on" title="last 7 days">7</button><button type="button" data-r="30" title="last 30 days">30</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
 <header class="tile hdr group" id="t-hdr">
   <div class="chartw hchart" id="t-yc">
-    <h2 class="gh"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><span class="sr">Yos</span><b class="gsum big" id="yc-n">–</b></h2>
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7z"/></svg><span>Sent</span><span class="gnums"><b class="gsum big" id="yc-n" title="total">–</b><span class="gtoday" title="today (UTC)">+<b id="yc-t">–</b> today</span></span></h2>
     <div class="area" id="yc-area"><svg id="yc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="yc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </div>
@@ -25,46 +26,53 @@
 </header>
   <div class="charts">
   <article class="tile group chartw" id="t-uc">
-    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><b class="gsum big" id="uc-n">–</b></h2>
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><span class="gnums"><b class="gsum big" id="uc-n" title="total">–</b><span class="gtoday" title="today (UTC)">+<b id="uc-t">–</b> today</span></span></h2>
     <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </article>
   </div>
-  <article class="tile group" id="g-usage">
-      <section class="counts" id="t-usage">
-        <div class="crow bars" id="c-md"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg><span class="cl">Media</span><b class="cn" id="md-n">–</b><span class="sv" id="md-sv"></span><svg class="spark" id="md-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars" id="c-gr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg><span class="cl">Groups</span><b class="cn" id="gr-n">–</b><span class="sv" id="gr-sv"></span><svg class="spark" id="gr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars sep" id="c-sc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg><span class="cl">Secured</span><b class="cn" id="sc-n">–</b><span class="sv" id="sc-sv"></span><svg class="spark" id="sc-spark" viewBox="0 0 140 28" preserveAspectRatio="none" hidden></svg><span class="stack share" id="sc-bar"><span></span></span></div>
-        <div class="crow bars" id="c-pl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span class="cl">Platforms</span><b class="cn" id="pl-n">–</b><span class="stack plats" id="pl-bar"></span></div>
-        <div class="crow bars" id="c-vr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/><path d="M5 20h14"/></svg><span class="cl">Versions</span><span class="vr-spark" id="vr-bar"></span></div>
-        <div class="crow bars sep" id="c-pr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow kv" id="c-q" hidden data-card="q"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="cl">Queue</span><b class="cn" id="q-n">–</b></div>
-        <div class="crow bars go" id="c-dl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h11"/><path d="m10 7.5 4.5 4.5-4.5 4.5"/><path d="M18 5v14"/></svg><span class="cl">Speed</span><svg class="spark" id="dl-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars go" id="c-ps"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span class="cl">Push</span><svg class="spark" id="ps-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars go" id="c-he" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Hub errors</span><svg class="spark" id="he-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+  <div class="halves">
+  <article class="tile group half" id="g-app">
+      <section class="counts">
+        <div class="crow main bars" id="c-vr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/><path d="M5 20h14"/></svg><span class="cl">App</span><span class="vr-spark" id="vr-bar"></span></div>
+        <div class="crow fold bars sep" id="c-sc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg><span class="cl">Secured</span><b class="cn" id="sc-n">–</b><span class="sv" id="sc-sv"></span><svg class="spark" id="sc-spark" viewBox="0 0 140 28" preserveAspectRatio="none" hidden></svg><span class="stack share" id="sc-bar"><span></span></span></div>
+        <div class="crow fold bars" id="c-pl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span class="cl">Platforms</span><b class="cn" id="pl-n">–</b><span class="stack plats" id="pl-bar"></span></div>
+        <div class="crow fold bars go" id="c-ps"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span class="cl">Push</span><svg class="spark" id="ps-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow fold bars" id="c-md"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg><span class="cl">Media</span><b class="cn" id="md-n">–</b><span class="sv" id="md-sv"></span><svg class="spark" id="md-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow fold bars" id="c-gr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg><span class="cl">Groups</span><b class="cn" id="gr-n">–</b><span class="sv" id="gr-sv"></span><svg class="spark" id="gr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
       </section>
   </article>
+  <article class="tile group half" id="g-usage">
+      <section class="counts" id="t-usage">
+        <div class="crow main bars" id="c-pr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow fold kv" id="c-q" hidden data-card="q"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="cl">Queue</span><b class="cn" id="q-n">–</b></div>
+        <div class="crow fold bars go" id="c-dl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h11"/><path d="m10 7.5 4.5 4.5-4.5 4.5"/><path d="M18 5v14"/></svg><span class="cl">Speed</span><svg class="spark" id="dl-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow fold bars go" id="c-he" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Hub errors</span><svg class="spark" id="he-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+      </section>
+  </article>
+  </div>
   <article class="tile group" id="g-server">
-    <div class="svcbar" role="group" aria-label="Services"><button type="button" class="chip" id="t-hub" data-card="svc:hub"><span class="dot"></span>Hub</button><button type="button" class="chip" id="t-dev" data-card="svc:dev"><span class="dot"></span>Dev</button><button type="button" class="chip" id="t-tunnel" data-card="svc:tunnel"><span class="dot"></span>Tunnel</button><button type="button" class="chip" id="t-cli" data-card="svc:cli" title="YoGPT and the status bot"><span class="dot"></span>CLI</button></div>
       <section class="counts" id="t-system">
         <div class="crow bars" id="c-cpu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3M15 2.5v3M9 18.5v3M15 18.5v3M2.5 9h3M2.5 15h3M18.5 9h3M18.5 15h3"/></svg><span class="cl">CPU</span><b class="cn" id="cpu-n">–</b><span class="sv" id="cpu-sv"></span><svg class="spark" id="cpu-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow bars" id="c-mem"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 10.5v3M11 10.5v3"/></svg><span class="cl">Memory</span><b class="cn" id="mem-n">–</b><span class="sv" id="mem-sv"></span><svg class="spark" id="mem-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow bars" id="c-disk"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/></svg><span class="cl">Disk</span><b class="cn" id="disk-n">–</b><span class="sv" id="disk-sv"></span><svg class="spark" id="disk-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow bars sep" id="c-net"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/></svg><span class="cl">LAN</span><b class="cn" id="net-n">–</b><span class="sv" id="net-sv"></span><svg class="spark" id="net-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow kv" id="c-upd"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 19h16"/></svg><span class="cl">Updates</span><b class="cn" id="upd-n">–</b></div>
+        <div class="crow kv sep" id="c-svc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Services</span><b class="cn" id="svc-n">–</b></div>
         <select id="st-every" aria-label="How often the status bot reports" hidden>
           <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
           <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
         <b id="reboot-text" hidden></b>
       </section>
+    <div class="svcbar" role="group" aria-label="Services" hidden><button type="button" class="chip" id="t-hub" data-card="svc:hub"><span class="dot"></span>Hub</button><button type="button" class="chip" id="t-dev" data-card="svc:dev"><span class="dot"></span>Dev</button><button type="button" class="chip" id="t-tunnel" data-card="svc:tunnel"><span class="dot"></span>Tunnel</button><button type="button" class="chip" id="t-cli" data-card="svc:cli" title="YoGPT and the status bot"><span class="dot"></span>CLI</button></div>
   </article>
-  <div class="rangebar"><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="1" title="last 24 hours">1</button><button type="button" data-r="7" class="on" title="last 7 days">7</button><button type="button" data-r="30" title="last 30 days">30</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
   <!-- The detail: closed by default; a click on a row, a service or a chart opens up to four cards about it here,
        in the range above; the same click again, × or Escape closes it. -->
   <section class="detail full" id="detail" hidden aria-labelledby="detail-title">
     <div class="dhead"><h2 id="detail-title"></h2><button type="button" class="close" id="detail-close" aria-label="Close" title="Close (Esc)">×</button></div>
     <div class="dgrid" id="detail-cards"></div>
   </section>
+  <div class="rangebar" aria-hidden="true"></div>
   <article class="tile full" id="t-db" aria-label="Database">
     <div class="tables" id="tables"></div>
     <div class="dbfoot"><span id="tables-note">–</span><button type="button" class="eye" id="db-blur" title="blur names and ids (for a screenshot); again to show them" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>

@@ -5,9 +5,9 @@ reports) over one range next to the logo (7, 30 or 365 days: totals with a trend
 day or month; green where more is good, orange where more is bad), Users (secured, active, platforms), Server (CPU,
 memory, disk, network with the last hour's bars, kept in memory by admin.py; updates), Services (queue, the units, the
 STATUS bot with its frequency, [skills/status](../skills/status)) and an always-open Database widget. No hovers: a click
-on a row, a service or a chart opens its detail (up to four cards, in the range; the server's last 24 hours, a point
-per quarter hour in admin.py's memory) between the widgets and the Database; again, × or Escape closes it. Its tables carry the tools: users is the sortable users table, support_messages opens as the support chat
-(List | Chat), diagnostics show open groups first with Done/Reopen, reserved has its switch and reasons; a footer eye
+on a row, a service or a chart opens its detail (all its cards, in the range; the server's last 24 hours, a point
+per quarter hour in admin.py's memory) between the widgets and the Database; again, × or Escape closes it. Its sidebar starts with the views: Users (the sortable users table), Support (the support chat), Errors (open
+groups first with Done/Reopen) and To-dos; below them every table as it is, by name (reserved with its switch and reasons); a footer eye
 blurs names and ids for screenshots. The collector (`users.py`) reads SQLite databases read-only and atomically writes
 a JSON snapshot. Yos, Media and Groups read the hub's `events` table (counts per kind and minute, no identifiers). Bots
 (an account whose every device names a `yogpt/` or `cli/` app) are left out of Sign-ups; the hub counts a bot's

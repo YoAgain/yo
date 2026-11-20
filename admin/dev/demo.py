@@ -605,6 +605,12 @@ def main():
     for hub_name, size, n_days in (("live", args.users, 21), ("dev", 9, 10)):
         vh[hub_name + "_build_days"], vh[hub_name + "_build_hours"] = build_history(size, n_days)
     write("version-days.json", vh)
+    # The queue over 48 hours and 30 days: Yos waiting for offline phones, the bytes of media waiting.
+    def queue_at(k):
+        yos = max(0, int(40 + 25 * math.sin(k / 5) + rng.gauss(0, 6)))
+        return [yos, yos * rng.randint(60_000, 140_000)]
+    write("queue.json", {"live": {"hours": {str(h): queue_at(h) for h in range(now // HOUR - 47, now // HOUR)},
+                                  "days": {str(d): queue_at(d) for d in range(today - 30, today)}}})
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
         hours[str(h)] = max(0, int(rng.gauss(5, 3)))

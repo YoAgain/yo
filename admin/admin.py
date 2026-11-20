@@ -294,6 +294,51 @@ def active_days(snapshot: dict, now_ms=None) -> dict:
     return out
 
 
+# The queue (Yos waiting for offline phones, and the bytes of the photos and videos waiting) per hub: the last value
+# per UTC hour for 48 hours and per UTC day for 400 days, kept here from the collector's snapshots. Counts only.
+QUEUE_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/queue.json"
+_queue_lock = threading.Lock()
+
+
+def queue_history(snapshot: dict, now_ms=None) -> dict:
+    """The snapshot with "queue_hours" and "queue_days": {slot: [yos, bytes]} per hub, after folding in its values."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    hour, day = now_ms // 3600000, now_ms // 86400000
+    with _queue_lock:
+        try:
+            history = json.loads(read_bytes(QUEUE_FILE))
+            if not isinstance(history, dict):
+                history = {}
+        except (OSError, ValueError):
+            history = {}
+        changed = False
+        for hub in ("live", "dev"):
+            h = snapshot.get(hub) if isinstance(snapshot.get(hub), dict) else {}
+            old = history.get(hub) if isinstance(history.get(hub), dict) else {}
+            hours = {k: v for k, v in (old.get("hours") or {}).items() if k.isdigit() and hour - int(k) < 48}
+            days = {k: v for k, v in (old.get("days") or {}).items() if k.isdigit() and day - int(k) < 400}
+            yos, blobs = h.get("messages"), h.get("blobs")
+            if isinstance(yos, int) and isinstance(blobs, list) and len(blobs) == 2 and snapshot.get("at", 0) // 3600000 == hour:
+                value = [yos, blobs[1] if isinstance(blobs[1], int) else 0]
+                if hours.get(str(hour)) != value or days.get(str(day)) != value:
+                    hours[str(hour)] = days[str(day)] = value
+                    changed = True
+            history[hub] = {"hours": hours, "days": days}
+        if changed:
+            try:
+                tmp = QUEUE_FILE + ".new"
+                with open(tmp, "w") as f:
+                    json.dump(history, f)
+                os.replace(tmp, QUEUE_FILE)
+            except OSError:
+                pass
+    out = dict(snapshot)
+    for hub in ("live", "dev"):
+        if isinstance(out.get(hub), dict):
+            out[hub] = {**out[hub], "queue_hours": history.get(hub, {}).get("hours", {}), "queue_days": history.get(hub, {}).get("days", {})}
+    return out
+
+
 # App versions per UTC day for the Versions row: the collector's "versions_day" (of the devices seen today: current,
 # update out, must update, unknown), the day's latest kept here for good (history starts with this file). Counts only.
 VERSIONS_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/version-days.json"
@@ -700,7 +745,7 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(version_days(active_days(collector.snapshot()))).encode(), "application/json")
+            return self.send(200, json.dumps(queue_history(version_days(active_days(collector.snapshot())))).encode(), "application/json")
         self.send(404, b"Not found", "text/plain")
 
     do_HEAD = do_GET
