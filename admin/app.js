@@ -2484,9 +2484,13 @@ if (document.body.classList.contains("login")) {
       const fbDays = year(h.support_days), fbHours = last24(h.support_hours);
       const fb = slots.map((x, i) => (range === 1 ? fbHours[i] || 0 : fbDays.get(x) || 0));
       const rp = slots.map((x) => (h.reports || []).filter((r) => Math.floor(r.at / unitMs) === x).length);
+      const openFeedback = h.support_unread_days?.at(-1) ?? 0;
+      const openReports = (h.reports || []).filter((r) => !lastDone.has(reportKey(r))).length;
+      const period = range === 1 ? "in 24 h" : range ? `in ${range} d` : "in total";
+      const summary = (open, incoming) => `Open ${num(open)} · came in ${num(incoming)} ${period}`;
       const userRows = [
-        { ico: "chat", label: "Feedback", value: num(kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
-        { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
+        { ico: "chat", label: "Feedback", value: num(openFeedback), cls: openFeedback ? "warn" : "", title: summary(openFeedback, kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
+        { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary(openReports, kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
