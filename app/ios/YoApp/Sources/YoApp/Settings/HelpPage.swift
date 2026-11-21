@@ -22,6 +22,13 @@ struct HelpPage: View {
     return build == "1" ? marketingVersion : "\(marketingVersion) (build \(build))"
   }
 
+  /// The Help row's short form, one line beside the title: "1.0.0 RC19", else "1.0.0 dev" (the build number is on the
+  /// About & Licenses page).
+  static var rowVersion: String {
+    if let rc = Bundle.main.infoDictionary?["YoReleaseName"] as? String { return "\(marketingVersion) \(rc)" }
+    return (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1") == "1" ? marketingVersion : "\(marketingVersion) dev"
+  }
+
   var body: some View {
     Form {
       Section {
@@ -32,7 +39,7 @@ struct HelpPage: View {
         NavigationLink(value: SettingsView.Page.licenses) {
           // A settings row: the label leading, the version as its value.
           LabeledContent {
-            Text(Self.shownVersion)
+            Text(Self.rowVersion)
           } label: {
             Label("About & Licenses", systemImage: "info.circle.fill").labelStyle(Tile(.gray))
           }

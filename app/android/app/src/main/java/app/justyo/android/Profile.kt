@@ -449,7 +449,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         Section(null, null,
                             Setting(stringResource(R.string.ui_status), Icons.Default.MonitorHeart,
                                 stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected, onClick = { open("Status") }),
-                            Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info, shownVersion(), onClick = { open("Licenses") }),
+                            Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info, rowVersion(), onClick = { open("Licenses") }),
                         )
                     }
                     shown == "Status" -> StatusPage(model, s, connected) { open(it) }
@@ -1351,6 +1351,9 @@ suspend fun readQr(context: Context,uri: Uri): String? = withContext(Dispatchers
     }
     return chunks
 }
+
+/** The Help row's short form, one line: "1.0.0 RC19", else "1.0.0 dev" (the build number is on the About page). */
+fun rowVersion(): String = shownVersion().let { if (it.contains(" (build ")) it.substringBefore(" (build ") + " dev" else it }
 
 /** "1.0.0 RC19" for a release (versionName 1.0.0-RC19, from the tag), else "<versionName> (build 202611211230)". */
 fun shownVersion(): String =
