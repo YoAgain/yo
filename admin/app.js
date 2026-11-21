@@ -806,15 +806,16 @@ if (document.body.classList.contains("login")) {
   // ---- versions: current (green), update out (yellow), must update (red: below the hub's minimum), unknown (grey) --
   const VSTATES = { current: "current", update: "update", must: "must", unknown: "unknown" }, VKEYS = Object.keys(VSTATES);
   const platLine = (l, p) => `${l} ${num(p.all)}${VKEYS.filter((k) => p[k] && k !== "unknown").map((k) => ` · ${num(p[k])} ${k}`).join("")}`;
-  // One stacked bar of shares, current at the bottom; an empty slot a faint dash.
+  // One stacked bar of shares, current at the top; an empty slot a faint dash.
   const vStack = (row, x, w, H, top) => {
     const all = row ? row.reduce((a, v) => a + v, 0) : 0;
     if (!all) return [svg("rect", { x: x.toFixed(1), width: w.toFixed(1), y: (H - 1.5).toFixed(1), height: 1.5, rx: 1, class: "b zero" })];
-    let y = H;
+    let y = top;
     return VKEYS.map((k, i) => {
       const hh = (row[i] / all) * (H - top);
-      y -= hh;
-      return row[i] ? svg("rect", { x: x.toFixed(1), width: w.toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: `v-${k}` }) : null;
+      const bandTop = y;
+      y += hh;
+      return row[i] ? svg("rect", { x: x.toFixed(1), width: w.toFixed(1), y: bandTop.toFixed(1), height: hh.toFixed(1), class: `v-${k}` }) : null;
     }).filter(Boolean);
   };
   // ---- overview ---------------------------------------------------------------------------------------------------
@@ -882,6 +883,8 @@ if (document.body.classList.contains("login")) {
       node.replaceChildren(...sb.childNodes);
       node.hidden = false;
       node._split = p;
+      set("pr-from", p.names[0] || "");
+      set("pr-to", p.names.at(-1) || "");
       if (!node._h) {
         node._h = 1;
         hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: problemRows(q, i) }; },
@@ -1877,7 +1880,7 @@ if (document.body.classList.contains("login")) {
         return [e, e === t ? "today" : dayName(e), row];
       });
     }
-    // The bands are the app tile's states, bottom to top: current, fresh, update, must update, unknown (dev builds and
+    // The bands are the app tile's states, top to bottom: current, fresh, update, must update, unknown (dev builds and
     // the like). The builds stay in each slot's `raw` row, for the hover.
     const stateOf = (a) => (belowMin(a) ? "must" : appInfo(a)?.state === "current" ? "current" : appInfo(a)?.state === "fresh" ? "fresh" : appInfo(a)?.state === "update" ? "update" : "unknown");
     const mine = (a) => (plat === "all" ? /^(ios|android)\//.test(String(a)) : String(a).startsWith(`${plat}/`));
@@ -1885,7 +1888,7 @@ if (document.body.classList.contains("login")) {
     // the other states are one band each.
     const upd = new Map();
     for (const [, , row] of slots) for (const [ap, c] of Object.entries(row || {})) if (c > 0 && mine(ap) && stateOf(ap) === "update") upd.set(ap, (upd.get(ap) || 0) + c);
-    const updApps = [...upd.keys()].sort((x, y) => buildKey(y).localeCompare(buildKey(x))), ownUpd = updApps.slice(0, 5), YELLOWS = ["#f6dc6b", "#e8c744", "#cdaa2c", "#ac8a21", "#8c6e1a"];
+    const updApps = [...upd.keys()].sort((x, y) => build(y).localeCompare(build(x))), ownUpd = updApps.slice(0, 5), YELLOWS = ["#f6dc6b", "#e8c744", "#cdaa2c", "#ac8a21", "#8c6e1a"];
     const bands = [{ k: "current", name: "Current", color: "var(--ok)" }, { k: "fresh", name: "Fresh", color: "#a3e4b8" },
       ...ownUpd.map((ap, n) => ({ k: "update", name: buildLabel(ap), color: YELLOWS[n], app: ap })), ...(updApps.length > 5 ? [{ k: "update", name: "older", color: "#6f5714", older: true }] : []),
       { k: "must", name: "Must update", color: "var(--bad)" }, { k: "unknown", name: "Unknown", color: "var(--muted)" }];
@@ -1899,27 +1902,28 @@ if (document.body.classList.contains("login")) {
     return { slots, bands, rows, raw: slots.map(([, , row]) => (row ? Object.entries(row).filter(([a, c]) => mine(a) && c > 0) : [])) };
   };
   const relChart = (h, plat, titleText) => {
-    const d = relData(h, plat), n = d.slots.length, W = 264, H = 96, bottom = 18, B = H - bottom;
-    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart rchart" });
+    const d = relData(h, plat), n = d.slots.length, W = 264, B = 96;
+    const s = svg("svg", { viewBox: `0 0 ${W} ${B + 1}`, preserveAspectRatio: "none", class: "hc-chart rchart" });
     const have = d.rows.map((r, i) => (r ? i : -1)).filter((i) => i >= 0), f0 = have[0] ?? 0, span = Math.max(1, n - 1 - f0);
     const xs = (i) => (n - 1 > f0 ? ((i - f0) * W) / span : W / 2);
-    const label = (x, text, anchor) => { const t = svg("text", { x, y: H - 4, "text-anchor": anchor, class: "ax" }); t.textContent = text; return t; };
     s.append(svg("line", { x1: 0, x2: W, y1: B + 0.5, y2: B + 0.5, class: "base" }));
     if (!have.length) return dcard(titleText, null, note("No builds kept yet: counted per hour and day from now on."));
-    // The bands' edges at each kept slot (a lone slot drawn as a thin column), bottom band first.
+    // The bands' edges at each kept slot (a lone slot drawn as a thin column), top band first.
     const pts = have.length > 1 ? have : [have[0], have[0]];
     const x = (k, i) => (have.length > 1 ? xs(i) : xs(i) + (k ? 3 : -3));
     const tops = pts.map((i) => { const r = d.rows[i], all = r.reduce((a, v) => a + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
     d.bands.forEach((b, j) => {
       if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
-      const up = pts.map((i, k) => `${x(k, i).toFixed(1)},${(B - tops[k][j] * (B - 2)).toFixed(1)}`);
-      const down = pts.map((i, k) => `${x(k, i).toFixed(1)},${(B - (j ? tops[k][j - 1] : 0) * (B - 2)).toFixed(1)}`).reverse();
+      const up = pts.map((i, k) => `${x(k, i).toFixed(1)},${(2 + tops[k][j] * (B - 2)).toFixed(1)}`);
+      const down = pts.map((i, k) => `${x(k, i).toFixed(1)},${(2 + (j ? tops[k][j - 1] : 0) * (B - 2)).toFixed(1)}`).reverse();
       const p = svg("polygon", { points: [...up, ...down].join(" "), class: "rb" });
       p.style.fill = b.color;
       s.append(p);
     });
     const mark = svg("line", { y1: 0, y2: B, class: "rmark" });
-    s.append(mark, label(0, d.slots[f0][1], "start"), label(W, d.slots[n - 1][1], "end"));
+    s.append(mark);
+    const axis = el("div", "chart-axis");
+    axis.append(el("span", null, d.slots[f0][1]), el("span", null, d.slots[n - 1][1]));
     // Under the chart the legend (the five newest builds); a click on the chart names that slot's shares instead, a
     // second click on the same slot gives the legend back.
     const pick = d.rows[have[have.length - 1]], pickAll = pick ? pick.reduce((a, v) => a + v, 0) : 0;
@@ -1927,9 +1931,9 @@ if (document.body.classList.contains("login")) {
     // No legend: the hover names each band's build with its share at that point.
     hoverTip(s, n - f0, (k) => {
       const i = f0 + k, r = d.rows[i], all = r ? r.reduce((x, v) => x + v, 0) : 0;
-      return { head: d.slots[i][1], rows: r ? d.bands.map((b, j) => ({ color: b.color, label: b.name, value: `${Math.round((100 * r[j]) / all)} %` })).filter((x) => x.value !== "0 %").reverse() : [{ label: "Builds", value: "not recorded" }] };
+      return { head: d.slots[i][1], rows: r ? d.bands.map((b, j) => ({ color: b.color, label: b.name, value: `${Math.round((100 * r[j]) / all)} %` })).filter((x) => x.value !== "0 %") : [{ label: "Builds", value: "not recorded" }] };
     });
-    const card = dcard(titleText, share, s);
+    const card = dcard(titleText, share, s, axis);
     return card;
   };
   // A small pill of choices in a card's header (the chosen one lit); `change(value)` when another is chosen.
@@ -2510,7 +2514,7 @@ if (document.body.classList.contains("login")) {
   const TITLE = { yc: "Yos", uc: "Accounts", md: "Media", gr: "Groups", sc: "Secured", pl: "Platforms", vr: "App", pr: "Problems", dl: "Speed", ps: "Push", server: "Server", upd: "Updates", svc: "Services" };
   const SLUG = { yc: "yos", uc: "accounts", md: "media", gr: "groups", sc: "secured", pl: "platforms", vr: "app", pr: "problems", dl: "speed", ps: "push",
     cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
-  const detailBox = $("detail");
+  const detailHosts = [$("grp-vr"), $("problem-rows")];
   let detailPending = false;
   // The status bot's select lives in the server card's hover while it shows, else hidden at home.
   const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
@@ -2522,12 +2526,14 @@ if (document.body.classList.contains("login")) {
   };
   // Redrawn with fresh data, unless the pointer is on a card (its captions) or a select is open; then once it leaves.
   function redrawDetail() {
-    if (detailBox.querySelector(".dcard:hover") || document.activeElement?.closest?.("#detail select")) { detailPending = true; return; }
+    if (matchMedia("(any-hover: hover)").matches && detailHosts.some((host) => host.matches(":hover"))) { detailPending = true; return; }
     drawDetail();
   }
-  detailBox.addEventListener("pointerleave", () => { if (detailPending) { detailPending = false; drawDetail(); } });
+  for (const host of detailHosts) host.addEventListener("pointerleave", () => {
+    if (detailPending) { detailPending = false; drawDetail(); }
+  });
   const openDetail = (key) => {
-    const target = { yc: "t-yc", uc: "t-uc", vr: "grp-vr", pr: "grp-pr", ps: "grp-pr", dl: "grp-pr" }[TOPIC(key)];
+    const target = { yc: "t-yc", uc: "t-uc", vr: "grp-vr", pr: "grp-pr", ps: "problem-rows", dl: "problem-rows" }[TOPIC(key)];
     if (target) $(target).scrollIntoView({ behavior: "smooth", block: "start" });
   };
   serverHints();

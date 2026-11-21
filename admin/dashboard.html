@@ -11,35 +11,32 @@
 </head>
 <body class="dash">
 
-<!-- One page of widgets: the header (logo, range), the Yos and Accounts charts, one widget of counts (Media, Groups,
-     Secured, Platforms, Problems, Queue, Delivery, Push, Hub errors), Server with the services as chips, the detail of
-     what was clicked (closed by default), the Database widget below, always open. -->
 <main class="ov" id="overview">
 <div class="topbar full"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><div class="live" id="live" role="img" aria-label="Yos right now"><span class="live-n"><b id="live-n">–</b><span>/m</span></span><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></div><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="-1" title="last hour: charts with per-minute counts; the others show 1D">1H</button><button type="button" data-r="1" title="last 24 hours">1D</button><button type="button" data-r="7" class="on" title="last 7 days">7D</button><button type="button" data-r="30" title="last 30 days">30D</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
-<header class="tile hdr group" id="t-hdr">
-  <div class="chartw hchart" id="t-yc">
+<div id="detail" class="overview-grid full">
+  <article class="tile group chartw" id="t-yc">
     <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7z"/></svg><span>Sent</span><span class="gnums"><b class="gsum big" id="yc-n" title="total">–</b><span class="gtoday" title="last 24 hours">+<b id="yc-t">–</b> in 24 h</span></span></h2>
     <div class="area" id="yc-area"><svg id="yc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="yc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
-  </div>
-  <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
-</header>
-  <article class="dcard"><h2 class="gh">Yos</h2><div id="yc-rows"></div></article>
-  <div class="charts">
+    <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
+  </article>
   <article class="tile group chartw" id="t-uc">
     <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><span class="gnums"><b class="gsum big" id="uc-n" title="total">–</b><span class="gtoday" title="last 24 hours">+<b id="uc-t">–</b> in 24 h</span></span></h2>
     <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </article>
+  <div id="grp-vr"></div>
+  <article class="dcard" id="grp-pr">
+    <div class="problem-chart" id="c-pr">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg>
+      <h2 class="cl">Problems</h2><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span>
+      <svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg>
+      <div class="chart-axis"><span id="pr-from"></span><span id="pr-to"></span></div>
+    </div>
+  </article>
+  <article class="dcard"><h2 class="gh">Yos</h2><div id="yc-rows"></div></article>
   <article class="dcard"><h2 class="gh">Accounts stats</h2><div id="uc-rows"></div></article>
-  </div>
-  <div id="detail" class="merged-grid full">
-    <div id="grp-vr"></div>
-    <article class="dcard" id="grp-pr">
-        <div class="problem-chart" id="c-pr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-      <div id="problem-rows"></div>
-    </article>
-  </div>
+  <article class="dcard"><h2 class="gh">Problems</h2><div id="problem-rows"></div></article>
   <div hidden>
         <div class="crow fold bars sep" id="c-sc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg><span class="cl">Secured</span><b class="cn" id="sc-n">–</b><span class="sv" id="sc-sv"></span><svg class="spark" id="sc-spark" viewBox="0 0 140 28" preserveAspectRatio="none" hidden></svg><span class="stack share" id="sc-bar"><span></span></span></div>
         <div class="crow fold bars" id="c-pl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span class="cl">Platforms</span><b class="cn" id="pl-n">–</b><span class="stack plats" id="pl-bar"></span></div>
@@ -51,6 +48,7 @@
         <div class="crow fold bars go" id="c-he" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Hub errors</span><svg class="spark" id="he-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
   </div>
   <article class="tile group" id="g-server">
+      <h2 class="gh">Server</h2>
       <section class="counts" id="t-system">
         <div class="crow bars" id="c-cpu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3M15 2.5v3M9 18.5v3M15 18.5v3M2.5 9h3M2.5 15h3M18.5 9h3M18.5 15h3"/></svg><span class="cl">CPU</span><b class="cn" id="cpu-n">–</b><span class="sv" id="cpu-sv"></span><svg class="spark" id="cpu-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow bars" id="c-mem"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 10.5v3M11 10.5v3"/></svg><span class="cl">Memory</span><b class="cn" id="mem-n">–</b><span class="sv" id="mem-sv"></span><svg class="spark" id="mem-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
@@ -65,7 +63,7 @@
       </section>
     <div class="svcbar" role="group" aria-label="Services" hidden><button type="button" class="chip" id="t-hub" data-card="svc:hub"><span class="dot"></span>Hub</button><button type="button" class="chip" id="t-dev" data-card="svc:dev"><span class="dot"></span>Dev</button><button type="button" class="chip" id="t-tunnel" data-card="svc:tunnel"><span class="dot"></span>Tunnel</button><button type="button" class="chip" id="t-cli" data-card="svc:cli" title="YoGPT and the status bot"><span class="dot"></span>CLI</button></div>
   </article>
-  <div class="rangebar" aria-hidden="true"></div>
+</div>
   <article class="tile full" id="t-db" aria-label="Database">
     <div class="tables" id="tables"></div>
     <div class="dbfoot"><span id="tables-note">–</span><button type="button" class="eye" id="db-blur" title="blur names and ids (for a screenshot); again to show them" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
