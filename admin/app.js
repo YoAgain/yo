@@ -515,20 +515,22 @@ if (document.body.classList.contains("login")) {
   };
   const SERIES = { "": "var(--ok)", cool: "#5dade2", bad: "#e67e22", acc: "var(--amethyst-soft)" };
   const slotWord = () => (range === 1 ? "This hour" : range ? "This day" : "This stretch");
-  const showTip = (t, x, y) => {
+  let tipAnchor, tipX, tipY;
+  const showTip = (t, x, y, node) => {
     const held = tipBox.querySelector("#st-every");  // the status bot's select goes home before the card changes
     if (held) { held.hidden = true; $("t-system").append(held); }
     if (typeof t === "string") {
       const [head, ...rest] = t.split(" · ");
       t = { head, note: rest.join(" · ") };
     }
-    tipBox.replaceChildren(el("b", "th", t.head), ...(t.nodes || []), ...(t.rows || []).filter(Boolean).map(tipRow), ...(t.note ? [el("span", "tn", t.note)] : []));
+    tipBox.replaceChildren(el("b", "th", t.head), ...(t.nodes || []).filter(Boolean), ...(t.rows || []).filter(Boolean).map(tipRow), ...(t.note ? [el("span", "tn", t.note)] : []));
     if (t.action) tipBox.append(t.action);
     tipBox.append(closeTip);
     tipBox.hidden = false;
-    const w = tipBox.offsetWidth, h = tipBox.offsetHeight;
-    tipBox.style.left = `${Math.min(innerWidth - w - 8, Math.max(8, x - w / 2))}px`;
-    tipBox.style.top = `${Math.max(8, Math.min(innerHeight - h - 8, y - h - 14 < 8 ? y + 18 : y - h - 14))}px`;
+    tipAnchor = node;
+    tipX = x;
+    tipY = y;
+    fitTip();
   };
   // An element that explains itself: the chart popup instead of a native title; on hover, keyboard focus and tap.
   // t: a text ("head · line · line") or { head, note, rows }.
@@ -538,29 +540,18 @@ if (document.body.classList.contains("login")) {
   let preview;
   const cancelPreview = () => {
     if (!preview) return;
-    clearTimeout(preview.timer);
     preview = null;
     tipBox.hidden = true;
   };
-  const delayCard = (node, show, track, leave) => {
+  const bindPreview = (node, show, leave) => {
     cardTriggers.add(node);
     const schedule = (point, source) => {
       if (pinned) return;
-      if (preview?.node === node && preview.source === source) {
-        if (preview.ready) { show(point); return; }
-        if (point.clientX === preview.point.clientX && point.clientY === preview.point.clientY) return;
-      }
-      cancelPreview();
-      preview = { node, source, point, ready: false };
-      preview.timer = setTimeout(() => {
-        if (!node.isConnected) { cancelPreview(); return; }
-        preview.ready = true;
-        show(preview.point);
-      }, 500);
+      preview = { node, source };
+      show(point);
     };
     const mouse = e => {
       if (pinned || e.pointerType !== "mouse" || e.composedPath().find(el => cardTriggers.has(el)) !== node) return;
-      track?.(e);
       schedule(e, "mouse");
     };
     node.addEventListener("pointerenter", mouse);
@@ -591,9 +582,19 @@ if (document.body.classList.contains("login")) {
   closeTip.addEventListener("click", unpin);
   const fitTip = () => {
     if (tipBox.hidden) return;
-    const r = tipBox.getBoundingClientRect();
-    tipBox.style.left = `${Math.max(8, Math.min(r.left, innerWidth - r.width - 8))}px`;
-    tipBox.style.top = `${Math.max(8, Math.min(r.top, innerHeight - r.height - 8))}px`;
+    const r = tipAnchor.getBoundingClientRect(), w = tipBox.offsetWidth, h = tipBox.offsetHeight;
+    const clamp = (v, max) => Math.max(8, Math.min(v, max - 8));
+    let x = clamp(tipX - w / 2, innerWidth - w), y;
+    if (r.top >= h + 16) y = r.top - h - 8;
+    else if (innerHeight - r.bottom >= h + 16) y = r.bottom + 8;
+    else {
+      y = clamp(tipY - h / 2, innerHeight - h);
+      if (innerWidth - r.right >= w + 16) x = r.right + 8;
+      else if (r.left >= w + 16) x = r.left - w - 8;
+      else y = clamp(r.top > innerHeight - r.bottom ? r.top - h - 8 : r.bottom + 8, innerHeight - h);
+    }
+    tipBox.style.left = x + "px";
+    tipBox.style.top = clamp(y, innerHeight - h) + "px";
   };
   new ResizeObserver(fitTip).observe(tipBox);
   window.addEventListener("resize", fitTip);
@@ -617,8 +618,8 @@ if (document.body.classList.contains("login")) {
   const hint = (node, t) => {
     if (!t) return node;
     const tv = () => (typeof t === "function" ? t() : t);
-    const at = () => { const r = node.getBoundingClientRect(); showTip(tv(), r.left + r.width / 2, r.top); };
-    delayCard(node, e => showTip(tv(), e.clientX, e.clientY));
+    const at = () => { const r = node.getBoundingClientRect(); showTip(tv(), r.left + r.width / 2, r.top, node); };
+    bindPreview(node, e => showTip(tv(), e.clientX, e.clientY, node));
     pinCard(node, at);
     return node;
   };
@@ -644,6 +645,7 @@ if (document.body.classList.contains("login")) {
   const historyPlot = (values, names, cls, line = false) => {
     const first = values.findIndex(v => v != null);
     if (first < 0) return el("span", "tn", "No recorded samples in range");
+    if (values.filter(v => v != null).length < 3) return null;
     const data = values.slice(first), from = (first ? "since " : "") + names[first];
     if (line) return liveChart({ line: data, from, to: names.at(-1), level: true }, cls);
     return plotWithAxis(sparkBars(data, cls), from, names.at(-1));
@@ -661,13 +663,13 @@ if (document.body.classList.contains("login")) {
       return { cap: 1, head: "CPU", nodes: histNode((p) => p[1] ?? 0, pct), rows: [c.cores ? { label: "Cores", value: String(c.cores) } : null, c.load?.length ? { label: "Load", value: c.load.map((x) => x.toFixed(2)).join(" · ") } : null, s.uptime == null ? null : { label: "Up", value: span(s.uptime) }] }; });
     hint($("c-mem"), () => { const m = (srvNow || {}).memory, used = m ? m.total - m.available : 0;
       return { cap: 1, head: "Memory", nodes: histNode((p) => p[2] ?? 0, pct), rows: m ? [{ label: "Used", value: `${bytes(used)} of ${bytes(m.total)}` }, m.swap_total ? { label: "Swap", value: bytes(m.swap_total - m.swap_free) } : null] : [] }; });
-    hint($("c-disk"), () => { const d = (srvNow || {}).disk, du = d ? d.used / d.total : 0;
-      return { cap: 1, head: "Disk", nodes: d ? [shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool")] : [], rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; });
+    hint($("c-disk"), () => { const d = (srvNow || {}).disk;
+      return { cap: 1, head: "Disk", rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; });
     hint($("c-net"), () => {
       const n = srvNow?.network || {}, recent = srvNow?.history || [];
       const throughput = (p) => (p[4] || 0) + (p[5] || 0);
       const nodes = histNode(throughput, rate);
-      if (recent.length) {
+      if (recent.length >= 3) {
         const chart = sparkBars(recent.map(throughput), "cool", null);
         const caption = el("span", "tn", "Last hour");
         const readSample = (event) => {
@@ -725,6 +727,10 @@ if (document.body.classList.contains("login")) {
       if (!t) { tipBox.hidden = true; mark?.(-1); return false; }
       mark?.(i);
       const card = typeof t === "string" ? { head: t } : t;
+      if (Number(node.dataset.samples ?? n) < 3) {
+        showTip(card, e.clientX, e.clientY, node);
+        return;
+      }
       const chart = node.cloneNode(true);
       chart.removeAttribute("id");
       chart.removeAttribute("hidden");
@@ -737,9 +743,9 @@ if (document.body.classList.contains("login")) {
       chart.querySelectorAll("text.ax").forEach(label => label.remove());
       const plot = plotWithAxis(chart, (first > 0 || node.dataset.since ? "since " : "") + (text(first)?.head || ""), text(n - 1)?.head || "");
       if (node.closest(".area")) plot.classList.add("area", node.closest("#t-uc") ? "c-acc" : "c-green");
-      showTip({ ...card, nodes: [plot, ...(card.nodes || [])] }, e.clientX, e.clientY);
+      showTip({ ...card, nodes: [plot, ...(card.nodes || [])] }, e.clientX, e.clientY, node);
     };
-    delayCard(node, show, e => mark?.(slotAt(e, slots())), mark);
+    bindPreview(node, show, mark);
     pinCard(node, show, mark);
   };
   window.addEventListener("scroll", () => { if (!pinned) cancelPreview(); }, { passive: true, capture: true });
@@ -1743,7 +1749,7 @@ if (document.body.classList.contains("login")) {
     set("live-n", rate >= 999.5 ? short(rate) : rate >= 10 ? Math.round(rate).toString() : rate.toFixed(1).replace(/\.0$/, ""));
     const hour = m.reduce((a, b) => a + b, 0);
     if (!box._h) { box._h = 1; hint(box, () => box._tip); }
-    box._tip = { head: "Yos per minute", nodes: [plotWithAxis(sparkBars(m, ""), "Last hour", "now")],
+    box._tip = { head: "Yos per minute", nodes: n >= 3 ? [plotWithAxis(sparkBars(m, ""), "Last hour", "now")] : [],
       rows: [{ label: "Per minute (5 min average)", value: $("live-n").textContent }, { label: "Last hour", value: num(hour) },
         { label: "This minute", value: num(m.at(-1)) }], note: ["Bots left out", box.dataset.state].filter(Boolean).join(" · ") };
     box.setAttribute("aria-label", `${rate.toFixed(1)} Yos per minute, ${hour} in the last hour`);
@@ -2246,6 +2252,7 @@ if (document.body.classList.contains("login")) {
       if (h - hb > 0 && tot[i]) g.append(rect(i, 28 - h, h - hb, "b hot"));
       s.append(g);
     });
+    s.dataset.samples = values.filter((v, i) => recorded ? recorded[i] : v != null).length;
     s.dataset.first = Math.max(0, values.findIndex((v, i) => recorded ? recorded[i] : v != null));
     if (tip) hoverTip(s, values.length, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
     return s;
@@ -2272,7 +2279,7 @@ if (document.body.classList.contains("login")) {
       let cachedCard;
       if (r.title || r.values?.length) hint(row, () => {
         if (cachedCard) return cachedCard;
-        const card = typeof r.title === "string" ? { head: r.label, note: r.title }
+        const card = typeof r.title === "string" ? { head: r.label, note: r.title, rows: [{ label: r.label, value: r.value }] }
           : r.title || { head: r.label, rows: [{ label: r.label, value: r.value }] };
         const nodes = [...(card.nodes || [])];
         if (!nodes.length && r.values?.length && r.tip) {
@@ -2309,7 +2316,7 @@ if (document.body.classList.contains("login")) {
           samples.forEach((b, i) => { let y = H; if (!tot(b)) return; LAT.forEach((_, k) => { const hh = (latPct(b, k) / 100) * H; y -= hh; if (hh > 0) g.append(svg("rect", { x: ((i + 0.12) * W) / n, width: (0.76 * W) / n, y, height: hh, fill: colors[k], opacity: ".85" })); }); });
           g.append(svg("path", { fill: "none", stroke: "var(--text)", "stroke-width": 1.5, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round",
             d: samples.map((b, i) => (tot(b) ? `${i && tot(samples[i - 1]) ? "L" : "M"}${(((i + 0.5) * W) / n).toFixed(1)},${(H - (latPct(b, 0) / 100) * H).toFixed(1)}` : null)).filter(Boolean).join(" ") }));
-          return { cap: 1, head: "Delivery speed", nodes: [plotWithAxis(g, (first ? "since " : "") + d.names[first], d.names.at(-1))],
+          return { cap: 1, head: "Delivery speed", nodes: samples.filter(b => tot(b)).length < 3 ? [] : [plotWithAxis(g, (first ? "since " : "") + d.names[first], d.names.at(-1))],
             rows: [{ label: "Within 1 s", value: pctText(latPct(d.all, 0)) }, { label: "Within 5 s", value: pctText(latPct(d.all, 0) + latPct(d.all, 1)) }, { section: "Delivery times" }, ...LAT_NAME.map((nm, k) => ({ color: colors[k], label: nm, value: pctText(latPct(d.all, k)) })), { ico: "send", label: "Yos", value: num(tot(d.all)) }] };
         })() : null,
         tip: (i) => ({ head: d.names[i], rows: tot(d.lat[i]) ? [...LAT_NAME.map((n, k) => ({ color: ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"][k], label: n, value: pctText(latPct(d.lat[i], k)) })),
@@ -2325,7 +2332,7 @@ if (document.body.classList.contains("login")) {
         let running = 0;
         const line = [0, ...bars.map(v => (running += v))];
         const chart = liveChart({ bars, line, ...axisOf(taken.names) }, "cool");
-        return { ico: "send", label: "Push", title: { head: "Push", nodes: [chart],
+        return { ico: "send", label: "Push", title: { head: "Push", nodes: bars.length >= 3 ? [chart] : [],
           rows: [{ label: "Sent", value: num(sent) }, { label: "Taken", value: sent ? pctText(100 * ok / sent) : "–" },
             { label: "Failed", value: num(failed) }] }, value: num(sent), values: p.sent, scls: "cool", tip: at }; })()] : []),
       { ico: "image", label: "Media queue", value: h.blobs ? bytes(h.blobs[1]) : "–", values: rows.map((r) => r?.[1] ?? null), scls: "cool",
@@ -2544,7 +2551,7 @@ if (document.body.classList.contains("login")) {
     for (let i = 0; i < len; i++) { let y = H; series.forEach((s, k) => { const hh = (pct[k][i] / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: ((i + 0.15) * W) / len, width: (0.7 * W) / len, y, height: hh, fill: s.color })); }); }
     return [{ ico: "cli", label: "Bots", value: traffic ? pctText(100 * sent / traffic) : "–", stack: pct, stackColors: colors,
       tip: (i) => ({ head: names[i], rows: series.map((s) => ({ color: s.color, label: s.name, value: num(s.slots.values[i] || 0) })) }),
-      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [plotWithAxis(g, names[0], names.at(-1))], rows: [{ label: "Yos sent by bots", value: num(sent) }, { label: "Yos acknowledged by bots", value: num(rangeCount("yo-out-bot")) }, { label: "All Yos in range", value: num(traffic) }, ...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
+      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: names.length < 3 ? [] : [plotWithAxis(g, names[0], names.at(-1))], rows: [{ label: "Yos sent by bots", value: num(sent) }, { label: "Yos acknowledged by bots", value: num(rangeCount("yo-out-bot")) }, { label: "All Yos in range", value: num(traffic) }, ...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
   };
 
   let drawUsageRows;
@@ -2566,7 +2573,7 @@ if (document.body.classList.contains("login")) {
       const active = ds.map(activeOn);
       const per = ds.map((d, i) => active[i] ? (yo.get(d) || 0) / active[i] : null);
       const mean = (yos, users) => yos != null && users ? (yos / users).toFixed(1) : "–";
-      const meanTip = (head, yos, users) => ({ head, note: "Accepted Yos divided by accounts seen in this period. The hub keeps no per-recipient history for a median.",
+      const meanTip = (head, yos, users) => ({ head, note: "Accepted Yos per active account.",
         rows: [{ label: "Mean", value: mean(yos, users) }, { label: "Median", value: "Unavailable" },
           { color: "var(--ok)", label: "Accepted Yos", value: num(yos) }, { ico: "user", label: "Active accounts", value: num(users) }] });
       const ret = Object.fromEntries((areaSub.yc || []).map(([l, v]) => [String(l).replace(/^Retention /, ""), v]));
@@ -2653,7 +2660,7 @@ if (document.body.classList.contains("login")) {
           });
           $("problem-trend").replaceChildren(svg("path", { d: path }));
           problemCard = { head: "Problems", nodes: [trend], rows: [{ label: "Open causes", value: num(openCount) }],
-            note: "Trend shows recorded occurrences of open problems, including crashes." };
+            note: "Occurrences of open problems, including crashes." };
           return { ico: "warn", label: "Problems", title: { cap: 1, head: "Problems", rows: [{ label: "Open causes", value: num(openCount) }, { label: "Occurrences", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Occurrence", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => problemTip(p, i) }; })(),
         { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
