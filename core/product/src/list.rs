@@ -186,6 +186,11 @@ struct Sent {
     rise: bool,
     sequence: u64,
 }
+#[derive(Clone, Copy, Debug)]
+struct Kept {
+    count: u32,
+    sequence: u64,
+}
 #[derive(Clone, Debug, Default)]
 struct State {
     senders: Vec<Sender>,
@@ -194,6 +199,9 @@ struct State {
     sent: Option<Sent>,
     outgoing: Option<(Kind, u32, u64)>,
     unsent: bool,
+    /// Photos and videos sent to it while the camera is open (`Kept`): the bar says "Sent Yo!" (counted, with the
+    /// photo) until the camera closes, so nobody sends the same photo twice by mistake; then it rises as after a Yo.
+    kept: Option<Kept>,
     /// Yos since the bar last showed its name or the user's own send (a friend's count).
     heard: u32,
     /// When a Yo last came and when the bar last told of a send or notice (`List::sequence`): the newer wins.
@@ -346,6 +354,17 @@ impl List {
                 state.forget_senders();
                 self.tap_lock = Some((id, self.now.saturating_add(SENT_MS)));
             }
+            Input::SendFinished { id, kind } if kind != Kind::Yo && self.camera => {
+                // Sent while the camera is open: the bar keeps saying so (counting each send) until it closes.
+                self.sequence = self.sequence.saturating_add(1);
+                let state = self.states.entry(id.clone()).or_default();
+                let count = state.kept.map_or(1, |k| k.count.saturating_add(1));
+                state.kept = Some(Kept { count, sequence: self.sequence });
+                state.sent = None;
+                state.told_at = self.sequence;
+                state.forget_senders();
+                self.tap_lock = Some((id, self.now.saturating_add(SENT_MS)));
+            }
             Input::SendFinished { id, kind } => {
                 // A released stack can finish while a newer stack still has its undo ring.
                 self.notice(id, kind.sent().into(), true);
@@ -374,7 +393,22 @@ impl List {
                 self.tap_lock = Some((id, self.now.saturating_add(SENT_MS)));
             }
             Input::Recording(id) => self.recording = id,
-            Input::Camera(on) => self.camera = on,
+            Input::Camera(on) => {
+                self.camera = on;
+                if !on {
+                    // The camera closed: the bars that kept "Sent" rise as after a Yo, in the order they were sent.
+                    let mut kept: Vec<_> = self
+                        .states
+                        .iter_mut()
+                        .filter_map(|(id, s)| s.kept.take().map(|k| (k.sequence, id.clone())))
+                        .collect();
+                    kept.sort();
+                    for (_, id) in kept {
+                        self.rise(id);
+                        self.batch_at = Some(self.now);
+                    }
+                }
+            }
             Input::Foreground(active) => {
                 self.background = !active;
                 if !active {
@@ -615,6 +649,10 @@ impl List {
                 let mut count = 1;
                 // A Yo came after the last send or notice: that one is over for the bar, whatever its timer.
                 let arrival_newer = s.arrival_at >= s.told_at;
+                if let Some(kept) = s.kept.filter(|_| !arrival_newer) {
+                    title = Text::SentYo.get(Language::English).into();
+                    count = kept.count;
+                }
                 if let Some(sent) = &s.sent {
                     next.push(sent.until);
                 }
@@ -1431,5 +1469,64 @@ mod tests {
         l.apply(0, Input::RequestArrived(Friend { id: "r".into(), name: "R".into(), request: true, group: false }));
         l.apply(0, receive("r"));
         assert_eq!(row(&l, "r").line, Line::Title);
+    }
+    #[test]
+    fn camera_sends_stay_sent_until_the_camera_closes() {
+        let mut l = model();
+        l.apply(0, Input::Camera(true));
+        l.apply(0, Input::SendStarted { id: "c".into(), kind: Kind::Photo, undo_ms: 2_000 });
+        l.apply(3_000, Input::SendFinished { id: "c".into(), kind: Kind::Photo });
+        let r = row(&l, "c");
+        assert_eq!((r.title.as_str(), r.count, r.notice_deadline), ("Sent Yo", 1, None));
+        // Long after a plain notice would be over: still sent, nothing moved, nothing to tick for.
+        let s = l.apply(60_000, Input::Tick);
+        assert_eq!(row(&l, "c").title, "Sent Yo");
+        assert_eq!(order(&l), ["a", "b", "c"]);
+        assert_eq!(s.next_tick, None);
+        // Tapped again: sent again, counted.
+        l.apply(61_000, Input::SendStarted { id: "c".into(), kind: Kind::Photo, undo_ms: 2_000 });
+        l.apply(64_000, Input::SendFinished { id: "c".into(), kind: Kind::Photo });
+        l.apply(64_000, Input::SendStarted { id: "b".into(), kind: Kind::Video, undo_ms: 2_000 });
+        l.apply(67_000, Input::SendFinished { id: "b".into(), kind: Kind::Video });
+        assert_eq!((row(&l, "c").title.as_str(), row(&l, "c").count), ("Sent Yo", 2));
+        assert_eq!((row(&l, "b").title.as_str(), row(&l, "b").count), ("Sent Yo", 1));
+        // An undone send says so for a moment, then the bar is sent again (what went before still went).
+        l.apply(68_000, Input::SendStarted { id: "c".into(), kind: Kind::Photo, undo_ms: 2_000 });
+        l.apply(68_500, Input::SendUndone("c".into()));
+        assert_eq!(row(&l, "c").title, "Canceled");
+        l.apply(70_500, Input::Tick);
+        assert_eq!((row(&l, "c").title.as_str(), row(&l, "c").count), ("Sent Yo", 2));
+        // A Yo from them is newer: their Yos, then the name.
+        l.apply(71_000, receive("a"));
+        l.apply(71_000, Input::SendStarted { id: "a".into(), kind: Kind::Photo, undo_ms: 0 });
+        l.apply(71_000, Input::SendFinished { id: "a".into(), kind: Kind::Photo });
+        l.apply(72_000, receive("a"));
+        assert_ne!(row(&l, "a").line, Line::Title);
+        // Closed: the names again, the sent bars on top as after a Yo, the newest send first.
+        l.apply(80_000, Input::Camera(false));
+        assert_eq!(order(&l), ["a", "b", "c"]);
+        assert_eq!(row(&l, "c").title, "C");
+        assert_eq!(row(&l, "b").title, "B");
+        // A send that ends after the camera closed is the usual short notice.
+        l.apply(90_000, Input::SendFinished { id: "c".into(), kind: Kind::Photo });
+        assert_eq!(row(&l, "c").notice_deadline, Some(90_000 + SENT_MS));
+        l.apply(90_000 + SENT_MS, Input::Tick);
+        assert_eq!(row(&l, "c").title, "C");
+        assert_eq!(order(&l)[0], "c");
+    }
+    #[test]
+    fn camera_closing_lifts_sent_bars_in_send_order() {
+        let mut l = model();
+        l.apply(0, Input::Camera(true));
+        for id in ["a", "c"] {
+            l.apply(0, Input::SendFinished { id: id.into(), kind: Kind::Photo });
+        }
+        assert_eq!(order(&l), ["a", "b", "c"]);
+        l.apply(10, Input::Camera(false));
+        assert_eq!(order(&l), ["c", "a", "b"]);
+        // A plain Yo sent in camera mode is still the short notice.
+        l.apply(20, Input::Camera(true));
+        l.apply(20, Input::SendFinished { id: "b".into(), kind: Kind::Yo });
+        assert_eq!(row(&l, "b").notice_deadline, Some(20 + SENT_MS));
     }
 }

@@ -64,7 +64,7 @@ class MediaQueue(
     internal val thumbnails=previews.asStateFlow()
     private fun publishPreviews() { previews.value=outgoing.groupBy { it.target }.mapValues { (_,items) -> items.map { OutgoingPreview(it.id, it.video) } } }
     suspend fun thumbnail(id: String,incoming: Boolean=false): ByteArray? = gate.withLock { vault.read(if(incoming) "in-thumb-$id" else "thumb-$id") }
-    var sent: ((String, Boolean)->Unit)? = null
+    var sent: ((String, Boolean, Boolean)->Unit)? = null
     var sendYo: (suspend (Friend) -> Unit)? = null
     /** A target with media that did not go (on) or nothing waiting for it any more (off): its bar says so. */
     var unsent: ((String, Boolean) -> Unit)? = null
@@ -284,7 +284,7 @@ class MediaQueue(
                                 publishPreviews(); publishUnsent()
                                 outgoing.none { it.target == item.target }
                             }
-                            if (last != null && c === client()) sent?.invoke(item.target, last)
+                            if (last != null && c === client()) sent?.invoke(item.target, last, item.video)
                             progress = true
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { blockedTargets += item.target; missed(item, e, version) }

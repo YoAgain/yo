@@ -190,10 +190,8 @@ extension FriendList {
       heldOrder = nil
       heldSince = nil
     }
-    if snapshot.lockedRow != lockedRow, let id = snapshot.lockedRow {
-      var transaction = Transaction(); transaction.disablesAnimations = true
-      withTransaction(transaction) { position.scrollTo(id: id) }
-    }
+    // A press alone never scrolls (a swipe up to the App Switcher starts as one on the lowest bar): only a reorder
+    // does, and keeps the touched bar where it stands (`applyOrder`).
     lockedRow = snapshot.lockedRow
     let friendsByID = Dictionary(friends.shown.map { ($0.key.uuidString, $0) }, uniquingKeysWith: { a, _ in a })
     for row in snapshot.rows {
@@ -242,7 +240,7 @@ extension FriendList {
     // In one frame, no sliding: the bars stand in their new places at once.
     var instant = Transaction(); instant.disablesAnimations = true
     withTransaction(instant) {
-      if let anchor { position.scrollTo(id: anchor) }
+      if let anchor, let place = anchorPlace(anchor) { position.scrollTo(id: anchor, anchor: place) }
       else if !scrolled { position.scrollTo(edge: .top) }
       listOrder = order
       if promote { friends.promoteBatch(order.reversed().compactMap(UUID.init(uuidString:))) }
@@ -251,6 +249,15 @@ extension FriendList {
     if moved, let first = order.indices.first(where: { $0 >= old.count || old[$0] != order[$0] }) {
       movedLock = (Set(order[first...]), Date.now + Self.reorderTapLock)
     }
+  }
+
+  /// The touched bar's place in the viewport as a scroll anchor: the same point of bar and viewport meet, so the bar
+  /// stays exactly where it is. None when it is not on screen (then nothing scrolls for it).
+  func anchorPlace(_ id: String) -> UnitPoint? {
+    guard let key = UUID(uuidString: id), let place = bars.each[key]?.place else { return nil }
+    let room = place.viewport - place.frame.height
+    guard room > 0, place.frame.maxY > 0, place.frame.minY < place.viewport else { return nil }
+    return UnitPoint(x: 0.5, y: min(1, max(0, place.frame.minY / room)))
   }
 
   /// Any touch on a bar: the order stays until the taps have been quiet a moment.

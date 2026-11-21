@@ -143,9 +143,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     val media = MediaQueue(context,vault, scope, { client }, { sessionId }, { source, events -> absorb(events, source) }, { refreshMedia() }).also { queue ->
         queue.sendYo = { friend -> client?.let { sendNow(friend, it) } }
         queue.unsent = { target, on -> synchronized(unsentYos) { if (on) mediaUnsent += target else mediaUnsent -= target }; markUnsent(target) }
-        queue.sent = { target, last ->
+        queue.sent = { target, last, video ->
             state.value.friends.firstOrNull { it.target == target }?.let {
-                if (last) showSent(it)
+                // As a photo or video: sent while the camera is open, the bar keeps saying so until it closes (core).
+                if (last) showSent(it, kind = if (video) ListKind.VIDEO else ListKind.PHOTO)
                 recordStat(it, true)
             }
         }
@@ -833,9 +834,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
     }
     /** A send's end on the bar: `sent` (Yo) or a failure's words from the core. */
-    fun showSent(friend: Friend, failure: String? = null) {
+    fun showSent(friend: Friend, failure: String? = null, kind: ListKind = ListKind.YO) {
         listFriends()
-        present { time -> if (failure == null) sendFinished(time, friend.key, ListKind.YO) else sendFailed(time, friend.key, failure) }
+        present { time -> if (failure == null) sendFinished(time, friend.key, kind) else sendFailed(time, friend.key, failure) }
     }
     private fun recordStat(friend: Friend,sent: Boolean) {
         val time=System.currentTimeMillis()

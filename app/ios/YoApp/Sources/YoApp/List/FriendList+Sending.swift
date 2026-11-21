@@ -32,6 +32,14 @@ extension FriendList {
       var seconds = FriendList.sendDelay
       /// A video being held on this bar: the stack's countdown waits for it, so the video joins the same stack.
       var recording = false
+      /// Where the bar stands in the list's viewport (its frame there, and the viewport's height): a reorder keeps a
+      /// touched bar at this place. Not observed: it changes with every scrolled frame.
+      @ObservationIgnored var place: Place?
+    }
+
+    struct Place: Equatable {
+      let frame: CGRect
+      let viewport: CGFloat
     }
 
     @ObservationIgnored var each: [UUID: Bar] = [:]

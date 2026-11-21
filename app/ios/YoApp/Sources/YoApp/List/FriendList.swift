@@ -400,6 +400,9 @@ struct FriendList: View {
             let friend = shaded.friend
             row(friend, shade: shaded.shade)
               .modifier(FlightRowLayer(bar: bars.of(friend)))
+              .onGeometryChange(for: Bars.Place?.self) { proxy in
+                proxy.bounds(of: .scrollView).map { Bars.Place(frame: proxy.frame(in: .scrollView), viewport: $0.height) }
+              } action: { bars.of(friend).place = $0 }
               .id(friend.key.uuidString)
               .transaction {
                 if inbox.busy {
