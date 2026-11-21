@@ -1319,45 +1319,58 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .overview-grid .srow .sv { white-space: nowrap; text-align: right; }
 .overview-grid .srow :is(.sl, .sv), #t-system .crow :is(.cl, .cn) { font-size: 15px; }
 .overview-grid .srow .sl { white-space: nowrap; }
-.ov > .topbar { --control-height: 46px; flex-wrap: wrap; margin: 0; padding: 18px 0; gap: 18px; justify-content: flex-start; }
-.topbar .live { flex: none; gap: 12px; }
-.topbar .logo { height: var(--control-height); min-width: var(--control-height); justify-content: center; border-radius: 10px; }
+.ov > .topbar {
+  --dial-size: 52px;
+  display: grid; grid-template-columns: 1fr auto 1fr; grid-template-areas: "badge gauges range";
+  align-items: center; gap: 12px; margin: 0; padding: 12px 16px;
+  border: 1px solid var(--line); border-radius: 18px; background: var(--card);
+}
+.topbar .logo { grid-area: badge; align-self: start; justify-self: start; width: var(--dial-size); height: var(--dial-size); justify-content: center; border-radius: 50%; }
+.topbar #t-system { grid-area: gauges; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; min-width: 0; }
+.dial {
+  display: grid; justify-items: center; gap: 5px; padding: 0; border: 0; background: transparent;
+  font: 600 11px/1.2 var(--font); color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.dial-face {
+  position: relative; display: grid; place-content: center; justify-items: center;
+  width: var(--dial-size); height: var(--dial-size); border-radius: 50%; background: var(--bg);
+  box-shadow: inset 0 0 0 2px var(--track, var(--line)); color: var(--text); font-size: 15px;
+}
+.dial-arc { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); fill: none; }
+.dial-arc circle { stroke: var(--accent, #5dade2); stroke-width: 3; stroke-dasharray: var(--fill, 0) 100; }
+.dial.ok { --accent: var(--ok); }
+.dial.warn { --accent: var(--warn); }
+.dial.bad { --accent: var(--bad); }
+:is(#c-upd, #c-svc) .dial-face { --track: var(--accent, var(--line)); color: var(--accent, var(--muted)); font-size: 19px; }
+#net-n { white-space: pre; font-size: 10px; line-height: 1.35; }
+.live-face { gap: 2px; --track: color-mix(in srgb, var(--amethyst) 55%, var(--line)); }
+.live-face .live-strip { width: 28px; height: 8px; }
+.dial:is(:hover, :focus-visible) .dial-face { background: var(--line); }
 .topbar #range {
-  flex: none; display: flex; align-items: stretch; height: var(--control-height); padding: 3px;
-  background: var(--card); border: 0; border-radius: 10px; cursor: default;
+  grid-area: range; align-self: start; justify-self: end; display: flex; align-items: stretch; height: var(--dial-size); padding: 4px;
+  border: 2px solid var(--line); border-radius: 999px; background: var(--bg); cursor: default;
 }
 .topbar #range button {
-  min-height: 40px; flex: 1; border: 0; padding: 0 clamp(8px, 1.4vw, 12px); border-radius: 7px; background: transparent;
-  font: inherit; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted); cursor: pointer;
+  border: 0; padding: 0 12px; border-radius: 999px; background: transparent;
+  color: var(--muted); font: 600 13px/1 var(--font); font-variant-numeric: tabular-nums;
 }
 .topbar #range button:hover { color: var(--text); }
 .topbar #range button.on { background: var(--amethyst); color: #fff; }
-#t-system { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.server-chip {
-  display: inline-flex; align-items: center; flex: none; gap: 4px; padding: 5px 8px;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--card);
-  color: var(--muted); font: inherit; font-size: 12px; line-height: 1.3; white-space: nowrap; cursor: pointer;
+@media (max-width: 960px) {
+  .ov > .topbar { grid-template-columns: auto 1fr; grid-template-areas: "badge range" "gauges gauges"; }
 }
-.server-chip .ico { width: 13px; height: 13px; }
-.server-chip .cn { color: var(--text); font-variant-numeric: tabular-nums; }
-.server-chip.ok .cn, .server-chip .cn.ok { color: var(--ok); }
-.server-chip.warn .cn { color: var(--warn); }
-.server-chip:is(.hot, .bad) .cn, .server-chip .cn.bad { color: var(--bad); }
-.server-chip:is(:hover, :focus-visible) { border-color: var(--amethyst); }
-@media (max-width: 1050px) {
-  .topbar #t-system { order: 1; flex-basis: 100%; flex-wrap: wrap; }
+@media (max-width: 540px) {
+  .ov > .topbar { --dial-size: 44px; padding: 10px 4px; }
+  .topbar #t-system { gap: 2px; }
+  .topbar .logo { margin-left: 6px; }
+  .topbar #range { margin-right: 6px; }
+  .dial { font-size: 10px; }
+  .dial-face { font-size: 13px; }
 }
-@media (max-width: 640px) {
-  .ov > .topbar { gap: 8px; padding: 6px 0; }
-  .topbar #t-system {
-    flex-wrap: nowrap; overflow-x: auto; padding: 2px 12px 2px 0; scrollbar-width: none;
-    mask-image: linear-gradient(to right, black calc(100% - 12px), transparent);
-  }
-  .topbar .live { flex: 1; gap: 4px; }
-  .topbar .live-strip { min-width: 0; max-width: 54px; flex: 1; }
-  .topbar #range button { padding-inline: 7px; }
+@media (max-width: 389px) {
+  .topbar #t-system { justify-self: center; max-width: 236px; column-gap: 12px; row-gap: 8px; }
 }
-.ctip :is(.th.cap, .tsec), .tside .tside-k, .live-n span { font-size: 12px; }
+.ctip :is(.th.cap, .tsec), .tside .tside-k { font-size: 12px; }
 @media (min-width: 1200px) { .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (min-width: 1800px) { .overview-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (width < 760px) {

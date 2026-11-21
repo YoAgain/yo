@@ -53,8 +53,9 @@ if (document.body.classList.contains("login")) {
     if (!n) return;
     const down = SVCS.filter(([id]) => $(id)?.classList.contains("bad")).map(([, name]) => name);
     const known = SVCS.every(([id]) => $(id)?.classList.contains("ok"));
-    n.textContent = down.length ? (down.length === 1 ? `${down[0]} down` : `${down.length} down`) : known ? "✓" : "–";
-    n.className = `cn ${down.length ? "bad" : known ? "ok" : ""}`.trim();
+    n.textContent = down.length ? "!" : known ? "✓" : "–";
+    state("c-svc", down.length ? "bad" : known ? "ok" : null);
+    $("c-svc").setAttribute("aria-label", down.length ? `Services down: ${down.join(", ")}` : known ? "Services running" : "Services unknown");
   };
   new MutationObserver(svcSum).observe(document.querySelector(".svcbar") || document.body, { subtree: true, attributes: true, attributeFilter: ["class"] });
   const bytes = (n) => {
@@ -165,7 +166,9 @@ if (document.body.classList.contains("login")) {
   // ---- server: every three seconds --------------------------------------------------------------------------------
   const serverPercent = (key, percent) => {
     set(`${key}-n`, Number.isFinite(percent) ? `${Math.round(percent)} %` : "–");
-    $(`c-${key}`).classList.toggle("hot", percent > 90);
+    const dial = $(`c-${key}`);
+    dial.style.setProperty("--fill", Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0);
+    state(dial.id, percent > 90 ? "bad" : percent > 70 ? "warn" : null);
   };
   // A service chip: its dot; state, uptime, memory, restarts and version in its card.
   const svcInfo = {};
@@ -213,7 +216,7 @@ if (document.body.classList.contains("login")) {
       const n = s.network || {};
       // Below 100 KB/s in KB/s ("79K"), from there in Mbit/s with one decimal ("1.4M").
       const k = (v) => (v == null ? "–" : v >= 100000 ? `${((v * 8) / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}K`);
-      set("net-n", `↓${k(n.rx_per_s)} ↑${k(n.tx_per_s)}`);
+      set("net-n", `↓${k(n.rx_per_s)}\n↑${k(n.tx_per_s)}`);
     });
     part(() => {
       const version = s.hub && s.hub.version;
@@ -237,7 +240,7 @@ if (document.body.classList.contains("login")) {
     const summary = stale ? "Update data unavailable" : u.apt.error || u.apt.packages == null ? "Package check unavailable"
       : u.apt.packages ? `${u.apt.packages} updates (${u.apt.security} security)` : "Up to date";
     const unavailable = stale || u.apt.error || u.apt.packages == null;
-    set("upd-n", unavailable ? "?" : u.apt.packages || u.reboot ? num(u.apt.packages) : "✓");
+    set("upd-n", unavailable ? "?" : u.apt.packages ? num(u.apt.packages) : u.reboot ? "!" : "✓");
     state("c-upd", u?.reboot || u?.apt.security ? "bad" : unavailable || u.apt.packages ? "warn" : "ok");
     updData = u ? { ...u, summary, stale } : null;
   };
@@ -502,7 +505,7 @@ if (document.body.classList.contains("login")) {
   };
   document.addEventListener("pointerdown", (e) => { if (pinned && !tipBox.contains(e.target) && !pinned.contains(e.target)) unpin(); }, true);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) unpin(); });
-  // The header chips show server details: CPU, memory and LAN with their history over the range
+  // The header gauges show server details: CPU, memory and LAN with their history over the range
   // (the bars the detail cards drew), disk with its sizes, updates and services with what they hold.
   const serverSeries = (col) => {
     const s = srvNow || {}, now = Date.now();

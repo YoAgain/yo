@@ -12,14 +12,31 @@
 <body class="dash">
 
 <main class="ov" id="overview">
-<div class="topbar full"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><div class="live" id="live" role="img" aria-label="Yos right now"><span class="live-n"><b id="live-n">–</b><span>/m</span></span><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></div>
-  <div id="t-system" role="group" aria-label="Server status">
-        <button type="button" class="server-chip" id="c-cpu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3M15 2.5v3M9 18.5v3M15 18.5v3M2.5 9h3M2.5 15h3M18.5 9h3M18.5 15h3"/></svg><span class="cl">CPU</span><b class="cn" id="cpu-n">–</b></button>
-        <button type="button" class="server-chip" id="c-mem"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 10.5v3M11 10.5v3"/></svg><span class="cl">Mem</span><b class="cn" id="mem-n">–</b></button>
-        <button type="button" class="server-chip" id="c-disk"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/></svg><span class="cl">Disk</span><b class="cn" id="disk-n">–</b></button>
-        <button type="button" class="server-chip" id="c-net"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/></svg><span class="cl">LAN</span><b class="cn" id="net-n">–</b></button>
-        <button type="button" class="server-chip" id="c-upd"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 19h16"/></svg><span class="cl">Updates</span><b class="cn" id="upd-n">–</b></button>
-        <button type="button" class="server-chip" id="c-svc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Services</span><b class="cn" id="svc-n">–</b></button>
+<div class="topbar full">
+  <button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button>
+  <div id="t-system" role="group" aria-label="Live activity and server status">
+    <button type="button" class="dial" id="live" aria-label="Yos per minute">
+      <span class="dial-face live-face"><b id="live-n">–</b><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></span>
+      <span>Yos/min</span>
+    </button>
+    <button type="button" class="dial" id="c-cpu">
+      <span class="dial-face"><svg class="dial-arc" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24" pathLength="100"/></svg><b id="cpu-n">–</b></span><span>CPU</span>
+    </button>
+    <button type="button" class="dial" id="c-mem">
+      <span class="dial-face"><svg class="dial-arc" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24" pathLength="100"/></svg><b id="mem-n">–</b></span><span>Mem</span>
+    </button>
+    <button type="button" class="dial" id="c-disk">
+      <span class="dial-face"><svg class="dial-arc" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24" pathLength="100"/></svg><b id="disk-n">–</b></span><span>Disk</span>
+    </button>
+    <button type="button" class="dial" id="c-net">
+      <span class="dial-face"><b id="net-n">–</b></span><span>LAN</span>
+    </button>
+    <button type="button" class="dial" id="c-upd">
+      <span class="dial-face"><b id="upd-n">–</b></span><span>Updates</span>
+    </button>
+    <button type="button" class="dial" id="c-svc">
+      <span class="dial-face"><b id="svc-n">–</b></span><span>Services</span>
+    </button>
         <select id="st-every" aria-label="How often the status bot reports" hidden>
           <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
           <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
