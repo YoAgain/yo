@@ -1311,14 +1311,14 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .problem-chart > :is(.spark, .chart-axis) { grid-column: 1 / -1; }
 .problem-chart .spark { width: 100%; height: 100%; max-width: none; }
 .problem-chart .pr-open { padding: 2px 6px; margin-left: 8px; border-radius: 12px; background: var(--bad); font-size: 12px; }
-.overview-grid .srow, #g-server .crow { min-height: 40px; }
-.overview-grid .srow { grid-template-columns: 18px minmax(min-content, 1fr) fit-content(32%) minmax(0, var(--graph-share)); gap: 8px; }
+.overview-grid .srow { min-height: 40px; }
+.overview-grid .srow { grid-template-columns: 18px minmax(max-content, 1fr) max-content minmax(0, var(--graph-share)); gap: 8px; }
 .overview-grid .srow :is(.spark, .hc-pbar) { width: 100%; max-width: none; }
 .overview-grid .srow .spark { height: 34px; }
 .overview-grid .srow .hc-pbar { height: 18px; }
-.overview-grid .srow .sv { white-space: normal; overflow-wrap: anywhere; text-align: right; }
+.overview-grid .srow .sv { white-space: nowrap; text-align: right; }
 .overview-grid .srow :is(.sl, .sv), #t-system .crow :is(.cl, .cn) { font-size: 15px; }
-.overview-grid .srow .sl { white-space: normal; }
+.overview-grid .srow .sl { white-space: nowrap; }
 .ov > .topbar { --control-height: 46px; flex-wrap: wrap; margin: 0; padding: 18px 0; gap: 18px; justify-content: flex-start; }
 .topbar .live { flex: none; gap: 12px; }
 .topbar .logo { height: var(--control-height); min-width: var(--control-height); justify-content: center; border-radius: 10px; }
@@ -1332,7 +1332,31 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 }
 .topbar #range button:hover { color: var(--text); }
 .topbar #range button.on { background: var(--amethyst); color: #fff; }
-@media (max-width: 400px) { .topbar #range { flex-basis: 100%; } }
+#t-system { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.server-chip {
+  display: inline-flex; align-items: center; flex: none; gap: 4px; padding: 5px 8px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--card);
+  color: var(--muted); font: inherit; font-size: 12px; line-height: 1.3; white-space: nowrap; cursor: pointer;
+}
+.server-chip .ico { width: 13px; height: 13px; }
+.server-chip .cn { color: var(--text); font-variant-numeric: tabular-nums; }
+.server-chip.ok .cn, .server-chip .cn.ok { color: var(--ok); }
+.server-chip.warn .cn { color: var(--warn); }
+.server-chip:is(.hot, .bad) .cn, .server-chip .cn.bad { color: var(--bad); }
+.server-chip:is(:hover, :focus-visible) { border-color: var(--amethyst); }
+@media (max-width: 1050px) {
+  .topbar #t-system { order: 1; flex-basis: 100%; flex-wrap: wrap; }
+}
+@media (max-width: 640px) {
+  .ov > .topbar { gap: 8px; padding: 6px 0; }
+  .topbar #t-system {
+    flex-wrap: nowrap; overflow-x: auto; padding: 2px 12px 2px 0; scrollbar-width: none;
+    mask-image: linear-gradient(to right, black calc(100% - 12px), transparent);
+  }
+  .topbar .live { flex: 1; gap: 4px; }
+  .topbar .live-strip { min-width: 0; max-width: 54px; flex: 1; }
+  .topbar #range button { padding-inline: 7px; }
+}
 .ctip :is(.th.cap, .tsec), .tside .tside-k, .live-n span { font-size: 12px; }
 @media (min-width: 1200px) { .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (min-width: 1800px) { .overview-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
@@ -1341,10 +1365,6 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
   .overview-grid { grid-template-columns: minmax(0, 1fr); --graph-share: 1.5fr; }
 }
 
-#g-server .crow.bars:has(.gauge) { grid-template-columns: 18px minmax(min-content, 1fr) fit-content(32%) minmax(0, var(--graph-share)); column-gap: 8px; }
-#g-server .crow:has(.gauge) .cn { display: block; grid-row: 1; grid-column: 3; }
-#g-server .gauge { width: 100%; height: 12px; }
-#g-server #t-system .crow :is(.cl, .cn) { font-size: 15px; }
 #t-db :is(.list th, .tside small, .pill), .ctip .hc-note { font-size: 12px; }
 @media (max-width: 640px) {
   .tside { align-items: center; }
@@ -1367,5 +1387,3 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 #t-uc .cfoot .l-act::before { background: var(--ok); }
 .chartw .gtoday.big { display: block; gap: 0; }
 
-.range-summary { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
-.range-summary .value { color: var(--text); font-weight: 400; }

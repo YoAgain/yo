@@ -46,16 +46,15 @@ if (document.body.classList.contains("login")) {
   const set = (id, text) => { const e = $(id); if (e) e.textContent = text; else console.warn(`no #${id}`); };
   const part = (fn) => { try { fn(); } catch (e) { console.warn(e); } };
   const state = (id, cls) => { $(id).classList.remove("ok", "bad", "warn"); if (cls) $(id).classList.add(cls); };
-  // Services in one row: "all running", or the ones down by name; a click opens all four.
+  // Summarize the four service indicators in the header.
   const SVCS = [["t-hub", "Hub"], ["t-dev", "Dev"], ["t-tunnel", "Tunnel"], ["t-cli", "CLI"]];
   const svcSum = () => {
     const n = $("svc-n");
     if (!n) return;
     const down = SVCS.filter(([id]) => $(id)?.classList.contains("bad")).map(([, name]) => name);
-    const known = SVCS.some(([id]) => $(id)?.classList.contains("ok") || $(id)?.classList.contains("bad"));
-    n.textContent = !known ? "–" : down.length ? `${down.join(", ")} down` : "all running";
-    set("range-services", down.length ? `, ${down.join(", ")} down` : SVCS.every(([id]) => $(id)?.classList.contains("ok")) ? ", all services running" : "");
-    n.className = `cn ${!known ? "" : down.length ? "bad" : "ok"}`.trim();
+    const known = SVCS.every(([id]) => $(id)?.classList.contains("ok"));
+    n.textContent = down.length ? (down.length === 1 ? `${down[0]} down` : `${down.length} down`) : known ? "✓" : "–";
+    n.className = `cn ${down.length ? "bad" : known ? "ok" : ""}`.trim();
   };
   new MutationObserver(svcSum).observe(document.querySelector(".svcbar") || document.body, { subtree: true, attributes: true, attributeFilter: ["class"] });
   const bytes = (n) => {
@@ -164,29 +163,9 @@ if (document.body.classList.contains("login")) {
   $("range").addEventListener("click", (e) => { const b = e.target.closest("button[data-r]"); if (b) setRange(+b.dataset.r); });
 
   // ---- server: every three seconds --------------------------------------------------------------------------------
-  // Network traffic over the server's last hour.
-  const serverBars = (all) => {
-    // As many bars as Usage shows (7, 30, or 12 months): the hour in as many slices, each its average.
-    const n = range === 1 ? 6 : range >= 7 && range <= 30 ? range : 12, size = Math.max(1, Math.ceil(all.length / n)), hist = [];
-    for (let i = 0; i < all.length; i += size) {
-      const part = all.slice(i, i + size), avg = (k) => part.reduce((t, p) => t + (p[k] || 0), 0) / part.length;
-      hist.push([part[part.length - 1][0], avg(1), avg(2), avg(3), avg(4), avg(5)]);
-    }
-    const names = hist.map(([t]) => clock(t));
-    spark("net", null, hist.map((p) => (p[4] || 0) + (p[5] || 0)), names, (k) => `↓ ${rate(hist[k][4])} ↑ ${rate(hist[k][5])}`);
-    [...$("net-spark").children].forEach((b) => b.classList.add("cool"));
-  };
-  const serverGauge = (key, percent) => {
-    const known = Number.isFinite(percent);
-    const value = known ? Math.max(0, Math.min(100, Math.round(percent))) : 0;
-    const row = $(`c-${key}`);
-    set(`${key}-n`, known ? `${value} %` : "–");
-    row.classList.toggle("hot", value > 90);
-    $(`${key}-spark`).setAttribute("hidden", "");
-    let gauge = row.querySelector(".gauge");
-    if (!gauge) { gauge = el("span", "gauge"); gauge.append(el("span")); row.append(gauge); }
-    gauge.firstChild.style.width = `${value}%`;
-    gauge.className = `gauge ${value > 90 ? "hot" : value > 70 ? "warm" : "cool"}`;
+  const serverPercent = (key, percent) => {
+    set(`${key}-n`, Number.isFinite(percent) ? `${Math.round(percent)} %` : "–");
+    $(`c-${key}`).classList.toggle("hot", percent > 90);
   };
   // A service chip: its dot; state, uptime, memory, restarts and version in its card.
   const svcInfo = {};
@@ -225,37 +204,16 @@ if (document.body.classList.contains("login")) {
     } catch { $("stale").hidden = false; return; }
     set("host", s.host || "");
     srvNow = s;
-    part(() => serverBars(s.history || []));
     reservedData = s.reserved;
-    part(() => {
-      const c = s.cpu || {};
-      serverGauge("cpu", c.percent);
-      $("c-cpu").dataset.tip = [c.cores ? `${c.cores} cores` : "", c.load?.length ? `load ${c.load.map((x) => x.toFixed(2)).join(" · ")}` : "", s.uptime == null ? "" : `up ${span(s.uptime)}`].filter(Boolean).join(" · ");
-    });
-    part(() => {
-      const m = s.memory;
-      serverGauge("mem", m?.total ? 100 * (m.total - m.available) / m.total : null);
-      if (!m) return;
-      const used = m.total - m.available;
-      $("c-mem").dataset.tip = `${bytes(used)} of ${bytes(m.total)}${m.swap_total ? ` · swap ${bytes(m.swap_total - m.swap_free)}` : ""}`;
-    });
-    part(() => {
-      const d = s.disk;
-      serverGauge("disk", d?.total ? 100 * d.used / d.total : null);
-      if (!d) return;
-      $("c-disk").dataset.tip = `of ${bytes(d.total)} · ${bytes(d.free)} free`;
-    });
+    serverPercent("cpu", s.cpu?.percent);
+    const m = s.memory, d = s.disk;
+    serverPercent("mem", m?.total ? 100 * (m.total - m.available) / m.total : null);
+    serverPercent("disk", d?.total ? 100 * d.used / d.total : null);
     part(() => {
       const n = s.network || {};
       // Below 100 KB/s in KB/s ("79K"), from there in Mbit/s with one decimal ("1.4M").
       const k = (v) => (v == null ? "–" : v >= 100000 ? `${((v * 8) / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}K`);
       set("net-n", `↓${k(n.rx_per_s)} ↑${k(n.tx_per_s)}`);
-      $("c-net").dataset.tip = "K = KB/s · M = Mbit/s";
-    });
-    part(() => {
-      const r = s.reboot;
-      set("reboot-text", r && r.needed ? "reboot needed" : "");
-      $("reboot-text").dataset.tip = r && r.needed && r.packages?.length ? r.packages.join(", ") : "";
     });
     part(() => {
       const version = s.hub && s.hub.version;
@@ -276,11 +234,11 @@ if (document.body.classList.contains("login")) {
   // Updates: a dot in the row (green: all fine, no package updates); a click opens its detail.
   const updates = (u) => {
     const stale = !u || Date.now() / 1000 - u.at > 1800;
-    state("t-system", stale ? "warn" : u.status);
     const summary = stale ? "Update data unavailable" : u.apt.error || u.apt.packages == null ? "Package check unavailable"
       : u.apt.packages ? `${u.apt.packages} updates (${u.apt.security} security)` : "Up to date";
-    set("upd-n", stale ? "unknown" : u.apt.packages ? `${u.apt.packages} (${u.apt.security} security)${u.reboot ? " · reboot" : ""}` : u.reboot ? "reboot needed" : "up to date");
-    state("c-upd", stale ? "warn" : u.status);
+    const unavailable = stale || u.apt.error || u.apt.packages == null;
+    set("upd-n", unavailable ? "?" : u.apt.packages || u.reboot ? num(u.apt.packages) : "✓");
+    state("c-upd", u?.reboot || u?.apt.security ? "bad" : unavailable || u.apt.packages ? "warn" : "ok");
     updData = u ? { ...u, summary, stale } : null;
   };
 
@@ -544,7 +502,7 @@ if (document.body.classList.contains("login")) {
   };
   document.addEventListener("pointerdown", (e) => { if (pinned && !tipBox.contains(e.target) && !pinned.contains(e.target)) unpin(); }, true);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) unpin(); });
-  // The server card's rows explain themselves in the hover card: CPU, memory and LAN with their history over the range
+  // The header chips show server details: CPU, memory and LAN with their history over the range
   // (the bars the detail cards drew), disk with its sizes, updates and services with what they hold.
   const serverSeries = (col) => {
     const s = srvNow || {}, now = Date.now();
@@ -562,19 +520,37 @@ if (document.body.classList.contains("login")) {
   const serverHints = () => {
     const pct = (v) => `${Math.round(v)} %`;
     hint($("c-cpu"), () => { const s = srvNow || {}, c = s.cpu || {};
-      return { cap: 1, head: "CPU", nodes: histNode((p) => p[1] ?? 0, pct), rows: [c.cores ? { label: "Cores", value: String(c.cores) } : null, c.load?.length ? { label: "Load", value: c.load.map((x) => x.toFixed(2)).join(" · ") } : null, s.uptime == null ? null : { label: "Up", value: span(s.uptime) }] }; });
+      return { cap: 1, head: "CPU", nodes: histNode((p) => p[1] ?? 0, pct), rows: [c.cores ? { label: "Cores", value: String(c.cores) } : null, c.load?.length ? { label: "Load", value: c.load.map((x) => x.toFixed(2)).join(" · ") } : null, s.uptime == null ? null : { label: "Up", value: span(s.uptime) }] }; }, true);
     hint($("c-mem"), () => { const m = (srvNow || {}).memory, used = m ? m.total - m.available : 0;
-      return { cap: 1, head: "Memory", nodes: histNode((p) => p[2] ?? 0, pct), rows: m ? [{ label: "Used", value: `${bytes(used)} of ${bytes(m.total)}` }, m.swap_total ? { label: "Swap", value: bytes(m.swap_total - m.swap_free) } : null] : [] }; });
+      return { cap: 1, head: "Memory", nodes: histNode((p) => p[2] ?? 0, pct), rows: m ? [{ label: "Used", value: `${bytes(used)} of ${bytes(m.total)}` }, m.swap_total ? { label: "Swap", value: bytes(m.swap_total - m.swap_free) } : null] : [] }; }, true);
     hint($("c-disk"), () => { const d = (srvNow || {}).disk, du = d ? d.used / d.total : 0;
-      return { cap: 1, head: "Disk", nodes: d ? [shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool")] : [], rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; });
-    hint($("c-net"), () => { const n = (srvNow || {}).network || {};
-      return { cap: 1, head: "LAN", nodes: histNode((p) => (p[4] || 0) + (p[5] || 0), (v) => `${bytes(v)}/s`), rows: [{ label: "Down", value: rate(n.rx_per_s) }, { label: "Up", value: rate(n.tx_per_s) }] }; });
+      return { cap: 1, head: "Disk", nodes: d ? [shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool")] : [], rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; }, true);
+    hint($("c-net"), () => {
+      const n = srvNow?.network || {}, recent = srvNow?.history || [];
+      const throughput = (p) => (p[4] || 0) + (p[5] || 0);
+      const nodes = histNode(throughput, rate);
+      if (recent.length) {
+        const chart = sparkBars(recent.map(throughput), "cool", null);
+        const caption = el("span", "tn", "Last hour");
+        const readSample = (event) => {
+          const rect = chart.getBoundingClientRect();
+          const i = Math.floor((event.clientX - rect.left) * recent.length / rect.width);
+          const sample = recent[Math.max(0, Math.min(i, recent.length - 1))];
+          caption.textContent = `${clock(sample[0])} · ↓${rate(sample[4])} ↑${rate(sample[5])}`;
+        };
+        chart.addEventListener("pointermove", readSample);
+        chart.addEventListener("click", readSample);
+        nodes.push(caption, chart);
+      }
+      return { cap: 1, head: "LAN", note: "K = KB/s · M = Mbit/s", nodes,
+        rows: [{ label: "Down", value: rate(n.rx_per_s) }, { label: "Up", value: rate(n.tx_per_s) }] };
+    }, true);
     hint($("c-upd"), () => { const u = updData;
       if (!u) return { cap: 1, head: "Updates", rows: [{ label: "Collector", value: "unavailable" }] };
       const kernel = !!(u.installed_kernel && u.running_kernel && u.installed_kernel !== u.running_kernel), lts = !!(u.release?.result && !/no new release/i.test(u.release.result));
       const yn = (b) => (b ? "yes" : "no");
-      return { cap: 1, head: "Updates", rows: [{ label: "Updates", value: u.apt.packages ? `${num(u.apt.packages)}${u.apt.security ? ` (${num(u.apt.security)} security)` : ""}` : "none" },
-        { label: "Reboot needed", value: yn(u.reboot) }, { label: "Kernel update", value: yn(kernel) }, { label: "New Ubuntu LTS", value: yn(lts) }] }; });
+      return { cap: 1, head: "Updates", note: u.summary, rows: [{ label: "Updates", value: u.stale || u.apt.error || u.apt.packages == null ? "unknown" : u.apt.packages ? `${num(u.apt.packages)}${u.apt.security ? ` (${num(u.apt.security)} security)` : ""}` : "none" },
+        { label: "Reboot needed", value: yn(u.reboot) }, u.reboot_packages?.length ? { label: "Packages", value: u.reboot_packages.join(", ") } : null, { label: "Kernel update", value: yn(kernel) }, { label: "New Ubuntu LTS", value: yn(lts) }] }; }, true);
     hint($("c-svc"), () => {
       const rows = [["hub", "Hub"], ["dev", "Dev"], ["tunnel", "Tunnel"], ["yogpt", "YoGPT"], ["stbot", "Status bot"]].map(([id, name]) => {
         const i = svcInfo[id], r = (k) => i?.rows?.find(([n]) => n === k)?.[1], up = r("Up"), row = el("div", "tr"), mark = el("span", "tm");
@@ -599,6 +575,7 @@ if (document.body.classList.contains("login")) {
   };
   const hoverTip = (node, count, text, mark) => {
     const show = (e) => {
+      if (pinned) return;
       const n = typeof count === "function" ? count() : count, r = node.getBoundingClientRect();
       if (!n || !r.width) return;
       const i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n))), t = text(i);
@@ -608,7 +585,7 @@ if (document.body.classList.contains("login")) {
     };
     node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") show(e); });
     onTap(node, show);
-    node.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") { tipBox.hidden = true; mark?.(-1); } });
+    node.addEventListener("pointerleave", (e) => { if (!pinned && e.pointerType === "mouse") { tipBox.hidden = true; mark?.(-1); } });
   };
   window.addEventListener("scroll", () => { if (!pinned) tipBox.hidden = true; if (!bigBox.hidden) bigBox.hidden = true; }, { passive: true, capture: true });
   // The painter of every running-total chart (the overview's two and the details'): bars (each slot's count, between
@@ -843,21 +820,9 @@ if (document.body.classList.contains("login")) {
   };
   const reportKey = (r) => `${which}:r${r.id}`;
   let hubNow = null;
-  const drawRangeSummary = (h, signups, open) => {
-    const stats = $("range-stats"), value = (n) => el("span", "value", num(n));
-    const yos = range ? sumOf(evSlots("yo-in")) : h.events?.["yo-in"]?.total;
-    const active = range === 1 ? h.active_day : range === 7 ? h.active_users : h.active_month;
-    const period = range === 1 ? "Last 24 h" : range ? `Last ${range} days` : "All time";
-    stats.replaceChildren(`${period}: `, value(yos), " Yos");
-    if (range && active && yos != null) stats.append(" (", value(Math.round(yos / active)), " per active user)");
-    stats.append(", ", el("span", "value", `+${num(signups)}`), signups === 1 ? " account" : " accounts");
-    if (active != null && h.total) stats.append(", ", value(Math.round(100 * active / h.total)), range ? " % active" : " % active in the last 30 days");
-    if (open != null) stats.append(", ", value(open), open === 1 ? " open problem" : " open problems");
-  };
   const overview = (h) => {
     const ok = h && !h.error;
     hubNow = ok ? h : null;
-    $("range-stats").parentElement.hidden = !ok;
     // Attention, in the chosen range (7, 30 or 365 days): totals, and bars per day (per month for a year).
     // Feedback: messages users wrote; Errors: crash and error reports (the hub keeps 14 days of them); Reports: new.
     const perDay = new Map();
@@ -936,7 +901,6 @@ if (document.body.classList.contains("login")) {
       const sud = new Map(h.signup_days || []);
       areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, last24(h.signups_hours).reduce((n, v) => n + (v || 0), 0));
       const signups = range ? sumOf(perSlot(sud, h.signups_hours)) : [...sud.values()].reduce((a, v) => a + v, 0);
-      drawRangeSummary(h, signups, po ? sparkData.pr?.values.at(-1) : null);
       const dn14 = days14().map(dayName);
       // Health: secured (of each sign-up day's accounts, the share with a backup now), active (per UTC day), and the
       // app versions per platform as one stacked bar (current, update out, unknown).
@@ -2129,7 +2093,7 @@ if (document.body.classList.contains("login")) {
   const perfRows = (h) => {
     const d = speedData, tot = (b) => b.reduce((a, v) => a + v, 0), { names, rows } = queueSlots(h);
     return ([
-      { ico: "speed", label: "Speed", value: d && tot(d.all) ? `${pctText(latPct(d.all, 0))} in 1 s` : "–", values: d ? d.lat.map((b) => (tot(b) ? latPct(b, 0) : 0)) : [],
+      { ico: "speed", label: "Speed", value: d && tot(d.all) ? pctText(latPct(d.all, 0)) : "–", values: d ? d.lat.map((b) => (tot(b) ? latPct(b, 0) : 0)) : [],
         title: d && tot(d.all) ? (() => {
           // The whole range: each slot's split into the four buckets as stacked bars, the share within 1 s as the line over them.
           const W = 240, H = 70, n = d.lat.length, g = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" }), colors = ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"];
@@ -2141,7 +2105,7 @@ if (document.body.classList.contains("login")) {
         })() : null,
         tip: (i) => ({ head: d.names[i], rows: tot(d.lat[i]) ? [...LAT_NAME.map((n, k) => ({ color: ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"][k], label: n, value: pctText(latPct(d.lat[i], k)) })),
           { ico: "send", label: "Yos", value: num(tot(d.lat[i])) }] : [{ ico: "send", label: "Yos", value: "none" }] }) },
-      { ico: "clock", label: "Queue", value: `${num(h.messages)} Yos`, values: rows.map((r) => r?.[0] || 0), scls: "cool",
+      { ico: "clock", label: "Queue", value: num(h.messages), title: { head: "Yos waiting", rows: [{ label: "Queue", value: num(h.messages) }] }, values: rows.map((r) => r?.[0] || 0), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ color: "#5dade2", label: "Yos waiting", value: rows[i] ? num(rows[i][0]) : "not kept" }] }) },
       ...(pushData ? [(() => { const p = pushData, counts = healthData.ps, sum = (v) => v.reduce((x, y) => x + y, 0), at = (i) => ({ head: p.names[i], rows: [{ ico: "send", label: "Pushes sent", value: num(p.sent[i]) },
           { label: "Taken", value: p.sent[i] ? pctText(100 * counts[i][0] / p.sent[i]) : "–" }, { label: "Failed", value: num(counts[i][1]) }, { label: "Folded, 1 s window", value: num(p.folded[i]) }, { label: "Folded, backlog", value: num(p.paced[i]) },
@@ -2208,6 +2172,7 @@ if (document.body.classList.contains("login")) {
   // The last 24 hours of an event kind, rolling (not since UTC midnight): the "in 24 h" sub-lines.
   const last24sum = (k) => last24(hubNow?.events?.[k]?.hours).reduce((a, v) => a + (v || 0), 0);
   const evSlots = (k) => ({ ...perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours), day24: last24sum(k) });
+  const rangeCount = (key, slots = evSlots(key)) => range ? sumOf(slots) : hubNow?.events?.[key]?.total ?? sumOf(slots);
   const sumOf = (d) => d.values.reduce((a, v) => a + (v || 0), 0);
   // Users seen in the range: today (1), 7 days (7), 30 days (30, Total).
   const activeIn = () => (range === 1 ? hubNow?.active_day : range === 7 ? hubNow?.active_users : hubNow?.active_month) ?? 0;
@@ -2381,7 +2346,7 @@ if (document.body.classList.contains("login")) {
   const botCards = (h) => {
     const ev = h.events || {}, today = (k) => last24(ev[k]?.hours).reduce((n, v) => n + (v || 0), 0);
     const media = Object.keys(ev).filter((k) => k.startsWith("bot-media:")).sort();
-    if (!media.length && !ev["bot-yo"]?.total && !today("bot-yo")) return [];
+    const sent = rangeCount("bot-yo"), traffic = sent + rangeCount("yo-in") + rangeCount("yo-in-bot");
     const kinds = [["bot-yo", "Bot Yos"], ...media.map((k) => [k, `${k.slice(10)} photos`])], shades = ["#5dade2", "#3d8fc4", "#2f6f9c", "#7fc0ea", "#1f4f75"];
     const series = kinds.map(([k, name], n) => ({ name, color: shades[n % shades.length], slots: evSlots(k), today: today(k) }));
     const len = series[0].slots.values.length, names = series[0].slots.names, totalAt = (i) => series.reduce((s, x) => s + (x.slots.values[i] || 0), 0);
@@ -2389,9 +2354,9 @@ if (document.body.classList.contains("login")) {
     const pct = series.map((s) => Array.from({ length: len }, (_, i) => ((s.slots.values[i] || 0) / top) * 100)), colors = series.map((s) => s.color);
     const W = 240, H = 70, g = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" });
     for (let i = 0; i < len; i++) { let y = H; series.forEach((s, k) => { const hh = (pct[k][i] / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: ((i + 0.15) * W) / len, width: (0.7 * W) / len, y, height: hh, fill: s.color })); }); }
-    return [{ ico: "cli", label: "Bots", value: `${num(sum24)} in 24 h`, stack: pct, stackColors: colors,
+    return [{ ico: "cli", label: "Bots", value: traffic ? pctText(100 * sent / traffic) : "–", stack: pct, stackColors: colors,
       tip: (i) => ({ head: names[i], rows: series.map((s) => ({ color: s.color, label: s.name, value: num(s.slots.values[i] || 0) })) }),
-      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
+      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [{ label: "Yos sent by bots", value: num(sent) }, { label: "All Yos in range", value: num(traffic) }, ...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
   };
 
   {
@@ -2435,7 +2400,7 @@ if (document.body.classList.contains("login")) {
           })(),
           { ico: "trash", label: "Deleted", value: num(sumOf(gone)), cls: sumOf(gone) ? "warn" : "", values: gone.values.map((v) => v || 0), scls: "warm",
             tip: (i) => ({ head: gone.names[i], rows: [{ color: "#e67e22", label: "Deleted", value: num(gone.values[i] || 0) }] }) },
-          { ico: "send", label: "Yos per user (mean)", value: mean(yoN, dau), values: per,
+          { ico: "user", label: "Yos / user", value: mean(yoN, dau), values: per,
             title: meanTip("Last 24 hours", yoN, dau),
             tip: (i) => meanTip(dayName(ds[i]), h.events ? yo.get(ds[i]) ?? 0 : null, active[i]) },
       ];
@@ -2446,12 +2411,12 @@ if (document.body.classList.contains("login")) {
       if (!slot || !h || h.error) return;
       const by = evSlots("media-in-bytes"), yo = evSlots("yo-in");
       const row = (ico, label, k, total, size) => {
-        const s = evSlots(k);
-        return { ico, label, value: `${num(total)} · +${num(s.day24)} in 24 h`, values: s.values.map((v) => v || 0), scls: "cool",
+        const s = evSlots(k), count = rangeCount(k, s), yos = rangeCount("yo-in", yo);
+        return { ico, label, value: size ? (yos ? pctText(100 * count / yos) : "–") : `+${num(count)}`, values: s.values.map((v) => v || 0), scls: "cool",
           tip: (i) => ({ head: s.names[i], rows: [{ color: "#5dade2", label: label, value: num(s.values[i] || 0) }, ...(size ? [{ ico: "disk", label: "Size", value: bytes(by.values[i] || 0) },
             { ico: "send", label: "Share of Yos", value: yo.values[i] ? pctText((100 * (s.values[i] || 0)) / yo.values[i]) : "–" }] : []),
             { section: "In all" }, { color: "#5dade2", line: true, label: "Total", value: num(total - s.values.slice(i + 1).reduce((n, v) => n + (v || 0), 0)) }] }),
-          title: { cap: 1, head: label, nodes: [sparkBars(s.values.map((v) => v || 0), "cool", null)], rows: [{ label: "Total", value: num(total) }, { label: "In 24 h", value: num(s.day24) },
+          title: { cap: 1, head: label, nodes: [sparkBars(s.values.map((v) => v || 0), "cool", null)], rows: [{ label: "In range", value: num(count) }, ...(size ? [{ label: "Yos in range", value: num(yos) }] : []), { label: "Total", value: num(total) }, { label: "In 24 h", value: num(s.day24) },
             ...(size ? [{ label: "Size, all media", value: h.events?.["media-in-bytes"]?.total == null ? "–" : bytes(h.events["media-in-bytes"].total) }] : [])] } };
       };
       slot.replaceChildren(sparkCard("Sent", [row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true), row("user", "Groups", "group-create", h.groups ?? 0, false), ...botCards(h)]).querySelector(".srows"));
@@ -2490,7 +2455,7 @@ if (document.body.classList.contains("login")) {
         (() => { const p = problemSplit(h), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
           const causes = new Set(open.map(diagCause)).size, reports = open.reduce((n, d) => n + (d.count || 0), 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${causes}${matchMedia("(max-width: 430px)").matches ? "" : causes === 1 ? " cause" : " causes"} · ${num(reports)} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: causes ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "Open causes", value: num(causes) }, { label: "Open reports", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(causes), cls: causes ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => problemTip(p, i) }; })(),
         (() => {
           // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
@@ -2500,7 +2465,7 @@ if (document.body.classList.contains("login")) {
           const mk = (seen, any, crash) => { const b = el("span", "hc-pbar dbar srow-bar"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
           const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Fine", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With an error", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
           const crash = pt.crashInstalls || 0;
-          return { ico: "ios", label: "Phones", value: `${pc(Math.max(0, pt.seen - pt.installs), pt.seen)} fine`, node: mk(pt.seen, pt.installs, crash),
+          return { ico: "ios", label: "Phones", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node: mk(pt.seen, pt.installs, crash),
             title: { cap: 1, head: "Phones seen in the range", note: "Crash-free (est.): 1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day. The hub has no app start per install, so the phones seen stand for the installs in use.",
               rows: [...three(pt.seen, pt.installs, crash), { label: "Crash-free (est.)", value: hd.free == null ? "–" : pctText(hd.free) },
                 ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
@@ -2515,7 +2480,7 @@ if (document.body.classList.contains("login")) {
     cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
   const detailHosts = [$("grp-vr"), $("delivery-rows"), $("feedback-rows")];
   let detailPending = false;
-  // The status bot's select lives in the server card's hover while it shows, else hidden at home.
+  // The status bot's select lives in the Services popover while it shows, else hidden at home.
   const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
   const drawDetail = () => {
     if (!hubNow) return;

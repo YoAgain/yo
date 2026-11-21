@@ -12,8 +12,20 @@
 <body class="dash">
 
 <main class="ov" id="overview">
-<div class="topbar full"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><div class="live" id="live" role="img" aria-label="Yos right now"><span class="live-n"><b id="live-n">–</b><span>/m</span></span><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></div><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="1" title="last 24 hours">1D</button><button type="button" data-r="7" class="on" title="last 7 days">7D</button><button type="button" data-r="30" title="last 30 days">30D</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
-<p class="range-summary full" hidden><span id="range-stats"></span><span id="range-services"></span>.</p>
+<div class="topbar full"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><div class="live" id="live" role="img" aria-label="Yos right now"><span class="live-n"><b id="live-n">–</b><span>/m</span></span><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></div>
+  <div id="t-system" role="group" aria-label="Server status">
+        <button type="button" class="server-chip" id="c-cpu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3M15 2.5v3M9 18.5v3M15 18.5v3M2.5 9h3M2.5 15h3M18.5 9h3M18.5 15h3"/></svg><span class="cl">CPU</span><b class="cn" id="cpu-n">–</b></button>
+        <button type="button" class="server-chip" id="c-mem"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 10.5v3M11 10.5v3"/></svg><span class="cl">Mem</span><b class="cn" id="mem-n">–</b></button>
+        <button type="button" class="server-chip" id="c-disk"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/></svg><span class="cl">Disk</span><b class="cn" id="disk-n">–</b></button>
+        <button type="button" class="server-chip" id="c-net"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/></svg><span class="cl">LAN</span><b class="cn" id="net-n">–</b></button>
+        <button type="button" class="server-chip" id="c-upd"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 19h16"/></svg><span class="cl">Updates</span><b class="cn" id="upd-n">–</b></button>
+        <button type="button" class="server-chip" id="c-svc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Services</span><b class="cn" id="svc-n">–</b></button>
+        <select id="st-every" aria-label="How often the status bot reports" hidden>
+          <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
+          <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
+  </div>
+  <div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="1" title="last 24 hours">1D</button><button type="button" data-r="7" class="on" title="last 7 days">7D</button><button type="button" data-r="30" title="last 30 days">30D</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
+    <div class="svcbar" role="group" aria-label="Services" hidden><button type="button" class="chip" id="t-hub" data-card="svc:hub"><span class="dot"></span>Hub</button><button type="button" class="chip" id="t-dev" data-card="svc:dev"><span class="dot"></span>Dev</button><button type="button" class="chip" id="t-tunnel" data-card="svc:tunnel"><span class="dot"></span>Tunnel</button><button type="button" class="chip" id="t-cli" data-card="svc:cli" title="YoGPT and the status bot"><span class="dot"></span>CLI</button></div>
 <div id="detail" class="overview-grid full">
   <article class="tile group chartw" id="t-yc">
     <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7z"/></svg><span>Sent</span><span class="gnums"><span class="gtoday big">+<b id="yc-t">–</b> <span id="yc-w">in 24 h</span></span><span class="gsum" title="total"><b id="yc-n">–</b> total</span></span></h2>
@@ -49,22 +61,7 @@
         <div class="crow fold bars go" id="c-dl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h11"/><path d="m10 7.5 4.5 4.5-4.5 4.5"/><path d="M18 5v14"/></svg><span class="cl">Speed</span><svg class="spark" id="dl-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow fold bars go" id="c-he" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Hub errors</span><svg class="spark" id="he-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
   </div>
-  <article class="tile group" id="g-server">
-      <h2 class="gh">Server</h2>
-      <section class="counts" id="t-system">
-        <div class="crow bars" id="c-cpu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3M15 2.5v3M9 18.5v3M15 18.5v3M2.5 9h3M2.5 15h3M18.5 9h3M18.5 15h3"/></svg><span class="cl">CPU</span><b class="cn" id="cpu-n">–</b><span class="sv" id="cpu-sv"></span><svg class="spark" id="cpu-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars" id="c-mem"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 10.5v3M11 10.5v3"/></svg><span class="cl">Memory</span><b class="cn" id="mem-n">–</b><span class="sv" id="mem-sv"></span><svg class="spark" id="mem-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars" id="c-disk"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/></svg><span class="cl">Disk</span><b class="cn" id="disk-n">–</b><span class="sv" id="disk-sv"></span><svg class="spark" id="disk-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars sep" id="c-net"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/></svg><span class="cl">LAN</span><b class="cn" id="net-n">–</b><span class="sv" id="net-sv"></span><svg class="spark" id="net-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow kv" id="c-upd"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 19h16"/></svg><span class="cl">Updates</span><b class="cn" id="upd-n">–</b></div>
-        <div class="crow kv sep" id="c-svc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Services</span><b class="cn" id="svc-n">–</b></div>
-        <select id="st-every" aria-label="How often the status bot reports" hidden>
-          <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
-          <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
-        <b id="reboot-text" hidden></b>
-      </section>
-    <div class="svcbar" role="group" aria-label="Services" hidden><button type="button" class="chip" id="t-hub" data-card="svc:hub"><span class="dot"></span>Hub</button><button type="button" class="chip" id="t-dev" data-card="svc:dev"><span class="dot"></span>Dev</button><button type="button" class="chip" id="t-tunnel" data-card="svc:tunnel"><span class="dot"></span>Tunnel</button><button type="button" class="chip" id="t-cli" data-card="svc:cli" title="YoGPT and the status bot"><span class="dot"></span>CLI</button></div>
-  </article>
+
 </div>
   <article class="tile full" id="t-db" aria-label="Database">
     <div class="tables" id="tables"></div>
