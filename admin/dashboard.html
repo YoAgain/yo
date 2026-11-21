@@ -17,21 +17,20 @@
 <main class="ov" id="overview">
 <div class="topbar full"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><div class="live" id="live" role="img" aria-label="Yos right now"><span class="live-n"><b id="live-n">–</b><span>/m</span></span><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></div><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="-1" title="last hour: charts with per-minute counts; the others show 1D">1H</button><button type="button" data-r="1" title="last 24 hours">1D</button><button type="button" data-r="7" class="on" title="last 7 days">7D</button><button type="button" data-r="30" title="last 30 days">30D</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
 <header class="tile hdr group" id="t-hdr">
-  <div class="chartw hchart" id="t-yc">
-    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7z"/></svg><span>Sent</span><span class="gnums"><b class="gsum big" id="yc-n" title="total">–</b><span class="gtoday" title="today (UTC)">+<b id="yc-t">–</b> today</span></span></h2>
+  <div class="chartw hchart twocol" id="t-yc">
+  <div class="tcol">
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 10 14M21 3l-7 18-4-7-7-4 18-7z"/></svg><span>Sent</span><span class="gnums"><b class="gsum big" id="yc-n" title="total">–</b><span class="gtoday" title="last 24 hours">+<b id="yc-t">–</b> in 24 h</span></span></h2>
     <div class="area" id="yc-area"><svg id="yc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="yc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+  </div>
+  <div class="tcol" id="yc-rows"></div>
   </div>
   <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
 </header>
   <div class="charts">
-  <article class="tile group chartw" id="t-ac">
-    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Active</span><span class="gnums"><b class="gsum big" id="ac-n">–</b><span class="gtoday" id="ac-s">–</span></span></h2>
-    <div class="area" id="ac-area"></div>
-  </article>
   <article class="tile group chartw twocol" id="t-uc">
   <div class="tcol">
-    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><span class="gnums"><b class="gsum big" id="uc-n" title="total">–</b><span class="gtoday" title="today (UTC)">+<b id="uc-t">–</b> today</span></span></h2>
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><span class="gnums"><b class="gsum big" id="uc-n" title="total">–</b><span class="gtoday" title="last 24 hours">+<b id="uc-t">–</b> in 24 h</span></span></h2>
     <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
     </div>

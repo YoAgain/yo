@@ -833,7 +833,8 @@ if (document.body.classList.contains("login")) {
     [["ios", "iOS", 0], ["android", "Android", 15]].forEach(([plat, name, y0]) => {
       const d = relData(h, plat), n = d.slots.length, have = d.rows.map((r, k) => (r ? k : -1)).filter((k) => k >= 0), bh = 12;
       if (have.length) {
-        const pts = have.length > 1 ? have : [have[0], have[0]], xs = (k, q) => (have.length > 1 ? (n > 1 ? (k * W) / (n - 1) : 0) : q ? W : 0);
+        // Each strip runs from its own first recorded slot to the right edge, so both start at the left edge.
+        const pts = have.length > 1 ? have : [have[0], have[0]], xs = (k, q) => (have.length > 1 ? ((k - have[0]) * W) / Math.max(1, have[have.length - 1] - have[0]) : q ? W : 0);
         const tops = pts.map((k) => { const r = d.rows[k], all = r.reduce((x, v) => x + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
         d.bands.forEach((b, j) => {
           if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
@@ -846,7 +847,14 @@ if (document.body.classList.contains("login")) {
         shares.push(`${name} ${Math.round((100 * (last[0] + last[1])) / all)} %`);
       } else s.append(svg("rect", { x: 0, width: W, y: y0 + bh - 1, height: 1.5, class: "b zero" }));
     });
-    host.replaceChildren(s);
+    // Under the strips: the devices as one bar (iOS, Android, Bot), their numbers in the hover.
+    const plats = platData?.plats || [], devAll = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0)), dev = el("div", "vr-dev");
+    if (plats.length) {
+      const bar = platCard().firstChild;
+      dev.append(bar);
+      hint(dev, { cap: 1, head: `Devices ${num(platData.devices)}`, rows: plats.map(([l, p]) => ({ label: l, value: `${num(p.all)} · ${Math.round((100 * p.all) / devAll)} %` })) });
+    }
+    host.replaceChildren(s, dev);
     set("vr-n", shares.length ? shares.join(" · ") : "–");
     vrShares = shares;
     const p = vPct(verData.today);
@@ -866,7 +874,7 @@ if (document.body.classList.contains("login")) {
   // ---- overview ---------------------------------------------------------------------------------------------------
   // Active, a tile of the top grid like Sent and Accounts: who was here per day (bars) and the share of them who came
   // back (line); the number and its share of the month in the header, retention and the rest in the hover.
-  let activeSpec = null, drawAccountStatsImpl = null;
+  let activeSpec = null, drawAccountStatsImpl = null, drawSentRowsImpl = null;
   const drawAccountStats = (h) => drawAccountStatsImpl?.(h);
   const drawActive = (h) => {
     const slot = $("ac-area");
@@ -934,8 +942,8 @@ if (document.body.classList.contains("login")) {
           (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
       }
     }
-    drawActive(h);
     drawAccountStats(h);
+    drawSentRowsImpl?.(h);
     showOpen();
 
     // Services: the queue at the bottom.
@@ -963,9 +971,9 @@ if (document.body.classList.contains("login")) {
       // Sent (into inboxes) or Delivered (acknowledged by a device): the pill in the header chooses, the choice is kept.
       const yk = sentMode === "sent" ? "yo-in" : "yo-out";
       drawSentPill();
-      areaChart("yc", yt(yk) ?? 0, ym(yk), yh(yk), ev?.[yk]?.today ?? 0, yk);
+      areaChart("yc", yt(yk) ?? 0, ym(yk), yh(yk), last24(yh(yk)).reduce((n, v) => n + (v || 0), 0), yk);
       const sud = new Map(h.signup_days || []);
-      areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, sud.get(today0()) ?? 0);
+      areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, last24(h.signups_hours).reduce((n, v) => n + (v || 0), 0));
       const dn14 = days14().map(dayName);
       // Health: secured (of each sign-up day's accounts, the share with a backup now), active (per UTC day), and the
       // app versions per platform as one stacked bar (current, update out, unknown).
@@ -2085,7 +2093,7 @@ if (document.body.classList.contains("login")) {
       { color: c, line: true, label: "Total", value: lf(line[i + 1]) },
       ...(moreAll ? moreAll(i) : []),
     ] });
-    return dcard(title, dnums(lf(end), sub !== undefined ? sub : `+${fmt(todayOf(d.values))} today`, subCls),
+    return dcard(title, dnums(lf(end), sub !== undefined ? sub : d.day24 != null ? `+${fmt(d.day24)} in 24 h` : `+${fmt(todayOf(d.values))} today`, subCls),
       liveChart({ line, bars: d.values.map((v) => v || 0), ...axisOf(d.names) }, cls, foot, say), foot);
   };
   // The queue: Yos waiting for offline phones (the line) and the size of the photos and videos waiting (the bars), as
@@ -2132,6 +2140,7 @@ if (document.body.classList.contains("login")) {
   const sparkCard = (title, rows) => {
     const box = el("div", "srows");
     for (const r of rows) {
+      if (r.heading) { box.append(el("div", "srow-head", r.heading)); continue; }
       const row = el("div", `srow${r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);
@@ -2144,11 +2153,11 @@ if (document.body.classList.contains("login")) {
     }
     return dcard(title, null, box);
   };
-  const perfCard = (h) => {
+  // The delivery rows (Speed, Queue, Push, Media queue): the first group of the Problems card.
+  const perfRows = (h) => {
     const d = speedData, tot = (b) => b.reduce((a, v) => a + v, 0), { names, rows } = queueSlots(h);
-    return sparkCard("Delivery performance", [
-      { ico: "speed", label: "Speed", value: d && tot(d.all) ? `${pctText(latPct(d.all, 0))} in 1 s` : "–", stack: d ? LAT.map((_, k) => d.lat.map((b) => (tot(b) ? latPct(b, k) : 0))) : [],
-        stackColors: ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"],
+    return ([
+      { ico: "speed", label: "Speed", value: d && tot(d.all) ? `${pctText(latPct(d.all, 0))} in 1 s` : "–", values: d ? d.lat.map((b) => (tot(b) ? latPct(b, 0) : 0)) : [],
         title: d && tot(d.all) ? (() => {
           // The whole range: each slot's split into the four buckets as stacked bars, the share within 1 s as the line over them.
           const W = 240, H = 70, n = d.lat.length, g = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" }), colors = ["var(--ok)", "#a3e4b8", "var(--warn)", "var(--muted)"];
@@ -2216,7 +2225,9 @@ if (document.body.classList.contains("login")) {
     const slots = rangeSlots(perDay);
     return { names: slots.map(([n]) => n), values: slots.map((s) => slotSum(s, perDay, hours)) };
   };
-  const evSlots = (k) => minuteSlots(k) || perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours);
+  // The last 24 hours of an event kind, rolling (not since UTC midnight): the "in 24 h" sub-lines.
+  const last24sum = (k) => last24(hubNow?.events?.[k]?.hours).reduce((a, v) => a + (v || 0), 0);
+  const evSlots = (k) => ({ ...(minuteSlots(k) || perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours)), day24: last24sum(k) });
   const sumOf = (d) => d.values.reduce((a, v) => a + (v || 0), 0);
   // Users seen in the range: today (1), 7 days (7), 30 days (30, Total).
   const activeIn = () => (range === 1 ? hubNow?.active_day : range === 7 ? hubNow?.active_users : hubNow?.active_month) ?? 0;
@@ -2398,20 +2409,19 @@ if (document.body.classList.contains("login")) {
   // Bots: all bot traffic as bars stacked by kind (Bot Yos, then each bot's photos) in blue shades; the numbers per kind
   // and the note in the hover. Bots are not in Sent, Media or Accounts.
   const botCards = (h) => {
-    const ev = h.events || {}, today = (k) => ev[k]?.today ?? 0;
+    const ev = h.events || {}, today = (k) => last24(ev[k]?.hours).reduce((n, v) => n + (v || 0), 0);
     const media = Object.keys(ev).filter((k) => k.startsWith("bot-media:")).sort();
     if (!media.length && !ev["bot-yo"]?.total && !today("bot-yo")) return [];
     const kinds = [["bot-yo", "Bot Yos"], ...media.map((k) => [k, `${k.slice(10)} photos`])], shades = ["#5dade2", "#3d8fc4", "#2f6f9c", "#7fc0ea", "#1f4f75"];
     const series = kinds.map(([k, name], n) => ({ name, color: shades[n % shades.length], slots: evSlots(k), today: today(k) }));
     const len = series[0].slots.values.length, names = series[0].slots.names, totalAt = (i) => series.reduce((s, x) => s + (x.slots.values[i] || 0), 0);
-    const top = Math.max(1, ...Array.from({ length: len }, (_, i) => totalAt(i))), W = 264, H = 80, gap = W / len;
-    const g = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart", preserveAspectRatio: "none" });
-    for (let i = 0; i < len; i++) {
-      let y = H;
-      for (const s of series) { const hh = ((s.slots.values[i] || 0) / top) * (H - 4); if (!hh) continue; y -= hh; g.append(svg("rect", { x: (i * gap + gap * 0.15).toFixed(1), width: (gap * 0.7).toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), rx: 1, fill: s.color })); }
-    }
-    hoverTip(g, len, (i) => ({ head: names[i], note: "Not in the counts of Sent, Media or Accounts.", rows: [...series.map((s) => ({ color: s.color, label: s.name, value: num(s.slots.values[i] || 0) })), { label: "Today", value: num(series.reduce((n, s) => n + s.today, 0)) }] }));
-    return [dcard("Bots", dnums(num(series.reduce((n, s) => n + s.today, 0)), "today"), g)];
+    const top = Math.max(1, ...Array.from({ length: len }, (_, i) => totalAt(i))), sum24 = series.reduce((n, s) => n + s.today, 0);
+    const pct = series.map((s) => Array.from({ length: len }, (_, i) => ((s.slots.values[i] || 0) / top) * 100)), colors = series.map((s) => s.color);
+    const W = 240, H = 70, g = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" });
+    for (let i = 0; i < len; i++) { let y = H; series.forEach((s, k) => { const hh = (pct[k][i] / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: ((i + 0.15) * W) / len, width: (0.7 * W) / len, y, height: hh, fill: s.color })); }); }
+    return [{ ico: "cli", label: "Bots", value: `${num(sum24)} in 24 h`, stack: pct, stackColors: colors,
+      tip: (i) => ({ head: names[i], rows: series.map((s) => ({ color: s.color, label: s.name, value: num(s.slots.values[i] || 0) })) }),
+      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
   };
 
   { const one = { ...DETAIL }, title = (c) => c?.querySelector("h3 span")?.textContent, tot = (b) => b.reduce((a, v) => a + v, 0);
@@ -2419,15 +2429,6 @@ if (document.body.classList.contains("login")) {
     DETAIL.yc = () => {
       const h = hubNow, d = speedData;
       return [
-        perfCard(h),
-        (() => { const by = evSlots("media-in-bytes");
-          const yo = evSlots("yo-in");
-          return comboCard("Media sent", evSlots("media-in"), { cls: "cool", total: h.events?.["media-in"]?.total, unit: "sent",
-            moreAll: (i) => { const end = h.events?.["media-in-bytes"]?.total; return end == null ? [] : [{ ico: "disk", label: "Size", value: bytes(end - by.values.slice(i + 1).reduce((a, v) => a + (v || 0), 0)) }]; },
-            more: (i) => [{ ico: "disk", label: "Size", value: bytes(by.values[i] || 0) },
-              { ico: "send", label: "Share of Yos", value: yo.values[i] ? pctText((100 * (evSlots("media-in").values[i] || 0)) / yo.values[i]) : "–" }] }); })(),
-        comboCard("Groups", evSlots("group-create"), { total: h.groups, unit: "made" }),
-        ...botCards(h),
       ];
     };
     // Accounts: activity (who is active, how many stay, how much they send) and the accounts' properties (secured,
@@ -2436,7 +2437,7 @@ if (document.body.classList.contains("login")) {
     // The Accounts tile's second column: the stats as the overview's rows (secured bar, new accounts secured, deleted,
     // Yos per user), each with its history in the hover.
     const statsRows = (h) => {
-      const hd = healthData || {}, mau = h.active_month || 0, act = activeIn(), yoN = sumOf(evSlots("yo-in")), t = today0();
+      const hd = healthData || {}, mau = h.active_month || 0, dau = h.active_today ?? 0, act = dau, yoN = last24sum("yo-in"), t = today0();
       const ds = Array.from({ length: 14 }, (_, i) => t - 13 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
       const active = ds.map((d) => (d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0));
       const per = ds.map((d, i) => (active[i] ? (yo.get(d) || 0) / active[i] : 0));
@@ -2444,6 +2445,9 @@ if (document.body.classList.contains("login")) {
       const sc = sparkData.sc, gone = evSlots("account-gone");
       const wk = (h.secured_days || []).slice(-7).filter(Boolean), made = wk.reduce((n, d) => n + d[0], 0), withKey = wk.reduce((n, d) => n + d[1], 0);
       return [
+          { ico: "chart", label: "Active", value: pctText(mau ? (100 * dau) / mau : null), bar: mau ? dau / mau : 0,
+            title: { cap: 1, head: "Active users", nodes: [sparkBars(active, "", null)], note: "Bars: users seen per day, the last 14 days", rows: [{ label: "DAU (last 24 h)", value: num(dau) }, { label: "MAU (last 30 days)", value: num(mau) }, { label: "Stickiness DAU / MAU", value: pctText(mau ? (100 * dau) / mau : null) },
+              { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: ret[k] ?? "–" }))] } },
           (() => {
             // Secured: accounts with a backup as a share of all accounts (the bar); its line over the last 30 days in the hover.
             const us = h.users || [], dd = Array.from({ length: 30 }, (_, i) => t - 29 + i), end = (d) => (d + 1) * 86400000;
@@ -2453,21 +2457,30 @@ if (document.body.classList.contains("login")) {
             if (have.length > 1) g.append(svg("polyline", { fill: "none", stroke: "var(--ok)", "stroke-width": 2, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round",
               points: share.map((v, k) => (v == null ? null : `${((k * 240) / (share.length - 1)).toFixed(1)},${(50 - (hi === lo ? 0.5 : (v - lo) / (hi - lo)) * 44).toFixed(1)}`)).filter(Boolean).join(" ") }));
             return { ico: "lock", label: "Secured", value: pctText(now), bar: (now || 0) / 100,
-              title: { cap: 1, head: "Secured, all accounts", nodes: [g], rows: [{ label: `${dayName(dd[0])} – today`, value: pctText(now) }] } };
+              title: { cap: 1, head: "Secured, all accounts", nodes: [g, ...(sc?.values?.length ? [sparkBars(sc.values.map((v) => v || 0), "", null)] : [])], rows: [{ label: `${dayName(dd[0])} – today`, value: pctText(now) }, { section: "New accounts, the bars above" },
+                { label: "Secured, last 7 days", value: made ? pctText((100 * withKey) / made) : "–" }] } };
           })(),
-          (() => {
-            const plats = platData?.plats || [], all = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0)), bar = platCard().firstChild;
-            bar.classList.add("srow-bar");
-            return { ico: "ios", label: "Devices", value: num(platData?.devices), node: bar,
-              title: { cap: 1, head: "Devices", rows: plats.map(([l, p]) => ({ label: l, value: `${num(p.all)} · ${Math.round((100 * p.all) / all)} %` })) } };
-          })(),
-          { ico: "lock", label: "Secured, new", value: made ? pctText((100 * withKey) / made) : "–", values: sc?.values?.map((v) => v || 0),
-            tip: sc ? (i) => ({ head: sc.names[i], rows: [{ color: "var(--ok)", label: "Secured of that day's sign-ups", value: pctText(sc.values[i]) }] }) : null },
           { ico: "trash", label: "Deleted", value: num(sumOf(gone)), cls: sumOf(gone) ? "warn" : "", values: gone.values.map((v) => v || 0), scls: "warm",
             tip: (i) => ({ head: gone.names[i], rows: [{ color: "#e67e22", label: "Deleted", value: num(gone.values[i] || 0) }] }) },
           { ico: "send", label: "Yos per user", value: act ? (yoN / act).toFixed(1) : "–", values: per,
             tip: (i) => ({ head: dayName(ds[i]), rows: [{ color: "var(--ok)", label: "Yos per active user", value: per[i] ? per[i].toFixed(1) : "–" }, { ico: "user", label: "Active", value: num(active[i]) }] }) },
       ];
+    };
+    // The Sent tile's second column: Media sent and Groups as rows (value, sparkline; the bars and the totals in the hover).
+    drawSentRowsImpl = (h) => {
+      const slot = $("yc-rows");
+      if (!slot || !h || h.error) return;
+      const by = evSlots("media-in-bytes"), yo = evSlots("yo-in");
+      const row = (ico, label, k, total, size) => {
+        const s = evSlots(k);
+        return { ico, label, value: `${num(total)} · +${num(s.day24)} in 24 h`, values: s.values.map((v) => v || 0), scls: "cool",
+          tip: (i) => ({ head: s.names[i], rows: [{ color: "#5dade2", label: label, value: num(s.values[i] || 0) }, ...(size ? [{ ico: "disk", label: "Size", value: bytes(by.values[i] || 0) },
+            { ico: "send", label: "Share of Yos", value: yo.values[i] ? pctText((100 * (s.values[i] || 0)) / yo.values[i]) : "–" }] : []),
+            { section: "In all" }, { color: "#5dade2", line: true, label: "Total", value: num(total - s.values.slice(i + 1).reduce((n, v) => n + (v || 0), 0)) }] }),
+          title: { cap: 1, head: label, nodes: [sparkBars(s.values.map((v) => v || 0), "cool", null)], rows: [{ label: "Total", value: num(total) }, { label: "In 24 h", value: num(s.day24) },
+            ...(size ? [{ label: "Size, all media", value: h.events?.["media-in-bytes"]?.total == null ? "–" : bytes(h.events["media-in-bytes"].total) }] : [])] } };
+      };
+      slot.replaceChildren(sparkCard("Sent", [row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true), row("user", "Groups", "group-create", h.groups ?? 0, false), ...botCards(h)]).querySelector(".srows"));
     };
     drawAccountStatsImpl = (h) => {
       const slot = $("uc-rows");
@@ -2500,27 +2513,28 @@ if (document.body.classList.contains("login")) {
       const fbDays = year(h.support_days), fbHours = last24(h.support_hours);
       const fb = slots.map((x, i) => (range === 1 ? fbHours[i] || 0 : fbDays.get(x) || 0));
       const rp = slots.map((x) => (h.reports || []).filter((r) => Math.floor(r.at / unitMs) === x).length);
-      const users = sparkCard("Problems", [
+      const userRows = [
         { ico: "chat", label: "Feedback", value: num(kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
         { ico: "warn", label: "Reports", value: num(kinds.Reports), cls: kinds.Reports ? "warn" : "", values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${p.ec.at(-1) + p.cc.at(-1)} ${p.ec.at(-1) + p.cc.at(-1) === 1 ? "cause" : "causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${p.ec.at(-1) + p.cc.at(-1)}${matchMedia("(max-width: 430px)").matches ? "" : p.ec.at(-1) + p.cc.at(-1) === 1 ? " cause" : " causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
             tip: (i) => ({ head: p.names[i], rows: problemRows(p, i) }) }; })(),
         (() => {
-          // Phones affected as one bar: crash (red), error only (orange), fine (green); iOS and Android in the hover.
+          // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
+          // shares, crash-free (est.) with its explanation, iOS and Android.
           const pt = problemTotals, pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
-          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Phones affected", value: "–" };
-          const mk = (seen, any, crash) => { const b = el("span", "hc-pbar dbar srow-bar"); for (const [k, v] of [["must", crash], ["warm", Math.max(0, any - crash)], ["current", Math.max(0, seen - any)]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
-          const line = (l, seen, any, crash) => ({ label: l, value: `${pc(crash, seen)} crash · ${pc(Math.max(0, any - crash), seen)} error · ${pc(Math.max(0, seen - any), seen)} fine` });
-          return { ico: "ios", label: "Phones affected", value: pc(pt.installs, pt.seen), node: mk(pt.seen, pt.installs, pt.crashInstalls || 0),
-            title: { cap: 1, head: "Phones affected", rows: [line("All phones", pt.seen, pt.installs, pt.crashInstalls || 0), ...pt.platforms.filter(([, , n]) => n).map(([l, hit, n, c]) => line(l, n, hit, c))] } };
+          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Phones", value: "–" };
+          const mk = (seen, any, crash) => { const b = el("span", "hc-pbar dbar srow-bar"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
+          const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Fine", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With an error", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
+          const crash = pt.crashInstalls || 0;
+          return { ico: "ios", label: "Phones", value: `${pc(Math.max(0, pt.seen - pt.installs), pt.seen)} fine`, node: mk(pt.seen, pt.installs, crash),
+            title: { cap: 1, head: "Phones seen in the range", note: "Crash-free (est.): 1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day. The hub has no app start per install, so the phones seen stand for the installs in use.",
+              rows: [...three(pt.seen, pt.installs, crash), { label: "Crash-free (est.)", value: hd.free == null ? "–" : pctText(hd.free) },
+                ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
         })(),
-        { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
-          title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
-            rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },
-      ]);
+      ];
       // Yo to Yo speed: from the hub taking a Yo to the friend's phone having it, the share within 1 s per slot as the
       // line over the Yos delivered as bars; within 1 s and within 5 s in the title, every bucket in the popup.
       const sd = speedData, stot = (b) => b.reduce((a, v) => a + v, 0);
@@ -2533,7 +2547,7 @@ if (document.body.classList.contains("login")) {
       })() : dcard("Yo to Yo speed", null, note("No Yos delivered in this range."));
       // Speed two columns wide: the four columns filled without the Errors card (errors are in the Errors view).
       fast.classList.add("wide");
-      return [users];
+      return [sparkCard("Problems", [{ heading: "Delivery" }, ...perfRows(h), { heading: "Feedback & problems" }, ...userRows])];
     };
 
   }
@@ -2544,7 +2558,7 @@ if (document.body.classList.contains("login")) {
   let detailPending = false;
   // All cards are on the page, always: a group each, under a small label, in this order. A click on a tile or row takes
   // its group to the top of the screen.
-  const GROUPS = [["yc", "Yos"], ["uc", "Accounts"], ["vr", "App"], ["pr", "Problems"]];
+  const GROUPS = [["uc", "Accounts"], ["vr", "App"], ["pr", "Problems"]];
   // The status bot's select lives in the server card's hover while it shows, else hidden at home.
   const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
   const drawDetail = () => {
