@@ -253,8 +253,8 @@ struct FriendList: View {
         if let contacts = try? await Hub.run({ client.contacts() }) { friends.markRequests(contacts) }
         if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
         guard client === accounts.client else { return }
-        // Accepting keeps the bar's place (`yo_product::list`): only the person's own Yos lift it.
-        showSent(to: bar, BarSendText.sentYo)
+        // Accepting sends a Yo: "Sent Yo" where the bar stands, then it rises (`yo_product::list`).
+        showSent(to: bar, BarSendText.sentYo, thenOnTop: true)
         if let problem = await inbox.send(to: bar, accounts: accounts, friends: friends) {
           if problem == Inbox.groupEmpty { emptyGroup = bar }
           showSent(to: bar, problem)

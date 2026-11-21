@@ -151,6 +151,7 @@ extension FriendList {
       withAnimation(.snappy) {
         friends.add(invitation.name, user: invitation.user)
       }
+      syncListFriends()  // the list model has the bar before its Yo is told
     }
     let skeleton = Username.skeleton(invitation.name)
     guard
@@ -165,7 +166,8 @@ extension FriendList {
     send(to: friend, origin: nil)
   }
 
-  /// A name to add, once the hub said who it is: added as its owner spells it, at the bottom; without an answer, not at all. One already
+  /// A name to add, once the hub said who it is: added as its owner spells it, at the bottom, told as a Yo sent ("Sent
+  /// Yo", then it rises); without an answer, not at all. One already
   /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or why the hub did not
   /// answer, or nil.
   enum AddProblem { case said(String), unreachable(ProductProblem) }
@@ -183,6 +185,9 @@ extension FriendList {
     case .new(let spelled, let user):
       withAnimation(.snappy) {
         friends.add(spelled, user: user)
+      }
+      if let bar = friends.all.first(where: { !$0.gone && $0.group == nil && $0.user == user }) {
+        DeleteNotice.shared.added(bar)
       }
     }
     return nil

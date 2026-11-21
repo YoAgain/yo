@@ -687,7 +687,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val known = known(found.username ?: name, found.user)
         if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return }
         addFriend(c, found.username ?: name, found.user)
+        // Told as a Yo sent: "Sent Yo" where the new bar stands (the bottom), then it rises (`yo_product::list`).
+        known(found.username ?: name, found.user)?.let { showAdded(it) }
     }
+    private fun showAdded(friend: Friend) = present { added(it, friend.key) }
     private fun known(spelled: String, user: String?) = state.value.friends.firstOrNull { it.group == null && !it.gone &&
         ((user != null && it.user == user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
     private suspend fun addFriend(c: YoClient, spelled: String, user: String?) {
@@ -991,6 +994,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val c = client ?: return
         val made = c.createGroup(utf8Limit(name.trim(), 32), members.take(19))
         absorb(made.events, c); if (c !== client) return; refresh()
+        // No Yo goes, yet it is told as one: "Sent Yo", then the group's bar rises (as a contact added).
+        state.value.friends.firstOrNull { it.group == made.id }?.let { showAdded(it) }
         val names=members.mapNotNull { id -> state.value.friends.firstOrNull { it.user==id }?.name }
         val shown=if(names.size>4) names.take(3) else names
         val listed=shown+if(shown.size<names.size) listOf(context.resources.getQuantityString(R.plurals.more_members,names.size-shown.size,names.size-shown.size)) else emptyList()

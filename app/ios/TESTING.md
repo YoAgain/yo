@@ -131,7 +131,7 @@ app's team in its id, which the Simulator build has not: the https link opens Sa
 
 | Flow | Result |
 |---|---|
-| Signed in, link to someone not on the list: added once, at the bottom; again: "Already Added" on their bar, no second bar | ok |
+| Signed in, link to someone not on the list: added once, "Sent Yo" at the bottom, then on top; again: "Already Added" on their bar, no second bar | ok |
 | Signed in, link to a name nobody has: "No Such User" in Add Friend's field, nothing added | ok |
 | Signed in, link to one's own name: "That’s You" | ok |
 | Fresh install, link before the welcome ("NAME invited you" over Sign Up), app killed while typing the name, still there after the start; signed up: NAME and YoGPT on the list | ok |

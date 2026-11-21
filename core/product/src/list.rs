@@ -71,6 +71,9 @@ pub enum Input {
         text: String,
     },
     SendUndone(String),
+    /// The person added this bar (a contact typed in, a group made or joined): told as a Yo sent to it, "Sent Yo"
+    /// where it stands (the bottom, as a new bar), then it rises. One the platform has not listed yet waits for it.
+    Added(String),
     /// What the platform keeps for this bar and has not sent (on: something waits, off: none waits any more): the
     /// bar says "Not Sent · Tap to Retry" whenever it shows its title, until it is off. Never silent, never lost.
     Unsent {
@@ -234,8 +237,11 @@ pub struct List {
     proposed: Vec<String>,
     source_order: Vec<String>,
     /// Bars added after the list was first given (a contact added or a request, a group made or joined), oldest
-    /// first: they stand at the bottom, whatever place the platform gave them, until their first Yo lifts them.
+    /// first: they stand at the bottom, whatever place the platform gave them, until a Yo (or `Input::Added`) lifts
+    /// them.
     fresh: Vec<String>,
+    /// `Input::Added` for bars the platform has not listed yet: told once they come.
+    added: Vec<String>,
     states: BTreeMap<String, State>,
     rising: Vec<String>,
     batch_at: Option<u64>,
@@ -276,7 +282,8 @@ impl List {
         match input {
             Input::Friends(friends) => {
                 self.deleted.retain(|id| friends.iter().any(|f| &f.id == id));
-                // Adding is no activity: a new bar starts below all others (the add row's neighbour).
+                // A new bar starts below all others (the add row's neighbour); the person's add tells "Sent Yo"
+                // there and lifts it (`Input::Added`), as a Yo sent does.
                 if !self.friends.is_empty() {
                     for f in &friends {
                         if !self.friends.contains_key(&f.id) && !self.fresh.contains(&f.id) {
@@ -299,6 +306,13 @@ impl List {
                     if !self.order.contains(id) {
                         self.order.push(id.clone());
                     }
+                }
+                let (come, waiting) = std::mem::take(&mut self.added)
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|id| self.friends.contains_key(id));
+                self.added = waiting;
+                for id in come {
+                    self.notice(id, Kind::Yo.sent().into(), true);
                 }
             }
             Input::SenderNamed { user, name } => {
@@ -385,6 +399,13 @@ impl List {
             }
             Input::SendFailed { id, text } => {
                 self.notice(id, text, false);
+            }
+            // Adding sends the first Yo (or request), or, for a group, is told as if it did: as `SendFinished`.
+            Input::Added(id) if self.friends.contains_key(&id) => self.notice(id, Kind::Yo.sent().into(), true),
+            Input::Added(id) => {
+                if !self.added.contains(&id) {
+                    self.added.push(id);
+                }
             }
             Input::Unsent { id, on } => {
                 let state = self.states.entry(id).or_default();
@@ -913,48 +934,75 @@ mod tests {
         assert!(l.apply(4000, Input::Tick).committed_deletes.is_empty());
     }
     #[test]
-    fn added_bars_start_at_the_bottom_until_their_first_yo() {
+    fn a_contact_added_says_sent_yo_then_rises_as_a_yo_sent() {
         let mut l = model();
         l.apply(0, receive("c"));
         l.apply(300, Input::Tick);
         assert_eq!(order(&l), ["c", "a", "b"]);
-        // The platform puts a new contact (a request at first) on top: the core keeps it at the bottom.
-        let mut fs = friends(&["n", "c", "a", "b"]);
-        fs[0].request = true;
-        l.apply(400, Input::Friends(fs.clone()));
+        // The add told before the platform lists the bar (as iOS does): it waits for it.
+        l.apply(400, Input::Added("n".into()));
+        assert_eq!(order(&l), ["c", "a", "b"]);
+        // Wherever the platform puts it, it says "Sent Yo" at the bottom, as a tapped bar where it stands.
+        l.apply(400, Input::Friends(friends(&["n", "c", "a", "b"])));
         assert_eq!(order(&l), ["c", "a", "b", "n"]);
-        // Accepted: no move. A stale platform order cannot lift it either.
-        fs[0].request = false;
-        l.apply(500, Input::Friends(fs));
-        l.apply(600, Input::Friends(friends(&["c", "n", "a", "b"])));
+        assert_eq!(row(&l, "n").title, "Sent Yo");
+        assert_eq!(row(&l, "n").notice_deadline, Some(400 + SENT_MS));
+        // Told once only, though the list comes again.
+        l.apply(500, Input::Friends(friends(&["n", "c", "a", "b"])));
+        assert_eq!(row(&l, "n").count, 1);
+        l.apply(400 + SENT_MS - 1, Input::Tick);
         assert_eq!(order(&l), ["c", "a", "b", "n"]);
-        // A second new one goes below the first.
-        l.apply(700, Input::Friends(friends(&["m", "c", "a", "b", "n"])));
-        assert_eq!(order(&l), ["c", "a", "b", "n", "m"]);
-        // A Yo received lifts it like any bar; one sent lifts the other.
-        l.apply(800, receive("n"));
-        l.apply(1_100, Input::Tick);
-        assert_eq!(order(&l), ["n", "c", "a", "b", "m"]);
-        l.apply(1_200, Input::SendFinished { id: "m".into(), kind: Kind::Yo });
-        l.apply(1_200 + SENT_MS, Input::Tick);
+        // The notice over: on top, its name again, as after any Yo sent.
+        l.apply(400 + SENT_MS, Input::Tick);
+        assert_eq!(order(&l), ["n", "c", "a", "b"]);
+        assert_eq!(row(&l, "n").title, "N");
+        // One already listed (as Android lists it first) is told at once.
+        l.apply(3_000, Input::Friends(friends(&["n", "c", "a", "b", "m"])));
+        l.apply(3_000, Input::Added("m".into()));
+        assert_eq!(row(&l, "m").title, "Sent Yo");
+        l.apply(3_000 + SENT_MS, Input::Tick);
         assert_eq!(order(&l), ["m", "n", "c", "a", "b"]);
         // Once lifted they are ordinary bars: the platform's order (written back from the core's) is kept.
-        l.apply(3_000, Input::Friends(friends(&["m", "n", "c", "a", "b"])));
+        l.apply(5_000, Input::Friends(friends(&["m", "n", "c", "a", "b"])));
         assert_eq!(order(&l), ["m", "n", "c", "a", "b"]);
     }
     #[test]
-    fn a_new_group_starts_at_the_bottom_until_its_first_yo() {
+    fn accepting_a_request_sends_a_yo_and_rises_after_it() {
         let mut l = model();
-        let mut fs = friends(&["a", "b", "c"]);
-        fs.insert(0, Friend { id: "g".into(), name: "Team".into(), request: true, group: true });
+        // A request the platform lists (not by a Yo of its own here): at the bottom, no move.
+        let mut fs = friends(&["n", "a", "b", "c"]);
+        fs[0].request = true;
         l.apply(0, Input::Friends(fs.clone()));
-        assert_eq!(order(&l), ["a", "b", "c", "g"]);
+        assert_eq!(order(&l), ["a", "b", "c", "n"]);
+        // Accepted: the Yo it sends says "Sent Yo" where it stands, then lifts it.
         fs[0].request = false;
         l.apply(100, Input::Friends(fs));
+        assert_eq!(order(&l), ["a", "b", "c", "n"]);
+        l.apply(200, Input::SendFinished { id: "n".into(), kind: Kind::Yo });
+        assert_eq!(row(&l, "n").title, "Sent Yo");
+        assert_eq!(order(&l), ["a", "b", "c", "n"]);
+        l.apply(200 + SENT_MS, Input::Tick);
+        assert_eq!(order(&l), ["n", "a", "b", "c"]);
+    }
+    #[test]
+    fn a_group_made_or_joined_says_sent_yo_then_rises() {
+        let mut l = model();
+        let mut fs = friends(&["a", "b", "c"]);
+        fs.insert(0, Friend { id: "g".into(), name: "Team".into(), request: false, group: true });
+        l.apply(0, Input::Friends(fs.clone()));
         assert_eq!(order(&l), ["a", "b", "c", "g"]);
-        l.apply(200, Input::Received { id: "g".into(), kind: Kind::Yo, token: "t".into(), sender: Some("u".into()) });
-        l.apply(500, Input::Tick);
+        assert_eq!(row(&l, "g").title, "Team");
+        // Made: no Yo goes, yet it is told as one.
+        l.apply(100, Input::Added("g".into()));
+        assert_eq!(row(&l, "g").title, "Sent Yo");
+        assert_eq!(order(&l), ["a", "b", "c", "g"]);
+        l.apply(100 + SENT_MS, Input::Tick);
         assert_eq!(order(&l), ["g", "a", "b", "c"]);
+        // A group bar new to the list without the person's add (made elsewhere): at the bottom, quiet.
+        fs.push(Friend { id: "h".into(), name: "Other".into(), request: false, group: true });
+        l.apply(2_000, Input::Friends(fs));
+        assert_eq!(order(&l), ["g", "a", "b", "c", "h"]);
+        assert_eq!(row(&l, "h").title, "Other");
     }
     #[test]
     fn the_first_list_keeps_its_order() {
