@@ -1256,7 +1256,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 #t-yc .area, #t-uc .area, #t-ac .area { height: 170px !important; min-height: 170px !important; flex: none; }
 #c-vr .vr-dev { display: block; margin-top: 6px; } #c-vr .vr-dev .hc-pbar { height: 8px; }
 .half #c-vr .vr-spark { display: flex; flex-direction: column; height: auto; min-height: 36px; }
-.half #c-vr .vr-spark > svg { width: 100%; height: 66px; flex: none; }
+.half #c-vr .vr-spark > svg { width: 100%; height: 22px; flex: none; }
 .srow-head { margin: 10px 0 2px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .srow-head:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 /* Phone: the section tabs as a row of icon and count, tables scroll sideways inside their card, the users table compact. */
@@ -1278,3 +1278,12 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 #t-yc.twocol { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--gap); height: auto !important; }
 @media (min-width: 641px) { .ov > header.tile.hdr { grid-column: span 2 !important; } }
 @media (max-width: 640px) { #t-yc.twocol { grid-template-columns: minmax(0, 1fr); } }
+
+#c-vr .vr-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 13px; }
+#c-vr svg + .vr-label { margin-top: 8px; }
+@media (max-width: 640px) {
+  .area svg text.ax, .area .lab, .hc-chart text, .axis, .stripbox span,
+  .cfoot, .shead, .cap, .hc-note, .hc-legend, .hc-plat small, .dcard .hc-sub,
+  .glabel small, .srow-head, .live-n span, .stat3 span, .dcard .pstat small,
+  .dcard .pstep small, .dcard .dnums small { font-size: 13px; }
+}

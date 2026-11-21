@@ -827,35 +827,42 @@ if (document.body.classList.contains("login")) {
     const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
     verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
     }
-    // The row: the releases as two thin stacked areas, iOS above Android, in the states' colours; the title value is
-    // each platform's share on the newest build (current and fresh).
-    const host = $("vr-bar"), W = 140, H = 28, s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" }), shares = [];
-    [["ios", "iOS", 0], ["android", "Android", 15]].forEach(([plat, name, y0]) => {
-      const d = relData(h, plat), n = d.slots.length, have = d.rows.map((r, k) => (r ? k : -1)).filter((k) => k >= 0), bh = 12;
+    const host = $("vr-bar"), W = 140, bh = 12, strips = [], shares = [];
+    const labelRow = (name, value) => {
+      const row = el("span", "vr-label");
+      row.append(el("span", "", name), el("b", "", value));
+      return row;
+    };
+    for (const [plat, name] of [["ios", "iOS"], ["android", "Android"]]) {
+      const s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${bh}`, preserveAspectRatio: "none" });
+      const d = relData(h, plat), have = d.rows.map((r, k) => (r ? k : -1)).filter((k) => k >= 0);
+      let value = "–";
       if (have.length) {
         // Each strip runs from its own first recorded slot to the right edge, so both start at the left edge.
         const pts = have.length > 1 ? have : [have[0], have[0]], xs = (k, q) => (have.length > 1 ? ((k - have[0]) * W) / Math.max(1, have[have.length - 1] - have[0]) : q ? W : 0);
         const tops = pts.map((k) => { const r = d.rows[k], all = r.reduce((x, v) => x + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
         d.bands.forEach((b, j) => {
           if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
-          const up = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(y0 + bh - tops[q][j] * bh).toFixed(1)}`), down = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(y0 + bh - (j ? tops[q][j - 1] : 0) * bh).toFixed(1)}`).reverse();
+          const up = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(bh - tops[q][j] * bh).toFixed(1)}`), down = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(bh - (j ? tops[q][j - 1] : 0) * bh).toFixed(1)}`).reverse();
           const p = svg("polygon", { points: [...up, ...down].join(" ") });
           p.style.fill = b.color;
           s.append(p);
         });
         const last = d.rows[have[have.length - 1]], all = last.reduce((x, v) => x + v, 0);
-        shares.push(`${name} ${Math.round((100 * (last[0] + last[1])) / all)} %`);
-      } else s.append(svg("rect", { x: 0, width: W, y: y0 + bh - 1, height: 1.5, class: "b zero" }));
-    });
+        const pct = Math.round((100 * (last[0] + last[1])) / all);
+        value = `${pct} % current`;
+        shares.push(`${name} ${pct} %`);
+      } else s.append(svg("rect", { x: 0, width: W, y: bh - 1, height: 1.5, class: "b zero" }));
+      strips.push(labelRow(name, value), s);
+    }
     // Under the strips: the devices as one bar (iOS, Android, Bot), their numbers in the hover.
     const plats = platData?.plats || [], devAll = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0)), dev = el("div", "vr-dev");
     if (plats.length) {
       const bar = platCard().firstChild;
-      dev.append(bar);
+      dev.append(labelRow("Devices", num(platData.devices)), bar);
       hint(dev, { cap: 1, head: `Devices ${num(platData.devices)}`, rows: plats.map(([l, p]) => ({ label: l, value: `${num(p.all)} · ${Math.round((100 * p.all) / devAll)} %` })) });
     }
-    host.replaceChildren(s, dev);
-    set("vr-n", shares.length ? shares.join(" · ") : "–");
+    host.replaceChildren(...strips, dev);
     vrShares = shares;
     const p = vPct(verData.today);
     $("c-vr").dataset.tip = p == null ? "" : `today: ${p} % current`;
