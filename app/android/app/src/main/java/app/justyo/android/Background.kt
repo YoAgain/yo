@@ -92,7 +92,14 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
                         repo.registerPush(token)
                     }
                 }
-                "inbox" -> repo.syncPush()
+                "inbox" -> try {
+                    repo.syncPush()
+                } catch (e: Exception) {
+                    if (e is CancellationException || e is YoException.Replaced) throw e
+                    // Once more after a moment (a network still waking up) before the fallback says a Yo may have come.
+                    kotlinx.coroutines.delay(3_000)
+                    repo.syncPush()
+                }
                 "send" -> repo.sendWidgetYo(inputData.getString("friend"), inputData.getString("account"), inputData.getBoolean("latest", false))
                 else -> return@withContext Result.failure()
             }

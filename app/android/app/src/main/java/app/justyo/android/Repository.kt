@@ -635,6 +635,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     suspend fun syncPush() {
         if (foreground && listening?.isActive == true) return
+        // Woken by a push: a pooled connection may have died while the process was frozen or the phone slept, and a
+        // request on it fails only after the ping times out; the push then ends in the fallback. A fresh one instead.
+        transport.forgetConnections(now = true)
         syncing.withLock {
             val c = client ?: return
             absorb(c.savedEvents(), c)
@@ -643,6 +646,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
             }
         }
+        // As Signal's "you may have new messages": gone once the inbox came through.
+        notifications.clear(FALLBACK)
         // Keep the process eligible to complete downloads started by the inbox pass.
         withTimeoutOrNull(15_000) {
             state.first { snapshot -> snapshot.media.none { !it.ready } }
@@ -653,7 +658,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (!foreground) {
             crashes.countNotificationFallback("pushSyncFailed")
             try {
-                notifications.show("yo-fallback", "yo-fallback:${java.util.UUID.randomUUID()}", null, null, MessageKind.Yo)
+                notifications.show(FALLBACK, "$FALLBACK:${java.util.UUID.randomUUID()}", null, null, MessageKind.Yo)
             } catch (_: SecurityException) { }
         }
     }
@@ -1132,6 +1137,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     fun keyChangeSeen() { mutable.update { it.copy(keyChanged = null) } }
     companion object {
+        /** The thread of "You may have received a Yo", shown when a push's inbox sync failed. */
+        const val FALLBACK = "yo-fallback"
         /** A failed one-time sign-in that is tried again later, not dropped: a network error, a busy hub, a save. */
         fun keepsPendingSignIn(error: Exception) = error is YoException && retryLater(error)
 

@@ -53,8 +53,12 @@ class HubTransport(private val reached: (Boolean) -> Unit = {}, private val unsu
     }
     /** Connections from before a suspension or on another network: dropped, so the next request opens a fresh one at
      *  once instead of waiting on a dead socket. Off the main thread (it calls from `onStart`): closing a TLS socket
-     *  writes to it, which Android refuses there (NetworkOnMainThreadException, rethrown by OkHttp: a crash). */
-    fun forgetConnections() = offMain { listOf(signed, anonymous).forEach { it.connectionPool.evictAll() } }
+     *  writes to it, which Android refuses there (NetworkOnMainThreadException, rethrown by OkHttp: a crash). [now]:
+     *  done before returning, for a caller off the main thread whose next request must not take an old one. */
+    fun forgetConnections(now: Boolean = false) {
+        val evict = { listOf(signed, anonymous).forEach { it.connectionPool.evictAll() } }
+        if (now) runCatching(evict) else offMain(evict)
+    }
     fun close() = offMain { listOf(signed, anonymous).forEach { it.dispatcher.cancelAll(); it.connectionPool.evictAll() } }
     private fun offMain(work: () -> Unit) { thread(name = "yo-connections") { runCatching(work) } }
     companion object {
