@@ -911,12 +911,12 @@ button.hc-hint:hover { border-color: var(--amethyst-soft); }
 .ov > #t-db::before { display: none; }
 .rangebar { column-span: all; display: flex; align-items: center; gap: 12px; margin: 14px 0 22px; }
 .rangebar::before { content: ""; flex: 1; border-top: 1px solid var(--line); }
-:is(.rangebar, .topbar) .range { display: flex; align-items: center; height: auto; padding: 0; margin: 0; border: 0; background: none; font-size: 12px; }
-:is(.rangebar, .topbar) .range button { border: 0; background: none; padding: 2px 4px; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
-:is(.rangebar, .topbar) .range button + button::before { content: "·"; margin-right: 8px; color: var(--line); font-weight: 400; }
-:is(.rangebar, .topbar) .range button:hover { color: var(--text); }
-:is(.rangebar, .topbar) .range button.on { color: var(--amethyst-soft); font-weight: 800; background: none; }
-:is(.rangebar, .topbar) .range button + button::before { color: var(--muted); opacity: .5; font-weight: 400; }
+.rangebar .range { display: flex; align-items: center; height: auto; padding: 0; margin: 0; border: 0; background: none; font-size: 12px; }
+.rangebar .range button { border: 0; background: none; padding: 2px 4px; min-width: 0; color: var(--muted); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rangebar .range button + button::before { content: "·"; margin-right: 8px; color: var(--line); font-weight: 400; }
+.rangebar .range button:hover { color: var(--text); }
+.rangebar .range button.on { color: var(--amethyst-soft); font-weight: 800; background: none; }
+.rangebar .range button + button::before { color: var(--muted); opacity: .5; font-weight: 400; }
 .area .lab { font-family: var(--font); font-size: 9.5px; fill: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
 /* Both chart cards alike: a 28 px title line, the curve 2/3 and the bars 1/3 of the same fixed heights. */
 .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac { padding: 16px 18px; }
@@ -1201,12 +1201,13 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 /* Live Yos next to the logo: the rate per minute, the last ten minutes as bars like Problems' (the running minute
    bright); every new Yo is a dot that leaves the logo, arcs over the rate and rains into that bar (Web Animations in
    app.js, transform and opacity only). */
-.ov > .topbar { gap: 14px; }
+
 .ov > .topbar .range { margin-left: auto; }
-.live { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; height: 28px; color: var(--amethyst); }
-.live-n { display: flex; align-items: baseline; font-size: 13px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.live-n span { font-size: 10.5px; font-weight: 700; color: var(--muted); }
-.live-strip { position: relative; width: 100px; height: 24px; }
+.live { min-width: 0; display: flex; align-items: center; gap: 8px; height: var(--control-height); color: var(--amethyst); }
+.live-n { display: flex; align-items: baseline; gap: 1px; line-height: 1; font-size: 17px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.live-n b { font-weight: 600; }
+.live-n span { font-size: 12px; font-weight: 500; color: var(--muted); }
+.live-strip { position: relative; width: clamp(58px, 8vw, 88px); height: 18px; }
 .live-strip svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .live-strip .b { fill: var(--amethyst-soft); opacity: .45; transform-box: fill-box; transform-origin: 50% 100%; }
 .live-strip .b:last-of-type { fill: var(--amethyst-soft); opacity: 1; filter: drop-shadow(0 0 3px var(--amethyst)); }
@@ -1217,7 +1218,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 #live.away { opacity: .45; }
 .yo-spark { position: absolute; left: 0; top: 0; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: #fff;
   box-shadow: 0 0 0 1px var(--amethyst-soft), 0 0 7px 1.5px var(--amethyst); opacity: 0; will-change: transform, opacity; }
-@media (max-width: 420px) { .ov > .topbar { gap: 10px; } .live { gap: 7px; } .live-strip { width: 90px; } }
 @media (prefers-reduced-motion: reduce) { .live-lane { display: none; } }
 #range { position: relative; }
 .ctip.pin { pointer-events: auto; }
@@ -1286,7 +1286,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ctip .area.dchart { position: relative; width: 240px; height: 88px; }
 
 /* Overview cards share reading order, gutters and chart geometry at both widths. */
-body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 1328px; padding: 24px 24px 40px; }
+body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 1328px; padding: 24px 16px 40px; }
 .overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); }
 .overview-grid > *, #grp-vr > .dcard { min-width: 0; }
 .overview-grid :is(.tile, .dcard) { padding: var(--inset); gap: 8px; }
@@ -1321,19 +1321,22 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 1328px; padd
 .overview-grid .srow .sl { white-space: normal; }
 .overview-grid .srow-head { font-size: 12px; margin: 8px 0 0; padding-top: 12px; }
 .overview-grid .srow-head:first-child { margin: 0; padding: 0; }
-.ov > .topbar { margin: 0; gap: 12px; flex-wrap: wrap; }
-.topbar #range { padding: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
-.topbar #range button { font-size: 13px; padding: 6px 8px; border-radius: 8px; }
-.topbar #range button.on { background: var(--sel); color: var(--amethyst-soft); }
-.topbar #range button::before { content: none; }
-.topbar:has(.hourly) { padding-bottom: 28px; }
-#range.hourly::after { top: calc(100% + 8px); font-size: var(--caption); }
+.ov > .topbar { --control-height: 36px; margin: 0 0 8px; gap: clamp(8px, 2vw, 16px); justify-content: flex-start; }
+.topbar .logo { height: var(--control-height); min-width: var(--control-height); justify-content: center; border-radius: 10px; }
+.topbar #range {
+  flex: none; display: flex; align-items: stretch; height: var(--control-height); padding: 3px;
+  background: var(--card); border: 0; border-radius: 10px; cursor: default;
+}
+.topbar #range button {
+  border: 0; padding: 0 clamp(6px, 1.4vw, 12px); border-radius: 7px; background: transparent;
+  font: inherit; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted); cursor: pointer;
+}
+.topbar #range button:hover { color: var(--text); }
+.topbar #range button.on { background: var(--amethyst); color: #fff; }
 .ctip :is(.th.cap, .tsec), .tside .tside-k, .live-n span { font-size: 12px; }
 @media (max-width: 840px) {
-  body.dash { --gap: 12px; padding: 16px 12px 32px; }
+  body.dash { --gap: 12px; padding: 16px 16px 32px; }
   .overview-grid { grid-template-columns: minmax(0, 1fr); --track: 64px; }
-  .ov > .topbar { gap: 8px; }
-  .live-strip { width: clamp(32px, 14vw, 72px); }
 }
 
 #g-server .crow.bars:has(.gauge) { grid-template-columns: 18px minmax(0, 1fr) auto var(--track, 112px); column-gap: 8px; }
@@ -1342,7 +1345,6 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 1328px; padd
 #g-server #t-system .crow :is(.cl, .cn) { font-size: 15px; }
 #t-db :is(.list th, .tside small, .pill), .ctip .hc-note { font-size: 12px; }
 @media (max-width: 640px) {
-  body.dash { padding-inline: 16px; }
   .tside { align-items: center; }
   .tside .tside-k { margin: 0; }
   .tside button.main { align-items: center; min-height: 36px; }
