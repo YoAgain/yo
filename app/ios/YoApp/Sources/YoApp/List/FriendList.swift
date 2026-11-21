@@ -253,14 +253,7 @@ struct FriendList: View {
         if let contacts = try? await Hub.run({ client.contacts() }) { friends.markRequests(contacts) }
         if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
         guard client === accounts.client else { return }
-        // Accepting sends a Yo: "Sent Yo" where the bar stands, then it rises (`yo_product::list`).
-        showSent(to: bar, BarSendText.sentYo, thenOnTop: true)
-        if let problem = await inbox.send(to: bar, accounts: accounts, friends: friends) {
-          if problem == Inbox.groupEmpty { emptyGroup = bar }
-          showSent(to: bar, problem)
-        } else {
-          await sentYo()
-        }
+        await yoNow(bar)  // accepting sends a Yo
       } else if let group = bar.group {
         await leaveGroup(group, client: client)
       } else {

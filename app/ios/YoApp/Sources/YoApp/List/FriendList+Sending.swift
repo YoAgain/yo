@@ -173,6 +173,19 @@ extension FriendList {
     if now.isEmpty { Problems.shared.resolve(.notSent) }
   }
 
+  /// The Yo a person's add sends (a contact typed in, a request accepted, a group made): "Sent Yo" where the bar
+  /// stands, then it rises (`yo_product::list`); if it does not go, the bar says why instead and stays.
+  func yoNow(_ bar: Friend) async {
+    syncListFriends()  // the list model has the bar before its Yo is told
+    showSent(to: bar, BarSendText.sentYo, thenOnTop: true)
+    if let problem = await inbox.send(to: bar, accounts: accounts, friends: friends) {
+      if problem == Inbox.groupEmpty { emptyGroup = bar }
+      showSent(to: bar, problem)
+    } else {
+      await sentYo()
+    }
+  }
+
   /// The first Yo ever sent from this phone: what the friend gets, and how to get a Yo back with notifications off.
   func sentYo() async {
     guard !UserDefaults.standard.bool(forKey: Self.firstYoKey) else { return }

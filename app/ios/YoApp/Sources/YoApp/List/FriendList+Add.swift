@@ -166,9 +166,9 @@ extension FriendList {
     send(to: friend, origin: nil)
   }
 
-  /// A name to add, once the hub said who it is: added as its owner spells it, at the bottom, told as a Yo sent ("Sent
-  /// Yo", then it rises); without an answer, not at all. One already
-  /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or why the hub did not
+  /// A name to add, once the hub said who it is: added as its owner spells it, at the bottom, and sent a Yo (the first
+  /// goes as a request, as "Add & Yo"): "Sent Yo", then it rises; without an answer, not at all. One already on the
+  /// list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or why the hub did not
   /// answer, or nil.
   enum AddProblem { case said(String), unreachable(ProductProblem) }
 
@@ -187,7 +187,7 @@ extension FriendList {
         friends.add(spelled, user: user)
       }
       if let bar = friends.all.first(where: { !$0.gone && $0.group == nil && $0.user == user }) {
-        DeleteNotice.shared.added(bar)
+        Task { await yoNow(bar) }
       }
     }
     return nil

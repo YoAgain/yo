@@ -172,11 +172,6 @@ impl YoList {
     pub fn send_undone(&self, now: u64, id: String) -> Snapshot {
         self.apply(now, Input::SendUndone(id))
     }
-    /// The person added this bar (a contact typed in, a group made): "Sent Yo", then it rises, as a Yo sent. Also
-    /// before the bar is listed: told once it is.
-    pub fn added(&self, now: u64, id: String) -> Snapshot {
-        self.apply(now, Input::Added(id))
-    }
     pub fn notice(&self, now: u64, id: String, text: String, rise: bool) -> Snapshot {
         self.apply(now, Input::Notice { id, text, rise })
     }

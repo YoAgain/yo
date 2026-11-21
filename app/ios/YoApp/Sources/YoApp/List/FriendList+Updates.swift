@@ -165,6 +165,7 @@ extension FriendList {
   /// Projects core state into per-row observable render slots; gestures and artwork stay here.
   func publish(_ snapshot: ListSnapshot) {
     DeleteNotice.shared.receive = { publish($0) }
+    DeleteNotice.shared.yo = { bar in Task { await yoNow(bar) } }
     DeleteNotice.shared.banner = snapshot.banner
     DeleteNotice.shared.deletion = snapshot.deletion
     DeleteNotice.shared.undo = snapshot.deletion == nil ? nil : {

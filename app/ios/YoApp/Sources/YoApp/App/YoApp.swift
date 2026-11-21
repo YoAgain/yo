@@ -11,12 +11,8 @@ import os
   /// The list model's clock in ms: monotonic through sleep, so a seen Yo's fade runs in real time.
   nonisolated static var now: UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1_000_000 }
   var receive: ((ListSnapshot) -> Void)?
-  /// A bar the person added (a contact typed in, a group made): "Sent Yo" where it stands, then it rises, as a Yo sent
-  /// (`yo_product::list`; told once the list has it, if it has not yet).
-  func added(_ friend: Friend) {
-    let snapshot = model.added(now: Self.now, id: friend.key.uuidString)
-    receive?(snapshot)
-  }
+  /// One Yo to a bar from outside the list (a group just made), as the list sends it (`FriendList.yoNow`).
+  var yo: ((Friend) -> Void)?
   var banner: String?
   var deletion: ListDeletion?
   var undo: (() -> Void)?

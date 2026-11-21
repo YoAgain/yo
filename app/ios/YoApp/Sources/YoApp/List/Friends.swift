@@ -157,8 +157,8 @@ final class Friends {
 
   private static func typed(_ friend: Friend) -> Bool { friend.user == nil && friend.group == nil }
 
-  /// One bar per group this account is in (spec 4.9), new ones at the bottom until a Yo (or the person's add, told as
-  /// one) lifts them (`yo_product::list`); a group left goes.
+  /// One bar per group this account is in (spec 4.9), new ones at the bottom until a Yo (the one sent as it is made)
+  /// lifts them (`yo_product::list`); a group left goes.
   func takeGroups(_ groups: [YoGroup]) {
     Perf.timed("friends.groups") {
       var list = all
@@ -205,7 +205,7 @@ final class Friends {
     return Color.rows.indices.min { (used[$0] ?? 0, $0) < (used[$1] ?? 0, $1) } ?? 0
   }
 
-  /// Adds a name at the bottom (told as a Yo sent, it rises then, `yo_product::list`); an empty or known one (in any
+  /// Adds a name at the bottom (the Yo the add sends lifts it, `yo_product::list`); an empty or known one (in any
   /// spelling) is ignored. A gone friend gives its place to the name's new owner. Where both user ids are known, they
   /// decide.
   func add(_ typed: String, user: String? = nil) {

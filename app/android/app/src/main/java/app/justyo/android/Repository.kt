@@ -375,7 +375,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             mutable.update { it.copy(username = c.username() ?: name, friends = emptyList(), broken = false) }
             persist(); vault.delete(pendingName)
             // YoGPT is there from the start, stored with the account so a restore knows its name.
-            runCatching { add("YoGPT") }
+            runCatching { add("YoGPT", yo = false) }
             syncItem()
             refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
         } finally { mutable.update { it.copy(busy = false) } }
@@ -675,7 +675,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     fun widgetAccount() = client?.userId()
 
-    suspend fun add(typed: String) {
+    /** A name typed in: added at the bottom once the hub said who it is, then sent a Yo (the first goes as a request,
+     *  as "Add & Yo"): "Sent Yo" where the bar stands, then it rises (`yo_product::list`). YoGPT at sign-up: no Yo. */
+    suspend fun add(typed: String, yo: Boolean = true) {
         val c = client ?: return
         val name = usernameCanonical(typed)
         require(name.isNotBlank()) { context.getString(R.string.type_name) }
@@ -687,10 +689,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val known = known(found.username ?: name, found.user)
         if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return }
         addFriend(c, found.username ?: name, found.user)
-        // Told as a Yo sent: "Sent Yo" where the new bar stands (the bottom), then it rises (`yo_product::list`).
-        known(found.username ?: name, found.user)?.let { showAdded(it) }
+        // Its Yo goes on its own, the field free meanwhile; a failure says so on the bar, as any tap's.
+        if (yo) known(found.username ?: name, found.user)?.let { friend -> command { send(friend) } }
     }
-    private fun showAdded(friend: Friend) = present { added(it, friend.key) }
     private fun known(spelled: String, user: String?) = state.value.friends.firstOrNull { it.group == null && !it.gone &&
         ((user != null && it.user == user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
     private suspend fun addFriend(c: YoClient, spelled: String, user: String?) {
@@ -994,8 +995,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val c = client ?: return
         val made = c.createGroup(utf8Limit(name.trim(), 32), members.take(19))
         absorb(made.events, c); if (c !== client) return; refresh()
-        // No Yo goes, yet it is told as one: "Sent Yo", then the group's bar rises (as a contact added).
-        state.value.friends.firstOrNull { it.group == made.id }?.let { showAdded(it) }
+        // Its first Yo goes to the members: "Sent Yo", then the bar rises. Made empty: no Yo, it waits at the bottom.
+        if (members.isNotEmpty()) state.value.friends.firstOrNull { it.group == made.id }?.let { bar -> command { send(bar) } }
         val names=members.mapNotNull { id -> state.value.friends.firstOrNull { it.user==id }?.name }
         val shown=if(names.size>4) names.take(3) else names
         val listed=shown+if(shown.size<names.size) listOf(context.resources.getQuantityString(R.plurals.more_members,names.size-shown.size,names.size-shown.size)) else emptyList()

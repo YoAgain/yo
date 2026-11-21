@@ -107,14 +107,17 @@ struct NewGroupSheet: View {
         let made = try await Hub.run { try client.createGroup(name: FriendList.groupName(name), members: members) }
         await inbox.absorb(made.events, client: client, friends: friends)
         if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
-        if let bar = friends.all.first(where: { $0.group == made.id }) {
-          DeleteNotice.shared.added(bar)  // told as a Yo sent: "Sent Yo", then it rises
+        let bar = friends.all.first(where: { $0.group == made.id })
+        if let bar {
           let names = members.compactMap { id in friends.all.first { $0.user == id }?.name }.sorted()
           await GroupNotice.send(
             [.user(GroupNotice.me(accounts)), " made ", .group(bar.name)] + GroupNotice.with(names), to: bar,
             accounts: accounts, outbox: outbox)
         }
         dismiss()
+        // Its first Yo goes to the members once the list shows again, so "Sent Yo" is seen there (none in it: no Yo,
+        // the bar waits quietly at the bottom).
+        if let bar, !members.isEmpty { DeleteNotice.shared.yo?(bar) }
       } catch {
         failed = true
         Problems.shared.report(error)
