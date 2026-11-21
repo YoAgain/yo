@@ -165,8 +165,11 @@ if (document.body.classList.contains("login")) {
 
   // ---- server: every three seconds --------------------------------------------------------------------------------
   const serverPercent = (key, percent) => {
-    set(`${key}-n`, Number.isFinite(percent) ? `${Math.round(percent)} %` : "–");
+    const value = $(`${key}-n`);
+    value.textContent = Number.isFinite(percent) ? Math.round(percent) : "–";
+    if (Number.isFinite(percent)) value.append(el("small", "", "%"));
     const dial = $(`c-${key}`);
+    dial.classList.toggle("filled", percent > 0);
     dial.style.setProperty("--fill", Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0);
     state(dial.id, percent > 90 ? "bad" : percent > 70 ? "warn" : null);
   };
@@ -240,8 +243,9 @@ if (document.body.classList.contains("login")) {
     const summary = stale ? "Update data unavailable" : u.apt.error || u.apt.packages == null ? "Package check unavailable"
       : u.apt.packages ? `${u.apt.packages} updates (${u.apt.security} security)` : "Up to date";
     const unavailable = stale || u.apt.error || u.apt.packages == null;
-    set("upd-n", unavailable ? "?" : u.apt.packages ? num(u.apt.packages) : u.reboot ? "!" : "✓");
-    state("c-upd", u?.reboot || u?.apt.security ? "bad" : unavailable || u.apt.packages ? "warn" : "ok");
+    const level = !stale && (u.reboot || u.apt.security) ? "bad" : !unavailable && u.apt.packages ? "warn" : null;
+    set("upd-n", level ? "!" : unavailable ? "?" : "✓");
+    state("c-upd", level);
     updData = u ? { ...u, summary, stale } : null;
   };
 
@@ -758,17 +762,7 @@ if (document.body.classList.contains("login")) {
     drawArea(key);
     for (const [k, d] of Object.entries(areaData)) if (d?.overlay === key) drawArea(k);
   };
-  // Problems row: marked while tickets are open (unanswered support, open crash groups); its count is the graph's.
-  let openTickets = 0, openSupport = 0, platData = null;
-  // Problems: a red count of the support conversations still waiting for an answer, before its graph.
-  const showOpen = () => {
-    const row = $("c-pr");
-    row.classList.toggle("has-open", openTickets > 0);
-    let badge = row.querySelector(".pr-open");
-    if (!badge) { badge = el("span", "pr-open"); row.querySelector(".cl")?.append(badge); }
-    badge.textContent = openSupport ? String(openSupport) : "";
-    badge.hidden = !openSupport;
-  };
+  let openSupport = 0, platData = null;
   const charts = ["yc", "uc"];
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => charts.forEach(drawArea)); charts.forEach((k) => ro.observe($(`${k}-area`))); }
   const drawRange = () => {
@@ -809,8 +803,7 @@ if (document.body.classList.contains("login")) {
   // ---- overview ---------------------------------------------------------------------------------------------------
   // Active, a tile of the top grid like Sent and Accounts: who was here per day (bars) and the share of them who came
   // back (line); the number and its share of the month in the header, retention and the rest in the hover.
-  let activeSpec = null, drawAccountStatsImpl = null, drawSentRowsImpl = null;
-  const drawAccountStats = (h) => drawAccountStatsImpl?.(h);
+  let activeSpec = null;
   const drawActive = (h) => {
     const slot = $("ac-area");
     if (!slot || !h || h.error) return;
@@ -834,55 +827,6 @@ if (document.body.classList.contains("login")) {
   const overview = (h) => {
     const ok = h && !h.error;
     hubNow = ok ? h : null;
-    // Attention, in the chosen range (7, 30 or 365 days): totals, and bars per day (per month for a year).
-    // Feedback: messages users wrote; Errors: crash and error reports (the hub keeps 14 days of them); Reports: new.
-    const perDay = new Map();
-    for (const r of h?.diagnostic_days || []) perDay.set(r.day, (perDay.get(r.day) || 0) + r.count);
-    const reps = h?.reports || [], repDays = new Map();
-    for (const r of reps) { const d = Math.floor(r.at / 86400000); repDays.set(d, (repDays.get(d) || 0) + 1); }
-    const h0 = Math.floor(Date.now() / 3600000) - 23, repHours = Array(24).fill(0);
-    for (const r of reps) { const i = Math.floor(r.at / 3600000) - h0; if (i >= 0 && i < 24) repHours[i]++; }
-    // Problems: feedback, errors and reports together, per hour, day or week of the range.
-    const problems = new Map();
-    for (const m of [year(h?.support_days), perDay, repDays]) for (const [d, n] of m || []) problems.set(d, (problems.get(d) || 0) + n);
-    const probHours = Array.from({ length: 24 }, (_, i) => (h?.support_hours?.slice(-24)[i] || 0) + repHours[i]);
-    // Problems: how many were open at each point of the range (feedback not handled, errors not done, reports not
-    // ticked), not how many came in; a bar an hour (1 day), a day (7, 30), up to 12 stretches (Total).
-    const po = h?.problems_open, openRep = reps.filter((r) => !lastDone.has(reportKey(r)));
-    const repAt = (t) => openRep.filter((r) => r.at <= t).length, nowMs = Date.now();
-    if (po) {
-      let names, values;
-      if (range === 1) {
-        names = Array.from({ length: 24 }, (_, i) => clock((h0 + i + 1) * 3600000));
-        values = po.hours.map((v, i) => v + repAt(Math.min(nowMs, (h0 + i + 1) * 3600000)));
-      } else {
-        const dayAt = (k) => po.days[po.days.length - 1 - k] ?? 0, end = (k) => Math.min(nowMs, (today0() - k + 1) * 86400000);
-        const first = po.days.findIndex((v) => v > 0), span = range || Math.max(7, first < 0 ? 7 : po.days.length - first);
-        const step = range ? 1 : Math.ceil(span / 12), n = Math.ceil(span / step);
-        const ks = Array.from({ length: n }, (_, i) => (n - 1 - i) * step);
-        names = ks.map((k) => dayName(today0() - k)); values = ks.map((k) => dayAt(k) + repAt(end(k)));
-      }
-      spark("pr", values[values.length - 1], values, names, (i, v) => `${num(v)} open`, "Problems open: feedback, errors and reports");
-      $("c-pr").classList.add("bad-up");
-    } else rangeRow("pr", problems, "problems", "Problems: feedback, errors and reports", null, true, probHours);
-    // The tile's bars: open reports per slot, errors (orange) with the crashes on top (red).
-    if (h) {
-      const node = $("pr-spark"), p = problemSplit(h), sb = sparkBars(p.er, "warm", null, p.cr, p.recorded);
-      node.replaceChildren(...sb.childNodes);
-      node.removeAttribute("hidden");
-      node._split = p;
-      set("pr-from", p.names[0] || "");
-      set("pr-to", p.names.at(-1) || "");
-      if (!node._h) {
-        node._h = 1;
-        hoverTip(node, () => node._split.cr.length, (i) => problemTip(node._split, i),
-          (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
-      }
-    }
-    drawAccountStats(h);
-    drawSentRowsImpl?.(h);
-    showOpen();
-
     // Services: the queue at the bottom.
     const blobs = ok && h.blobs;
     set("q-n", ok ? num(h.messages) : "–");
@@ -946,7 +890,6 @@ if (document.body.classList.contains("login")) {
       }));
       $("c-pl").dataset.tip = plats.map(([l, p]) => `${l} ${num(p.all)}`).join(" · ");
       platData = { plats, min: h.min_app, devices };
-      drawAccountStats(h);
     }
   };
 
@@ -1103,12 +1046,7 @@ if (document.body.classList.contains("login")) {
       const threads = (await supportGet()).filter((t) => /^[0-9a-f]{32}$/i.test(t.install || ""));
       if (hub !== which) return;
       supportThreads = threads;
-      // The page title's count: conversations still open, and open crash groups without the expected ones.
-      const unanswered = threads.filter((t) => t.unread > 0).length;
-      const crashes = new Set((last?.[which]?.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected).map(diagCause)).size;
-      drawTitle();
-      openTickets = unanswered + crashes; openSupport = unanswered;
-      showOpen();
+      openSupport = threads.filter((t) => t.unread > 0).length;
       part(drawList);
       part(drawPerson);
       // Nothing chosen yet: the newest open conversation, else the newest one.
@@ -1492,13 +1430,12 @@ if (document.body.classList.contains("login")) {
   // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only), the
   // last ten minutes as bars. Each new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only): a dot
   // leaves the "Yo" logo, arcs over the rate and rains down into the running minute's bar, which then takes it with a
-  // tiny bump. Several at once leave one after another, but none waits longer than LIVE_WAIT: a Yo sent now is seen
-  // now. Without the stream, new Yos come from the minutes' counts, spread over the refresh. Reduced motion or a
+  // tiny bump. Bursts update the count immediately between flights. Without the stream, new Yos come from the minutes' counts, spread over the refresh. Reduced motion or a
   // hidden page: no dots, the bar at once.
   // The stream is watched: a Yo or the proxy's ping (every 15 s) keeps it alive; silent for LIVE_DEAD it is taken as
   // cut (a connection Cloudflare or the network dropped without telling the browser) and opened again, refused it is
   // tried again sooner, then later (LIVE_RETRY, doubling up to LIVE_RETRY_MAX). While it is away the strip dims.
-  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_BARS = 10, LIVE_GAP = 170, LIVE_FLY = 1500, LIVE_WAIT = 400;
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_BARS = 10, LIVE_GAP = 300, LIVE_FLY = 540;
   const LIVE_DEAD = 35000, LIVE_RETRY = 2000, LIVE_RETRY_MAX = 30000, LIVE_DIM = 6000;
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
   let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null, liveNext = 0, liveFlying = 0;
@@ -1544,13 +1481,14 @@ if (document.body.classList.contains("login")) {
     const bar = $("live-spark").lastElementChild;
     if (bar && !calm.matches) bar.animate([{ transform: "scaleY(1)" }, { transform: "scaleY(1.22)" }, { transform: "scaleY(1)" }], { duration: 260, easing: "ease-out" });
   };
-  // A Yo to show: its dot leaves at the next free slot after the last, so a burst reads as rain; land paints it.
+  // Count every Yo while spacing the visible flights during bursts.
   const liveSpark = (land = () => {}) => {
     const lane = $("live-lane");
-    if (calm.matches || document.visibilityState !== "visible" || lane.childElementCount + liveTimers.length > LIVE_CAP) return land();
-    const now = performance.now(), at = Math.max(now, Math.min(liveNext, now + LIVE_WAIT));
-    liveNext = at + LIVE_GAP * (0.8 + Math.random() * 0.4);
-    liveLater(Math.round(at - now), () => liveFly(() => { land(); liveBump(); }));
+    if (calm.matches || document.visibilityState !== "visible" || lane.childElementCount >= 2) return land();
+    const now = performance.now();
+    if (now < liveNext) return land();
+    liveNext = now + LIVE_GAP;
+    liveFly(() => { land(); liveBump(); });
   };
   // The strip from the last minutes and the Yos streamed since; the running minute never goes down within itself.
   const paintLive = () => {
@@ -2379,6 +2317,7 @@ if (document.body.classList.contains("login")) {
       title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [{ label: "Yos sent by bots", value: num(sent) }, { label: "Yos acknowledged by bots", value: num(rangeCount("yo-out-bot")) }, { label: "All Yos in range", value: num(traffic) }, ...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
   };
 
+  let drawUsageRows;
   {
     // Yo: beside the tile's Yos: delivered, delivery performance (speed, the queues), media sent, groups.
     DETAIL.yc = () => {
@@ -2426,10 +2365,7 @@ if (document.body.classList.contains("login")) {
             tip: (i) => meanTip(dayName(ds[i]), h.events ? yo.get(ds[i]) ?? 0 : null, active[i]) },
       ];
     };
-    // The Yos card: Media, Groups and Bots as rows (value, sparkline; the bars and the totals in the hover).
-    drawSentRowsImpl = (h) => {
-      const slot = $("yc-rows");
-      if (!slot || !h || h.error) return;
+    drawUsageRows = (h) => {
       const by = evSlots("media-in-bytes"), yo = evSlots("yo-in");
       const row = (ico, label, k, total, size) => {
         const s = evSlots(k), count = rangeCount(k, s), yos = rangeCount("yo-in", yo);
@@ -2440,12 +2376,10 @@ if (document.body.classList.contains("login")) {
           title: { cap: 1, head: label, nodes: [sparkBars(s.values.map((v) => v || 0), "cool", null)], rows: [{ label: "In range", value: num(count) }, ...(size ? [{ label: "Yos in range", value: num(yos) }] : []), { label: "Total", value: num(total) }, { label: "In 24 h", value: num(s.day24) },
             ...(size ? [{ label: "Size, all media", value: h.events?.["media-in-bytes"]?.total == null ? "–" : bytes(h.events["media-in-bytes"].total) }] : [])] } };
       };
-      slot.replaceChildren(sparkRows([row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true), row("user", "Groups", "group-create", h.groups ?? 0, false), ...botCards(h)], true));
-    };
-    drawAccountStatsImpl = (h) => {
-      const slot = $("uc-rows");
-      if (!slot || !h || h.error) return;
-      slot.replaceChildren(sparkRows([...statsRows(h), deviceRow()], true));
+      const media = row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true);
+      const groups = row("user", "Groups", "group-create", h.groups ?? 0, false);
+      $("uc-rows").replaceChildren(sparkRows([...statsRows(h), deviceRow(), groups], true));
+      $("delivery-rows").replaceChildren(sparkRows([...perfRows(h), media, ...botCards(h)], true));
     };
     // Secured: accounts with a backup, this week's new ones, and the share per sign-up day.
     const securedCard = () => {
@@ -2472,14 +2406,14 @@ if (document.body.classList.contains("login")) {
       const period = range === 1 ? "in 24 h" : range ? `in ${range} d` : "in total";
       const summary = (open, incoming) => `Open ${num(open)} · came in ${num(incoming)} ${period}`;
       const userRows = [
+        (() => { const p = problemSplit(h), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
+          const causes = new Set(open.map(diagCause)).size, reports = open.reduce((n, d) => n + (d.count || 0), 0);
+          const openCount = (h.problems_open?.hours?.at(-1) ?? (openFeedback + causes)) + openReports;
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "Open problems (feedback, causes and reports)", value: num(openCount) }, { label: "Open causes", value: num(causes) }, { label: "Open reports", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
+            tip: (i) => problemTip(p, i) }; })(),
         { ico: "chat", label: "Feedback", value: num(openFeedback), cls: openFeedback ? "warn" : "", title: summary(openFeedback, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
         { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary(openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
-        (() => { const p = problemSplit(h), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
-          const causes = new Set(open.map(diagCause)).size, reports = open.reduce((n, d) => n + (d.count || 0), 0);
-          // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "Open causes", value: num(causes) }, { label: "Open reports", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(causes), cls: causes ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
-            tip: (i) => problemTip(p, i) }; })(),
         (() => {
           // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
           // shares, crash-free (est.) with its explanation, iOS and Android.
@@ -2501,7 +2435,7 @@ if (document.body.classList.contains("login")) {
   const TITLE = { yc: "Yos", uc: "Accounts", md: "Media", gr: "Groups", sc: "Secured", pl: "Platforms", vr: "App", pr: "Problems", dl: "Speed", ps: "Push", server: "Server", upd: "Updates", svc: "Services" };
   const SLUG = { yc: "yos", uc: "accounts", md: "media", gr: "groups", sc: "secured", pl: "platforms", vr: "app", pr: "problems", dl: "speed", ps: "push",
     cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
-  const detailHosts = [$("grp-vr"), $("delivery-rows"), $("feedback-rows")];
+  const detailHosts = [$("grp-vr"), $("delivery-rows"), $("grp-pr"), $("uc-rows")];
   let detailPending = false;
   // The status bot's select lives in the Services popover while it shows, else hidden at home.
   const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
@@ -2509,8 +2443,8 @@ if (document.body.classList.contains("login")) {
     if (!hubNow) return;
     parkSelect();
     $("grp-vr").replaceChildren(...relCard(hubNow));
-    $("delivery-rows").replaceChildren(sparkRows(perfRows(hubNow), true));
-    $("feedback-rows").replaceChildren(DETAIL.pr()[0]);
+    drawUsageRows(hubNow);
+    $("grp-pr").replaceChildren(DETAIL.pr()[0]);
   };
   // Redrawn with fresh data, unless the pointer is on a card (its captions) or a select is open; then once it leaves.
   function redrawDetail() {
