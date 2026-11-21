@@ -288,8 +288,8 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     if request.ids.len() > limits::MAX_ACK {
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
-    let acked = hub.db.ack(&device.device_id, &request.ids)?;
-    hub.count_acked(&acked, hub.clock_ms());
+    let (acked, bot) = hub.db.ack(&device.device_id, &request.ids)?;
+    hub.count_acked(&acked, hub.clock_ms(), bot);
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -57,7 +57,7 @@ use {
 pub(crate) enum Event {
     /// A Yo accepted into an inbox.
     YoIn,
-    /// A Yo a device fetched and acknowledged.
+    /// A Yo a person's device fetched and acknowledged (one per device).
     YoOut,
     /// A blob uploaded.
     MediaIn,
@@ -103,11 +103,13 @@ pub(crate) enum Event {
     Crash,
     /// An app's error report (each report's `count`), counted like `Crash`.
     Error,
+    /// A Yo a bot's device (`db::is_bot_app`) fetched and acknowledged, out of `yo-out` (like `yo-in-bot` of `yo-in`).
+    YoOutBot,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 24] = [
+    const KINDS: [&str; 25] = [
         "yo-in",
         "yo-out",
         "media-in",
@@ -132,6 +134,7 @@ impl Event {
         "push-paced",
         "crash",
         "error",
+        "yo-out-bot",
     ];
 
     /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
@@ -382,8 +385,13 @@ impl Hub {
         }
     }
 
-    /// Yos acknowledged at `now`, accepted at `accepted` (ms): `yo-out`, and how long each took in latency buckets.
-    pub(crate) fn count_acked(&self, accepted: &[u64], now: u64) {
+    /// Yos acknowledged at `now`, accepted at `accepted` (ms): `yo-out` (a bot device's `yo-out-bot`), and how long
+    /// each took in latency buckets (people's devices only).
+    pub(crate) fn count_acked(&self, accepted: &[u64], now: u64, bot: bool) {
+        if bot {
+            self.count(Event::YoOutBot, accepted.len() as u64);
+            return;
+        }
         self.count(Event::YoOut, accepted.len() as u64);
         for at in accepted {
             self.count(Event::latency(now.saturating_sub(*at)), 1);
@@ -747,9 +755,20 @@ mod tests {
     fn acknowledged_yos_count_in_latency_buckets() {
         let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
         let now = 1_000_000;
-        hub.count_acked(&[now - 10, now - 999, now - 1_000, now - 4_999, now - 59_999, now - 60_000, now + 5], now);
+        hub.count_acked(
+            &[now - 10, now - 999, now - 1_000, now - 4_999, now - 59_999, now - 60_000, now + 5],
+            now,
+            false,
+        );
         let rows = [("latency-1s", 3), ("latency-5s", 2), ("latency-60s", 1), ("latency-slow", 1), ("yo-out", 7)];
         assert_eq!(counted(&hub), kinds(&rows), "a clock behind counts as at once");
+    }
+
+    #[test]
+    fn a_bot_devices_acks_count_apart() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        hub.count_acked(&[10, 20], 30, true);
+        assert_eq!(counted(&hub), kinds(&[("yo-out-bot", 2)]));
     }
 
     #[tokio::test]

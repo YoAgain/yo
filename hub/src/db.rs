@@ -1437,7 +1437,8 @@ impl Db {
     /// Deletes a device's envelopes by id (WAL NORMAL: one undone by a power loss comes again, spec 4.7).
     /// Returns how many there were.
     /// Deletes the device's envelopes of `ids`; when each one deleted was accepted (ms), for the latency counts.
-    pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<Vec<u64>> {
+    /// Deletes the acknowledged envelopes; returns when each was accepted, and whether the device is a bot's.
+    pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<(Vec<u64>, bool)> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut acked = Vec::new();
@@ -1450,8 +1451,10 @@ impl Db {
                 }
             }
         }
+        let app: Option<String> =
+            tx.query_row("SELECT app FROM devices WHERE id = ?1", [device], |r| r.get(0)).optional()?.flatten();
         tx.commit()?;
-        Ok(acked)
+        Ok((acked, is_bot_app(app.as_deref())))
     }
 
     // ---- upkeep and audit ----
@@ -2572,7 +2575,7 @@ mod tests {
         assert_eq!(synchronous(), 1);
         assert_eq!(db.conn().query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0)).unwrap(), 16384);
         let (id, _, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
-        assert_eq!(db.ack(&[1; 16], &[id]).unwrap(), [0], "when it was accepted");
+        assert_eq!(db.ack(&[1; 16], &[id]).unwrap(), (vec![0], false), "when it was accepted");
         assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
         assert_eq!(synchronous(), 1);
     }
@@ -2601,7 +2604,7 @@ mod tests {
         assert!(matches!(&delivered[..], [Delivered::Stored(_)]));
         let ids: Vec<u64> = db.fetch(&[1; 16], 10).unwrap().into_iter().map(|(id, _, _)| id).collect();
         let committer = commit_later(committer.join().unwrap());
-        assert_eq!(db.ack(&[1; 16], &ids).unwrap().len(), 1);
+        assert_eq!(db.ack(&[1; 16], &ids).unwrap().0.len(), 1);
         drop(committer.join().unwrap());
         drop(db);
         for suffix in ["", "-wal", "-shm"] {

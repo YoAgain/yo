@@ -698,6 +698,7 @@ if (document.body.classList.contains("login")) {
         const c = key === "uc" ? "var(--amethyst-soft)" : "var(--ok)";
         return d ? { head: d.names[i], rows: [{ section: slotWord() }, { color: c, label: what[0].toUpperCase() + what.slice(1), value: num(d.incs[i]) },
           { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) },
+          ...(key === "yc" && sentMode !== "sent" ? [{ section: "One per device; before 2026-11-21 incl. bots" }] : []),
           ...(activeLine(key, d)?.[i + 1] != null ? [{ color: "var(--ok)", line: true, label: "Active (48 h)", value: num(activeLine(key, d)[i + 1]) }] : [])] } : "";
       }, (i) => { areaHover[key] = i; drawArea(key); });
     }
@@ -2359,7 +2360,7 @@ if (document.body.classList.contains("login")) {
     for (let i = 0; i < len; i++) { let y = H; series.forEach((s, k) => { const hh = (pct[k][i] / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: ((i + 0.15) * W) / len, width: (0.7 * W) / len, y, height: hh, fill: s.color })); }); }
     return [{ ico: "cli", label: "Bots", value: traffic ? pctText(100 * sent / traffic) : "–", stack: pct, stackColors: colors,
       tip: (i) => ({ head: names[i], rows: series.map((s) => ({ color: s.color, label: s.name, value: num(s.slots.values[i] || 0) })) }),
-      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [{ label: "Yos sent by bots", value: num(sent) }, { label: "All Yos in range", value: num(traffic) }, ...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
+      title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [{ label: "Yos sent by bots", value: num(sent) }, { label: "Yos acknowledged by bots", value: num(rangeCount("yo-out-bot")) }, { label: "All Yos in range", value: num(traffic) }, ...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
   };
 
   {
