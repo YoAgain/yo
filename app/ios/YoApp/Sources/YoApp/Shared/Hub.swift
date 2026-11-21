@@ -227,6 +227,8 @@ final class HubTransport: HttpTransport {
     // A group another member changed meanwhile: the hub answers with the group as it is and the core applies the
     // change to that revision.
     if method == "POST", route.hasPrefix("/v1/groups/") { expectedStatus.insert(409) }
+    // Removed from the group (or it ended) meanwhile: the core takes it as leaving the group (403 or 404).
+    if method == "POST", route.hasPrefix("/v1/groups/") { expectedStatus.formUnion([403, 404]) }
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
     task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace, quiet: quietErrors) { data, response, error in
       answer.result =
