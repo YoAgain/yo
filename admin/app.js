@@ -1546,6 +1546,9 @@ if (document.body.classList.contains("login")) {
   const openReportCount = h => (h?.reports || []).filter(r => !lastDone.has(reportKey(r))).length;
   const openProblemGroups = h => (h?.diagnostics || []).filter(d => !d.done && !diagInfo(d).expected);
   const causeCount = groups => new Set(groups.map(diagCause)).size;
+  $("tables").addEventListener("scroll", ({ target }) => {
+    if (target.matches(".scroll")) target.classList.toggle("scrolled-x", target.scrollLeft > 0);
+  }, { capture: true, passive: true });
   const drawTables = () => {
     const box = $("tables"), list = last?.[which]?.tables || [];
     const openGroups = openProblemGroups(last?.[which]), openCauses = causeCount(openGroups);
