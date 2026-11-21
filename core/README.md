@@ -85,7 +85,7 @@ the hash of (kind, domain, code, place, app). Sent with the same switch.
 |---|---|---|---|---|
 | `uuid` | random | dedupe | as above | no |
 | `domain` | `HTTP`, `NSURLErrorDomain`, `YoCore.YoError`, `NotificationFallback`, `UnknownSender`, `StateMigration`, `IntentSend`, `LiveActivity`, `com.apple.AuthenticationServices.AuthorizationError` | error type | as above | no |
-| `code` | `500`, `-1001`, `Refused/409`, `Save`, `hubStatus/503`, `unknownGroupSender contact=no members=4 inRoster=yes friend=no` | the enum case or number, never its values or message | as above | no |
+| `code` | `500`, `-1001`, `Refused/409`, `Save`, `hubStatus/503`, `unknownGroupSender contact=no members=4 inRoster=yes friend=no` | the enum case or number, never its values or message (but a core Protocol's fixed reason: `Protocol/protocol: storage`; libsignal's text only as `Protocol/session`) | as above | no |
 | `place` | `YoApp/Shared/Hub.swift:240 request(...)`, `HubTransport.request POST /v1/inbox`, `NotificationService`, `ForegroundInbox` | code location; routes are cut to two segments, so no ids | as above | no |
 | `count` | `"37"` (1…100000) | phone-side count for one kind and day | adds to the group's `count` | no |
 | `details` | `2026-11-19: 37`, `day=20411 count=37`, `2026-11-19: 2 · user=3fa91c` | day and count; for `UnknownSender` also a **6-hex (24-bit) SHA-256 prefix of the other person's user id** | latest value per group | no; the prefix points loosely at the sender, not the reporter |

@@ -23,6 +23,11 @@ enum Diagnostics {
     if let yo = error as? YoError {
       switch yo {
       case .Network, .Refused: return
+      case .Replaced:
+        // Another iPhone signed in to the account: every caller signs out and shows it; no change of the app helps.
+        CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
+          code: "Replaced", expected: true)
+        return
       case .Save:
         // The state's turn not had or ended (another process, background time over): the step runs again. A failure
         // of the database itself is counted by the state (StateFailureCounts).
@@ -141,8 +146,8 @@ enum Diagnostics {
     let mirror = Mirror(reflecting: error)
     let domain = mirror.displayStyle == .enum ? String(reflecting: type(of: error)) : (error as NSError).domain
     let code: String
-    if let yo = error as? YoError, case .Refused(let status) = yo {
-      code = "Refused/\(status)"
+    if let yo = error as? YoError {
+      code = name(yo)
     } else if mirror.displayStyle == .enum {
       code = mirror.children.first?.label ?? String((error as NSError).code)
     } else {
@@ -158,6 +163,25 @@ enum Diagnostics {
       guard let data = try? JSONSerialization.data(withJSONObject: payload), let text = String(data: data, encoding: .utf8) else { return }
       append(text, kind: "error", epoch: epoch)
       send(epoch: epoch)
+    }
+  }
+
+  /// A core error's case by name, never a number (a case without values had only its NSError code). Protocol carries
+  /// its reason: the core's fixed texts; a session's libsignal text (which can name an address) only as "session".
+  static func name(_ error: YoError) -> String {
+    switch error {
+    case .Network: "Network"
+    case .Refused(let status): "Refused/\(status)"
+    case .NotOnYo: "NotOnYo"
+    case .Blocked: "Blocked"
+    case .GroupEmpty: "GroupEmpty"
+    case .Outdated: "Outdated"
+    case .Unconfirmed: "Unconfirmed"
+    case .Replaced: "Replaced"
+    case .Protocol(let message):
+      "Protocol/" + (message.hasPrefix("session") ? "session" : String(message.prefix(60)))
+    case .State: "State"
+    case .Save: "Save"
     }
   }
 

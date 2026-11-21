@@ -6,7 +6,10 @@ root=$(cd "$here/../../.." && pwd)
 out="$root/target/diagnostics-swift"
 mkdir -p "$out"
 cat > "$out/YoCore.swift" <<'SWIFT'
-public enum YoError: Error { case Refused(status: UInt16), Network(message: String), Save(message: String) }
+public enum YoError: Error {
+  case Network(message: String), Refused(status: UInt16), NotOnYo, Blocked, GroupEmpty, Outdated, Unconfirmed, Replaced
+  case Protocol(message: String), State, Save(message: String)
+}
 SWIFT
 swiftc -module-cache-path "$out/modules" -swift-version 6 -emit-library -emit-module -module-name YoCore "$out/YoCore.swift" -o "$out/libYoCore.so"
 cat > "$out/main.swift" <<'SWIFT'
@@ -66,6 +69,14 @@ for body in Transport.state.withLock({ $0.bodies }) {
 }
 let last = try! JSONSerialization.jsonObject(with: Transport.state.withLock { $0.bodies.last! }) as! [String: String]
 precondition(last["code"] == "Refused/429")
+// Cases by name, not their NSError number ("9" was Replaced); a session's libsignal text never leaves.
+precondition(Diagnostics.name(.Replaced) == "Replaced" && Diagnostics.name(.State) == "State")
+precondition(Diagnostics.name(.Protocol(message: "protocol: storage version")) == "Protocol/protocol: storage version")
+precondition(Diagnostics.name(.Protocol(message: "session: PRIVATE_SENTINEL.1")) == "Protocol/session")
+// Replaced elsewhere is expected (signed out and shown), never a report.
+Diagnostics.recordUnreported(YoError.Replaced)
+usleep(50_000)
+precondition(Transport.state.withLock { $0.bodies.count } == 14 && Diagnostics.pending("error").isEmpty)
 Transport.state.withLock { $0.online = false }
 for _ in 0..<3 { Diagnostics.record(NSError(domain: "offline", code: 2)) }
 eventually { Diagnostics.pending("error").count == 3 }
