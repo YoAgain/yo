@@ -556,8 +556,8 @@ if (document.body.classList.contains("login")) {
     node.tabIndex = node.tabIndex < 0 ? 0 : node.tabIndex;
     const mine = () => !pinned || pinned === node;
     node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !pinned && !e.target.closest?.("svg.spark")) showTip(tv(), e.clientX, e.clientY); });
-    node.addEventListener("pointerleave", () => { if (!pinned) tipBox.hidden = true; });
-    node.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && mine()) at(); });
+    node.addEventListener("pointerleave", (e) => { if (!pinned && e.pointerType === "mouse") tipBox.hidden = true; });
+    onTap(node, () => { if (mine()) at(); });
     node.addEventListener("focus", () => { if (!pinned) at(); });
     node.addEventListener("blur", () => { if (!pinned) tipBox.hidden = true; });
     node.addEventListener("click", () => { if (pin && !pinned) { at(); pinned = node; tipBox.classList.add("pin"); } });
@@ -610,17 +610,29 @@ if (document.body.classList.contains("login")) {
     }, true);
   };
   document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && !pinned) tipBox.hidden = true; }, true);
+  // On touch a card shows on a TAP only (a press that lifts without moving more than 8 px), never while a finger moves:
+  // the page scrolls freely (touch-action: pan-y), and any scroll closes the cards. A mouse hovers as before.
+  const onTap = (node, show) => {
+    let down = null;
+    node.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") down = [e.clientX, e.clientY]; });
+    node.addEventListener("pointermove", (e) => { if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 8) down = null; });
+    node.addEventListener("pointercancel", () => { down = null; });
+    node.addEventListener("pointerup", (e) => { if (down && e.pointerType !== "mouse") { down = null; show(e); } });
+  };
   const hoverTip = (node, count, text, mark) => {
-    node.addEventListener("pointermove", (e) => {
+    const show = (e) => {
       const n = typeof count === "function" ? count() : count, r = node.getBoundingClientRect();
       if (!n || !r.width) return;
       const i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n))), t = text(i);
       if (!t) { tipBox.hidden = true; return; }
       showTip(t, e.clientX, e.clientY);
       mark?.(i);
-    });
-    node.addEventListener("pointerleave", () => { tipBox.hidden = true; mark?.(-1); });
+    };
+    node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") show(e); });
+    onTap(node, show);
+    node.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") { tipBox.hidden = true; mark?.(-1); } });
   };
+  window.addEventListener("scroll", () => { if (!pinned) tipBox.hidden = true; if (!bigBox.hidden) bigBox.hidden = true; }, { passive: true, capture: true });
   // The painter of every running-total chart (the overview's two and the details'): bars (each slot's count, between
   // the line's points when there is one point more, else under them; up to half the height under a line), the line with
   // its dots over them, the first and last slot as the axis. Sized to its svg in pixels, so text stays text-sized.
@@ -631,7 +643,7 @@ if (document.body.classList.contains("login")) {
     const slots = bars ? bars.length : line.length, np = line ? line.length : 0, gap = (W - 2 * pad) / Math.max(1, slots);
     const px = (i) => pad + (between ? i : i + 0.5) * gap, out = [];
     if (bars) {
-      const top = max || Math.max(1, ...bars.map((v) => v || 0)), room = (B - padTop) * (line ? 0.5 : 1);
+      const top = max || Math.max(1, ...bars.map((v) => v || 0)), room = (B - padTop) * (line ? 0.55 : 1);
       bars.forEach((v, i) => {
         const h = v ? Math.max(2, (v / top) * room) : 1.5;
         out.push(svg("rect", { x: (pad + i * gap + gap * 0.15).toFixed(1), width: (gap * 0.7).toFixed(1), y: (B - h).toFixed(1), height: h.toFixed(1), rx: 1.5,
