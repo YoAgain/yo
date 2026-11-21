@@ -158,7 +158,7 @@ private struct ContactsList: View {
     }
     .navigationTitle("Contacts")
     .navigationBarTitleDisplayMode(.inline)
-    .sheet(item: $openGroup) { group in GroupMembersSheet(bar: group) }
+    .sheet(item: $openGroup) { group in GroupMembersSheet(bar: group).appObjects() }
     .sheet(item: $open) { friend in
       NavigationStack {
         ContactDetail(friend: friend, state: states[friend.user ?? ""]) { user, loaded in
@@ -172,6 +172,7 @@ private struct ContactsList: View {
       }
       .presentationDetents([.large])
       .presentationDragIndicator(.hidden)
+      .appObjects()
     }
     .task(id: Reload(accounts.client, friends.contacts)) {
       while !Task.isCancelled {

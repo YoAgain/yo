@@ -16,6 +16,24 @@ import os
   var undo: (() -> Void)?
 }
 
+/// The app's objects (made once, in `YoApp.init`), for the content of sheets: each sheet gets them once more
+/// (`appObjects()`). On a Mac (the iPhone app in macOS 27) the Settings sheet's content found no `AccountStore` above
+/// it although the list presenting it had one, and SwiftUI stopped the app (crash 318, "No Observable object").
+@MainActor enum AppObjects {
+  static var inbox: Inbox?
+  static var friends: Friends?
+  static var accounts: AccountStore?
+  static var outbox: MediaOutbox?
+}
+
+extension View {
+  /// The app's objects again, on a sheet's content (`AppObjects`).
+  func appObjects() -> some View {
+    environment(AppObjects.inbox).environment(AppObjects.friends)
+      .environment(AppObjects.accounts).environment(AppObjects.outbox)
+  }
+}
+
 @main
 struct YoApp: App {
   @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -63,6 +81,7 @@ struct YoApp: App {
     let outbox = MediaOutbox()
     _accounts = State(initialValue: accounts)
     _outbox = State(initialValue: outbox)
+    (AppObjects.inbox, AppObjects.friends, AppObjects.accounts, AppObjects.outbox) = (inbox, friends, accounts, outbox)
     // Another user than the one shown signed in: the list and what waited go.
     accounts.leaving = {
       Self.forget(friends, inbox, outbox)

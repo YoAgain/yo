@@ -124,6 +124,7 @@ struct AccountPage: View {
       }
       .presentationDetents([.large])
       .presentationDragIndicator(.hidden)
+      .appObjects()
     }
     .sheet(
       isPresented: $showingRecoveryKey,
@@ -139,7 +140,8 @@ struct AccountPage: View {
         done: {
           keptKey = true
           showingRecoveryKey = false
-        })
+        }
+      ).appObjects()
     }
     .navigationDestination(isPresented: $showingSecurity) {
       AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey)
@@ -307,9 +309,9 @@ struct AccountSecurityPage: View {
     .scrollBounceBehavior(.basedOnSize)
     .accessibilityIdentifier("security.page")
     .navigationTitle("Account Security")
-    .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }
-    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
-    .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }) }
+    .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet().appObjects() }
+    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }).appObjects() }
+    .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }).appObjects() }
     .alert("Turn Off Recovery Key?", isPresented: $turningOffKey) {
       Button("Turn Off", role: .destructive) { change { _ = try await accounts.newRecoveryKey() } }
       Button("Cancel", role: .cancel) {}

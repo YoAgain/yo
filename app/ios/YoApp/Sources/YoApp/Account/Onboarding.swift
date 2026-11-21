@@ -46,7 +46,7 @@ struct Onboarding: View {
     .foregroundStyle(.white)
     .animation(.smooth(duration: 0.35), value: step)
     .preferredColorScheme(.dark)
-    .sheet(isPresented: $signingInCard) { signInCard }
+    .sheet(isPresented: $signingInCard) { signInCard.appObjects() }
   }
 
   // MARK: Welcome
@@ -611,6 +611,7 @@ private struct SignInCard: View {
         submitTyped()
       }
       .ignoresSafeArea()
+      .appObjects()
     }
     .onChange(of: picked) { _, item in
       guard let item else { return }

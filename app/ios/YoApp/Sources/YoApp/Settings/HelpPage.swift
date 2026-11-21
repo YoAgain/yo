@@ -55,6 +55,6 @@ struct HelpPage: View {
     .task { await LicenseContent.prepare() }
     .navigationTitle("Help & About")
     .navigationBarTitleDisplayMode(.inline)
-    .sheet(isPresented: $showingMessage) { MessagePage() }
+    .sheet(isPresented: $showingMessage) { MessagePage().appObjects() }
   }
 }

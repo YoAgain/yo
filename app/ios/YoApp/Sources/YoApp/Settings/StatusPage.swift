@@ -261,7 +261,7 @@ struct StatusPage: View {
             }
           }
           .sheet(isPresented: $showingKeys) {
-            if let status { IdentitySheet(status: status, tally: tally) }
+            if let status { IdentitySheet(status: status, tally: tally).appObjects() }
           }
           .navigationTitle("Status")
           .navigationBarTitleDisplayMode(.inline)

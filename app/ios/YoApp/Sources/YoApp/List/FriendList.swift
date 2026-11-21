@@ -294,8 +294,9 @@ struct FriendList: View {
             settings = false
           }
           .preferredColorScheme(SystemAppearance.scheme)
+          .appObjects()
         }
-        .sheet(isPresented: $newGroup) { NewGroupSheet().preferredColorScheme(SystemAppearance.scheme) }
+        .sheet(isPresented: $newGroup) { NewGroupSheet().preferredColorScheme(SystemAppearance.scheme).appObjects() }
         .videoTrimming($videoTrim)
         .confirmDestructive(
           $blocking,
@@ -317,7 +318,9 @@ struct FriendList: View {
             .disabled(newGroupName.trimmingCharacters(in: .whitespaces).isEmpty)  // an empty name was dropped unsaid
           Button("Cancel", role: .cancel) {}
         }
-        .sheet(item: $membersOf) { bar in GroupMembersSheet(bar: bar).preferredColorScheme(SystemAppearance.scheme) }
+        .sheet(item: $membersOf) { bar in
+          GroupMembersSheet(bar: bar).preferredColorScheme(SystemAppearance.scheme).appObjects()
+        }
         .alert(
           problem?.title ?? "", isPresented: $problem.isPresent
         ) {

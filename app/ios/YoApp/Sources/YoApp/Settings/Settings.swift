@@ -161,6 +161,7 @@ struct SettingsView: View {
       .scrollBounceBehavior(.basedOnSize)
       .presentationDetents([.large])
       .presentationBackground(Color(.systemGroupedBackground))
+      .appObjects()
     }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
