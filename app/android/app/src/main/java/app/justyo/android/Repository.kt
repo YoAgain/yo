@@ -1047,12 +1047,16 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         mutable.update { it.copy(friends = it.friends.map { f -> if (f.key == friend.key) f.copy(undo = on, undoSeconds = productUndoSeconds(seconds.toDouble()).toInt()) else f }) }; persist()
     }
     suspend fun security() = client?.securityStatus()
+    /** Read from the contact and encryption pages' own coroutines, outside [scope]: a core error (a closed client)
+     *  goes where [command]'s do and shows no details, never escapes into the screen. */
     suspend fun contact(friend: Friend): ContactDetails? {
         val c=client ?: return null
-        val contact=c.contacts().firstOrNull { it.user==friend.user }
-        return ContactDetails(contact,friend.user?.let { c.accountKeyOf(it) },
-            friend.user?.takeIf { contact!=null }?.let { c.safetyNumber(it) },friend.user?.let { c.sessionsWith(it) }.orEmpty(),
-            friend.user?.takeIf { contact!=null }?.let { c.safetyCode(it) })
+        return try {
+            val contact=c.contacts().firstOrNull { it.user==friend.user }
+            ContactDetails(contact,friend.user?.let { c.accountKeyOf(it) },
+                friend.user?.takeIf { contact!=null }?.let { c.safetyNumber(it) },friend.user?.let { c.sessionsWith(it) }.orEmpty(),
+                friend.user?.takeIf { contact!=null }?.let { c.safetyCode(it) })
+        } catch (e: CancellationException) { throw e } catch (e: Exception) { failed(e); null }
     }
     /** Verified only when the code scanned off the contact's screen matches (spec 3.4). */
     suspend fun verifyScan(friend: Friend, scanned: ByteArray): Boolean {
