@@ -54,6 +54,7 @@ if (document.body.classList.contains("login")) {
     const down = SVCS.filter(([id]) => $(id)?.classList.contains("bad")).map(([, name]) => name);
     const known = SVCS.some(([id]) => $(id)?.classList.contains("ok") || $(id)?.classList.contains("bad"));
     n.textContent = !known ? "–" : down.length ? `${down.join(", ")} down` : "all running";
+    set("range-services", down.length ? `, ${down.join(", ")} down` : SVCS.every(([id]) => $(id)?.classList.contains("ok")) ? ", all services running" : "");
     n.className = `cn ${!known ? "" : down.length ? "bad" : "ok"}`.trim();
   };
   new MutationObserver(svcSum).observe(document.querySelector(".svcbar") || document.body, { subtree: true, attributes: true, attributeFilter: ["class"] });
@@ -842,9 +843,21 @@ if (document.body.classList.contains("login")) {
   };
   const reportKey = (r) => `${which}:r${r.id}`;
   let hubNow = null;
+  const drawRangeSummary = (h, signups, open) => {
+    const stats = $("range-stats"), value = (n) => el("span", "value", num(n));
+    const yos = range ? sumOf(evSlots("yo-in")) : h.events?.["yo-in"]?.total;
+    const active = range === 1 ? h.active_day : range === 7 ? h.active_users : h.active_month;
+    const period = range === 1 ? "Last 24 h" : range ? `Last ${range} days` : "All time";
+    stats.replaceChildren(`${period}: `, value(yos), " Yos");
+    if (range && active && yos != null) stats.append(" (", value(Math.round(yos / active)), " per active user)");
+    stats.append(", ", el("span", "value", `+${num(signups)}`), signups === 1 ? " account" : " accounts");
+    if (active != null && h.total) stats.append(", ", value(Math.round(100 * active / h.total)), range ? " % active" : " % active in the last 30 days");
+    if (open != null) stats.append(", ", value(open), open === 1 ? " open problem" : " open problems");
+  };
   const overview = (h) => {
     const ok = h && !h.error;
     hubNow = ok ? h : null;
+    $("range-stats").parentElement.hidden = !ok;
     // Attention, in the chosen range (7, 30 or 365 days): totals, and bars per day (per month for a year).
     // Feedback: messages users wrote; Errors: crash and error reports (the hub keeps 14 days of them); Reports: new.
     const perDay = new Map();
@@ -922,6 +935,8 @@ if (document.body.classList.contains("login")) {
       areaChart("yc", yt(yk) ?? 0, ym(yk), yh(yk), last24(yh(yk)).reduce((n, v) => n + (v || 0), 0));
       const sud = new Map(h.signup_days || []);
       areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, last24(h.signups_hours).reduce((n, v) => n + (v || 0), 0));
+      const signups = range ? sumOf(perSlot(sud, h.signups_hours)) : [...sud.values()].reduce((a, v) => a + v, 0);
+      drawRangeSummary(h, signups, po ? sparkData.pr?.values.at(-1) : null);
       const dn14 = days14().map(dayName);
       // Health: secured (of each sign-up day's accounts, the share with a backup now), active (per UTC day), and the
       // app versions per platform as one stacked bar (current, update out, unknown).
