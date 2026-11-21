@@ -16,10 +16,12 @@ struct HelpPage: View {
     return String(bytes: "\(marketingVersion) (\(build))".utf8.prefix(64), encoding: .utf8) ?? "?"
   }
 
-  /// "1.2" as people read it; a TestFlight build adds its number, "1.2 (34)" (a local build is always 1).
+  /// As people read it: "1.0.0 RC19" for a release candidate (CI writes YoReleaseName from the tag), else
+  /// "1.0.0 (build 202611211230)" (a local build is always 1 and shows just "1.0.0").
   static var shownVersion: String {
+    if let rc = Bundle.main.infoDictionary?["YoReleaseName"] as? String { return "\(marketingVersion) \(rc)" }
     let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-    return build == "1" ? marketingVersion : "\(marketingVersion) (\(build))"
+    return build == "1" ? marketingVersion : "\(marketingVersion) (build \(build))"
   }
 
   var body: some View {
@@ -43,7 +45,7 @@ struct HelpPage: View {
         NavigationLink(value: SettingsView.Page.licenses) {
           // A settings row: the label leading, the version as its value.
           LabeledContent {
-            Text(Self.marketingVersion)
+            Text(Self.shownVersion)
           } label: {
             Label("About & Licenses", systemImage: "info.circle.fill").labelStyle(Tile(.gray))
           }

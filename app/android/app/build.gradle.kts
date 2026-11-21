@@ -50,6 +50,7 @@ android {
         buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")  // debug and the device QA build: the dev hub
         // Debug and QA builds say "android/dev<build>": not a Play build, so the admin never takes one as the newest.
         buildConfigField("String", "YO_APP", "\"android/dev$yoBuild\"")
+        buildConfigField("String", "YO_BUILD", "\"$yoBuild\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
     signingConfigs {

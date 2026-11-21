@@ -455,7 +455,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         Section(null, null,
                             Setting(stringResource(R.string.ui_status), Icons.Default.MonitorHeart,
                                 stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected, onClick = { open("Status") }),
-                            Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info, BuildConfig.VERSION_NAME, onClick = { open("Licenses") }),
+                            Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info, shownVersion(), onClick = { open("Licenses") }),
                         )
                     }
                     shown == "Status" -> StatusPage(model, s, connected) { open(it) }
@@ -1076,7 +1076,7 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
                 Setting(stringResource(R.string.about_yo_by), onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/imprint".toUri()))
                 }),
-                Setting(stringResource(R.string.about_version), value = BuildConfig.VERSION_NAME),
+                Setting(stringResource(R.string.about_version), value = shownVersion()),
                 Setting(stringResource(R.string.about_operated_by)),
                 Setting(stringResource(R.string.about_website), value = "justyo.co", onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co".toUri()))
@@ -1354,3 +1354,8 @@ suspend fun readQr(context: Context,uri: Uri): String? = withContext(Dispatchers
     }
     return chunks
 }
+
+/** "1.0.0 RC19" for a release (versionName 1.0.0-RC19, from the tag), else "<versionName> (build 202611211230)". */
+fun shownVersion(): String =
+    if (BuildConfig.VERSION_NAME.contains('-') && !BuildConfig.VERSION_NAME.endsWith("-dev")) BuildConfig.VERSION_NAME.replaceFirst('-', ' ')
+    else "${BuildConfig.VERSION_NAME} (build ${BuildConfig.YO_BUILD})"
