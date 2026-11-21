@@ -454,28 +454,31 @@ if (document.body.classList.contains("login")) {
   // ending at the total since the start; a click opens their detail.
   const areaData = {};
   const runningTotal = (perDay, hours, total, week) => {
-    let names, incs, hourEnds;
+    let names, incs, hourStarts, hourEnds;
     const nowH = Math.floor(Date.now() / 3600000);
     if (range === 1) {
       const h0 = nowH - 23;
-      hourEnds = Array.from({ length: 24 }, (_, i) => h0 + i + 1);
+      hourStarts = Array.from({ length: 24 }, (_, i) => h0 + i);
+      hourEnds = hourStarts.map(h => h + 1);
       names = Array.from({ length: 24 }, (_, i) => clock((h0 + i + 1) * 3600000));
       incs = Array.isArray(hours) ? hours.slice(-24).map((v) => v || 0) : Array(24).fill(0);
     } else if (range === 7 && week) {
       incs = week;
       names = weekNames();
-      hourEnds = weekStarts().map(h => Math.min(h + 6, nowH));
+      hourStarts = weekStarts();
+      hourEnds = hourStarts.map(h => Math.min(h + 6, nowH));
     } else {
       const first = range ? today0() - range + 1 : Math.min(today0() - 6, ...[...(perDay?.keys() || [])].filter((d) => perDay.get(d) > 0));
       const span = today0() - first + 1, step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
       const ends = Array.from({ length: n }, (_, i) => today0() - (n - 1 - i) * step);
       names = ends.map(dayName);
+      hourStarts = ends.map(e => (e + 1 - step) * 24);
       hourEnds = ends.map((e) => Math.min((e + 1) * 24, nowH));
       incs = ends.map((e) => { let t = 0; for (let d = e - step + 1; d <= e; d++) t += perDay?.get(d) || 0; return t; });
     }
     const values = []; let v = total;
     for (let i = incs.length - 1; i >= 0; i--) { values[i] = v; v -= incs[i]; }
-    return { names, incs, hourEnds, values: [Math.max(0, v), ...values], labels: [range === 1 ? "24 hours ago" : "before", ...names] };
+    return { names, incs, hourStarts, hourEnds, values: [Math.max(0, v), ...values], labels: [range === 1 ? "24 hours ago" : "before", ...names] };
   };
   // The hover popup of every chart: the slot under the pointer with its values (text "slot · value · value"; the first
   // line bold), beside the pointer; mark(i) highlights that slot in the chart (-1 when the pointer leaves).
@@ -711,8 +714,14 @@ if (document.body.classList.contains("login")) {
       if (have.length) {
         const lo = Math.min(...have), hi = Math.max(...have), y = (v) => padTop + (B - padTop - 3) * (hi === lo ? 0.5 : 1 - (v - lo) / (hi - lo));
         const pts = [], dots = [];
-        line2.forEach((v, i) => { if (v != null) { pts.push(`${px(i).toFixed(1)},${y(v).toFixed(1)}`); dots.push(svg("circle", { class: i === np - 1 || i === pick ? "dot act" : "dot act hide", cx: px(i).toFixed(1), cy: y(v).toFixed(1), r: 2.6 })); } });
-        if (pts.length > 1) out.push(svg("path", { class: "line act", d: `M${pts.join(" L")}` }));
+        line2.forEach((v, i) => {
+          if (v == null) return;
+          const cx = px(i).toFixed(1), cy = y(v).toFixed(1);
+          pts.push(`${line2[i - 1] == null ? "M" : "L"}${cx},${cy}`);
+          const visible = line2[i - 1] == null || line2[i + 1] == null || i === pick;
+          dots.push(svg("circle", { class: visible ? "dot act" : "dot act hide", cx, cy, r: 2.6 }));
+        });
+        if (pts.length > 1) out.push(svg("path", { class: "line act", d: pts.join(" ") }));
         out.push(...dots);
       }
     }
@@ -725,7 +734,7 @@ if (document.body.classList.contains("login")) {
   let active48 = [];
   const activeLine = (key, d) => {
     if (key !== "uc" || !active48.length || !d.hourEnds) return null;
-    const at = (hr) => { let v = null; for (const [t, n] of active48) { if (t > hr) break; v = n; } return v; };
+    const at = (hr, i) => { let v = null; for (const [t, n] of active48) { if (t > hr) break; if (t > d.hourStarts[i]) v = n; } return v; };
     return [null, ...d.hourEnds.map(at)];
   };
   const drawArea = (key) => {
@@ -1915,21 +1924,13 @@ if (document.body.classList.contains("login")) {
   const VNAME = { current: "Current", update: "Update out", must: "Must update", unknown: "Unknown" }, VCLS = { current: "ok", update: "warn", must: "bad", unknown: "" };
   // One bar of a platform's versions: current, update out, must update, unknown.
   const verBar = (p) => { const b = el("span", "hc-pbar dbar"); for (const k of VKEYS) if (p[k]) { const x = el("span", k); x.style.flexGrow = p[k]; b.append(x); } return b; };
-  // Releases over time: of the devices seen per slot (an hour of the last 24 for 1, else a day), each build's share as
-  // its own band, 100 % stacked, the newest on top: the current build green, older ones greyer with age, builds below
-  // the hub's minimum reddish. The six newest builds get bands, the rest are "older". A click on the chart names that
-  // slot's shares in the line under it (the newest slot until then), the pick kept across redraws.
-  let relPick = null;
-  const RTOP = 6, REL_SHADES = ["#b98bd0", "#a48fb8", "#9690a0", "#86828e", "#77737d"], MUST_SHADES = ["#d0695e", "#b45d55", "#9a534c", "#844a45"];
-  // iOS TestFlight builds first (newest first), then other platforms' dated builds, then dev builds and unknown.
-  const buildKey = (app) => { const b = build(app); return /^\d{12}$/.test(b) ? `${String(app).startsWith("ios/") ? 2 : 1}${b}` : "0"; };
+  // Releases over time, stacked by build with the newest at the top.
   const buildLabel = (app) => {
     const b = build(app), p = (app || "").split("/")[0], word = { ios: "", android: "Android ", yogpt: "Bot " }[p] ?? `${appInfo(app)?.label || p} `;
     if (!/^\d{12}$/.test(b)) return app === "unknown" ? "unknown" : `${word || "iOS "}${b}`.trim();
     const mon = new Date(Date.UTC(2000, +b.slice(4, 6) - 1, 1)).toLocaleDateString("en", { month: "short", timeZone: "UTC" });
     return `${word}${mon} ${+b.slice(6, 8)} ${b.slice(8, 10)}:${b.slice(10, 12)}`;
   };
-  const REL_STATES = [["current", "Current", "var(--ok)"], ["fresh", "Fresh", "#a3e4b8"], ["update", "Update", "var(--warn)"], ["must", "Must update", "var(--bad)"], ["unknown", "Unknown", "var(--muted)"]];
   const relData = (h, plat) => {
     const t = today0(), kept = { ...(h.build_days || {}) };
     if (Array.isArray(h.apps_today) && h.apps_today.length) kept[t] = Object.fromEntries(h.apps_today.filter(([a]) => !String(a).startsWith("cli/")));
@@ -1947,26 +1948,26 @@ if (document.body.classList.contains("login")) {
         return [e, e === t ? "today" : dayName(e), row];
       });
     }
-    // The bands are the app tile's states, top to bottom: current, fresh, update, must update, unknown (dev builds and
-    // the like). The builds stay in each slot's `raw` row, for the hover.
-    const stateOf = (a) => (belowMin(a) ? "must" : appInfo(a)?.state === "current" ? "current" : appInfo(a)?.state === "fresh" ? "fresh" : appInfo(a)?.state === "update" ? "update" : "unknown");
-    const mine = (a) => (plat === "all" ? /^(ios|android)\//.test(String(a)) : String(a).startsWith(`${plat}/`));
-    // Update builds each get a band in yellow shades, the newest lightest (at most five, the rest together as "older");
-    // the other states are one band each.
-    const upd = new Map();
-    for (const [, , row] of slots) for (const [ap, c] of Object.entries(row || {})) if (c > 0 && mine(ap) && stateOf(ap) === "update") upd.set(ap, (upd.get(ap) || 0) + c);
-    const updApps = [...upd.keys()].sort((x, y) => build(y).localeCompare(build(x))), ownUpd = updApps.slice(0, 5), YELLOWS = ["#f6dc6b", "#e8c744", "#cdaa2c", "#ac8a21", "#8c6e1a"];
-    const bands = [{ k: "current", name: "Current", color: "var(--ok)" }, { k: "fresh", name: "Fresh", color: "#a3e4b8" },
-      ...ownUpd.map((ap, n) => ({ k: "update", name: buildLabel(ap), color: YELLOWS[n], app: ap })), ...(updApps.length > 5 ? [{ k: "update", name: "older", color: "#6f5714", older: true }] : []),
-      { k: "must", name: "Must update", color: "var(--bad)" }, { k: "unknown", name: "Unknown", color: "var(--muted)" }];
-    const bandOf = (ap) => { const s = stateOf(ap); return s === "update" ? bands.findIndex((b) => b.k === "update" && (b.app === ap || b.older && !ownUpd.includes(ap))) : bands.findIndex((b) => b.k === s); };
-    const rows = slots.map(([, , row]) => {
-      if (!row) return null;
-      const r = bands.map(() => 0);
-      for (const [ap, c] of Object.entries(row)) if (mine(ap)) r[bandOf(ap)] += c;
-      return r.some((v) => v) ? r : null;
+    const mine = (a) => plat === "all" ? a === "unknown" || /^(ios|android)\//.test(a) : a.startsWith(`${plat}/`);
+    const apps = new Set();
+    for (const [, , row] of slots) {
+      for (const [app, count] of Object.entries(row || {})) if (count > 0 && mine(app)) apps.add(app);
+    }
+    const dated = [...apps].filter(app => /^\d{12}$/.test(build(app)))
+      .sort((a, b) => build(b).localeCompare(build(a)) || a.localeCompare(b));
+    const datedSet = new Set(dated);
+    const unknown = [...apps].filter(app => !datedSet.has(app)).sort();
+    const bands = [...dated, ...unknown].map((app, i) => {
+      const age = i / Math.max(1, dated.length - 1);
+      const hue = belowMin(app) ? 12 * (1 - age) : 125 * (1 - age);
+      const color = datedSet.has(app) ? `hsl(${hue} 68% ${52 - 8 * age}%)` : "var(--muted)";
+      return { app, name: buildLabel(app), color };
     });
-    return { slots, bands, rows, raw: slots.map(([, , row]) => (row ? Object.entries(row).filter(([a, c]) => mine(a) && c > 0) : [])) };
+    const rows = slots.map(([, , row]) => {
+      const counts = bands.map(b => row?.[b.app] || 0);
+      return counts.some(v => v > 0) ? counts : null;
+    });
+    return { slots, bands, rows };
   };
   const relChart = (h, plat, titleText) => {
     const d = relData(h, plat), n = d.slots.length, W = 264, B = 96;
@@ -1991,15 +1992,14 @@ if (document.body.classList.contains("login")) {
     s.append(mark);
     const axis = el("div", "chart-axis");
     axis.append(el("span", null, (f0 ? "since " : "") + d.slots[f0][1]), el("span", null, d.slots[n - 1][1]));
-    // Under the chart the legend (the five newest builds); a click on the chart names that slot's shares instead, a
-    // second click on the same slot gives the legend back.
-    const pick = d.rows[have[have.length - 1]], pickAll = pick ? pick.reduce((a, v) => a + v, 0) : 0;
-    const share = pickAll ? `${Math.round((100 * (pick[0] + pick[1])) / pickAll)} % current` : "";
-    // No legend: the hover names each band's build with its share at that point.
+    const pick = d.rows[have[have.length - 1]], pickAll = pick.reduce((sum, count) => sum + count, 0);
+    const current = d.bands.reduce((sum, b, i) =>
+      sum + (!belowMin(b.app) && ["current", "fresh"].includes(appInfo(b.app)?.state) ? pick[i] : 0), 0);
+    const share = `${Math.round(100 * current / pickAll)} % current`;
     if (f0) s.dataset.since = "true";
     hoverTip(s, n - f0, (k) => {
       const i = f0 + k, r = d.rows[i], all = r ? r.reduce((x, v) => x + v, 0) : 0;
-      return { head: d.slots[i][1], rows: r ? d.bands.map((b, j) => ({ color: b.color, label: b.name, value: `${Math.round((100 * r[j]) / all)} %` })).filter((x) => x.value !== "0 %") : [{ label: "Builds", value: "not recorded" }] };
+      return { head: d.slots[i][1], rows: r ? d.bands.flatMap((b, j) => r[j] > 0 ? [{ color: b.color, label: b.name, value: `${Math.round(100 * r[j] / all) || "<1"} %` }] : []) : [{ label: "Builds", value: "not recorded" }] };
     });
     const card = dcard(titleText, share, s, axis);
     return card;
