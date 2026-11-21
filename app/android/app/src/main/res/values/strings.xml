@@ -8,7 +8,7 @@
     <string name="ui_can_t_open_your_account">Can’t Open Your Account</string>
     <string name="ui_cancel">Cancel</string>
     <string name="ui_confirm_new_key">Confirm New Key</string>
-    <string name="ui_contact_us">Contact Us</string>
+    <string name="ui_send_feedback">Send Feedback</string>
     <string name="ui_delete_account">Delete Account</string>
     <string name="ui_done">Done</string>
     <string name="ui_encryption">Encryption</string>

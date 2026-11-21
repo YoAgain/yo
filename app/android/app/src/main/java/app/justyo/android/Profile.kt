@@ -446,12 +446,9 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                             Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, onClick = { blockingNew = friend })
                         }).toTypedArray())
                     shown == "Appearance" -> IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
-                    // iOS HelpPage: the tutorial, then Contact Us, then Status and About & Licenses with the version.
+                    // iOS HelpPage: the tutorial, then Status and About & Licenses with the version.
                     shown == "Help" -> {
                         HelpHero(Modifier.padding(bottom = 20.dp))
-                        Section(null, null,
-                            Setting(stringResource(R.string.ui_contact_us), Icons.Default.Forum, dot = s.supportUnread, onClick = { open("Contact Us") }),
-                        )
                         Section(null, null,
                             Setting(stringResource(R.string.ui_status), Icons.Default.MonitorHeart,
                                 stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected, onClick = { open("Status") }),
@@ -707,8 +704,11 @@ private fun shareCode(context: Context, name: String) {
             onChecked = { on -> repo.command { settings(left = on) } })),
     )
     Section(null, null,
-        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, dot = s.supportUnread, onClick = { open("Help") }),
-        Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends)),
+        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
+        Setting(stringResource(R.string.ui_send_feedback), Icons.Default.Forum, dot = s.supportUnread, onClick = { open("Contact Us") })),
+    )
+    Section(null, null,
+        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends)),
     )
 }
 

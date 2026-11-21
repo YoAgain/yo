@@ -1,7 +1,7 @@
 import SwiftUI
 import YoCore
 
-/// The red dot of an unread reply from the Yo team: on the Yo button, Help & About and Contact Us, until the chat
+/// The red dot of an unread reply from the Yo team: on the Yo button and Send Feedback, until the chat
 /// is opened (a dot, not a count: one reply or three, the way there is the same).
 @MainActor
 struct SupportBadge: View {
@@ -84,7 +84,7 @@ struct MessagePage: View {
         }
       }
     }
-    .hitchScene("Contact Us")
+    .hitchScene("Send Feedback")
     // One look when the chat opens (and after sending); no polling: replies are rare and data stays small.
     .task { await refresh() }
     .onChange(of: text) { _, new in

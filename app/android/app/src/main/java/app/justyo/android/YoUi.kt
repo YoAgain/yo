@@ -1072,7 +1072,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                             }
                         }
                         // The red dot, over the glass and not through it: the account is not backed up (Settings ›
-                        // Account Recovery says why), or the Yo team answered in the support chat (Help & About › Contact Us).
+                        // Account Recovery says why), or the Yo team answered in the support chat (Send Feedback).
                         if (s.backupMissing || s.supportUnread) RedDot(Modifier.align(Alignment.TopEnd).offset((-2).dp, 2.dp))
                     }
                 }

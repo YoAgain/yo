@@ -51,6 +51,7 @@ struct SettingsView: View {
   /// The full-height page open as its own sheet on top, with its own stack (About & Licenses and Status push in it).
   @State private var sheet: Page?
   @State private var showingDeleteAccount = false
+  @State private var showingFeedback = false
 
   /// Every push goes through here: a half page joins the path, a full page opens its own sheet instead.
   private func navigate(to new: [Page]) {
@@ -110,11 +111,26 @@ struct SettingsView: View {
               } label: {
                 HStack {
                   Label("Help & About", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
+                }
+              }
+            }
+            .tint(Color(.label))
+            // The support chat opens as its own sheet.
+            Button {
+              showingFeedback = true
+            } label: {
+              LabeledContent {
+                DisclosureChevron()
+              } label: {
+                HStack {
+                  Label("Send Feedback", systemImage: "envelope.fill").labelStyle(Tile(.blue))
                   SupportBadge()
                 }
               }
             }
             .tint(Color(.label))
+          }
+          Section {
             // Opens the list's own "+" field, so one learns where friends are added.
             Button {
               listAction(.addContact)
@@ -130,7 +146,7 @@ struct SettingsView: View {
         }
       }
       .listSectionSpacing(.compact)
-      // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
+      // It fits at its height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
       // The title "Yodentity" and no close button: the system's grabber pulls the sheet down and away. The bar stays
@@ -163,6 +179,7 @@ struct SettingsView: View {
       .presentationBackground(Color(.systemGroupedBackground))
       .appObjects()
     }
+    .sheet(isPresented: $showingFeedback) { MessagePage().appObjects() }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
@@ -171,8 +188,9 @@ struct SettingsView: View {
     }
     // Every page scrolls only when it does not fit.
     .scrollBounceBehavior(.basedOnSize)
-    // Always half height: a full page opens as a sheet of its own on top.
-    .presentationDetents([.medium])
+    // Always this height (just over half: three groups of rows and the profile card fit): a full page opens as a
+    // sheet of its own on top.
+    .presentationDetents([.fraction(0.68)])
     // The grabber on every page: toggled with the path, it moved the bar mid-push (the pushed page's back button and
     // title began at the grabber's height, then dropped into place).
     .presentationDragIndicator(.visible)

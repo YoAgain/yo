@@ -229,7 +229,7 @@ another device. See
 [operator deployment and privacy](../../skills/pingtest/README.md).
 
 
-Help › Contact Us is a support conversation with the Yo team, not end-to-end encrypted (the chat says so).
+Send Feedback (Settings) is a support conversation with the Yo team, not end-to-end encrypted (the chat says so).
 The core signs sends, thread fetches and bounded read markers under the state lock and performs transport
 outside it. Opening the chat marks displayed team replies read; pull to refresh fetches later replies.
 Unread counts refresh at launch, foreground and opening Settings; no polling. Draft text remains on send

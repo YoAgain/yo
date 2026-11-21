@@ -4,8 +4,6 @@ import YoCore
 
 @MainActor
 struct HelpPage: View {
-  @State private var showingMessage = false
-
   static var marketingVersion: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
   }
@@ -30,17 +28,6 @@ struct HelpPage: View {
         HelpHero().listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
       }
       Section {
-        Button {
-          showingMessage = true
-        } label: {
-          HStack {
-            Label("Contact Us", systemImage: "envelope.fill").labelStyle(Tile(.blue))
-            SupportBadge()
-          }
-        }
-        .tint(Color(.label))
-      }
-      Section {
         StatusPage(summaryOnly: true)
         NavigationLink(value: SettingsView.Page.licenses) {
           // A settings row: the label leading, the version as its value.
@@ -57,6 +44,5 @@ struct HelpPage: View {
     .task { await LicenseContent.prepare() }
     .navigationTitle("Help & About")
     .navigationBarTitleDisplayMode(.inline)
-    .sheet(isPresented: $showingMessage) { MessagePage().appObjects() }
   }
 }

@@ -73,7 +73,7 @@ data class AppState(
     /** The list's top line from the core: "Offline", a failed send's words (tap: try again), else none. */
     val banner: String? = null,
     /** An unread reply from the Yo team in the support chat (`/v1/help`, by the install id): the red dot on the menu,
-     *  Help & About and Contact Us until the chat is opened. */
+     *  Send Feedback until the chat is opened. */
     val supportUnread: Boolean = false,
 ) {
     /** What the list and the screens over it draw: without the counters and clocks every Yo and every sync change

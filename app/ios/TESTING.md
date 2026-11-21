@@ -78,7 +78,7 @@ the Linux build does not run the Simulator UI driver.
   Check Group and Invite after opening the field. Receive Yos while adding: camera mode must keep row
   order and countdowns frozen until it closes, as in the core list regressions.
 - Root: profile card; App Icon and Left-Handed; Help and Add Friends (last).
-- Help: Tutorial and Contact Us, then Status (help.status: overall state word and glyph) and Licenses.
+- Help: Tutorial, then Status (help.status: overall state word and glyph) and Licenses.
 - Status: Crashes (Send Crashes, the reports or No Crashes); Usage (Total Yos — tap: ↑/↓, then Most Yos With —,
   Data Usage "… this month", Storage); Server (Notifications; one connection row: Round Trip by default, measured continuously
   (a second after each answer) while Status is open; a tap cycles to Server Ping and Sync and back; Identity — just a check; a tap brings up a card with its checks and both keys); Hitches inline in dev.
