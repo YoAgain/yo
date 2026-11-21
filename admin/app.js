@@ -443,7 +443,7 @@ if (document.body.classList.contains("login")) {
     const ps = sums(["push-ok", "push-fail"]), psAll = whole(ps), share = ([ok, bad]) => (ok + bad ? (100 * ok) / (ok + bad) : null);
     spark("ps", null, ps.map((p) => share(p) ?? 0), names,
       (i) => (ps[i][0] + ps[i][1] ? `${pctText(share(ps[i]))} taken · ${num(ps[i][1])} failed of ${num(ps[i][0] + ps[i][1])}` : "no pushes"),
-      `Push: taken by APNs and FCM · ${pctText(share(psAll))} · ${num(psAll[1])} failed (in Errors) · ${span}`, 100);
+      `Push: taken by APNs and FCM · ${pctText(share(psAll))} · ${num(psAll[1])} failed (in Problems) · ${span}`, 100);
     if (!(psAll[0] + psAll[1])) none("ps", "pushes");
     // Push pacing (spec 6.7): kept for the card inside Sent's detail.
     pushData = { sent: ps.map(([a, b]) => a + b), folded: sums(["push-folded"]).map(([n]) => n), paced: sums(["push-paced"]).map(([n]) => n), names, span };
@@ -910,7 +910,7 @@ if (document.body.classList.contains("login")) {
     drawArea(key);
     for (const [k, d] of Object.entries(areaData)) if (d?.overlay === key) drawArea(k);
   };
-  let openSupport = 0, platData = null;
+  let platData = null;
   const charts = ["yc", "uc"];
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => charts.forEach(drawArea)); charts.forEach((k) => ro.observe($(`${k}-area`))); }
   const drawRange = () => {
@@ -1200,7 +1200,6 @@ if (document.body.classList.contains("login")) {
       const threads = (await supportGet()).filter((t) => /^[0-9a-f]{32}$/i.test(t.install || ""));
       if (hub !== which) return;
       supportThreads = threads;
-      openSupport = threads.filter((t) => t.unread > 0).length;
       part(drawList);
       part(drawPerson);
       // Nothing chosen yet: the newest open conversation, else the newest one.
@@ -1333,7 +1332,7 @@ if (document.body.classList.contains("login")) {
     ["Messages", "mail", ["messages", "blobs", "blob_quota"]],
     ["Groups", "group", ["zk_groups"]],
     ["Backup", "disk", ["backups"]],
-    ["Support and crashes", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_days", "diagnostic_seen", "diagnostic_installs", "todos"]],
+    ["Support, Problems and Reports", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_days", "diagnostic_seen", "diagnostic_installs", "todos"]],
     ["Stats", "chart", ["deliveries_hourly*", "events", "request_hours"]],
   ];
   Object.assign(ICONS, {
@@ -1361,10 +1360,11 @@ if (document.body.classList.contains("login")) {
   const VIEWS = [
     ["people", "Users", "user", "Accounts with their devices, app, push and backup, put together"],
     ["v-support", "Support", "chat", "The support chat: who wrote, open or answered, and the conversation"],
-    ["v-errors", "Errors", "warn", "Crash and error groups, open first, with Done and Reopen"],
+    ["v-errors", "Problems", "warn", "App problems grouped by cause, open first, with Done and Reopen"],
+    ["v-reports", "Reports", "warn", "Users reporting other users"],
     ["v-todos", "To-dos", "check", "The team's to-dos: add, tick, delete"],
   ];
-  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-todos": "todos" };
+  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-todos": "todos" };
   // What each table is for, from the hub's schema (hub/src/db.rs); "(?)" marks a guess.
   const TABLE_INFO = {
     users: "Accounts: id, account key, sign-up time",
@@ -1384,9 +1384,9 @@ if (document.body.classList.contains("login")) {
     backups: "Each user's backup record; it secures the name",
     support_messages: "Support chat messages, by random install id (no account)",
     todos: "The team's to-dos",
-    diagnostics: "Crash and error reports, one row per signature",
+    diagnostics: "App problems, one row per signature",
     diagnostic_seen: "Report ids already counted, never counted twice",
-    diagnostic_days: "Crashes and errors per day, last 14 days",
+    diagnostic_days: "App problems per day, last 14 days",
     diagnostic_installs: "Which install sent a group on which day, kept 90 days",
     reports: "Users reported by installs (random id, no account), latest per pair",
     settings: "Hub switches, such as name reservation on/off",
@@ -1491,7 +1491,7 @@ if (document.body.classList.contains("login")) {
       share.title = "Share of phones seen in 90 days";
       const recent = el("span", null, age === "just now" || !g.last ? age : age + " ago");
       recent.title = "Last seen " + date(g.last);
-      stats.append(el("span", null, `${num(reports)} report${reports === 1 ? "" : "s"}`),
+      stats.append(el("span", null, `${num(reports)} occurrence${reports === 1 ? "" : "s"}`),
         el("span", null, `${num(phones)} phone${phones === 1 ? "" : "s"}`), share, recent);
       const placeLine = el("div", "diag-place");
       const main = locations[0]?.replace(/^\S*\/([^/\s]+\.swift:\d+)/, "$1").replace(/^\d+\s+Yo\s+/, "");
@@ -1532,9 +1532,16 @@ if (document.body.classList.contains("login")) {
     if (!groups.size) list.append(el("p", "empty", "No diagnostics."));
     return list;
   };
+  const openSupportCount = h => h?.support_unread_days?.at(-1) ?? 0;
+  const openReportCount = h => (h?.reports || []).filter(r => !lastDone.has(reportKey(r))).length;
+  const openProblemGroups = h => (h?.diagnostics || []).filter(d => !d.done && !diagInfo(d).expected);
+  const causeCount = groups => new Set(groups.map(diagCause)).size;
   const drawTables = () => {
     const box = $("tables"), list = last?.[which]?.tables || [];
-    const drawn = JSON.stringify([which, tableOpen, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
+    const openGroups = openProblemGroups(last?.[which]), openCauses = causeCount(openGroups);
+    const openSupport = openSupportCount(last?.[which]), openReports = openReportCount(last?.[which]);
+    const occurrences = openGroups.reduce((n, d) => n + (d.count || 0), 0);
+    const drawn = JSON.stringify([which, tableOpen, openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
       (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
@@ -1549,9 +1556,8 @@ if (document.body.classList.contains("login")) {
     const rowsOf = (name) => list.find((x) => x.name === name);
     const open = (name, column) => { const t = rowsOf(name); if (!t) return 0; const i = t.columns.indexOf(column);
       return i < 0 ? t.count : t.rows.filter((r) => !r[i]).length; };
-    const openErrors = (last?.[which]?.diagnostics || []).filter(d => !d.done);
-    const openCauses = new Set(openErrors.map(diagCause)).size;
     const viewCount = (key) => key === "v-support" ? openSupport
+      : key === "v-reports" ? openReports
       : key === "v-errors" ? openCauses
       : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
@@ -1559,8 +1565,7 @@ if (document.body.classList.contains("login")) {
       b.type = "button";
       if (key === "v-errors") {
         // Groups (a row per build and line), causes (what they are about) and reports (the sum of counts), open ones.
-        const g = openErrors;
-        hint(b, { cap: 1, head: "Open errors and crashes", rows: [{ label: "Groups", value: num(g.length) }, { label: "Causes", value: num(openCauses) }, { label: "Reports", value: num(g.reduce((n, d) => n + (d.count || 0), 0)) }] });
+        hint(b, { cap: 1, head: "Problems", rows: [{ label: "Groups", value: num(openGroups.length) }, { label: "Causes", value: num(openCauses) }, { label: "Occurrences", value: num(occurrences) }] });
       } else b.title = tip;
       name.prepend(icon(ico));
       b.append(name, el("small", null, num(viewCount(key))));
@@ -1911,7 +1916,7 @@ if (document.body.classList.contains("login")) {
   // the support chat, Errors to diagnostics, Reports to reports, Sign-ups (and the Users card's title) to the users
   // table. Services is one row in Server, opened in place (on its own while something is down); the Status bot row
   // there shows its frequency select. Keys: 1 top, 2 chat, 3 diagnostics, 4 users, 5 database, 0 the hub.
-  const showTable = (name) => { tableOpen = { users: "people", support_messages: "v-support", diagnostics: "v-errors", todos: "v-todos" }[name] || name; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const showTable = (name) => { tableOpen = { users: "people", support_messages: "v-support", diagnostics: "v-errors", reports: "v-reports", todos: "v-todos" }[name] || name; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
   // The support chat shown, scrolled to only when it is out of sight (a click inside it never moves the page).
   const toInbox = () => {
     if (tableOpen !== "v-support") { tableOpen = "v-support"; tablesDrawn = ""; part(drawTables); }
@@ -2404,8 +2409,8 @@ if (document.body.classList.contains("login")) {
     return { values, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
   };
   const problemTip = (p, i) => p.recorded[i] ? { head: p.names[i], rows: [
-    { color: "#e67e22", label: "Open error reports", value: num(p.er[i]) },
-    { color: "var(--bad)", label: "Open crash reports", value: num(p.cr[i]) },
+    { color: "#e67e22", label: "Problems without crashes", value: num(p.er[i]) },
+    { color: "var(--bad)", label: "Crashes", value: num(p.cr[i]) },
   ] } : null;
   const problemSplit = (h) => {
     const hourly = range === 1, weekly = range === 7 && h.week, size = hourly ? 3600000 : weekly ? 21600000 : 86400000, count = hourly ? 24 : weekly ? 28 : range || Math.max(1, today0() - Math.floor((h.open_report_history?.[0]?.t ?? Date.now()) / size) + 1);
@@ -2423,10 +2428,8 @@ if (document.body.classList.contains("login")) {
     const from = range === 1 ? Date.now() - 86400000 : range ? (today0() - range + 1) * 86400000 : 0, d0 = range === 1 ? today0() : Math.floor(from / 86400000);
     const fb = range === 1 ? last24(h.support_hours).reduce((a, v) => a + (v || 0), 0) : [...year(h.support_days)].filter(([d]) => d >= d0).reduce((a, [, v]) => a + (v || 0), 0);
     const diag = (kind) => (h.diagnostic_days || []).filter((r) => r.kind === kind && r.day >= d0).reduce((a, r) => a + r.count, 0);
-    return [["Feedback", fb], ["Crashes", crashSlots(h).total], ["Errors", diag("error")], ["Reports", (h.reports || []).filter((r) => r.at >= from).length]];
+    return [["Support", fb], ["Crashes", crashSlots(h).total], ["Problems without crashes", diag("error")], ["Reports", (h.reports || []).filter((r) => r.at >= from).length]];
   };
-  const CRASH_FREE_NOTE = "1 − installs with a crash ÷ phones seen (iOS, Android; no macOS or bots), since the range's first UTC day"
-    + " (24 hours: since yesterday). Estimate: the hub has no app start per install, so the phones seen stand for the installs in use.";
   const DETAIL = {
     yc: () => {
       const h = hubNow, yo = evSlots("yo-in"), md = evSlots("media-in"), n = sumOf(yo), act = activeIn(), ad = activeDays();
@@ -2475,25 +2478,6 @@ if (document.body.classList.contains("login")) {
       return [
         ...relCard(h),
         dcard("Builds", null, kvRows([["Hub's minimum", h.min_app || "none"], ...apps.map(([app, c]) => [`${appInfo(app)?.label || "?"} ${build(app)}`, num(c), belowMin(app) ? "bad" : VCLS[appState(app)] || ""])])),
-      ];
-    },
-    pr: () => {
-      const h = hubNow, hd = healthData || {}, d = sparkData.pr, kinds = problemKinds(h), top = Math.max(1, ...kinds.map(([, v]) => v));
-      const go = el("button", "hc-hint", "Open the support chat →");
-      go.type = "button"; go.addEventListener("click", () => showTable("support_messages"));
-      const he = hd.he, rate = ([e, n]) => (n ? (100 * e) / n : 0);
-      return [
-        chartCard("Open", d ? num(d.values[d.values.length - 1]) : "–", d, "bad", go),
-        dcard("Came in", num(kinds.reduce((a, [, v]) => a + v, 0)), barRows(kinds.map(([l, v]) => [l, num(v), v / top]))),
-        // Crash-free installs (est.): installs with a crash in the range against the phones seen in it.
-        dcard("Crash-free installs (est.)", pctText(hd.free), kvRows([
-          ["Installs with a crash", hd.crashInstalls == null ? "– (hub too old)" : num(hd.crashInstalls)],
-          ["Phones seen (iOS, Android)", num(hd.seen)],
-          ["Crash reports", num(crashSlots(h).total)]]),
-          note(CRASH_FREE_NOTE)),
-        he && hd.heAll[1] ? chartCard("Hub errors", `${num(hd.heAll[0])} 5xx`, { names: hd.names, values: he.map(([e]) => e),
-          tip: (i) => (he[i][1] ? `${num(he[i][0])} 5xx (${pctText(rate(he[i]))}) · ${num(he[i][2])} 4xx · ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers") }, "bad",
-        note(`${pctText(hd.heRate)} of ${num(hd.heAll[1])} answers`)) : dcard("Hub errors", null, note("None counted yet in this range.")),
       ];
     },
     dl: () => {
@@ -2635,7 +2619,7 @@ if (document.body.classList.contains("login")) {
     // Problems: what users sent and what crashed (feedback, reports, crashes, crash-free installs (est.); the way to
     // the chat), delivery and speed. The app's errors are in the Errors view.
     DETAIL.pr = () => {
-      const h = hubNow, hd = healthData || {}, kinds = Object.fromEntries(problemKinds(h));
+      const h = hubNow, kinds = Object.fromEntries(problemKinds(h));
       // Feedback: what users sent, as the overview's rows: feedback and reports per slot, crashes and crash-free (est.).
       const h1 = Math.floor(Date.now() / 3600000), t0 = today0(), span = range === 1 ? 24 : range || 30;
       const slots = Array.from({ length: span }, (_, i) => (range === 1 ? h1 - span + 1 + i : t0 - span + 1 + i));
@@ -2645,21 +2629,15 @@ if (document.body.classList.contains("login")) {
       const names = weekly ? weekNames() : slots.map(slotName);
       const fb = weekly || slots.map((x, i) => (range === 1 ? fbHours[i] || 0 : fbDays.get(x) || 0));
       const rp = weekly ? weekStarts().map(h0 => (h.reports || []).filter(r => r.at >= h0 * 3600000 && r.at < (h0 + 6) * 3600000).length) : slots.map((x) => (h.reports || []).filter((r) => Math.floor(r.at / unitMs) === x).length);
-      const openFeedback = h.support_unread_days?.at(-1) ?? 0;
-      const openReports = (h.reports || []).filter((r) => !lastDone.has(reportKey(r))).length;
+      const supportCount = openSupportCount(h);
+      const openReports = openReportCount(h);
       const period = range === 1 ? "in 24 h" : range ? `in ${range} d` : "in total";
       const summary = (head, open, incoming) => ({ head, rows: [{ label: "Open", value: num(open) }, { label: `Came in ${period}`, value: num(incoming) }] });
       const userRows = [
-        (() => { const p = problemSplit(h), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
-          const causes = new Set(open.map(diagCause)).size, reports = open.reduce((n, d) => n + (d.count || 0), 0);
-          const openCount = (h.problems_open?.hours?.at(-1) ?? (openFeedback + causes)) + openReports;
-          const sampled = p.recorded.some(Boolean);
-          const history = range === 1 ? h.problems_open?.hours : h.problems_open?.days;
-          const levels = sampled ? p.er.map((v, i) => p.recorded[i] ? v + p.cr[i] : null)
-            : (history || []).slice(-(range === 1 ? 24 : range || history?.length));
-          const names = sampled ? p.names : levels.map((_, i) => range === 1
-            ? new Date((h1 + 1 - levels.length + i) * 3600000).toLocaleTimeString(undefined, { timeStyle: "short" })
-            : dayName(t0 + 1 - levels.length + i));
+        (() => { const p = problemSplit(h), open = openProblemGroups(h);
+          const openCount = causeCount(open), reports = open.reduce((n, d) => n + (d.count || 0), 0);
+          const levels = p.er.map((v, i) => p.recorded[i] ? v + p.cr[i] : null);
+          const names = p.names;
           const recorded = levels.filter(v => v != null);
           const rise = recorded.length ? recorded.at(-1) - recorded[0] : 0;
           const fast = recorded.length > 1 && rise >= Math.max(3, Math.ceil(recorded[0] * 0.5));
@@ -2674,25 +2652,25 @@ if (document.body.classList.contains("login")) {
             path += `${levels[i - 1] == null ? "M" : "L"}${x} ${7 - 6 * v / peak}h0`;
           });
           $("problem-trend").replaceChildren(svg("path", { d: path }));
-          problemCard = { head: "Problems", nodes: [trend], rows: [{ label: "Open problems", value: num(openCount) },
-            { label: "Unread feedback", value: num(openFeedback) }, { label: "Open causes", value: num(causes) },
-            { label: "Open user reports", value: num(openReports) }], note: sampled ? "Trend counts recorded open errors and crashes." : "Trend counts unread feedback and open diagnostic causes." };
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "Open problems (feedback, causes and reports)", value: num(openCount) }, { label: "Open causes", value: num(causes) }, { label: "Open reports", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
+          problemCard = { head: "Problems", nodes: [trend], rows: [{ label: "Open causes", value: num(openCount) }],
+            note: "Trend shows recorded occurrences of open problems, including crashes." };
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "Problems", rows: [{ label: "Open causes", value: num(openCount) }, { label: "Occurrences", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Occurrence", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => problemTip(p, i) }; })(),
-        { ico: "chat", label: "Feedback", value: num(openFeedback), cls: openFeedback ? "warn" : "", title: summary("Feedback", openFeedback, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
+        { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
         { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => {
           // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
           // shares, crash-free (est.) with its explanation, iOS and Android.
           const pt = problemTotals, pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
-          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Phones", value: "–" };
+          const explanation = "Share of phones without an error or crash in the range.";
+          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", value: "–", title: { head: "Error-free", note: explanation } };
           const mk = (seen, any, crash) => { const b = el("span", "hc-pbar dbar srow-bar"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
-          const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Fine", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With an error", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
+          const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Error-free", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With a problem, without a crash", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
           const crash = pt.crashInstalls || 0;
-          return { ico: "ios", label: "Phones", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node: mk(pt.seen, pt.installs, crash),
-            title: { cap: 1, head: "Phones seen in the range", note: "Crash-free (est.): 1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day. The hub has no app start per install, so the phones seen stand for the installs in use.",
-              rows: [...three(pt.seen, pt.installs, crash), { label: "Crash-free (est.)", value: hd.free == null ? "–" : pctText(hd.free) },
+          return { ico: "ios", label: "Error-free", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node: mk(pt.seen, pt.installs, crash),
+            title: { cap: 1, head: "Error-free", note: explanation,
+              rows: [...three(pt.seen, pt.installs, crash),
                 ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
         })(),
       ];
