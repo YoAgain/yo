@@ -891,7 +891,7 @@ if (document.body.classList.contains("login")) {
       return;
     }
     const bars = inc.map((v, i) => {
-      const h = v ? Math.max(2, (v / top) * 26) : 1.5;
+      const h = fixedMax ? (v / top) * 26 : v ? Math.max(2, (v / top) * 26) : 1.5;
       return svg("rect", { x: (i * sl + sl * 0.16).toFixed(2), width: (sl * 0.68).toFixed(2), y: (28 - h).toFixed(1), height: h.toFixed(1), rx: 1, class: v ? "b" : "b zero" });
     });
     st.replaceChildren(...bars);
@@ -2246,13 +2246,13 @@ if (document.body.classList.contains("login")) {
   };
   // A sparkline like the overview's rows: a bar per slot (the last one full), no axis.
   // top: a second list stacked on the first (the first from the bottom in cls, this one above it in red).
-  const sparkBars = (values, cls, tip, top2, recorded) => {
-    const n = Math.max(1, values.length), sl = 140 / n, tot = values.map((v, i) => (v || 0) + (top2?.[i] || 0)), top = Math.max(1e-9, ...tot);
+  const sparkBars = (values, cls, tip, top2, recorded, fixedMax) => {
+    const n = Math.max(1, values.length), sl = 140 / n, tot = values.map((v, i) => (v || 0) + (top2?.[i] || 0)), top = fixedMax ?? Math.max(1e-9, ...tot);
     const s = svg("svg", { class: "spark", viewBox: "0 0 140 28", preserveAspectRatio: "none", "aria-hidden": "true" });
     const rect = (i, y, h, c) => svg("rect", { x: (i * sl).toFixed(2), width: sl.toFixed(2), y: y.toFixed(1), height: h.toFixed(1), rx: 1, class: c });
     values.forEach((v, i) => {
       if (v == null && !top2) { s.append(svg("g", {})); return; }
-      if (!top2) { const h = v ? Math.max(2, (v / top) * 26) : 1.5; s.append(rect(i, 28 - h, h, v ? `b ${cls || ""}`.trim() : "b zero")); return; }
+      if (!top2) { const h = fixedMax ? (v / top) * 26 : v ? Math.max(2, (v / top) * 26) : 1.5; s.append(rect(i, 28 - h, h, v ? `b ${cls || ""}`.trim() : "b zero")); return; }
       const g = svg("g", {}), h = tot[i] ? Math.max(2, (tot[i] / top) * 26) : 1.5, hb = tot[i] ? (h * (v || 0)) / tot[i] : 0;
       if (recorded && !recorded[i]) { s.append(g); return; }
       if (!tot[i]) g.append(rect(i, 28 - h, h, "b zero"));
@@ -2678,16 +2678,23 @@ if (document.body.classList.contains("login")) {
         { ico: "flag", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => {
-          // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
-          // shares, crash-free (est.) with its explanation, iOS and Android.
           const pt = problemTotals, pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
-          const explanation = "Share of phones without an error or crash in the range.";
-          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", value: "–", title: { head: "Error-free", note: explanation } };
-          const mk = (seen, any, crash) => { const b = el("span", "hc-pbar dbar srow-bar"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
+          const explanation = "Share of phones without an error or crash in the range. Bars show the share per day.";
+          const days = range === 1 ? 7 : range || 90;
+          const dates = Array.from({ length: days }, (_, i) => t0 - days + 1 + i);
+          const values = dates.map(day => {
+            const seen = day === t0 ? h.active_day : h.active_days?.[day];
+            if (!seen || h.daily_problem_installs == null) return null;
+            return 100 * Math.max(0, seen - (h.daily_problem_installs[day] || 0)) / seen;
+          });
+          const tip = i => ({ head: dayName(dates[i]), rows: [{ label: "Error-free per day", value: values[i] == null ? "–" : pctText(values[i]) }] });
+          const node = sparkBars(values, "", tip, null, null, 100);
+          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", node, value: "–", title: { head: "Error-free", note: explanation } };
+          const mk = (seen, any, crash) => { const b = el("span", "hc-pbar error-free-split"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
           const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Error-free", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With a problem, without a crash", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
           const crash = pt.crashInstalls || 0;
-          return { ico: "ios", label: "Error-free", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node: mk(pt.seen, pt.installs, crash),
-            title: { cap: 1, head: "Error-free", note: explanation,
+          return { ico: "ios", label: "Error-free", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node,
+            title: { cap: 1, head: "Error-free", note: explanation, nodes: [mk(pt.seen, pt.installs, crash)],
               rows: [...three(pt.seen, pt.installs, crash),
                 ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
         })(),

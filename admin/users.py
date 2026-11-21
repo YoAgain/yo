@@ -277,6 +277,18 @@ def problem_installs(db, now: int):
     return out
 
 
+def daily_problem_installs(db, now: int):
+    if not has_table(db, "diagnostic_installs"):
+        return None
+    today = now // DAY_MS
+    return dict(db.execute(
+        "SELECT i.day, count(DISTINCT i.install) FROM diagnostic_installs i"
+        " JOIN diagnostics d ON d.id = i.diagnostic_id"
+        f" WHERE i.day BETWEEN ? AND ? AND {PHONE_APP.format('d.app')}"
+        " AND d.os NOT LIKE 'mac%' AND d.kind IN ('error', 'crash') GROUP BY i.day",
+        (today - CRASH_FREE_DAYS["0"] + 1, today)))
+
+
 def diagnostics(db):
     installs = ("(SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id = d.id)"
                 if has_table(db, "diagnostic_installs") else "NULL")
@@ -440,6 +452,7 @@ def hub(name: str, path: str) -> dict:
                 for day,kind,count in db.execute("SELECT day,kind,count FROM diagnostic_days ORDER BY day")]
                 if has_table(db,"diagnostic_days") else [], []),
             "diagnostics": part("diagnostics", lambda: diagnostics(db) if has_table(db, "diagnostics") else [], []),
+            "daily_problem_installs": part("daily_problem_installs", lambda: daily_problem_installs(db, now)),
             "problem_installs": part("problem_installs", lambda: problem_installs(db, now)),
             # Crash-free installs (estimated) per range: installs with a crash against the phones seen.
             "crash_free": part("crash_free", lambda: crash_free(db, now)),
