@@ -1219,7 +1219,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .yo-spark { position: absolute; left: 0; top: 0; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: #fff;
   box-shadow: 0 0 0 1px var(--amethyst-soft), 0 0 7px 1.5px var(--amethyst); opacity: 0; will-change: transform, opacity; }
 @media (prefers-reduced-motion: reduce) { .live-lane { display: none; } }
-#range { position: relative; }
 .ctip.pin { pointer-events: auto; }
 .ctip svg.spark { width: 240px; height: 56px; display: block; margin-bottom: 2px; }
 .ctip .tm .dot { display: block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); } .ctip .tm .dot.ok { background: var(--ok); } .ctip .tm .dot.bad { background: var(--bad); }
