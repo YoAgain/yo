@@ -1275,10 +1275,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
   #all-users-table td:nth-child(4) .ico { width: 18px; height: 18px; }
   #all-users-table td:nth-child(5) .pill, #all-users-table td:nth-child(5) span { font-size: 0; display: inline-block; width: 10px; height: 10px; padding: 0; border-radius: 50%; background: currentColor; }
 }
-#t-yc.twocol { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--gap); height: auto !important; }
-@media (min-width: 641px) { .ov > header.tile.hdr { grid-column: span 2 !important; } }
-@media (max-width: 640px) { #t-yc.twocol { grid-template-columns: minmax(0, 1fr); } }
-
 #c-vr .vr-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 13px; }
 #c-vr svg + .vr-label { margin-top: 8px; }
 @media (max-width: 640px) {
@@ -1287,3 +1283,13 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
   .glabel small, .srow-head, .live-n span, .stat3 span, .dcard .pstat small,
   .dcard .pstep small, .dcard .dnums small { font-size: 13px; }
 }
+
+.merged-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); align-items: start; }
+.merged-grid .dcard { min-width: 0; }
+.problem-chart { display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 8px; font-weight: 700; }
+.problem-chart .sv { display: none; }
+.problem-chart > .spark { grid-column: 1 / -1; width: 100%; max-width: none; height: 104px; }
+.merged-grid .srow .hc-pbar { width: 100%; }
+@media (max-width: 640px) { .merged-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.ctip .area.dchart { position: relative; width: 240px; height: 88px; }

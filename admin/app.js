@@ -590,7 +590,6 @@ if (document.body.classList.contains("login")) {
       return { cap: 1, head: "Disk", nodes: d ? [shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool")] : [], rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; });
     hint($("c-net"), () => { const n = (srvNow || {}).network || {};
       return { cap: 1, head: "LAN", nodes: histNode((p) => (p[4] || 0) + (p[5] || 0), (v) => `${bytes(v)}/s`), rows: [{ label: "Down", value: rate(n.rx_per_s) }, { label: "Up", value: rate(n.tx_per_s) }] }; });
-    hint($("c-vr"), () => ({ cap: 1, head: "On the newest build", rows: vrShares.length ? vrShares.map((x) => ({ label: x.replace(/ \d+ %$/, ""), value: `${x.match(/\d+ %$/)[0]} current` })) : [{ label: "Builds", value: "none kept yet" }] }));
     hint($("c-upd"), () => { const u = updData;
       if (!u) return { cap: 1, head: "Updates", rows: [{ label: "Collector", value: "unavailable" }] };
       const kernel = !!(u.installed_kernel && u.running_kernel && u.installed_kernel !== u.running_kernel), lts = !!(u.release?.result && !/no new release/i.test(u.release.result));
@@ -807,66 +806,6 @@ if (document.body.classList.contains("login")) {
   // ---- versions: current (green), update out (yellow), must update (red: below the hub's minimum), unknown (grey) --
   const VSTATES = { current: "current", update: "update", must: "must", unknown: "unknown" }, VKEYS = Object.keys(VSTATES);
   const platLine = (l, p) => `${l} ${num(p.all)}${VKEYS.filter((k) => p[k] && k !== "unknown").map((k) => ` · ${num(p[k])} ${k}`).join("")}`;
-  // Per slot of the range: [current, update, must, unknown] of the devices seen that day (the collector's daily
-  // snapshot, kept since it began), null where none was kept. 1: today; 7, 30: per day; Total: since the first.
-  let verData = null, vrShares = [];
-  const vPct = (row, i = 0) => { const all = row ? row.reduce((a, v) => a + v, 0) : 0; return all ? Math.round((100 * row[i]) / all) : null; };
-  const versionsRow = (h) => {
-    const kept = { ...(h.version_days || {}) }, t = today0();
-    if (h.versions_day) kept[t] = VKEYS.map((k) => h.versions_day[k] || 0);
-    const days = Object.keys(kept).map(Number).filter((d) => d <= t).sort((a, b) => a - b), first = days[0] ?? t;
-    if (range === 1) {
-      // The last 24 hours, an hour each (kept hourly by admin.py), empty slots where none was kept yet.
-      const hrs = h.version_hours || {}, h1 = Math.floor(Date.now() / 3600000);
-      const hk = Array.from({ length: 24 }, (_, i) => h1 - 23 + i);
-      verData = { rows: hk.map((x) => hrs[x] || null), names: hk.map((x) => clock(x * 3600000)), first, today: kept[t] || null };
-    } else {
-    const span = range === 1 ? 1 : range || Math.max(7, t - first + 1), step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
-    const ends = Array.from({ length: n }, (_, i) => t - (n - 1 - i) * step);
-    // A stretch of days (Total, long): its last kept day.
-    const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
-    verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
-    }
-    const host = $("vr-bar"), W = 140, bh = 12, strips = [], shares = [];
-    const labelRow = (name, value) => {
-      const row = el("span", "vr-label");
-      row.append(el("span", "", name), el("b", "", value));
-      return row;
-    };
-    for (const [plat, name] of [["ios", "iOS"], ["android", "Android"]]) {
-      const s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${bh}`, preserveAspectRatio: "none" });
-      const d = relData(h, plat), have = d.rows.map((r, k) => (r ? k : -1)).filter((k) => k >= 0);
-      let value = "–";
-      if (have.length) {
-        // Each strip runs from its own first recorded slot to the right edge, so both start at the left edge.
-        const pts = have.length > 1 ? have : [have[0], have[0]], xs = (k, q) => (have.length > 1 ? ((k - have[0]) * W) / Math.max(1, have[have.length - 1] - have[0]) : q ? W : 0);
-        const tops = pts.map((k) => { const r = d.rows[k], all = r.reduce((x, v) => x + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
-        d.bands.forEach((b, j) => {
-          if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
-          const up = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(bh - tops[q][j] * bh).toFixed(1)}`), down = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(bh - (j ? tops[q][j - 1] : 0) * bh).toFixed(1)}`).reverse();
-          const p = svg("polygon", { points: [...up, ...down].join(" ") });
-          p.style.fill = b.color;
-          s.append(p);
-        });
-        const last = d.rows[have[have.length - 1]], all = last.reduce((x, v) => x + v, 0);
-        const pct = Math.round((100 * (last[0] + last[1])) / all);
-        value = `${pct} % current`;
-        shares.push(`${name} ${pct} %`);
-      } else s.append(svg("rect", { x: 0, width: W, y: bh - 1, height: 1.5, class: "b zero" }));
-      strips.push(labelRow(name, value), s);
-    }
-    // Under the strips: the devices as one bar (iOS, Android, Bot), their numbers in the hover.
-    const plats = platData?.plats || [], devAll = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0)), dev = el("div", "vr-dev");
-    if (plats.length) {
-      const bar = platCard().firstChild;
-      dev.append(labelRow("Devices", num(platData.devices)), bar);
-      hint(dev, { cap: 1, head: `Devices ${num(platData.devices)}`, rows: plats.map(([l, p]) => ({ label: l, value: `${num(p.all)} · ${Math.round((100 * p.all) / devAll)} %` })) });
-    }
-    host.replaceChildren(...strips, dev);
-    vrShares = shares;
-    const p = vPct(verData.today);
-    $("c-vr").dataset.tip = p == null ? "" : `today: ${p} % current`;
-  };
   // One stacked bar of shares, current at the bottom; an empty slot a faint dash.
   const vStack = (row, x, w, H, top) => {
     const all = row ? row.reduce((a, v) => a + v, 0) : 0;
@@ -1015,7 +954,6 @@ if (document.body.classList.contains("login")) {
       }));
       $("c-pl").dataset.tip = plats.map(([l, p]) => `${l} ${num(p.all)}`).join(" · ");
       platData = { plats, min: h.min_app, devices };
-      versionsRow(h);
       drawAccountStats(h);
     }
   };
@@ -2011,8 +1949,13 @@ if (document.body.classList.contains("login")) {
   const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
   let relPlat = saved("relPlat", "all", ["all", "ios", "android"]);
   const relCard = (h) => {
-    const card = relChart(h, relPlat, "Releases");
+    const card = relChart(h, relPlat, "App");
     card.querySelector("h3")?.children[0]?.after(pillOf([["all", "All"], ["ios", "iOS"], ["android", "Android"]], relPlat, (v) => { relPlat = v; save("relPlat", v); drawDetail(); }));
+    const devices = platData?.devices, plats = platData?.plats || [];
+    const rows = sparkCard("Devices", [{ ico: "ios", label: "Devices", value: devices == null ? "–" : num(devices),
+      node: platCard().firstChild, title: { head: "Devices", rows: plats.map(([label, p]) => ({
+        label, value: `${num(p.all)} · ${pctText(100 * p.all / Math.max(1, devices))}` })) } }]);
+    card.append(rows.lastChild);
     return [card];
   };
   // Speed: the range's split in one bar with its four shares named.
@@ -2179,10 +2122,18 @@ if (document.body.classList.contains("login")) {
           { ico: "send", label: "Yos", value: num(tot(d.lat[i])) }] : [{ ico: "send", label: "Yos", value: "none" }] }) },
       { ico: "clock", label: "Queue", value: `${num(h.messages)} Yos`, values: rows.map((r) => r?.[0] || 0), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ color: "#5dade2", label: "Yos waiting", value: rows[i] ? num(rows[i][0]) : "not kept" }] }) },
-      ...(pushData ? [(() => { const p = pushData, sum = (v) => v.reduce((x, y) => x + y, 0), at = (i) => ({ head: p.names[i], rows: [{ ico: "send", label: "Pushes sent", value: num(p.sent[i]) },
-          { label: "Folded, 1 s window", value: num(p.folded[i]) }, { label: "Folded, backlog", value: num(p.paced[i]) },
+      ...(pushData ? [(() => { const p = pushData, counts = healthData.ps, sum = (v) => v.reduce((x, y) => x + y, 0), at = (i) => ({ head: p.names[i], rows: [{ ico: "send", label: "Pushes sent", value: num(p.sent[i]) },
+          { label: "Taken", value: p.sent[i] ? pctText(100 * counts[i][0] / p.sent[i]) : "–" }, { label: "Failed", value: num(counts[i][1]) }, { label: "Folded, 1 s window", value: num(p.folded[i]) }, { label: "Folded, backlog", value: num(p.paced[i]) },
           { label: "In backlog pacing now", value: h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices) }] });
-        return { ico: "send", label: "Push", value: num(sum(p.sent)), values: p.sent, scls: "cool", tip: at }; })()] : []),
+        const sent = sum(p.sent), [ok, failed] = healthData.psAll;
+        const taken = evSlots("push-ok"), failures = evSlots("push-fail");
+        const bars = taken.values.map((v, i) => (v || 0) + (failures.values[i] || 0));
+        let running = 0;
+        const line = [0, ...bars.map(v => (running += v))];
+        const chart = liveChart({ bars, line, ...axisOf(taken.names) }, "cool");
+        return { ico: "send", label: "Push", title: { head: "Push", nodes: [chart],
+          rows: [{ label: "Sent", value: num(sent) }, { label: "Taken", value: sent ? pctText(100 * ok / sent) : "–" },
+            { label: "Failed", value: num(failed) }] }, value: num(sent), values: p.sent, scls: "cool", tip: at }; })()] : []),
       { ico: "image", label: "Media queue", value: h.blobs ? bytes(h.blobs[1]) : "–", values: rows.map((r) => r?.[1] || 0), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ ico: "disk", label: "Media waiting", value: rows[i] ? bytes(rows[i][1]) : "not kept" }] }) },
     ]);
@@ -2438,7 +2389,7 @@ if (document.body.classList.contains("login")) {
       title: { cap: 1, head: "Bots", note: "Not in the counts of Sent, Media or Accounts.", nodes: [g], rows: [...series.map((s) => ({ color: s.color, label: s.name, value: `${num(s.today)} in 24 h` })), { label: "All bots", value: `${num(sum24)} in 24 h` }] } }];
   };
 
-  { const one = { ...DETAIL }, title = (c) => c?.querySelector("h3 span")?.textContent, tot = (b) => b.reduce((a, v) => a + v, 0);
+  {
     // Yo: beside the tile's Yos: delivered, delivery performance (speed, the queues), media sent, groups.
     DETAIL.yc = () => {
       const h = hubNow, d = speedData;
@@ -2447,8 +2398,7 @@ if (document.body.classList.contains("login")) {
     };
     // Accounts: activity (who is active, how many stay, how much they send) and the accounts' properties (secured,
     // deleted), as the overview's rows: a label, its value, a sparkline where there is a history, a popup per slot.
-    DETAIL.uc = () => [pushCard(healthData || {})];
-    // The Accounts tile's second column: the stats as the overview's rows (secured bar, new accounts secured, deleted,
+    // The Accounts stats card: account metrics as the overview's rows (secured bar, new accounts secured, deleted,
     // Yos per user), each with its history in the hover.
     const statsRows = (h) => {
       const hd = healthData || {}, mau = h.active_month || 0, dau = h.active_today ?? 0, act = dau, yoN = last24sum("yo-in"), t = today0();
@@ -2480,7 +2430,7 @@ if (document.body.classList.contains("login")) {
             tip: (i) => ({ head: dayName(ds[i]), rows: [{ color: "var(--ok)", label: "Yos per active user", value: per[i] ? per[i].toFixed(1) : "–" }, { ico: "user", label: "Active", value: num(active[i]) }] }) },
       ];
     };
-    // The Sent tile's second column: Media sent and Groups as rows (value, sparkline; the bars and the totals in the hover).
+    // The Yos card: Media, Groups and Bots as rows (value, sparkline; the bars and the totals in the hover).
     drawSentRowsImpl = (h) => {
       const slot = $("yc-rows");
       if (!slot || !h || h.error) return;
@@ -2508,14 +2458,6 @@ if (document.body.classList.contains("login")) {
       return dcard("Secured", dnums(pctText(all), made ? `${pctText((100 * withKey) / made)} this week` : null),
         sc?.values?.length ? [liveChart({ bars: sc.values.map((v) => v || 0), max: sc.scale, ...axisOf(sc.names) }, "", sf, sayOf(sc)), sf] : null);
     };
-    // App: releases (wide), versions, devices, push (taken over sent).
-    // Push: the pushes per slot (taken or failed) with the share taken, on the same slots and labels as the other cards.
-    const pushCard = (hd) => {
-      const [ok, bad] = hd?.psAll || [0, 0], a = evSlots("push-ok"), b = evSlots("push-fail");
-      return ok + bad ? comboCard("Push", { names: a.names, values: a.values.map((v, i) => (v || 0) + (b.values[i] || 0)) },
-        { cls: "cool", sub: bad ? `${num(bad)} failed` : `${pctText((100 * ok) / (ok + bad))} taken`, subCls: bad ? "bad" : "" }) : dcard("Push", null, note("No data yet."));
-    };
-    DETAIL.vr = () => [...one.vr().filter((c) => title(c) !== "Builds")];
     // Problems: what users sent and what crashed (feedback, reports, crashes, crash-free installs (est.); the way to
     // the chat), delivery and speed. The app's errors are in the Errors view.
     DETAIL.pr = () => {
@@ -2570,27 +2512,13 @@ if (document.body.classList.contains("login")) {
     cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
   const detailBox = $("detail");
   let detailPending = false;
-  // All cards are on the page, always: a group each, under a small label, in this order. A click on a tile or row takes
-  // its group to the top of the screen.
-  const GROUPS = [["uc", "Accounts"], ["vr", "App"], ["pr", "Problems"]];
   // The status bot's select lives in the server card's hover while it shows, else hidden at home.
   const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
   const drawDetail = () => {
     if (!hubNow) return;
     parkSelect();
-    const groups = GROUPS.map(([t, label]) => {
-      let cards = [];
-      try { cards = (DETAIL[t]?.() || []).filter(Boolean); } catch (e) { console.warn(e); }
-      if (!cards.length) cards = [dcard(label, null, note("No data yet."))];
-      const g = el("section", "agroup"), head = el("h2", "glabel");
-      g.id = `grp-${t}`;
-      head.append(el("span", null, label), el("small", null, spanWord()));
-      const grid = el("div", "dgrid");
-      grid.append(...cards.slice(0, 16));
-      g.append(head, grid);
-      return g;
-    });
-    $("detail-groups").replaceChildren(...groups);
+    $("grp-vr").replaceChildren(...relCard(hubNow));
+    $("problem-rows").replaceChildren(DETAIL.pr()[0].querySelector(".srows"));
   };
   // Redrawn with fresh data, unless the pointer is on a card (its captions) or a select is open; then once it leaves.
   function redrawDetail() {
@@ -2598,14 +2526,10 @@ if (document.body.classList.contains("login")) {
     drawDetail();
   }
   detailBox.addEventListener("pointerleave", () => { if (detailPending) { detailPending = false; drawDetail(); } });
-  const openDetail = (key) => { const g = $(`grp-${TOPIC(key)}`) || $(`grp-${key}`); if (g) g.scrollIntoView({ behavior: "smooth", block: "start" }); };
-  for (const r of document.querySelectorAll(".crow[id^='c-']:not(.chips)")) if (!r.dataset.card) r.dataset.card = r.id.slice(2);
-  $("t-yc").dataset.card = "yc"; $("t-uc").dataset.card = "uc";
-  // Server, App and Problems: the whole tile opens its one detail, not each row its own.
-  for (const [tile, card] of [["g-server", null], ["g-app", "vr"], ["g-usage", "pr"]]) {
-    for (const r of $(tile).querySelectorAll("[data-card]")) { delete r.dataset.card; }
-    if (card) $(tile).dataset.card = card;
-  }
+  const openDetail = (key) => {
+    const target = { yc: "t-yc", uc: "t-uc", vr: "grp-vr", pr: "grp-pr", ps: "grp-pr", dl: "grp-pr" }[TOPIC(key)];
+    if (target) $(target).scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   serverHints();
   for (const n of document.querySelectorAll("[data-card]")) {
     if (n.tagName !== "BUTTON") { n.setAttribute("role", "button"); n.tabIndex = 0; }
