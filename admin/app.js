@@ -383,6 +383,9 @@ if (document.body.classList.contains("login")) {
   };
   const slotSum = ([, ds, hs], perDay, hours) => (hs ? hs.reduce((n, i) => n + ((hours || []).slice(-24)[i] || 0), 0)
     : ds.reduce((n, d) => n + (perDay?.get(d) || 0), 0));
+  const weekStarts = () => Array.from({ length: 28 }, (_, i) => hubNow.week.start + i * 6);
+  const weekNames = () => weekStarts().map(h => `${dayName(Math.floor(h / 24))} ${clock(h * 3600000)}`);
+  const weekEvent = key => hubNow?.week?.events && (hubNow.week.events[key] || Array(28).fill(0));
   const pctText = (x) => (x == null ? "–" : x > 0 && x < 0.1 ? "< 0.1 %" : `${x >= 99.95 || x < 10 ? x.toFixed(x >= 99.95 || x === 0 ? 0 : 1) : Math.round(x)} %`);
   // Health rows in the counts card, graph only (the value on hover): Delivery (p95 of how long a Yo took to its device),
   // Push (the share the services took), Hub errors (5xx answers), in the range; with nothing counted yet, no bars and
@@ -396,8 +399,8 @@ if (document.body.classList.contains("login")) {
   const areaSub = {};
   const healthRows = (h, ym, yh) => {
     const span = range === 1 ? "last 24 hours" : range ? `${range} days` : "since the start";
-    const all = (key) => ym(key), yo = ym("yo-out"), names24 = hourNames(), slots = range === 1 ? names24.map((n, i) => [n, null, [i]]) : rangeSlots(yo), names = slots.map(([n]) => n);
-    const sums = (keys) => slots.map((s) => keys.map((k) => slotSum(s, all(k), yh(k))));
+    const all = (key) => ym(key), yo = ym("yo-out"), weekly = range === 7 && h.week?.events, names24 = hourNames(), slots = range === 1 ? names24.map((n, i) => [n, null, [i]]) : rangeSlots(yo), names = weekly ? weekNames() : slots.map(([n]) => n);
+    const sums = (keys) => weekly ? names.map((_, i) => keys.map(k => h.week.events[k]?.[i] || 0)) : slots.map((s) => keys.map((k) => slotSum(s, all(k), yh(k))));
     const whole = (rows) => rows.reduce((a, r) => a.map((v, i) => v + r[i]), rows[0].map(() => 0));
     const none = (key, what) => { sparkData[key].empty = `No data yet: the hub has counted no ${what} in this range`; $(`c-${key}`).dataset.tip = "no data yet"; };
     // Speed: per bar the share of Yos on the friend's phone within 1 s (higher is better); the hover splits them all.
@@ -439,7 +442,7 @@ if (document.body.classList.contains("login")) {
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; a click opens their detail.
   const areaData = {};
-  const runningTotal = (perDay, hours, total) => {
+  const runningTotal = (perDay, hours, total, week) => {
     let names, incs, hourEnds;
     const nowH = Math.floor(Date.now() / 3600000);
     if (range === 1) {
@@ -447,6 +450,10 @@ if (document.body.classList.contains("login")) {
       hourEnds = Array.from({ length: 24 }, (_, i) => h0 + i + 1);
       names = Array.from({ length: 24 }, (_, i) => clock((h0 + i + 1) * 3600000));
       incs = Array.isArray(hours) ? hours.slice(-24).map((v) => v || 0) : Array(24).fill(0);
+    } else if (range === 7 && week) {
+      incs = week;
+      names = weekNames();
+      hourEnds = weekStarts().map(h => Math.min(h + 6, nowH));
     } else {
       const first = range ? today0() - range + 1 : Math.min(today0() - 6, ...[...(perDay?.keys() || [])].filter((d) => perDay.get(d) > 0));
       const span = today0() - first + 1, step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
@@ -604,8 +611,8 @@ if (document.body.classList.contains("login")) {
       const top = max || Math.max(1, ...bars.map((v) => v || 0)), room = (B - padTop) * (line ? 0.55 : 1);
       bars.forEach((v, i) => {
         const h = v ? Math.max(2, (v / top) * room) : 1.5;
-        out.push(svg("rect", { x: (pad + i * gap + gap * 0.15).toFixed(1), width: (gap * 0.7).toFixed(1), y: (B - h).toFixed(1), height: h.toFixed(1), rx: 1.5,
-          class: !v ? "cb zero" : i === pick || (pick < 0 && i === bars.length - 1) ? "cb now" : "cb" }));
+        out.push(svg("rect", { x: (pad + i * gap + 0.5).toFixed(1), width: Math.max(0.5, gap - 1).toFixed(1), y: (B - h).toFixed(1), height: h.toFixed(1), rx: 1.5,
+          class: `cb${v ? "" : " zero"}${i === pick || (pick < 0 && i === bars.length - 1) ? " now" : ""}` }));
       });
     }
     if (line) {
@@ -688,7 +695,7 @@ if (document.body.classList.contains("login")) {
       if (last) render();
     }));
   };
-  const areaChart = (key, total, perDay, hours, today) => {
+  const areaChart = (key, total, perDay, hours, today, week) => {
     set(`${key}-n`, num(total));
     active48 = hubNow?.active48 || [];
     if (!areaTips[key] && $(`${key}-svg`)) {
@@ -696,15 +703,15 @@ if (document.body.classList.contains("login")) {
       hoverTip($(`${key}-svg`), () => areaData[key]?.incs?.length || 0, (i) => {
         const d = areaData[key], what = { yc: sentMode === "sent" ? "sent" : "delivered", uc: "signed up" }[key] || "";
         const c = key === "uc" ? "var(--amethyst-soft)" : "var(--ok)";
-        return d ? { head: d.names[i], rows: [{ section: slotWord() }, { color: c, label: what[0].toUpperCase() + what.slice(1), value: num(d.incs[i]) },
+        return d ? { head: d.names[i], rows: [{ section: range === 7 && d.incs.length === 28 ? "These six hours" : slotWord() }, { color: c, label: what[0].toUpperCase() + what.slice(1), value: num(d.incs[i]) },
           { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) },
           ...(key === "yc" && sentMode !== "sent" ? [{ section: "One per device; before 2026-11-21 incl. bots" }] : []),
           ...(activeLine(key, d)?.[i + 1] != null ? [{ color: "var(--ok)", line: true, label: "Active (48 h)", value: num(activeLine(key, d)[i + 1]) }] : [])] } : "";
       }, (i) => { areaHover[key] = i; drawArea(key); });
     }
-    areaData[key] = { ...runningTotal(perDay, hours, total || 0), overlay: OVERLAY[key] || null, word: WORD[key] };
+    areaData[key] = { ...runningTotal(perDay, hours, total || 0, week), overlay: OVERLAY[key] || null, word: WORD[key] };
     drawArea(key);
-    // Under the chart, its activity as bars: per hour (1 day), per day (7, 30), per stretch of days (Total).
+    // Under the chart, its activity as bars: per hour (1 day), per six hours (7), per day (30), per stretch of days (Total).
     const st = $(`${key}-strip`), inc = areaData[key].incs, top = Math.max(1, ...inc), sl = 140 / inc.length;
     if (!st) return;
     if (COMBO[key]) {
@@ -892,7 +899,7 @@ if (document.body.classList.contains("login")) {
       // second line of the Yos chart.
       rangeRow("md", ym("media-in-bytes"), "", "Media: photos and videos uploaded", null, false, yh("media-in-bytes"), null, yt("media-in-bytes"));
       // Media's running total over Yos on its own scale; in the hover with its share of Yos.
-      const mdTotal = yt("media-in") ?? 0, md = runningTotal(ym("media-in"), yh("media-in"), mdTotal);
+      const mdTotal = yt("media-in") ?? 0, md = runningTotal(ym("media-in"), yh("media-in"), mdTotal, weekEvent("media-in"));
       seriesChart("ym", { values: md.values, labels: md.labels, word: "media", share: true },
         null);
       rangeRow("gr", ym("group-create"), "made", "Groups: made", null, false, yh("group-create"), null, yt("group-create"));
@@ -901,9 +908,9 @@ if (document.body.classList.contains("login")) {
       // Sent (into inboxes) or Delivered (acknowledged by a device): the pill in the header chooses, the choice is kept.
       const yk = sentMode === "sent" ? "yo-in" : "yo-out";
       drawSentPill();
-      areaChart("yc", yt(yk) ?? 0, ym(yk), yh(yk), last24(yh(yk)).reduce((n, v) => n + (v || 0), 0));
+      areaChart("yc", yt(yk) ?? 0, ym(yk), yh(yk), last24(yh(yk)).reduce((n, v) => n + (v || 0), 0), weekEvent(yk));
       const sud = new Map(h.signup_days || []);
-      areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, last24(h.signups_hours).reduce((n, v) => n + (v || 0), 0));
+      areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, last24(h.signups_hours).reduce((n, v) => n + (v || 0), 0), h.week?.signups);
       const signups = range ? sumOf(perSlot(sud, h.signups_hours)) : [...sud.values()].reduce((a, v) => a + v, 0);
       const dn14 = days14().map(dayName);
       // Health: secured (of each sign-up day's accounts, the share with a backup now), active (per UTC day), and the
@@ -2037,11 +2044,18 @@ if (document.body.classList.contains("login")) {
       liveChart({ line, bars: d.values.map((v) => v || 0), ...axisOf(d.names) }, cls, foot, say), foot);
   };
   // The queue: Yos waiting for offline phones (the line) and the size of the photos and videos waiting (the bars), as
-  // the hub keeps them (users.py from its levels: per hour for 48 hours, per day for good, now live).
+  // the hub keeps them (users.py from its levels: per hour for the week, then per day, now live).
   const queueSlots = (h) => {
     if (range === 1) {
       const h1 = Math.floor(Date.now() / 3600000), q = h.queue_hours || {}, hrs = Array.from({ length: 24 }, (_, i) => h1 - 23 + i);
       return { names: hrs.map((x) => clock(x * 3600000)), rows: hrs.map((x) => q[x] || null) };
+    }
+    if (range === 7 && h.week && h.queue_week) {
+      const rows = weekStarts().map(start => {
+        for (let hour = start + 5; hour >= start; hour--) if (h.queue_week[hour]) return h.queue_week[hour];
+        return null;
+      });
+      return { names: weekNames(), rows };
     }
     const t = today0(), n = range || 30, q = h.queue_days || {}, ds = Array.from({ length: n }, (_, i) => t - n + 1 + i);
     return { names: ds.map(dayName), rows: ds.map((d) => q[d] || null) };
@@ -2051,7 +2065,7 @@ if (document.body.classList.contains("login")) {
   const sparkBars = (values, cls, tip, top2, recorded) => {
     const n = Math.max(1, values.length), sl = 140 / n, tot = values.map((v, i) => (v || 0) + (top2?.[i] || 0)), top = Math.max(1e-9, ...tot);
     const s = svg("svg", { class: "spark", viewBox: "0 0 140 28", preserveAspectRatio: "none", "aria-hidden": "true" });
-    const rect = (i, y, h, c) => svg("rect", { x: (i * sl + sl * 0.16).toFixed(2), width: (sl * 0.68).toFixed(2), y: y.toFixed(1), height: h.toFixed(1), rx: 1, class: c });
+    const rect = (i, y, h, c) => svg("rect", { x: (i * sl).toFixed(2), width: sl.toFixed(2), y: y.toFixed(1), height: h.toFixed(1), rx: 1, class: c });
     values.forEach((v, i) => {
       if (!top2) { const h = v ? Math.max(2, (v / top) * 26) : 1.5; s.append(rect(i, 28 - h, h, v ? `b ${cls || ""}`.trim() : "b zero")); return; }
       const g = svg("g", {}), h = tot[i] ? Math.max(2, (tot[i] / top) * 26) : 1.5, hb = tot[i] ? (h * (v || 0)) / tot[i] : 0;
@@ -2069,8 +2083,8 @@ if (document.body.classList.contains("login")) {
     const n = Math.max(1, series[0]?.length || 1), W = 140, H = 28, sl = W / n, s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" });
     for (let i = 0; i < n; i++) {
       const g = svg("g", {}); let y = H;
-      series.forEach((v, k) => { const hh = ((v[i] || 0) / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: (i * sl + sl * 0.12).toFixed(1), width: (sl * 0.76).toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: "b", style: `fill:${colors[k]}` })); });
-      if (y === H) g.append(svg("rect", { x: (i * sl + sl * 0.12).toFixed(1), width: (sl * 0.76).toFixed(1), y: H - 1.5, height: 1.5, class: "b zero" }));
+      series.forEach((v, k) => { const hh = ((v[i] || 0) / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: (i * sl).toFixed(1), width: sl.toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: "b", style: `fill:${colors[k]}` })); });
+      if (y === H) g.append(svg("rect", { x: (i * sl).toFixed(1), width: sl.toFixed(1), y: H - 1.5, height: 1.5, class: "b zero" }));
       s.append(g);
     }
     if (tip) hoverTip(s, n, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
@@ -2078,10 +2092,11 @@ if (document.body.classList.contains("login")) {
   };
   // A card of rows like the overview's: an icon, the label, its value and a sparkline (each slot's popup on hover);
   // a rule before a row marked sep. Rows: { ico, label, value, cls, values, scls, tip, sep }.
-  const sparkCard = (title, rows) => {
+  const sparkRows = (rows, heading = false) => {
     const box = el("div", "srows");
     for (const r of rows) {
-      const row = el("div", `srow${r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
+      const first = heading && !box.childElementCount;
+      const row = el(first ? "h2" : "div", `srow${first ? " gh" : ""}${r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
@@ -2091,8 +2106,9 @@ if (document.body.classList.contains("login")) {
       else if (r.bar != null) { const b = shareBar(r.bar, "current"); b.classList.add("srow-bar"); row.append(b); }
       box.append(row);
     }
-    return dcard(title, null, box);
+    return box;
   };
+  const sparkCard = (title, rows) => dcard(title, null, sparkRows(rows));
   // The delivery rows (Speed, Queue, Push, Media queue): the first group of the Problems card.
   const perfRows = (h) => {
     const d = speedData, tot = (b) => b.reduce((a, v) => a + v, 0), { names, rows } = queueSlots(h);
@@ -2175,7 +2191,7 @@ if (document.body.classList.contains("login")) {
   };
   // The last 24 hours of an event kind, rolling (not since UTC midnight): the "in 24 h" sub-lines.
   const last24sum = (k) => last24(hubNow?.events?.[k]?.hours).reduce((a, v) => a + (v || 0), 0);
-  const evSlots = (k) => ({ ...perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours), day24: last24sum(k) });
+  const evSlots = (k) => ({ ...(range === 7 && hubNow?.week ? { values: weekEvent(k), names: weekNames() } : perSlot(year(hubNow?.events?.[k]?.year), hubNow?.events?.[k]?.hours)), day24: last24sum(k) });
   const rangeCount = (key, slots = evSlots(key)) => range ? sumOf(slots) : hubNow?.events?.[key]?.total ?? sumOf(slots);
   const sumOf = (d) => d.values.reduce((a, v) => a + (v || 0), 0);
   // Users seen in the range: today (1), 7 days (7), 30 days (30, Total).
@@ -2208,14 +2224,14 @@ if (document.body.classList.contains("login")) {
     { color: "var(--bad)", label: "Open crash reports", value: num(p.cr[i]) },
   ] } : null;
   const problemSplit = (h) => {
-    const hourly = range === 1, size = hourly ? 3600000 : 86400000, count = hourly ? 24 : range || 30;
-    const first = Math.floor(Date.now() / size) - count + 1;
+    const hourly = range === 1, weekly = range === 7 && h.week, size = hourly ? 3600000 : weekly ? 21600000 : 86400000, count = hourly ? 24 : weekly ? 28 : range || 30;
+    const first = weekly ? h.week.start * 3600000 : (Math.floor(Date.now() / size) - count + 1) * size;
     const slots = Array(count).fill(null);
     for (const point of h.open_report_history || []) {
-      const i = Math.floor(point.t / size) - first;
+      const i = Math.floor((point.t - first) / size);
       if (i >= 0 && i < count) slots[i] = point;
     }
-    return { names: slots.map((_, i) => hourly ? clock((first + i) * size) : dayName(first + i)),
+    return { names: weekly ? weekNames() : slots.map((_, i) => hourly ? clock(first + i * size) : dayName(first / size + i)),
       recorded: slots.map(Boolean), er: slots.map((p) => p?.errors_open), cr: slots.map((p) => p?.crashes_open) };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
@@ -2376,8 +2392,9 @@ if (document.body.classList.contains("login")) {
     // Yos per user), each with its history in the hover.
     const statsRows = (h) => {
       const mau = h.active_month || 0, dau = h.active_today ?? 0, yoN = h.events ? last24sum("yo-in") : null, t = today0();
-      const ds = Array.from({ length: 14 }, (_, i) => t - 13 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
-      const active = ds.map((d) => (d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0));
+      const days = range || 30, ds = Array.from({ length: days }, (_, i) => t - days + 1 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
+      const activeOn = d => d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0;
+      const active = ds.map(activeOn);
       const per = ds.map((d, i) => (active[i] ? (yo.get(d) || 0) / active[i] : 0));
       const mean = (yos, users) => yos != null && users ? (yos / users).toFixed(1) : "–";
       const meanTip = (head, yos, users) => ({ head, note: "Accepted Yos divided by accounts seen in this period. The hub keeps no per-recipient history for a median.",
@@ -2388,7 +2405,7 @@ if (document.body.classList.contains("login")) {
       const wk = (h.secured_days || []).slice(-7).filter(Boolean), made = wk.reduce((n, d) => n + d[0], 0), withKey = wk.reduce((n, d) => n + d[1], 0);
       return [
           { ico: "chart", label: "Active", value: pctText(mau ? (100 * dau) / mau : null), bar: mau ? dau / mau : 0,
-            title: { cap: 1, head: "Active users", nodes: [sparkBars(active, "", null)], note: "Bars: users seen per day, the last 14 days", rows: [{ label: "DAU (last 24 h)", value: num(dau) }, { label: "MAU (last 30 days)", value: num(mau) }, { label: "Stickiness DAU / MAU", value: pctText(mau ? (100 * dau) / mau : null) },
+            title: { cap: 1, head: "Active users", nodes: [sparkBars(Array.from({ length: 14 }, (_, i) => activeOn(t - 13 + i)), "", null)], note: "Bars: users seen per day, the last 14 days", rows: [{ label: "DAU (last 24 h)", value: num(dau) }, { label: "MAU (last 30 days)", value: num(mau) }, { label: "Stickiness DAU / MAU", value: pctText(mau ? (100 * dau) / mau : null) },
               { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: ret[k] ?? "–" }))] } },
           (() => {
             // Secured: accounts with a backup as a share of all accounts (the bar); its line over the last 30 days in the hover.
@@ -2423,12 +2440,12 @@ if (document.body.classList.contains("login")) {
           title: { cap: 1, head: label, nodes: [sparkBars(s.values.map((v) => v || 0), "cool", null)], rows: [{ label: "In range", value: num(count) }, ...(size ? [{ label: "Yos in range", value: num(yos) }] : []), { label: "Total", value: num(total) }, { label: "In 24 h", value: num(s.day24) },
             ...(size ? [{ label: "Size, all media", value: h.events?.["media-in-bytes"]?.total == null ? "–" : bytes(h.events["media-in-bytes"].total) }] : [])] } };
       };
-      slot.replaceChildren(sparkCard("Sent", [row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true), row("user", "Groups", "group-create", h.groups ?? 0, false), ...botCards(h)]).querySelector(".srows"));
+      slot.replaceChildren(sparkRows([row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true), row("user", "Groups", "group-create", h.groups ?? 0, false), ...botCards(h)], true));
     };
     drawAccountStatsImpl = (h) => {
       const slot = $("uc-rows");
       if (!slot || !h || h.error) return;
-      slot.replaceChildren(sparkCard("Stats", [...statsRows(h), deviceRow()]).querySelector(".srows"));
+      slot.replaceChildren(sparkRows([...statsRows(h), deviceRow()], true));
     };
     // Secured: accounts with a backup, this week's new ones, and the share per sign-up day.
     const securedCard = () => {
@@ -2446,16 +2463,18 @@ if (document.body.classList.contains("login")) {
       const slots = Array.from({ length: span }, (_, i) => (range === 1 ? h1 - span + 1 + i : t0 - span + 1 + i));
       const slotName = (x) => (range === 1 ? clock(x * 3600000) : dayName(x)), unitMs = range === 1 ? 3600000 : 86400000;
       const fbDays = year(h.support_days), fbHours = last24(h.support_hours);
-      const fb = slots.map((x, i) => (range === 1 ? fbHours[i] || 0 : fbDays.get(x) || 0));
-      const rp = slots.map((x) => (h.reports || []).filter((r) => Math.floor(r.at / unitMs) === x).length);
+      const weekly = range === 7 && h.week?.feedback;
+      const names = weekly ? weekNames() : slots.map(slotName);
+      const fb = weekly || slots.map((x, i) => (range === 1 ? fbHours[i] || 0 : fbDays.get(x) || 0));
+      const rp = weekly ? weekStarts().map(h0 => (h.reports || []).filter(r => r.at >= h0 * 3600000 && r.at < (h0 + 6) * 3600000).length) : slots.map((x) => (h.reports || []).filter((r) => Math.floor(r.at / unitMs) === x).length);
       const openFeedback = h.support_unread_days?.at(-1) ?? 0;
       const openReports = (h.reports || []).filter((r) => !lastDone.has(reportKey(r))).length;
       const period = range === 1 ? "in 24 h" : range ? `in ${range} d` : "in total";
       const summary = (open, incoming) => `Open ${num(open)} · came in ${num(incoming)} ${period}`;
       const userRows = [
-        { ico: "chat", label: "Feedback", value: num(openFeedback), cls: openFeedback ? "warn" : "", title: summary(openFeedback, kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
-        { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary(openReports, kinds.Reports), values: rp, scls: "warm",
-          tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
+        { ico: "chat", label: "Feedback", value: num(openFeedback), cls: openFeedback ? "warn" : "", title: summary(openFeedback, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
+        { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary(openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
+          tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
           const causes = new Set(open.map(diagCause)).size, reports = open.reduce((n, d) => n + (d.count || 0), 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
@@ -2475,7 +2494,7 @@ if (document.body.classList.contains("login")) {
                 ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
         })(),
       ];
-      return [sparkCard("Feedback", userRows)];
+      return [sparkRows(userRows, true)];
     };
 
   }
@@ -2490,8 +2509,8 @@ if (document.body.classList.contains("login")) {
     if (!hubNow) return;
     parkSelect();
     $("grp-vr").replaceChildren(...relCard(hubNow));
-    $("delivery-rows").replaceChildren(sparkCard("Delivery", perfRows(hubNow)).querySelector(".srows"));
-    $("feedback-rows").replaceChildren(DETAIL.pr()[0].querySelector(".srows"));
+    $("delivery-rows").replaceChildren(sparkRows(perfRows(hubNow), true));
+    $("feedback-rows").replaceChildren(DETAIL.pr()[0]);
   };
   // Redrawn with fresh data, unless the pointer is on a card (its captions) or a select is open; then once it leaves.
   function redrawDetail() {

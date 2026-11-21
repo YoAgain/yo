@@ -1361,14 +1361,11 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 }
 @media (max-width: 540px) {
   .ov > .topbar { --dial-size: 44px; padding: 10px 4px; }
-  .topbar #t-system { gap: 2px; }
+  .topbar #t-system { justify-self: center; max-width: 236px; gap: 8px 12px; }
   .topbar .logo { margin-left: 6px; }
   .topbar #range { margin-right: 6px; }
   .dial { font-size: 10px; }
   .dial-face { font-size: 13px; }
-}
-@media (max-width: 389px) {
-  .topbar #t-system { justify-self: center; max-width: 236px; column-gap: 12px; row-gap: 8px; }
 }
 .ctip :is(.th.cap, .tsec), .tside .tside-k { font-size: 12px; }
 @media (min-width: 1200px) { .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
@@ -1400,3 +1397,18 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 #t-uc .cfoot .l-act::before { background: var(--ok); }
 .chartw .gtoday.big { display: block; gap: 0; }
 
+
+.overview-grid .srows {
+  display: grid;
+  grid-template-columns: 18px minmax(max-content, 1fr) max-content minmax(0, var(--graph-share));
+  column-gap: 8px;
+}
+.overview-grid .srows > .srow { grid-column: 1 / -1; grid-template-columns: subgrid; }
+.overview-grid .srow.gh :is(.sl, .sv) { font-size: inherit; }
+.overview-grid :is(.srow, .problem-chart) .spark rect {
+  stroke: var(--card); stroke-width: 1px; vector-effect: non-scaling-stroke;
+}
+.overview-grid .spark > .zero:last-child,
+.overview-grid .spark > g:last-child .zero,
+.overview-grid .area .cb.zero.now { fill: var(--muted) !important; }
+.problem-chart .spark g:not(:last-child, .on) .b { opacity: .6; }

@@ -176,6 +176,32 @@ def events(db, now: int) -> dict:
     return out
 
 
+def week_series(db, hour, has_app):
+    """28 six-hour windows ending with the current hour, aligned across metrics."""
+    start = hour - 167
+
+    def counts(table, condition):
+        slots = [0] * 28
+        for i, n in db.execute(
+                f"SELECT (created_at / 3600000 - ?) / 6, count(*) FROM {table} "
+                f"WHERE created_at >= ? AND created_at < ? AND {condition} GROUP BY 1",
+                (start, start * 3600000, (hour + 1) * 3600000)):
+            slots[i] = n
+        return slots
+
+    events = {}
+    if has_table(db, "events"):
+        for kind, i, n in db.execute(
+                "SELECT kind, (minute / 60 - ?) / 6, sum(n) FROM events "
+                "WHERE minute >= ? AND minute < ? GROUP BY 1, 2",
+                (start, start * 60, (hour + 1) * 60)):
+            events.setdefault(kind, [0] * 28)[i] = n
+    return {"start": start, "events": events,
+            "signups": counts("users u", f"NOT ({BOT_USER})" if has_app else "1"),
+            "feedback": counts("support_messages", "from_team = 0")
+            if has_table(db, "support_messages") else None}
+
+
 LIVE_KINDS = ("yo-in", "media-in")  # people's Yos and media; a bot's inbox (yo-in-bot) left out
 LIVE_MINUTES = 60
 
@@ -332,6 +358,7 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
         "active48": sorted(rows.get("active-48h", {}).items()),
         "active_days": {str(d): v for d, v in by_day("active-24h").items() if d < today},
         "queue_hours": hours,
+        "queue_week": {str(h): [v, media.get(h, 0)] for h, v in env.items() if hour_now - 168 < h <= hour_now} | hours,
         "queue_days": days,
         "open_report_history": [{"t": h * 3600000 - 1, "errors_open": errors.get(h, 0), "crashes_open": crashes.get(h, 0)}
                                 for h in sorted(set(errors) | set(crashes))],
@@ -427,6 +454,7 @@ def hub(name: str, path: str) -> dict:
             "problems_open": part("problems_open", lambda: open_problems(db, now)),
             # Sign-ups per UTC day since the first account, bots left out (every device a bot's: YoGPT or the CLI, as
             # the hub's db::is_bot_app), [[day, n], ...]: Sign-ups' bars and total.
+            "week": part("week", lambda: week_series(db, hour, has_app)),
             "signup_days": part("signup_days", lambda: [list(r) for r in db.execute(
                 f"SELECT created_at / ?, count(*) FROM users u WHERE NOT ({BOT_USER}) GROUP BY 1 ORDER BY 1", (DAY_MS,))], []),
             # Messages users wrote to the team per UTC day, the last 365 (today last): Feedback's bars and total.
