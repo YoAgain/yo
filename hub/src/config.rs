@@ -220,6 +220,9 @@ pub struct Config {
     pub reserved: Vec<Reserved>,
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
     pub trust_cloudflare: bool,
+    /// Addresses of test robots (`YO_ROBOT_RANGES`, default `ROBOT_RANGES`): their support messages, reports and
+    /// diagnostics are answered `204` and dropped.
+    pub robot_ranges: Vec<(std::net::IpAddr, u8)>,
     /// Apps allowed passkeys for this domain (`TEAMID.bundle.id`), for `/.well-known/apple-app-site-association`.
     pub apple_app_ids: Vec<String>,
     /// Digital Asset Links statements served at /.well-known/assetlinks.json.
@@ -263,6 +266,47 @@ pub fn parse_bots(text: &str) -> Result<Vec<(String, yo_wire::UserId)>, String> 
             Ok((label.to_owned(), id))
         })
         .collect()
+}
+
+/// Firebase Test Lab's devices (Google Play's pre-launch reports), as its documentation lists them
+/// (firebase.google.com/docs/test-lab/android/get-started, "IP address blocks", 2026-11).
+pub const ROBOT_RANGES: &str = "70.32.128.0/19,108.177.6.0/23,108.177.18.192/26,108.177.29.64/27,108.177.31.160/27,\
+    199.36.156.8/29,199.36.156.16/28,209.85.131.0/27,2001:4860:1008::/48,2001:4860:1018::/48,2001:4860:1019::/48,\
+    2001:4860:1020::/48,2001:4860:1022::/48,2001:4860:101d::/48,2001:4860:101e::/48,2001:4860:1031::/48,\
+    70.32.128.48/28,70.32.150.192/27,108.177.6.0/27,108.177.24.160/27,108.177.29.0/27,108.177.25.128/27,\
+    108.177.26.128/26,108.177.29.192/26,172.217.120.64/26,172.217.120.128/26,2001:4860:1037::/48,\
+    2001:4860:1038::/48,2001:4860:103a::/48,34.68.194.64/29,34.69.234.64/29,34.73.34.72/29,34.73.178.72/29,\
+    34.74.10.72/29,34.136.2.136/29,34.136.50.136/29,34.145.234.144/29,35.192.160.56/29,35.196.166.80/29,\
+    35.196.169.240/29,35.203.128.0/28,35.234.176.160/28,35.243.2.0/27,35.245.243.240/29,199.192.115.0/30,\
+    199.192.115.8/30,199.192.115.16/29";
+
+/// `YO_ROBOT_RANGES`: comma separated `ADDRESS/BITS`.
+pub fn parse_ranges(text: &str) -> Result<Vec<(std::net::IpAddr, u8)>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let bad = || format!("YO_ROBOT_RANGES: {s:?} is not ADDRESS/BITS");
+            let (ip, bits) = s.split_once('/').ok_or_else(bad)?;
+            let ip: std::net::IpAddr = ip.parse().map_err(|_| bad())?;
+            let bits: u8 = bits.parse().map_err(|_| bad())?;
+            match bits <= if ip.is_ipv4() { 32 } else { 128 } {
+                true => Ok((ip, bits)),
+                false => Err(bad()),
+            }
+        })
+        .collect()
+}
+
+/// The address lies in one of the ranges.
+pub fn in_ranges(ranges: &[(std::net::IpAddr, u8)], ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    let prefix = |a: u128, b: u128, bits: u8, width: u32| bits == 0 || (a ^ b) >> (width - bits as u32) == 0;
+    ranges.iter().any(|&(net, bits)| match (net, ip) {
+        (V4(net), V4(ip)) => prefix(u32::from(net).into(), u32::from(ip).into(), bits, 32),
+        (V6(net), V6(ip)) => prefix(net.into(), ip.into(), bits, 128),
+        _ => false,
+    })
 }
 
 /// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
@@ -314,6 +358,7 @@ impl Config {
             reserved: Vec::new(),
             admin_token: None,
             trust_cloudflare: false,
+            robot_ranges: parse_ranges(ROBOT_RANGES).expect("the robot ranges"),
             apple_app_ids: Vec::new(),
             asset_links: None,
             limits: Limits::unlimited(),

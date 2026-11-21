@@ -812,6 +812,47 @@ mod tests {
         assert_eq!(errors, Some(("error".to_owned(), 1)));
     }
 
+    /// A test robot's (Firebase Test Lab, by `CF-Connecting-IP`) support message, report and crash report: `204`,
+    /// nothing kept; everyone else's are kept as before.
+    #[tokio::test]
+    async fn robots_help_is_dropped() {
+        use axum::{body::Body, extract::ConnectInfo, http::Request};
+        use tower::ServiceExt;
+        let hub =
+            Hub::new(Config { trust_cloudflare: true, ..Config::for_tests() }, Arc::new(push::Recorder::default()))
+                .unwrap();
+        assert!(config::in_ranges(&hub.config.robot_ranges, "2001:4860:1008:1:2::3".parse().unwrap()));
+        assert!(!config::in_ranges(&hub.config.robot_ranges, "108.177.8.1".parse().unwrap()));
+        let message =
+            yo_wire::encode(&api::Feedback { text: b"Hello".to_vec().into(), app_version: b"1".to_vec().into() });
+        let report = yo_wire::encode(&api::Report { user_id: [9; 16], reason: api::REPORT_SPAM });
+        let crash = r#"{"app":"android/1","os":"o","model":"m","exception":"E","frames":"f","termination":"t"}"#;
+        for (ip, install) in
+            [("108.177.7.200", [0xaa; 16]), ("::ffff:34.68.194.65", [0xaa; 16]), ("192.0.2.1", [0xbb; 16])]
+        {
+            for (path, body) in [
+                (api::HELP_MESSAGES, message.clone()),
+                (api::HELP_REPORT, report.clone()),
+                (api::HELP_CRASH, crash.as_bytes().to_vec()),
+            ] {
+                let robot = install == [0xaa; 16];
+                let request = Request::post(path)
+                    .header(api::HEADER_INSTALL, if robot { "aa" } else { "bb" }.repeat(16))
+                    .header("cf-connecting-ip", ip)
+                    .extension(ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9))))
+                    .body(Body::from(body))
+                    .unwrap();
+                let status = hub.router().oneshot(request).await.unwrap().status();
+                let expected =
+                    if robot || path != api::HELP_REPORT { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND };
+                assert_eq!(status, expected, "{ip} {path}");
+            }
+        }
+        assert!(hub.db.support_thread(&[0xaa; 16]).unwrap().messages.is_empty(), "the robot's message is dropped");
+        assert_eq!(hub.db.support_thread(&[0xbb; 16]).unwrap().messages.len(), 1);
+        assert_eq!(counted(&hub).into_iter().find(|(kind, _)| kind == "crash"), Some(("crash".to_owned(), 1)));
+    }
+
     /// A push the service refuses: counted, and an error of the hub's own in diagnostics (domain "push", by reason and service,
     /// nothing of the device); one it takes is counted as such; a dead token is neither.
     #[tokio::test]

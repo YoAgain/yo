@@ -95,6 +95,9 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
 - **`YO_TRUST_CLOUDFLARE=1`** makes the hub take the client address from `CF-Connecting-IP`. Only safe when nothing
   but cloudflared can reach the listening address: anyone else could name any address and pass every per-address
   limit. The hub warns at start when it is set and the listening address is not a loopback one.
+- **Test robots.** Support messages, reports and crash/error reports from Firebase Test Lab's addresses (Google
+  Play's pre-launch reports; `config::ROBOT_RANGES`, as Firebase lists them, or `YO_ROBOT_RANGES`) are answered `204`
+  and dropped. The address is the one the limits use, so behind Cloudflare it needs `YO_TRUST_CLOUDFLARE=1`.
 - **The server's own services.** With `YO_TRUST_CLOUDFLARE=1`, a request from a loopback address *without*
   `CF-Connecting-IP` is the server itself (YoGPT, speaking for many users from one address) and is exempt from the
   per-address limits (not from the per-device and per-user ones, nor the disk floor). Anything on the server that

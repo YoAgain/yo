@@ -226,20 +226,27 @@ impl Hub {
         self.config.trust_cloudflare && peer.ip().is_loopback() && !headers.contains_key("cf-connecting-ip")
     }
 
-    /// The client's address as limits count it, IPv6 by /64; `CF-Connecting-IP` only if trusted: else anyone forges it.
-    fn ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    /// A test robot's request (`robot_ranges`, by the client's address): its help is answered `204` and dropped.
+    pub(crate) fn robot(&self, peer: SocketAddr, headers: &HeaderMap) -> bool {
+        crate::config::in_ranges(&self.config.robot_ranges, self.client_ip(peer, headers))
+    }
+
+    /// The client's address; `CF-Connecting-IP` only if trusted: else anyone forges it.
+    fn client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
         let ip = match header(headers, "cf-connecting-ip").and_then(|v| v.parse().ok()) {
             Some(ip) if self.config.trust_cloudflare => ip,
             _ => peer.ip(),
         };
-        match ip {
-            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => IpAddr::V4(v4),
-                None => {
-                    let s = v6.segments();
-                    IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
-                }
-            },
+        ip.to_canonical()
+    }
+
+    /// The client's address as limits count it, IPv6 by /64.
+    fn ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+        match self.client_ip(peer, headers) {
+            IpAddr::V6(v6) => {
+                let s = v6.segments();
+                IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
             v4 => v4,
         }
     }

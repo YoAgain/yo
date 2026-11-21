@@ -1,6 +1,7 @@
 //! Help (spec 6.4): what a phone tells the operator about the app, by a random install id (`Yo-Install`), never by
 //! the account and never signed: messages to the operator and their thread, reports of users, crash and error
-//! reports. Messages are plain text to the hub, not end-to-end encrypted (spec 1).
+//! reports. Messages are plain text to the hub, not end-to-end encrypted (spec 1). A test robot's (`robot_ranges`)
+//! are answered `204` and dropped.
 
 use crate::db::Install;
 use crate::error::{refuse, Res};
@@ -29,6 +30,9 @@ fn limited(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, per_install: 
 
 /// `POST /v1/help/report`: a user reported, for the operator to review; the reporter is the install id.
 pub(crate) async fn post_report(State(hub): Hubs, peer: Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    if hub.robot(peer.0, &headers) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let request: api::Report = decode(&body)?;
     if !(api::REPORT_SPAM..=api::REPORT_OTHER).contains(&request.reason) {
         return Err(bad());
@@ -42,6 +46,9 @@ pub(crate) async fn post_report(State(hub): Hubs, peer: Peer, headers: HeaderMap
 
 /// `POST /v1/help/messages`: a message to the operator. `429`: the day's are used up, or the thread is full.
 pub(crate) async fn post_message(State(hub): Hubs, peer: Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    if hub.robot(peer.0, &headers) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let request: api::Feedback = decode(&body)?;
     let (text, app_version) = request.check().map_err(|_| bad())?;
     let install = limited(&hub, "support", peer, &headers, hub.config.limits.support_per_install_day)?;
@@ -83,6 +90,9 @@ pub(crate) async fn post_crash(State(hub): Hubs, peer: Peer, headers: HeaderMap,
 /// A crash or error report: a JSON object of strings from a fixed list, nothing else; kept with its install id, so
 /// the operator counts installs, not reports.
 fn diagnostic(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, body: &[u8]) -> Res<StatusCode> {
+    if hub.robot(peer.0, headers) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let install = install(headers)?;
     hub.limit_ip("diagnostic", peer.0, headers, hub.config.limits.diagnostics_per_ip_hour, HOUR)?;
     hub.limit_by("diagnostic", &install, hub.config.limits.diagnostics_per_install_hour, HOUR)?;

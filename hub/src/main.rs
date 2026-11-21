@@ -3,6 +3,8 @@
 //!   YO_LISTEN             address, default 127.0.0.1:8080 (behind a Cloudflare Tunnel)
 //!   YO_DB                 SQLite file, default yo-hub.sqlite
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
+//!   YO_ROBOT_RANGES       ADDRESS/BITS, comma-separated: test robots, whose support messages, reports and
+//!                         diagnostics are answered 204 and dropped; default Firebase Test Lab's (config::ROBOT_RANGES)
 //!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE, YO_ASSET_LINKS_FILE
@@ -35,7 +37,9 @@
 //!   yo-hub zk public FILE                               prints them again
 
 use std::sync::Arc;
-use yo_hub::config::{parse_min_app, read_hub_key, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
+use yo_hub::config::{
+    parse_min_app, parse_ranges, read_hub_key, ApnsConfig, BlobConfig, Config, FcmConfig, Limits, ROBOT_RANGES,
+};
 use yo_hub::{push, Hub};
 use yo_wire::b64;
 
@@ -95,6 +99,7 @@ fn config() -> Result<(Config, String), String> {
         db_path,
         reserved: Vec::new(), // the names live in the database, added through the admin page
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
+        robot_ranges: parse_ranges(&var("YO_ROBOT_RANGES").unwrap_or_else(|| ROBOT_RANGES.to_owned()))?,
         apple_app_ids: var("YO_APPLE_APP_IDS")
             .map(|ids| ids.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect())
             .unwrap_or_default(),
