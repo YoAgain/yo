@@ -18,6 +18,22 @@ class MarksTests(unittest.TestCase):
                                      "ACCESS_TEAM": "invalid", "ACCESS_AUD": "test", "STATE_DIRECTORY": self.temp.name}):
             self.admin = load("admin")
 
+    def test_open_report_history(self):
+        hour = 3600000
+        def record(t, errors, changed=None):
+            data = {"open_report_counts": {"error": errors, "crash": 2}}
+            return self.admin.problem_history({"at": t, "live": data}, changed)["live"]["open_report_history"]
+
+        record(hour, 8)
+        record(2 * hour, 7)
+        self.assertEqual(record(2 * hour + 1, 4)[-1]["errors_open"], 7)
+        closed = record(2 * hour + 2, 3, "live")[-1]
+        self.assertEqual(closed, {"t": 2 * hour + 2, "errors_open": 3, "crashes_open": 2})
+        recent = record(24 * hour, 5)[-1]
+        points = record(31 * 24 * hour, 0)
+        self.assertEqual(points[:-1], [closed, recent])
+        self.assertEqual(points[-1]["errors_open"], 0)
+
     def test_active_days_keep_the_highest_count_per_day(self):
         admin, day = self.admin, 20400
         now = day * 86400000 + 5000

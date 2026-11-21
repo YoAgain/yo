@@ -937,9 +937,9 @@ if (document.body.classList.contains("login")) {
       spark("pr", values[values.length - 1], values, names, (i, v) => `${num(v)} open`, "Problems open: feedback, errors and reports");
       $("c-pr").classList.add("bad-up");
     } else rangeRow("pr", problems, "problems", "Problems: feedback, errors and reports", null, true, probHours);
-    // The tile's bars: what came in per slot, errors (orange) with the crashes on top (red).
+    // The tile's bars: open reports per slot, errors (orange) with the crashes on top (red).
     if (h) {
-      const node = $("pr-spark"), p = problemSplit(h), sb = sparkBars(p.er, "warm", null, p.cr);
+      const node = $("pr-spark"), p = problemSplit(h), sb = sparkBars(p.er, "warm", null, p.cr, p.recorded);
       node.replaceChildren(...sb.childNodes);
       node.hidden = false;
       node._split = p;
@@ -2115,13 +2115,14 @@ if (document.body.classList.contains("login")) {
   };
   // A sparkline like the overview's rows: a bar per slot (the last one full), no axis.
   // top: a second list stacked on the first (the first from the bottom in cls, this one above it in red).
-  const sparkBars = (values, cls, tip, top2) => {
+  const sparkBars = (values, cls, tip, top2, recorded) => {
     const n = Math.max(1, values.length), sl = 140 / n, tot = values.map((v, i) => (v || 0) + (top2?.[i] || 0)), top = Math.max(1e-9, ...tot);
     const s = svg("svg", { class: "spark", viewBox: "0 0 140 28", preserveAspectRatio: "none", "aria-hidden": "true" });
     const rect = (i, y, h, c) => svg("rect", { x: (i * sl + sl * 0.16).toFixed(2), width: (sl * 0.68).toFixed(2), y: y.toFixed(1), height: h.toFixed(1), rx: 1, class: c });
     values.forEach((v, i) => {
       if (!top2) { const h = v ? Math.max(2, (v / top) * 26) : 1.5; s.append(rect(i, 28 - h, h, v ? `b ${cls || ""}`.trim() : "b zero")); return; }
       const g = svg("g", {}), h = tot[i] ? Math.max(2, (tot[i] / top) * 26) : 1.5, hb = tot[i] ? (h * (v || 0)) / tot[i] : 0;
+      if (recorded && !recorded[i]) g.setAttribute("opacity", "0.65");
       if (!tot[i]) g.append(rect(i, 28 - h, h, "b zero"));
       if (hb) g.append(rect(i, 28 - hb, hb, `b ${cls || ""}`.trim()));
       if (h - hb > 0 && tot[i]) g.append(rect(i, 28 - h, h - hb, "b hot"));
@@ -2152,7 +2153,7 @@ if (document.body.classList.contains("login")) {
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
-      if (r.values) row.append(sparkBars(r.values, r.scls, r.tip, r.top));
+      if (r.values) row.append(sparkBars(r.values, r.scls, r.tip, r.top, r.recorded));
       else if (r.node) row.append(r.node);
       else if (r.stack) row.append(stackBars(r.stack, r.stackColors, r.tip));
       else if (r.bar != null) { const b = shareBar(r.bar, "current"); b.classList.add("srow-bar"); row.append(b); }
@@ -2264,13 +2265,11 @@ if (document.body.classList.contains("login")) {
   // The counts of the range's problems: all reports (sum of counts), the installs behind them, their share of the phones seen.
   const problemRows = (q, i) => {
     const t = problemTotals;
-    return [{ color: "#e67e22", label: "Errors reports", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crash reports", value: num(q.cr[i]) },
+    return [{ label: "Open report counts", value: q.recorded[i] ? "recorded" : "estimated" }, { color: "#e67e22", label: "Errors reports", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crash reports", value: num(q.cr[i]) },
       { label: "Errors open (causes)", value: num(q.ec[i]) }, { label: "Crashes open (causes)", value: num(q.cc[i]) }, { label: "Groups", value: num(q.gr[i]) },
       ...(t ? [{ label: "Installs affected (range)", value: t.installs == null ? "–" : num(t.installs) }, { label: "Of phones seen", value: t.installs == null || !t.seen ? "–" : pctText((100 * t.installs) / t.seen) }] : [])];
   };
-  // Open problems per slot, for the Problems tile and its detail row: the error groups (orange) and crash groups (red)
-  // not done yet, a done one counts nowhere. The hub keeps no time of when a group arrived in the past, so the open
-  // groups of a kind arrive evenly between the oldest one's first report and now: a rise to today's open count.
+  // Before recording began, estimate reports from the currently open groups.
   const problemSplit = (h) => {
     const now = Date.now(), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
     const t0 = open.length ? Math.min(...open.map((d) => d.first_seen)) : now;
@@ -2283,8 +2282,16 @@ if (document.body.classList.contains("login")) {
       : Array.from({ length: range || 30 }, (_, i) => Math.min(now, (today0() - (range || 30) + 2 + i) * 86400000));
     const names = range === 1 ? ends.map((t, i) => clock((Math.floor(now / 3600000) - 23 + i) * 3600000)) : ends.map((t, i) => dayName(today0() - (range || 30) + 1 + i));
     const at = (t) => { const e = upTo(eg, t), c = upTo(cg, t); return { er: sum(e), cr: sum(c), ec: new Set(e.map((x) => x.cause)).size, cc: new Set(c.map((x) => x.cause)).size, gr: e.length + c.length }; };
-    const cols = ends.map(at);
-    return { names, er: cols.map((x) => x.er), cr: cols.map((x) => x.cr), ec: cols.map((x) => x.ec), cc: cols.map((x) => x.cc), gr: cols.map((x) => x.gr) };
+    const points = h.open_report_history || [];
+    let next = 0;
+    const cols = ends.map((end, i) => {
+      // Closed slots exclude the next slot's midnight/hour boundary.
+      const until = i === ends.length - 1 ? end : end - 1;
+      while (next < points.length && points[next].t <= until) next++;
+      const col = at(end), point = points[next - 1];
+      return point ? { ...col, er: point.errors_open, cr: point.crashes_open, recorded: true } : col;
+    });
+    return { names, recorded: cols.map((x) => !!x.recorded), er: cols.map((x) => x.er), cr: cols.map((x) => x.cr), ec: cols.map((x) => x.ec), cc: cols.map((x) => x.cc), gr: cols.map((x) => x.gr) };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
@@ -2526,7 +2533,7 @@ if (document.body.classList.contains("login")) {
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${p.ec.at(-1) + p.cc.at(-1)}${matchMedia("(max-width: 430px)").matches ? "" : p.ec.at(-1) + p.cc.at(-1) === 1 ? " cause" : " causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${p.ec.at(-1) + p.cc.at(-1)}${matchMedia("(max-width: 430px)").matches ? "" : p.ec.at(-1) + p.cc.at(-1) === 1 ? " cause" : " causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => ({ head: p.names[i], rows: problemRows(p, i) }) }; })(),
         (() => {
           // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three

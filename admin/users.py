@@ -368,6 +368,9 @@ def hub(name: str, path: str) -> dict:
             # The team's to-dos: their own table from the hub's schema 7, the X'' thread before it.
             "todos": part("todos", lambda: [{"id": i, "text": text(t), "at": at, "done_at": done}
                 for i,t,at,done in db.execute(TODOS_SQL(db) + " ORDER BY done_at IS NOT NULL,created_at DESC LIMIT ?", (LIMIT,))] if TODOS_SQL(db) else [], []),
+            "open_report_counts": part("open_report_counts", lambda: dict(db.execute(
+                "SELECT kind, sum(count) FROM diagnostics WHERE done=0 GROUP BY kind"))
+                if has_table(db, "diagnostics") else {}),
             "diagnostics_open": part("diagnostics_open", lambda: one("SELECT count(*) FROM diagnostics WHERE done=0") if has_table(db,"diagnostics") else 0),
             "todos_open": part("todos_open", lambda: one(f"SELECT count(*) FROM ({TODOS_SQL(db)}) WHERE done_at IS NULL") if TODOS_SQL(db) else 0),
             "diagnostic_days": part("diagnostic_days", lambda: [{"day": day, "kind": kind, "count": count}
