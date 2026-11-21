@@ -277,6 +277,14 @@ def problem_installs(db, now: int):
     return out
 
 
+def diagnostics(db):
+    installs = ("(SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id = d.id)"
+                if has_table(db, "diagnostic_installs") else "NULL")
+    cursor = db.execute(f"SELECT d.*, {installs} AS installs FROM diagnostics d ORDER BY last_seen DESC")
+    columns = [c[0] for c in cursor.description]
+    return with_causes(db, [dict(zip(columns, row)) for row in cursor])
+
+
 def with_causes(db, rows):
     """Each diagnostics row with its cause's totals over every group of it (builds, lines): reports (sum of counts) and
     the distinct installs. Counts only."""
@@ -431,13 +439,7 @@ def hub(name: str, path: str) -> dict:
             "diagnostic_days": part("diagnostic_days", lambda: [{"day": day, "kind": kind, "count": count}
                 for day,kind,count in db.execute("SELECT day,kind,count FROM diagnostic_days ORDER BY day")]
                 if has_table(db,"diagnostic_days") else [], []),
-            "diagnostics": part("diagnostics", lambda: with_causes(db, [dict(zip(
-                ("id", "kind", "count", "first_seen", "last_seen", "app", "os", "model", "payload", "done", "installs"), row))
-                for row in db.execute("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,"
-                    + ("(SELECT count(DISTINCT install) FROM diagnostic_installs i WHERE i.diagnostic_id = diagnostics.id)"
-                       if has_table(db, "diagnostic_installs") else "NULL")
-                    + " FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))])
-                if has_table(db, "diagnostics") else [], []),
+            "diagnostics": part("diagnostics", lambda: diagnostics(db) if has_table(db, "diagnostics") else [], []),
             "problem_installs": part("problem_installs", lambda: problem_installs(db, now)),
             # Crash-free installs (estimated) per range: installs with a crash against the phones seen.
             "crash_free": part("crash_free", lambda: crash_free(db, now)),

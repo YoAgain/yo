@@ -15,18 +15,24 @@ const supportList = ({ threads, filter = "open" }) => threads
 const crashFree = (installs, users) => (installs == null || !users ? null : Math.max(0, 100 - (100 * installs) / users));
 // </support-list>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
-const diagInfo = (d) => {
-  let p = {};
-  try { p = JSON.parse(d.payload || "{}") || {}; } catch {}
-  const title = d.kind === "crash" ? (p.exception || p.termination || "Crash")
-    : [p.domain, p.code, p.place].filter((x) => x != null && x !== "").join(" · ") || "Error";
-  const text = [p.details, p.frames, p.message].filter(Boolean).join("\n\n") || d.payload || "";
-  return { title, text, expected: p.severity === "expected" };
+const diagPayload = (d) => {
+  try { return JSON.parse(d.payload) ?? {}; } catch { return d.payload ?? {}; }
 };
-// What a group is about without its build or line (as users.problem_cause): a new build opens no new problem.
+const diagInfo = (d) => {
+  const p = diagPayload(d), domain = p.domain || "", code = String(p.code ?? "");
+  let name = p.message || domain || "Error";
+  if (/AuthenticationServices|ASAuthorizationError/i.test(domain) && code === "1004") name = "Passkey: request failed";
+  if (domain === "NSURLErrorDomain" && code === "-1009") name = "Offline";
+  if (domain === "SharedAccess" && code === "35") name = "Shared state busy";
+  if (/^HTTP$/i.test(domain)) name = ({409: "Request conflict", 410: "Resource gone", 429: "Too many requests"})[code]
+    || (/^5\d\d$/.test(code) ? "Server error" : "HTTP request failed");
+  const title = d.kind === "crash" ? [p.exception, p.termination].filter(Boolean).join(" · ") || "Crash"
+    : code ? `${name} (${code})` : name;
+  return { title, expected: p.severity === "expected" };
+};
+// Match the collector's cause key across builds and source line changes.
 const diagCause = (d) => {
-  let p = {};
-  try { p = JSON.parse(d.payload || "{}") || {}; } catch {}
+  const p = diagPayload(d);
   const place = String(p.place ?? "").replace(/^\w+\//, "").replace(/:\d+/g, "");
   return JSON.stringify(d.kind === "crash" ? [d.kind, p.exception ?? "", p.termination ?? ""] : [d.kind, p.domain ?? "", p.code ?? "", place]);
 };
@@ -1365,9 +1371,75 @@ if (document.body.classList.contains("login")) {
     wrap.append(sw, label, form, err);
     return wrap;
   };
+  const diagnosticBuild = (d, payload) => {
+    const app = d.app || payload.app || "";
+    const rc = [payload.release, payload.version, app].join(" ").match(/\bRC(?:[ -]?\d+)?\b/i);
+    if (rc) return rc[0];
+    const stamp = build(app);
+    if (/^\d{12}$/.test(stamp)) return `${buildLabel(app)}, ${stamp.slice(0, 4)} UTC`;
+    return app;
+  };
+  const diagnosticList = (rows, previous) => {
+    const list = el("div", "diag-list"), groups = new Map(), hub = which;
+    const expanded = new Set([...previous.querySelectorAll("details[open]")].map(d => d.dataset.cause));
+    for (const d of rows) {
+      const key = diagCause(d);
+      if (!groups.has(key)) groups.set(key, { key, rows: [], open: false, first: d.first_seen, last: d.last_seen });
+      const g = groups.get(key);
+      g.rows.push(d);
+      g.open ||= !d.done;
+      g.first = Math.min(g.first, d.first_seen);
+      g.last = Math.max(g.last, d.last_seen);
+    }
+    for (const g of [...groups.values()].sort((a, b) => b.open - a.open || b.last - a.last)) {
+      const details = el("details"), summary = el("summary"), item = el("article", "diag-item");
+      details.dataset.cause = g.key;
+      details.open = expanded.has(g.key);
+      const places = new Set(), builds = new Set();
+      for (const d of g.rows) {
+        const p = diagPayload(d);
+        const place = p.place || p.endpoint || (p.file && [p.file, p.line].filter(Boolean).join(":"))
+          || String(p.frames || "").split("\n").find(line => /\bYo\b/.test(line));
+        if (place) places.add(place);
+        const buildName = diagnosticBuild(d, p);
+        if (buildName) builds.add(buildName);
+      }
+      const first = g.rows[0], reports = g.rows.reduce((sum, d) => sum + d.count, 0);
+      summary.append(el("strong", null, diagInfo(first).title),
+        el("span", "diag-place", [...places].join(" · ") || "Location unknown"),
+        el("span", null, "Builds · " + ([...builds].join(", ") || "Unknown")),
+        el("span", null, `${num(reports)} reports · ${num(first.cause_installs)} installs`),
+        el("span", null, `First seen ${rel(g.first)} · Last seen ${rel(g.last)}`));
+      const seen = last?.[hub]?.crash_free?.["0"]?.[1];
+      if (seen && first.cause_installs != null) summary.append(el("span", null,
+        `${pctText(100 * first.cause_installs / seen)} of phones seen in 90 days`));
+      const raw = el("pre", "pii");
+      const showRaw = () => {
+        if (details.open && !raw.textContent) raw.textContent = JSON.stringify(g.rows.map(d => ({ ...d, payload: diagPayload(d) })), null, 2);
+      };
+      details.addEventListener("toggle", showRaw);
+      showRaw();
+      details.append(summary, raw);
+      const state = el("div", "diag-state"), button = el("button", "pill", g.open ? "Mark done" : "Reopen");
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          for (const d of g.rows.filter(d => !!d.done !== g.open))
+            await postJSON("/diagnostics/done", { hub, id: d.id, done: g.open });
+        } catch (error) { state.append(el("span", "error", error.message)); }
+        finally { await refresh(); button.disabled = false; }
+      });
+      state.append(el("b", g.open ? "warn" : "muted", g.open ? "Open" : "Done"), button);
+      item.append(details, state);
+      list.append(item);
+    }
+    if (!groups.size) list.append(el("p", "empty", "No diagnostics."));
+    return list;
+  };
   const drawTables = () => {
     const box = $("tables"), list = last?.[which]?.tables || [];
-    const drawn = JSON.stringify([which, tableOpen, list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
+    const drawn = JSON.stringify([which, tableOpen, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
       (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
@@ -1382,20 +1454,22 @@ if (document.body.classList.contains("login")) {
     const rowsOf = (name) => list.find((x) => x.name === name);
     const open = (name, column) => { const t = rowsOf(name); if (!t) return 0; const i = t.columns.indexOf(column);
       return i < 0 ? t.count : t.rows.filter((r) => !r[i]).length; };
+    const openErrors = (last?.[which]?.diagnostics || []).filter(d => !d.done);
+    const openCauses = new Set(openErrors.map(diagCause)).size;
     const viewCount = (key) => key === "v-support" ? openSupport
-      : key === "v-errors" ? (last?.[which]?.diagnostics || []).filter((d) => !d.done).length || open("diagnostics", "done")
+      : key === "v-errors" ? openCauses
       : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
       const b = el("button", `main view${tableOpen === key ? " on" : ""}`), name = el("span", null, label);
       b.type = "button";
       if (key === "v-errors") {
         // Groups (a row per build and line), causes (what they are about) and reports (the sum of counts), open ones.
-        const g = (last?.[which]?.diagnostics || []).filter((d) => !d.done);
-        hint(b, { cap: 1, head: "Open errors and crashes", rows: [{ label: "Groups", value: num(g.length) }, { label: "Causes", value: num(new Set(g.map(diagCause)).size) }, { label: "Reports", value: num(g.reduce((n, d) => n + (d.count || 0), 0)) }] });
+        const g = openErrors;
+        hint(b, { cap: 1, head: "Open errors and crashes", rows: [{ label: "Groups", value: num(g.length) }, { label: "Causes", value: num(openCauses) }, { label: "Reports", value: num(g.reduce((n, d) => n + (d.count || 0), 0)) }] });
       } else b.title = tip;
       name.prepend(icon(ico));
       b.append(name, el("small", null, num(viewCount(key))));
-      b.addEventListener("click", () => { tableOpen = key; drawTables(); });
+      b.addEventListener("click", () => { unpin(); tableOpen = key; drawTables(); });
       side.append(b);
     }
     side.append(el("div", "tside-h", "Database"));
@@ -1428,7 +1502,8 @@ if (document.body.classList.contains("login")) {
       if (usersView) pane.append($("all-users"));
       if (t.name === "reserved") pane.append(reservedBar());
       if (tableOpen === "v-todos") pane.append(todoBar());
-      if (view === "list") {
+      if (tableOpen === "v-errors") pane.append(diagnosticList(last?.[which]?.diagnostics || [], box));
+      else if (view === "list") {
       const wrap = el("div", "scroll grid"), table = el("table", "list data");
       table.dataset.name = t.name;
       const hr = table.createTHead().insertRow();
@@ -1436,18 +1511,10 @@ if (document.body.classList.contains("login")) {
       for (const c of t.columns) hr.append(el("th", null, c));
       if (t.name === "reserved") hr.append(el("th"));
       const body = table.createTBody();
-      // Crash and error groups: open ones first, newest first; "Done" on each open one (done ones dimmed, "Reopen").
-      const diag = tableOpen === "v-errors", todo = tableOpen === "v-todos", col = (n) => t.columns.indexOf(n);
-      const rows = diag ? [...t.rows].sort((a, b) => (a[col("done")] ? 1 : 0) - (b[col("done")] ? 1 : 0) || b[col("last_seen")] - a[col("last_seen")]) : t.rows;
-      if (diag || todo) hr.append(el("th"));
-      for (const row of rows) {
+      const todo = tableOpen === "v-todos", col = (n) => t.columns.indexOf(n);
+      if (todo) hr.append(el("th"));
+      for (const row of t.rows) {
         const tr = body.insertRow();
-        if (diag && row[col("done")]) tr.className = "done";
-        // A group's cause (all its builds and lines): reports, installs, and their share of the phones seen in 90 days.
-        if (diag) {
-          const g = (last?.[which]?.diagnostics || []).find((d) => d.id === row[col("id")]), seen90 = last?.[which]?.crash_free?.["0"]?.[1];
-          if (g && g.cause_installs != null) hint(tr, { cap: 1, head: "This cause", rows: [{ label: "Reports", value: num(g.cause_reports) }, { label: "Installs", value: num(g.cause_installs) }, { label: "Of phones seen (90 days)", value: seen90 ? pctText((100 * g.cause_installs) / seen90) : "–" }] });
-        }
         // A to-do: its tick first (done or open again), a delete at the end.
         if (todo) {
           const id = row[col("id")], done = row[col("done_at")] != null;
@@ -1467,8 +1534,7 @@ if (document.body.classList.contains("login")) {
             cell(tr, note);
             return;
           }
-          if (diag && t.columns[i] === "signature") cell(tr, v == null ? "–" : String(v), "mono");
-          else if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
+          if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
           // A random install id (support, reports, diagnostic_installs): its first 6 hex, the full one on hover.
           else if (INSTALL_COL.test(t.columns[i]) && typeof v === "string" && /^[0-9a-f]{32}$/i.test(v)) cell(tr, installShort(v), "mono", v);
           else if (v != null && PII_COL.test(t.columns[i])) cell(tr, pii(String(v)), "mono", String(v).length > 40 ? String(v) : "");
@@ -1480,12 +1546,6 @@ if (document.body.classList.contains("login")) {
           x.addEventListener("click", () => { if (confirm("Delete this to-do?")) todoChange("/todos/delete", { id: row[col("id")] }); });
           cell(tr, x);
         }
-        if (diag) {
-          const id = row[col("id")], done = !!row[col("done")], hub = which, b = el("button", "pill", done ? "Reopen" : "Done");
-          b.type = "button";
-          b.addEventListener("click", async () => { b.disabled = true; try { await postJSON("/diagnostics/done", { hub, id, done: !done }); await refresh(); } catch { b.disabled = false; } });
-          cell(tr, b);
-        }
         if (t.name === "reserved") {
           const name = row[t.columns.indexOf("spelling")] ?? row[0];
           const x = el("button", "ghost-x", "Remove"); x.type = "button";
@@ -1493,7 +1553,7 @@ if (document.body.classList.contains("login")) {
           cell(tr, x);
         }
       }
-      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" || diag ? 1 : todo ? 2 : 0);
+      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : todo ? 2 : 0);
       wrap.append(table);
       pane.append(wrap);
       }
@@ -1502,7 +1562,7 @@ if (document.body.classList.contains("login")) {
     box.replaceChildren(side, pane);
     if (usersView) part(() => drawAllUsers(last?.[which]));
     if (t) pane.dataset.name = t.name;
-    if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; }
+    if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); if (g) { g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; } }
   };
 
   // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only), the
@@ -2104,7 +2164,7 @@ if (document.body.classList.contains("login")) {
     const n = Math.max(1, series[0]?.length || 1), W = 140, H = 28, sl = W / n, s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", "aria-hidden": "true" });
     for (let i = 0; i < n; i++) {
       const g = svg("g", {}); let y = H;
-      series.forEach((v, k) => { const hh = ((v[i] || 0) / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: (i * sl).toFixed(1), width: sl.toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: "b", style: `fill:${colors[k]}` })); });
+      series.forEach((v, k) => { const hh = ((v[i] || 0) / 100) * H; if (hh <= 0) return; y -= hh; g.append(svg("rect", { x: (i * sl).toFixed(1), width: sl.toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: "segment", fill: colors[k] })); });
       if (y === H) g.append(svg("rect", { x: (i * sl).toFixed(1), width: sl.toFixed(1), y: H - 1.5, height: 1.5, class: "b zero" }));
       s.append(g);
     }
