@@ -145,7 +145,9 @@ def render(path, n, base, when):
     image.save(path, "JPEG", quality=88)
 
 
-MAX_LINES = 8  # feature lines on a release card, "+n more" included
+MAX_ROWS = 7  # features on a release card; "+n more" for the rest
+# The friend list's colours: turquoise, emerald, peter river, amethyst, sun flower, carrot, alizarin.
+LIST = ("#1ABC9C", "#2ECC71", "#3498DB", "#9B59B6", "#F1C40F", "#E67E22", "#E74C3C")
 BULLET = re.compile(r"^\s*[-*•]\s+(.*\S)")
 
 
@@ -175,41 +177,36 @@ def wrap(text, font, width, most):
 
 
 def render_release(path, title, items):
-    """A 1080×1080 JPEG: amethyst top with the title as big as fits, the features as Flat UI rows at the bottom,
-    MAX_LINES lines at most, "+n more" for the rest."""
+    """A JPEG 1080 wide: a compact amethyst top with the title, then the features as rows in the friend list's
+    colours, one feature a row (two lines at most), MAX_ROWS of them, "+n more" for the rest. As tall as its rows:
+    wide for a few, up to portrait (1080×1350) for many."""
     from PIL import Image, ImageDraw, ImageFont
 
-    font, line = ImageFont.truetype(FONT, 42), 56
-    blocks, used = [], 0
-    for i, item in enumerate(items):
-        room = MAX_LINES - used - (1 if i < len(items) - 1 else 0)
-        lines = wrap(item, font, 920, 2)  # a feature: two lines at most, short
-        if len(lines) > room:
-            break
-        blocks.append(lines)
-        used += len(lines)
+    font, line, pad, head = ImageFont.truetype(FONT, 34), 44, 24, 210
+    blocks = [wrap(item, font, 952, 2) for item in items[:MAX_ROWS]]
     more = len(items) - len(blocks)
     if more:
         blocks.append([f"+{more} more"])
-    count = sum(map(len, blocks))
-    pad = max(12, min(34, (700 - count * line) // max(1, 2 * len(blocks))))
-    image = Image.new("RGB", (1080, 1080), "#9B59B6")
+    need = max((len(b) * line + 2 * pad for b in blocks), default=0)
+    # A row as tall as a list row (150), or as its text needs; the card as tall as its rows, 1350 at most.
+    height = min(1350, head + len(blocks) * max(need, 150))
+    row = (height - head) // max(1, len(blocks))
+    image = Image.new("RGB", (1080, height), "#9B59B6")
     draw = ImageDraw.Draw(image)
-    top = 1080 - sum(len(b) * line + 2 * pad for b in blocks)
-    size = 140
-    while size > 40 and ImageFont.truetype(FONT, size).getlength(title) > 920:
-        size -= 4
-    big = ImageFont.truetype(FONT, size)
-    middle = top // 2
-    draw.text((80, middle - 10), title, font=big, fill="white", anchor="ls")
-    draw.text((80, middle + 40), "New release", font=ImageFont.truetype(FONT, 40), fill="#ecdff2", anchor="lt")
+    size = 70
+    while size > 30 and ImageFont.truetype(FONT, size).getlength(title) > 952:
+        size -= 2
+    draw.text((64, 48), title, font=ImageFont.truetype(FONT, size), fill="white", anchor="lt")
+    draw.text((64, 140), "New release", font=ImageFont.truetype(FONT, 32), fill="#ecdff2", anchor="lt")
+    top = head
     for i, lines in enumerate(blocks):
-        height = len(lines) * line + 2 * pad
-        colour = "#7F8C8D" if more and i == len(blocks) - 1 else FLAT[i % len(FLAT)]
-        draw.rectangle((0, top, 1080, top + height), fill=colour)
+        bottom = height if i == len(blocks) - 1 else top + row
+        colour = "#7F8C8D" if more and i == len(blocks) - 1 else LIST[i % len(LIST)]
+        draw.rectangle((0, top, 1080, bottom), fill=colour)
+        first = (top + bottom) // 2 - (len(lines) - 1) * line // 2
         for j, text in enumerate(lines):
-            draw.text((80, top + pad + j * line + line // 2), text, font=font, fill="white", anchor="lm")
-        top += height
+            draw.text((64, first + j * line), text, font=font, fill="white", anchor="lm")
+        top = bottom
     image.save(path, "JPEG", quality=88)
 
 
