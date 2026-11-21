@@ -1209,7 +1209,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .live-strip .b { fill: var(--muted); opacity: .75; transform-box: fill-box; transform-origin: 50% 100%; }
 .live-strip .b:last-of-type { fill: var(--text); opacity: 1; }
 .live-strip .b.zero { fill: var(--line); opacity: 1; filter: none; }
-.live-lane { position: absolute; inset: 0; pointer-events: none; }
+.live-lane { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 /* The stream away (cut, reconnecting): the strip dims a little, the counts still come from the refresh. */
 #live { transition: opacity .6s; }
 #live.away { opacity: .45; }
@@ -1312,6 +1312,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .overview-grid .srow :is(.sl, .sv), #t-system .crow :is(.cl, .cn) { font-size: 15px; }
 .overview-grid .srow .sl { white-space: nowrap; }
 .ov > .topbar {
+  position: relative;
   --dial-size: 60px;
   display: grid; grid-template-columns: 1fr auto 1fr; grid-template-areas: "badge gauges range";
   align-items: center; gap: 12px; margin: 0; padding: 12px 16px;

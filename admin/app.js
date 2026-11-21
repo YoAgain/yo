@@ -1671,45 +1671,35 @@ if (document.body.classList.contains("login")) {
     if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); if (g) { g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; } }
   };
 
-  // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only), the
-  // last ten minutes as bars. Each new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only): a dot
-  // leaves the "Yo" logo, arcs over the rate and rains down into the running minute's bar, which then takes it with a
-  // tiny bump. Bursts update the count immediately between flights. Without the stream, new Yos come from the minutes' counts, spread over the refresh. Reduced motion or a
-  // hidden page: no dots, the bar at once.
-  // The stream is watched: a Yo or the proxy's ping (every 15 s) keeps it alive; silent for LIVE_DEAD it is taken as
-  // cut (a connection Cloudflare or the network dropped without telling the browser) and opened again, refused it is
-  // tried again sooner, then later (LIVE_RETRY, doubling up to LIVE_RETRY_MAX). While it is away the strip dims.
-  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_BARS = 10, LIVE_GAP = 300, LIVE_FLY = 540;
+  // ---- live Yos in the header: collector minute buckets, updated immediately by the hub stream -------------------
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_BARS = 10, LIVE_FLY = 540;
   const LIVE_DEAD = 35000, LIVE_RETRY = 2000, LIVE_RETRY_MAX = 30000, LIVE_DIM = 6000;
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
-  let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null, liveNext = 0, liveFlying = 0;
+  let liveSeen = null, liveTimers = [], liveData = null;
   let liveSource = null, liveOpen = false, liveRetry = null, liveBack = LIVE_RETRY, liveHeard = 0, liveLost = 0;
   const liveStop = () => {
     liveTimers.forEach(clearTimeout);
     liveTimers = [];
-    liveNext = 0;
-    liveFlying = 0;
     $("live-lane").replaceChildren();
-    if (liveData) paintLive();
   };
   const liveLater = (ms, f) => {
     const t = setTimeout(() => { liveTimers = liveTimers.filter((x) => x !== t); f(); }, ms);
     liveTimers.push(t);
   };
   // One dot from the logo's right edge into the last bar (rects read once, then transform and opacity only).
-  const liveFly = (land) => {
+  const liveFly = () => {
     const lane = $("live-lane"), bar = $("live-spark").lastElementChild, logo = $("hub-word");
-    if (!bar || document.visibilityState !== "visible") return land();
+    if (!bar || document.visibilityState !== "visible") return;
     const o = lane.getBoundingClientRect(), l = logo.getBoundingClientRect(), b = bar.getBoundingClientRect();
     const sx = l.right - o.left - 7, sy = l.top + l.height / 2 - o.top;
     const ex = b.left + b.width / 2 - o.left + (Math.random() - 0.5) * Math.min(3, b.width * 0.5), ey = b.top - o.top;
     // The arc: up from the logo over the rate, a little above the bars, to just over the bar; then the fall.
-    const hy = -9 - Math.random() * 5, hx = ex - 2 + Math.random() * 4, cx = (sx + hx) / 2, cy = hy - 10;
+    const hy = Math.min(sy, ey) - 9 - Math.random() * 5, hx = ex - 2 + Math.random() * 4, cx = (sx + hx) / 2, cy = hy - 10;
     const frames = [], ARC = 0.62;
     for (let i = 0; i <= 8; i++) {
       const t = i / 8, u = 1 - t;
       frames.push({ offset: ARC * t, transform: `translate(${(u * u * sx + 2 * u * t * cx + t * t * hx).toFixed(1)}px, ${(u * u * sy + 2 * u * t * cy + t * t * hy).toFixed(1)}px) scale(${(0.5 + 0.5 * Math.min(1, t * 4)).toFixed(2)})`,
-        opacity: Math.min(1, t * 5), easing: "linear" });
+        opacity: 1, easing: "linear" });
     }
     frames[frames.length - 1].easing = "cubic-bezier(.5, 0, .9, .6)";
     frames.push({ offset: 0.96, transform: `translate(${ex.toFixed(1)}px, ${(ey - 1).toFixed(1)}px) scale(.8, 1.15)`, opacity: 1, easing: "ease-out" });
@@ -1717,7 +1707,7 @@ if (document.body.classList.contains("login")) {
     const s = el("i", "yo-spark");
     lane.append(s);
     s.animate(frames, { duration: LIVE_FLY * (0.92 + Math.random() * 0.16), easing: "cubic-bezier(.3, .1, .6, 1)", fill: "forwards" })
-      .finished.then(() => { if (!s.isConnected) return; s.remove(); land(); }, () => {});
+      .finished.then(() => s.remove(), () => s.remove());
     if (!logo.getAnimations().length) logo.animate([{ transform: "scale(1)" }, { transform: "scale(1.045)" }, { transform: "scale(1)" }], { duration: 320, easing: "ease-out" });
   };
   // The running minute's bar takes a Yo: a tiny bump from its foot.
@@ -1725,50 +1715,53 @@ if (document.body.classList.contains("login")) {
     const bar = $("live-spark").lastElementChild;
     if (bar && !calm.matches) bar.animate([{ transform: "scaleY(1)" }, { transform: "scaleY(1.22)" }, { transform: "scaleY(1)" }], { duration: 260, easing: "ease-out" });
   };
-  // Count every Yo while spacing the visible flights during bursts.
-  const liveSpark = (land = () => {}) => {
-    const lane = $("live-lane");
-    if (calm.matches || document.visibilityState !== "visible" || lane.childElementCount >= 2) return land();
-    const now = performance.now();
-    if (now < liveNext) return land();
-    liveNext = now + LIVE_GAP;
-    liveFly(() => { land(); liveBump(); });
+  const liveSpark = () => {
+    if (calm.matches || document.visibilityState !== "visible") return;
+    liveFly();
+    liveBump();
   };
-  // The strip from the last minutes and the Yos streamed since; the running minute never goes down within itself.
   const paintLive = () => {
     const box = $("live"), d = liveData;
-    box.hidden = !d || !Array.isArray(d.minutes);
-    if (box.hidden) return;
-    const m = d.minutes.slice(), n = m.length, full = m.slice(-6, -1);
-    m[n - 1] += liveAdd - liveFlying;
-    const shown = `${which} ${d.minute}`;
-    if (liveShown?.key === shown) m[n - 1] = Math.max(m[n - 1], liveShown.v);
-    liveShown = { key: shown, v: m[n - 1] };
-    // The rate: the last five whole minutes, one decimal below ten.
-    const rate = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
-    set("live-n", rate >= 999.5 ? short(rate) : rate >= 10 ? Math.round(rate).toString() : rate.toFixed(1).replace(/\.0$/, ""));
+    box.hidden = !d;
+    if (!d) return;
+    const m = d.minutes, rate = m.at(-1);
+    set("live-n", num(rate));
     const hour = m.reduce((a, b) => a + b, 0);
-    if (!box._h) { box._h = 1; hint(box, () => box._tip); }
-    box._tip = { head: "Yos per minute", nodes: n >= 3 ? [plotWithAxis(sparkBars(m, ""), "Last hour", "now")] : [],
-      rows: [{ label: "Per minute (5 min average)", value: $("live-n").textContent }, { label: "Last hour", value: num(hour) },
-        { label: "This minute", value: num(m.at(-1)) }], note: ["Bots left out", box.dataset.state].filter(Boolean).join(" · ") };
-    box.setAttribute("aria-label", `${rate.toFixed(1)} Yos per minute, ${hour} in the last hour`);
+    if (!box._h) {
+      box._h = 1;
+      hint(box, () => {
+        const minutes = liveData.minutes, full = minutes.slice(-6, -1);
+        const avg = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
+        return { head: "Yos per minute", nodes: [plotWithAxis(sparkBars(minutes, ""), "Last hour", "now")],
+          rows: [{ label: "This minute", value: num(minutes.at(-1)) }, { label: "Per minute (5 min average)", value: avg.toFixed(1) },
+            { label: "Last hour", value: num(minutes.reduce((a, b) => a + b, 0)) }], note: ["Bots left out", box.dataset.state].filter(Boolean).join(" · ") };
+      });
+    }
+    box.setAttribute("aria-label", `${num(rate)} Yos this minute, ${num(hour)} in the last hour`);
     // The last ten minutes as bars like Problems', the running minute (bright) at the right.
     $("live-spark").replaceChildren(...bars(m.slice(-LIVE_BARS), LIVE_BARS * 10, 24));
   };
   const drawLive = (h) => {
     const d = h?.live;
-    liveData = d && Array.isArray(d.minutes) ? d : null;
-    liveAdd = 0;
+    if (liveData?.hub !== which) { liveStop(); liveData = null; }
+    if (!d?.minutes?.length) { paintLive(); return; }
+    // A refresh may lag the stream. Merge overlapping buckets by minute to avoid losing or double counting Yos.
+    const minute = Math.max(d.minute, liveData?.minute ?? d.minute);
+    const minutes = d.minutes.map((_, i) => {
+      const k = minute - d.minutes.length + 1 + i;
+      const snapshot = d.minutes[d.minutes.length - 1 + k - d.minute] ?? 0;
+      const streamed = liveData?.minutes[liveData.minutes.length - 1 + k - liveData.minute] ?? 0;
+      return Math.max(snapshot, streamed);
+    });
+    liveData = { hub: which, minute, minutes };
     paintLive();
-    if (!liveData) { liveSeen = null; liveStop(); return; }
     const m = d.minutes, n = m.length;
     // New Yos by the minutes: what this refresh counts above the last one (the running minute only on the first look).
     // The stream, while open, shows them instead.
     const key = `${which}`, byMinute = new Map(m.map((v, i) => [d.minute - (n - 1) + i, v]));
     let fresh = 0;
     if (liveSeen?.key === key) for (const [k, v] of byMinute) fresh += Math.max(0, v - (liveSeen.m.get(k) ?? (k > liveSeen.minute ? 0 : v)));
-    else { liveStop(); fresh = m[n - 1]; }
+    else fresh = m[n - 1];
     liveSeen = { key, minute: d.minute, m: byMinute };
     if (liveOpen || calm.matches || document.visibilityState !== "visible") return;
     fresh = Math.min(LIVE_CAP, fresh);
@@ -1806,6 +1799,7 @@ if (document.body.classList.contains("login")) {
       if (!mine()) return;
       liveOpen = true;
       liveLost = 0;
+      liveStop();
       liveBack = LIVE_RETRY;
       liveHeard = Date.now();
       liveState();
@@ -1815,11 +1809,17 @@ if (document.body.classList.contains("login")) {
       if (!mine()) return;
       liveHeard = Date.now();
       liveOpen = true;
-      liveAdd++;
-      if (!liveData) return;
-      // Counted on landing: the bar grows by one as each dot comes down.
-      liveFlying++;
-      liveSpark(() => { liveFlying = Math.max(0, liveFlying - 1); paintLive(); });
+      const minute = Math.floor(Date.now() / 60000);
+      if (liveData?.hub !== hub) liveData = { hub, minute, minutes: Array(60).fill(0) };
+      const elapsed = Math.min(liveData.minutes.length, minute - liveData.minute);
+      if (elapsed > 0) {
+        liveData.minutes.splice(0, elapsed);
+        liveData.minutes.push(...Array(elapsed).fill(0));
+        liveData.minute = minute;
+      }
+      liveData.minutes[liveData.minutes.length - 1]++;
+      paintLive();
+      liveSpark();
     };
     source.onerror = () => {
       if (!mine()) return;
