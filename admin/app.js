@@ -1352,6 +1352,7 @@ if (document.body.classList.contains("login")) {
     group: '<circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/>',
     disk: '<ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/>',
     chat: '<path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/>',
+    flag: '<path d="M5 21V4c5-4 9 4 15 0v10c-6 4-10-4-15 0"/>',
     warn: '<path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/>',
     chart: '<path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/>',
     check: '<path d="M4.5 12.5l4.5 4.5L19.5 6.5"/>',
@@ -1371,7 +1372,7 @@ if (document.body.classList.contains("login")) {
     ["people", "Users", "user", "Accounts with their devices, app, push and backup, put together"],
     ["v-support", "Support", "chat", "The support chat: who wrote, open or answered, and the conversation"],
     ["v-errors", "Problems", "warn", "App problems grouped by cause, open first, with Done and Reopen"],
-    ["v-reports", "Reports", "warn", "Users reporting other users"],
+    ["v-reports", "Reports", "flag", "Users reporting other users"],
     ["v-todos", "To-dos", "check", "The team's to-dos: add, tick, delete"],
   ];
   const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-todos": "todos" };
@@ -2574,11 +2575,14 @@ if (document.body.classList.contains("login")) {
     // The Accounts stats card: account metrics as the overview's rows (secured bar, new accounts secured, deleted,
     // Yos per user), each with its history in the hover.
     const statsRows = (h) => {
-      const mau = h.active_month || 0, dau = h.active_today ?? 0, yoN = h.events ? last24sum("yo-in") : null, t = today0();
+      const mau = h.active_month || 0, dau = h.active_today ?? 0, t = today0();
       const days = range || 30, ds = Array.from({ length: days }, (_, i) => t - days + 1 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
       const activeOn = d => d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0;
-      const active = ds.map(activeOn);
-      const per = ds.map((d, i) => active[i] ? (yo.get(d) || 0) / active[i] : null);
+      const yoN = h.events ? rangeCount("yo-in") : null;
+      const usersInRange = ({ 1: h.active_today, 7: h.active_users, 30: h.active_month })[range];
+      // Rolling activity levels cannot give distinct users for hourly, six-hour or multi-day slots.
+      const daily = range === 30 || (range === 7 && !h.week);
+      const per = daily ? ds.map(d => activeOn(d) && yo.get(d) != null ? yo.get(d) / activeOn(d) : null) : [];
       const mean = (yos, users) => yos != null && users ? (yos / users).toFixed(1) : "–";
       const meanTip = (head, yos, users) => ({ head, note: "Accepted Yos per active account.",
         rows: [{ label: "Mean", value: mean(yos, users) }, { label: "Median", value: "Unavailable" },
@@ -2602,9 +2606,11 @@ if (document.body.classList.contains("login")) {
           })(),
           ...(rangeCount("account-gone", gone) ? [{ ico: "trash", label: "Deleted", value: num(rangeCount("account-gone", gone)), cls: "warn", values: gone.values.map((v) => v || 0), scls: "warm",
             tip: (i) => ({ head: gone.names[i], rows: [{ color: "#e67e22", label: "Deleted", value: num(gone.values[i] || 0) }] }) }] : []),
-          { ico: "user", label: "Yos / user", value: mean(yoN, dau), values: per,
-            title: meanTip("Last 24 hours", yoN, dau),
-            tip: (i) => meanTip(dayName(ds[i]), h.events ? yo.get(ds[i]) ?? 0 : null, active[i]) },
+          { ico: "user", label: "Yos / user", value: mean(yoN, usersInRange), values: per.some(v => v != null) ? per : null,
+            title: { ...meanTip(spanWord(), yoN, usersInRange), note: !range ? "The hub has no all-time count of distinct active accounts." :
+              daily ? "Accepted Yos divided by distinct active accounts in the range. Each bar uses that day’s counts." :
+              "Accepted Yos divided by distinct active accounts in the range. Account activity is unavailable for individual slots." },
+            tip: (i) => meanTip(dayName(ds[i]), yo.get(ds[i]), activeOn(ds[i]) || null) },
       ];
     };
     drawUsageRows = (h) => {
@@ -2671,7 +2677,7 @@ if (document.body.classList.contains("login")) {
           return { ico: "warn", label: "Problems", title: { cap: 1, head: "Problems", rows: [{ label: "Open causes", value: num(openCount) }, { label: "Occurrences", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Occurrence", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => problemTip(p, i) }; })(),
         { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
-        { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
+        { ico: "flag", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => {
           // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
