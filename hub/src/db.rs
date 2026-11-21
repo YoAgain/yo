@@ -970,10 +970,16 @@ impl Db {
             ("open-errors", "SELECT coalesce(sum(count), 0) FROM diagnostics WHERE done = 0 AND kind = 'error'"),
             ("open-crashes", "SELECT coalesce(sum(count), 0) FROM diagnostics WHERE done = 0 AND kind = 'crash'"),
         ];
-        const OTHERS: [(&str, &str); 4] = [
+        const OTHERS: [(&str, &str); 5] = [
             ("queue-envelopes", "SELECT count(*) FROM messages"),
             ("queue-media-bytes", "SELECT coalesce(sum(size), 0) FROM blobs"),
             ("active-24h", "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 86400000"),
+            // People, not bots (`is_bot_app`): an account with a device of a person's app heard from in 48 hours.
+            (
+                "active-48h",
+                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 172800000 \
+                 AND (app IS NULL OR (app NOT LIKE 'yogpt/%' AND app NOT LIKE 'cli/%'))",
+            ),
             ("active-30d", "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 30 * 86400000"),
         ];
         let others: &[_] = if problems_only { &[] } else { &OTHERS };
@@ -2073,6 +2079,7 @@ mod tests {
             [
                 row("active-24h", h, 1),
                 row("active-30d", h, 2),
+                row("active-48h", h, 1),
                 row("open-crashes", h, 2),
                 row("open-errors", h, 3),
                 row("queue-envelopes", h, 1),
@@ -2082,10 +2089,10 @@ mod tests {
         // The hourly sample keeps the hour's first; a problem marked done replaces the open problems of the hour.
         db.diagnostic_done(1, true).unwrap();
         db.sample_levels(now + 60_000, false).unwrap();
-        assert_eq!(rows(&db)[3], row("open-errors", h, 3));
+        assert_eq!(rows(&db)[4], row("open-errors", h, 3));
         db.sample_levels(now + 60_000, true).unwrap();
-        assert_eq!(rows(&db)[3], row("open-errors", h, 0));
-        assert_eq!(rows(&db).len(), 6);
+        assert_eq!(rows(&db)[4], row("open-errors", h, 0));
+        assert_eq!(rows(&db).len(), 7);
         let columns: Vec<String> = db
             .conn()
             .prepare("SELECT name FROM pragma_table_info('levels')")
@@ -2095,6 +2102,14 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(columns, ["kind", "hour", "value"], "no identifier of anyone or anything");
+        // A bot's device (the CLI, YoGPT) is no active account: bob on the CLI leaves no one seen within 48 hours.
+        db.conn().execute("UPDATE devices SET app = 'cli/1' WHERE last_seen_at = ?1", [(now - hour) as i64]).unwrap();
+        db.sample_levels(now + hour, false).unwrap();
+        let bots: i64 = db
+            .conn()
+            .query_row("SELECT value FROM levels WHERE kind = 'active-48h' AND hour = ?1", [h + 1], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bots, 0);
         // 30 days of hours, then the day's last (the one at the next midnight) alone, kept for good.
         db.conn().execute("DELETE FROM levels", []).unwrap();
         let day0 = 900 * 24i64;

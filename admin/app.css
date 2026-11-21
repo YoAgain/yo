@@ -1059,7 +1059,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .chartw .gh { height: auto !important; align-items: flex-start; }
 .chartw .gnums { margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
 .chartw .gnums .gsum { margin-left: 0; }
-.chartw .gtoday { margin-top: 2px; font-size: 12px; font-weight: 600; color: var(--ok); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chartw .gtoday { font-size: 12px; font-weight: 600; color: var(--ok); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .chartw .gtoday b { font-weight: 700; }
 .chartw .area { position: relative; }
 .chartw .area > .cfoot { position: absolute; top: 0; left: 6px; margin: 0; padding: 2px 8px; border-radius: 6px; background: var(--card); opacity: 0; transition: opacity .15s; pointer-events: none; }
@@ -1255,8 +1255,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 #c-vr .vr-dev { display: block; margin-top: 6px; } #c-vr .vr-dev .hc-pbar { height: 8px; }
 .half #c-vr .vr-spark { display: flex; flex-direction: column; height: auto; min-height: 36px; }
 .half #c-vr .vr-spark > svg { width: 100%; height: 22px; flex: none; }
-.srow-head { margin: 10px 0 2px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
-.srow-head:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 /* Phone: the section tabs as a row of icon and count, tables scroll sideways inside their card, the users table compact. */
 @media (max-width: 640px) {
   .tside { position: static; max-height: none; flex-direction: row; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 6px; scrollbar-width: none; }
@@ -1278,7 +1276,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 @media (max-width: 640px) {
   .area svg text.ax, .area .lab, .hc-chart text, .axis, .stripbox span,
   .cfoot, .shead, .cap, .hc-note, .hc-legend, .hc-plat small, .dcard .hc-sub,
-  .glabel small, .srow-head, .live-n span, .stat3 span, .dcard .pstat small,
+  .glabel small, .live-n span, .stat3 span, .dcard .pstat small,
   .dcard .pstep small, .dcard .dnums small { font-size: 13px; }
 }
 
@@ -1318,9 +1316,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 1328px; padd
 .overview-grid .srow :is(.spark, .hc-pbar) { width: 100%; }
 .overview-grid .srow :is(.sl, .sv), #t-system .crow :is(.cl, .cn) { font-size: 15px; }
 .overview-grid .srow .sl { white-space: normal; }
-.overview-grid .srow-head { font-size: 12px; margin: 8px 0 0; padding-top: 12px; }
-.overview-grid .srow-head:first-child { margin: 0; padding: 0; }
-.ov > .topbar { --control-height: 36px; margin: 0 0 8px; gap: clamp(8px, 2vw, 16px); justify-content: flex-start; }
+.overview-grid .overview-grid .ov > .topbar { --control-height: 36px; margin: 0 0 8px; gap: clamp(8px, 2vw, 16px); justify-content: flex-start; }
 .topbar .logo { height: var(--control-height); min-width: var(--control-height); justify-content: center; border-radius: 10px; }
 .topbar #range {
   flex: none; display: flex; align-items: stretch; height: var(--control-height); padding: 3px;
@@ -1351,3 +1347,15 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 1328px; padd
 }
 
 .tside .tside-h, .dash .foot, .dash .footlink { font-size: 12px; }
+
+/* Chart headers: the growth is the big green number, the total small and muted under it; Accounts' second line is Active (green). */
+.chartw .gtoday.big { font-size: 24px; font-weight: 700; line-height: 1.12; }
+.chartw .gtoday.big b { font-weight: 700; }
+.chartw .gtoday.big span { font-size: var(--caption); font-weight: 600; }
+.chartw .gnums .gsum { margin-top: 2px; font-size: var(--caption); font-weight: 600; color: var(--muted); }
+.chartw .gnums .gsum b { font-size: inherit; font-weight: 600; color: inherit; }
+.dcard .dnums .dval.grow { color: var(--ok); }
+#t-uc .area svg .line.act { fill: none; stroke: var(--ok); stroke-width: 2; }
+#t-uc .area svg .dot.act { fill: var(--ok); }
+#t-uc .cfoot .l-act::before { background: var(--ok); }
+.chartw .gtoday.big { display: block; gap: 0; }

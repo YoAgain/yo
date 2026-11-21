@@ -313,7 +313,7 @@ def open_problems(db, now: int) -> dict:
 def levels(db, now: int, messages=None, blobs=None) -> dict:
     """The hub's levels (`levels`: counts only, sampled at each hour's start; older than 30 days only the day's last,
     taken at the next midnight, UTC) as the page's histories. A sample at an hour's start is the level at the end of
-    the hour before, so its day is (hour - 1) // 24. "active_days" {day: users seen in its 24 hours} (today left out:
+    the hour before, so its day is (hour - 1) // 24. "active48" [[hour, accounts seen within 48 hours], ...] (from when the hub samples it), "active_days" {day: users seen in its 24 hours} (today left out:
     the page has active_day), "queue_hours" {hour: [envelopes, bytes]} (48 hours) and "queue_days" {day: [...]} with
     the current values for this hour and today, "open_report_history" [{t, errors_open, crashes_open}]."""
     rows = {}
@@ -329,6 +329,7 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
         hours[str(hour_now)] = days[str(today)] = [messages, blobs[1] or 0]
     errors, crashes = rows.get("open-errors", {}), rows.get("open-crashes", {})
     return {
+        "active48": sorted(rows.get("active-48h", {}).items()),
         "active_days": {str(d): v for d, v in by_day("active-24h").items() if d < today},
         "queue_hours": hours,
         "queue_days": days,

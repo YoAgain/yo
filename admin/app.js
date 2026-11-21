@@ -487,9 +487,11 @@ if (document.body.classList.contains("login")) {
   // ending at the total since the start; a click opens their detail.
   const areaData = {};
   const runningTotal = (perDay, hours, total) => {
-    let names, incs;
+    let names, incs, hourEnds;
+    const nowH = Math.floor(Date.now() / 3600000);
     if (range === 1) {
-      const h0 = Math.floor(Date.now() / 3600000) - 23;
+      const h0 = nowH - 23;
+      hourEnds = Array.from({ length: 24 }, (_, i) => h0 + i + 1);
       names = Array.from({ length: 24 }, (_, i) => clock((h0 + i + 1) * 3600000));
       incs = Array.isArray(hours) ? hours.slice(-24).map((v) => v || 0) : Array(24).fill(0);
     } else {
@@ -497,11 +499,12 @@ if (document.body.classList.contains("login")) {
       const span = today0() - first + 1, step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
       const ends = Array.from({ length: n }, (_, i) => today0() - (n - 1 - i) * step);
       names = ends.map(dayName);
+      hourEnds = ends.map((e) => Math.min((e + 1) * 24, nowH));
       incs = ends.map((e) => { let t = 0; for (let d = e - step + 1; d <= e; d++) t += perDay?.get(d) || 0; return t; });
     }
     const values = []; let v = total;
     for (let i = incs.length - 1; i >= 0; i--) { values[i] = v; v -= incs[i]; }
-    return { names, incs, values: [Math.max(0, v), ...values], labels: [range === 1 ? "24 hours ago" : "before", ...names] };
+    return { names, incs, hourEnds, values: [Math.max(0, v), ...values], labels: [range === 1 ? "24 hours ago" : "before", ...names] };
   };
   // The hover popup of every chart: the slot under the pointer with its values (text "slot · value · value"; the first
   // line bold), beside the pointer; mark(i) highlights that slot in the chart (-1 when the pointer leaves).
@@ -619,7 +622,7 @@ if (document.body.classList.contains("login")) {
   // The painter of every running-total chart (the overview's two and the details'): bars (each slot's count, between
   // the line's points when there is one point more, else under them; up to half the height under a line), the line with
   // its dots over them, the first and last slot as the axis. Sized to its svg in pixels, so text stays text-sized.
-  const paintCombo = (node, { line, bars, from, to, max, pick = -1, hover = -1 }) => {
+  const paintCombo = (node, { line, line2, bars, from, to, max, pick = -1, hover = -1 }) => {
     const W = node.clientWidth, H = node.clientHeight;
     if (!W || !H) return;
     const pad = 6, padTop = 14, B = H - 16, between = line && bars && bars.length === line.length - 1;
@@ -641,10 +644,28 @@ if (document.body.classList.contains("login")) {
       const every = Math.max(1, Math.ceil(np / 16));
       line.forEach((v, i) => { if (v != null) out.push(svg("circle", { class: i % every && i !== np - 1 && i !== pick ? "dot hide" : "dot", cx: px(i).toFixed(1), cy: y(v).toFixed(1), r: 2.6 })); });
     }
+    // A second line on its own scale (Active over Accounts); a gap where the hub has no sample yet.
+    if (line2) {
+      const have = line2.filter((v) => v != null);
+      if (have.length) {
+        const lo = Math.min(...have), hi = Math.max(...have), y = (v) => padTop + (B - padTop - 3) * (hi === lo ? 0.5 : 1 - (v - lo) / (hi - lo));
+        const pts = [], dots = [];
+        line2.forEach((v, i) => { if (v != null) { pts.push(`${px(i).toFixed(1)},${y(v).toFixed(1)}`); dots.push(svg("circle", { class: i === np - 1 || i === pick ? "dot act" : "dot act hide", cx: px(i).toFixed(1), cy: y(v).toFixed(1), r: 2.6 })); } });
+        if (pts.length > 1) out.push(svg("path", { class: "line act", d: `M${pts.join(" L")}` }));
+        out.push(...dots);
+      }
+    }
     if (hover >= 0) { const hx = (bars ? pad + hover * gap + gap / 2 : px(hover)).toFixed(1); out.push(svg("line", { x1: hx, x2: hx, y1: padTop - 6, y2: B, class: "hmark" })); }
     const ax = (tx, text, anchor) => { const t = svg("text", { x: tx, y: H - 2, "text-anchor": anchor, class: "ax" }); t.textContent = text || ""; return t; };
     node.setAttribute("viewBox", `0 0 ${W} ${H}`);
     node.replaceChildren(...out, ax(pad, from, "start"), ax(W - pad, to, "end"));
+  };
+  // Accounts: the active accounts (the hub's active-48h, hourly, then daily) at the end of each slot; none before sampling began.
+  let active48 = [];
+  const activeLine = (key, d) => {
+    if (key !== "uc" || !active48.length || !d.hourEnds) return null;
+    const at = (hr) => { let v = null; for (const [t, n] of active48) { if (t > hr) break; v = n; } return v; };
+    return [null, ...d.hourEnds.map(at)];
   };
   const drawArea = (key) => {
     const d = areaData[key], node = $(`${key}-svg`);
@@ -673,7 +694,7 @@ if (document.body.classList.contains("login")) {
     node.setAttribute("viewBox", `0 0 ${W} ${H}`);
     if (combo) {
       const hv = areaHover[key] ?? -1;
-      paintCombo(node, { line: d.values, bars: d.incs, pick: hv, hover: hv, from: range === 1 ? "24 hours ago" : d.names[0], to: range === 1 ? "now" : d.names[d.names.length - 1] });
+      paintCombo(node, { line: d.values, line2: activeLine(key, d), bars: d.incs, pick: hv, hover: hv, from: range === 1 ? "24 hours ago" : d.names[0], to: range === 1 ? "now" : d.names[d.names.length - 1] });
       return;
     }
     // No numbers in the plot: the total is the title's, the time is on the axis under the bars.
@@ -682,7 +703,7 @@ if (document.body.classList.contains("login")) {
   // A second series drawn over a chart: Active over Accounts, Media over Yos (on the Yos' scale).
   const OVERLAY = {}, SAME = {}, COMBO = { yc: true, uc: true }, WORD = { yc: "Yos", uc: "accounts" };
   // Each curve's legend, under it: what its two lines are.
-  const LEGEND = { yc: [["Total", "l-main"], ["Sent", "l-bar"]], uc: [["Total", "l-main"], ["Sign-ups", "l-bar"]] };
+  const LEGEND = { yc: [["Total", "l-main"], ["Sent", "l-bar"]], uc: [["Total", "l-main"], ["Sign-ups", "l-bar"], ["Active (48 h)", "l-act"]] };
   const areaTips = {}, areaHover = {};
   let sentMode = (() => { try { return localStorage.getItem("sentMode") === "delivered" ? "delivered" : "sent"; } catch { return "sent"; } })();
   // The Sent card's pill: ↑ sent, ↓ delivered.
@@ -697,13 +718,15 @@ if (document.body.classList.contains("login")) {
   };
   const areaChart = (key, total, perDay, hours, today) => {
     set(`${key}-n`, num(total));
+    active48 = hubNow?.active48 || [];
     if (!areaTips[key] && $(`${key}-svg`)) {
       areaTips[key] = true;
       hoverTip($(`${key}-svg`), () => areaData[key]?.incs?.length || 0, (i) => {
         const d = areaData[key], what = { yc: sentMode === "sent" ? "sent" : "delivered", uc: "signed up" }[key] || "";
         const c = key === "uc" ? "var(--amethyst-soft)" : "var(--ok)";
         return d ? { head: d.names[i], rows: [{ section: slotWord() }, { color: c, label: what[0].toUpperCase() + what.slice(1), value: num(d.incs[i]) },
-          { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) }] } : "";
+          { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) },
+          ...(activeLine(key, d)?.[i + 1] != null ? [{ color: "var(--ok)", line: true, label: "Active (48 h)", value: num(activeLine(key, d)[i + 1]) }] : [])] } : "";
       }, (i) => { areaHover[key] = i; drawArea(key); });
     }
     areaData[key] = { ...runningTotal(perDay, hours, total || 0), overlay: OVERLAY[key] || null, word: WORD[key] };
@@ -720,7 +743,9 @@ if (document.body.classList.contains("login")) {
         for (const [t, c] of LEGEND[key] || []) legend.append(el("span", `key ${c}`, t));
         $(`${key}-area`).append(legend);
       }
-      set(`${key}-t`, num(today ?? 0));
+      // The growth over the range is the big number (a day: the last 24 hours), the total small under it.
+      const grow = range === 1 || !range ? (today ?? 0) : inc.reduce((a, v) => a + v, 0);
+      set(`${key}-t`, num(grow)); set(`${key}-w`, range === 7 ? "in 7 d" : range === 30 ? "in 30 d" : "in 24 h");
       return;
     }
     const bars = inc.map((v, i) => {
@@ -2004,7 +2029,7 @@ if (document.body.classList.contains("login")) {
   const axisOf = (names) => (range === 1 && names.length === 24 ? { from: "24 hours ago", to: "now" } : { from: names[0], to: names[names.length - 1] });
   const sayOf = (d) => (i) => `${d.names[i]} · ${d.values[i] == null ? "–" : d.tip ? d.tip(i, d.values[i]) : (d.fmt || num)(d.values[i])}`;
   // The total large, under it what came today (green), as on the overview's tiles.
-  const dnums = (big, sub, cls = "") => { const v = el("span", "dnums"); v.append(el("b", "dval", big)); if (sub) v.append(el("small", cls || null, sub)); return v; };
+  const dnums = (big, sub, cls = "", bigCls = "") => { const v = el("span", "dnums"); v.append(el("b", bigCls ? `dval ${bigCls}` : "dval", big)); if (sub) v.append(el("small", cls || null, sub)); return v; };
   const todayOf = (vals) => (range === 1 ? vals.slice(-(new Date().getUTCHours() + 1)) : vals.slice(-1)).reduce((a, v) => a + (v || 0), 0);
   // Levels (open problems, CPU, shares): bars only.
   const chartCard = (title, value, d, cls, ...more) => {
@@ -2031,7 +2056,10 @@ if (document.body.classList.contains("login")) {
       { color: c, line: true, label: "Total", value: lf(line[i + 1]) },
       ...(moreAll ? moreAll(i) : []),
     ] });
-    return dcard(title, dnums(lf(end), sub !== undefined ? sub : d.day24 != null ? `+${fmt(d.day24)} in 24 h` : `+${fmt(todayOf(d.values))} today`, subCls),
+    // The growth is the big green number (the range's, a day: the last 24 hours), the total small and muted under it.
+    const grown = d.values.reduce((a, v) => a + (v || 0), 0), word = range === 7 || range === 30 ? `in ${range} d` : d.day24 != null ? "in 24 h" : "today";
+    const big = sub !== undefined ? null : `+${fmt(range === 7 || range === 30 ? grown : d.day24 ?? todayOf(d.values))} ${word}`;
+    return dcard(title, big ? dnums(big, `${lf(end)} total`, "muted", "grow") : dnums(lf(end), sub, subCls),
       liveChart({ line, bars: d.values.map((v) => v || 0), ...axisOf(d.names) }, cls, foot, say), foot);
   };
   // The queue: Yos waiting for offline phones (the line) and the size of the photos and videos waiting (the bars), as
@@ -2079,7 +2107,6 @@ if (document.body.classList.contains("login")) {
   const sparkCard = (title, rows) => {
     const box = el("div", "srows");
     for (const r of rows) {
-      if (r.heading) { box.append(el("div", "srow-head", r.heading)); continue; }
       const row = el("div", `srow${r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);

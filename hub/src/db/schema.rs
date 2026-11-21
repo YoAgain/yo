@@ -179,7 +179,7 @@ CREATE TABLE IF NOT EXISTS events (
 -- Levels sampled once an hour (hours since the epoch, at the hour's start; the open problems also right after one is
 -- marked done), a count of each kind and nothing else: `open-errors`/`open-crashes` the reports of the error and
 -- crash groups not done (their counts summed), `queue-envelopes` the envelopes waiting, `queue-media-bytes` the bytes
--- of the blobs waiting, `active-24h`/`active-30d` the users seen in the last 24 hours / 30 days. Every hour for 30
+-- of the blobs waiting, `active-24h`/`active-48h`/`active-30d` the users seen in the last 24 hours / 48 hours / 30 days. Every hour for 30
 -- days, then the day's last (taken at the next midnight, UTC) kept for good, for the operator's page.
 CREATE TABLE IF NOT EXISTS levels (
     kind TEXT NOT NULL,

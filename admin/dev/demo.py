@@ -654,6 +654,9 @@ def main():
     for hub_name, path in paths.items():
         with sqlite3.connect(path) as db:
             db.executemany("INSERT OR IGNORE INTO levels VALUES (?, ?, ?)", migrate_levels.rows(hub_name, state, now))
+            # Active accounts (seen within 48 hours), sampled hourly for the last five days: the line starts when data does.
+            db.executemany("INSERT OR IGNORE INTO levels VALUES ('active-48h', ?, ?)",
+                           [(h, int(args.users * (0.5 + 0.1 * math.sin(h / 9)) + (h - now // HOUR))) for h in range(now // HOUR - 119, now // HOUR + 1)])
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
         hours[str(h)] = max(0, int(rng.gauss(5, 3)))
