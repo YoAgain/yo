@@ -243,6 +243,8 @@ final class SharedAccess: @unchecked Sendable {
       #if os(iOS)
       CountedErrors.record(domain: "SharedAccess", place: "held over \(Int(Self.heldLong)) s",
         code: requests == 0 ? "no request" : slowest.seconds > Self.heldLong / 2 ? "a slow request" : "many requests",
+        // A slow network request is the network's, counted to learn from; no request or many are ours to look at.
+        expected: requests > 0 && slowest.seconds > Self.heldLong / 2,
         details: "held \(Int(held)) s, \(requests) requests, slowest \(Int(slowest.seconds)) s \(slowest.place)")
       #endif
     }
