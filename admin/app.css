@@ -1456,11 +1456,28 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 
 .spark g .segment { opacity: .65; }
 .spark g.on .segment, .spark g:last-child .segment { opacity: 1; }
-.diag-list { display: grid; gap: 10px; }
-.diag-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px;
-  border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-.diag-item summary { cursor: pointer; overflow-wrap: anywhere; font-size: 16px; }
-.diag-item summary span { display: block; margin-top: 5px; font-size: 14px; color: var(--muted); }
-.diag-item summary .diag-place { color: var(--text); }
-.diag-state { display: grid; justify-items: end; gap: 8px; font-size: 14px; }
-.diag-item pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); padding: 12px; border-radius: 8px; }
+.diag-list { display: grid; align-content: start; gap: 6px; container-type: inline-size; font-size: 15px; line-height: 1.35; }
+.diag-item { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+  gap: 4px 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.diag-title { display: flex; gap: 8px; align-items: baseline; overflow-wrap: anywhere; }
+.diag-title::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: #f39c45; }
+.diag-title[data-status="Done"]::before { background: var(--muted); }
+.diag-stats { display: flex; flex-wrap: wrap; gap: 4px; }
+.diag-stats span { padding: 2px 7px; border-radius: 20px; background: var(--bg); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.diag-place, .diag-item details { grid-column: 1 / -1; margin-left: 16px; min-width: 0; color: var(--muted); }
+.diag-place { display: flex; gap: 8px; }
+.diag-place span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.diag-place small { flex: none; font-size: inherit; }
+.diag-list summary { cursor: pointer; overflow-wrap: anywhere; }
+.diag-item summary:hover, .diag-done > summary { color: var(--text); }
+.diag-done > summary { padding: 8px 0; font-weight: 600; }
+.diag-facts { margin: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.diag-facts dt { margin-top: 6px; font-weight: 600; color: var(--text); }
+.diag-facts dd { margin: 0; }
+.diag-item pre { max-height: 26rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  margin: 8px 0 0; background: var(--bg); padding: 10px; border-radius: 8px; }
+@container (max-width: 760px) {
+  .diag-item { grid-template-columns: minmax(0, 1fr) auto; }
+  .diag-item > button { grid-column: 2; grid-row: 1; }
+  .diag-stats { grid-column: 1 / -1; grid-row: 2; margin-left: 16px; }
+}

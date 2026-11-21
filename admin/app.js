@@ -1427,14 +1427,19 @@ if (document.body.classList.contains("login")) {
   const diagnosticBuild = (d, payload) => {
     const app = d.app || payload.app || "";
     const rc = [payload.release, payload.version, app].join(" ").match(/\bRC(?:[ -]?\d+)?\b/i);
-    if (rc) return rc[0];
-    const stamp = build(app);
-    if (/^\d{12}$/.test(stamp)) return `${buildLabel(app)}, ${stamp.slice(0, 4)} UTC`;
-    return app;
+    const stamp = build(app), dated = /^\d{12}$/.test(stamp);
+    const dateLabel = dated ? buildLabel(app) : "";
+    const label = rc && dated ? `${rc[0]} (${dateLabel})` : rc?.[0] || dateLabel || app;
+    return { key: app || label, label, oldest: dated ? dateLabel.replace(/ \d\d:\d\d$/, "") : label,
+      full: dated ? `${label} · ${app} UTC` : app || label,
+      time: dated ? Date.UTC(+stamp.slice(0, 4), +stamp.slice(4, 6) - 1, +stamp.slice(6, 8),
+        +stamp.slice(8, 10), +stamp.slice(10)) : d.first_seen };
   };
   const diagnosticList = (rows, previous) => {
     const list = el("div", "diag-list"), groups = new Map(), hub = which;
-    const expanded = new Set([...previous.querySelectorAll("details[open]")].map(d => d.dataset.cause));
+    const expanded = new Set([...previous.querySelectorAll("details[data-cause][open]")].map(d => d.dataset.cause));
+    const done = el("details", "diag-done"), doneList = el("div", "diag-list");
+    done.open = !!previous.querySelector(".diag-done[open]");
     for (const d of rows) {
       const key = diagCause(d);
       if (!groups.has(key)) groups.set(key, { key, rows: [], open: false, first: d.first_seen, last: d.last_seen });
@@ -1448,44 +1453,64 @@ if (document.body.classList.contains("login")) {
       const details = el("details"), summary = el("summary"), item = el("article", "diag-item");
       details.dataset.cause = g.key;
       details.open = expanded.has(g.key);
-      const places = new Set(), builds = new Set();
+      const places = new Map(), builds = new Map();
       for (const d of g.rows) {
         const p = diagPayload(d);
-        const place = p.place || p.endpoint || (p.file && [p.file, p.line].filter(Boolean).join(":"))
+        const source = [p.file, p.line].filter(Boolean).join(":");
+        const place = [source, p.place || p.function].filter(Boolean).join(" ") || p.endpoint
           || String(p.frames || "").split("\n").find(line => /\bYo\b/.test(line));
-        if (place) places.add(place);
-        const buildName = diagnosticBuild(d, p);
-        if (buildName) builds.add(buildName);
+        if (place) places.set(place, (places.get(place) || 0) + d.count);
+        const version = diagnosticBuild(d, p);
+        if (version.key && !builds.has(version.key)) builds.set(version.key, version);
       }
+      const locations = [...places.keys()].sort((a, b) => places.get(b) - places.get(a));
+      const versions = [...builds.values()].sort((a, b) => b.time - a.time);
       const first = g.rows[0], reports = g.rows.reduce((sum, d) => sum + d.count, 0);
-      summary.append(el("strong", null, diagInfo(first).title),
-        el("span", "diag-place", [...places].join(" · ") || "Location unknown"),
-        el("span", null, "Builds · " + ([...builds].join(", ") || "Unknown")),
-        el("span", null, `${num(reports)} reports · ${num(first.cause_installs)} installs`),
-        el("span", null, `First seen ${rel(g.first)} · Last seen ${rel(g.last)}`));
-      const seen = last?.[hub]?.crash_free?.["0"]?.[1];
-      if (seen && first.cause_installs != null) summary.append(el("span", null,
-        `${pctText(100 * first.cause_installs / seen)} of phones seen in 90 days`));
+      const title = el("strong", "diag-title", diagInfo(first).title);
+      title.dataset.status = g.open ? "Open" : "Done";
+      const stats = el("div", "diag-stats"), phones = first.cause_installs;
+      const seen = last?.[hub]?.crash_free?.["0"]?.[1], age = rel(g.last);
+      const share = el("span", null, pctText(seen && phones != null ? 100 * phones / seen : null));
+      share.title = "Share of phones seen in 90 days";
+      const recent = el("span", null, age === "just now" || !g.last ? age : age + " ago");
+      recent.title = "Last seen " + date(g.last);
+      stats.append(el("span", null, `${num(reports)} report${reports === 1 ? "" : "s"}`),
+        el("span", null, `${num(phones)} phone${phones === 1 ? "" : "s"}`), share, recent);
+      const placeLine = el("div", "diag-place");
+      const main = locations[0]?.replace(/^\S*\/([^/\s]+\.swift:\d+)/, "$1").replace(/^\d+\s+Yo\s+/, "");
+      placeLine.append(el("span", null, main || "Location unknown"));
+      if (locations.length > 1) placeLine.append(el("small", null, `+${locations.length - 1} more`));
+      summary.textContent = versions.length > 1
+        ? `${versions.length} builds · newest ${versions[0].label} · oldest ${versions.at(-1).oldest}`
+        : versions.length ? "1 build · " + versions[0].label : "Build unknown";
+      const facts = el("dl", "diag-facts");
+      for (const [name, values] of [["Builds", versions.map(v => v.full)], ["Places", locations], ["First seen", [date(g.first)]]]) {
+        facts.append(el("dt", null, name));
+        for (const value of values.length ? values : ["Unknown"]) facts.append(el("dd", null, value));
+      }
       const raw = el("pre", "pii");
       const showRaw = () => {
         if (details.open && !raw.textContent) raw.textContent = JSON.stringify(g.rows.map(d => ({ ...d, payload: diagPayload(d) })), null, 2);
       };
       details.addEventListener("toggle", showRaw);
       showRaw();
-      details.append(summary, raw);
-      const state = el("div", "diag-state"), button = el("button", "pill", g.open ? "Mark done" : "Reopen");
+      details.append(summary, facts, raw);
+      const button = el("button", "pill", g.open ? "Mark done" : "Reopen");
       button.type = "button";
       button.addEventListener("click", async () => {
         button.disabled = true;
         try {
           for (const d of g.rows.filter(d => !!d.done !== g.open))
             await postJSON("/diagnostics/done", { hub, id: d.id, done: g.open });
-        } catch (error) { state.append(el("span", "error", error.message)); }
+        } catch (error) { item.append(el("span", "error", error.message)); }
         finally { await refresh(); button.disabled = false; }
       });
-      state.append(el("b", g.open ? "warn" : "muted", g.open ? "Open" : "Done"), button);
-      item.append(details, state);
-      list.append(item);
+      item.append(title, stats, button, placeLine, details);
+      (g.open ? list : doneList).append(item);
+    }
+    if (doneList.childElementCount) {
+      done.append(el("summary", null, `Done (${doneList.childElementCount})`), doneList);
+      list.append(done);
     }
     if (!groups.size) list.append(el("p", "empty", "No diagnostics."));
     return list;
