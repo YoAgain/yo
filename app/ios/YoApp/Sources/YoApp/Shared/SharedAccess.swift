@@ -39,6 +39,8 @@ final class SharedAccess: @unchecked Sendable {
   /// Rust and its Swift callbacks are synchronous on one OS thread; no Swift task suspension occurs in a turn.
   static var current: SharedAccess? { Thread.current.threadDictionary[threadKey] as? SharedAccess }
   private static var lifetime: Lifetime? { Thread.current.threadDictionary[lifetimeKey] as? Lifetime }
+  /// Within a request's lifetime (an extension's, an App Intent's): the request keeps the process up until its end.
+  static var inRequest: Bool { lifetime != nil }
 
   /// Each extension request has its own lifetime: the system may reuse the process for another request.
   final class Lifetime: @unchecked Sendable {

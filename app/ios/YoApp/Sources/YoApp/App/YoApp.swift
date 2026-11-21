@@ -316,7 +316,9 @@ private final class StateAccessTime: StateAccess, @unchecked Sendable {
       // iOS may refuse background time even in front (seen on a first open: every refusal stalled the update, and
       // under Face ID for a passkey: the backup's save came back "Busy"). In front, inactive too, the app is not
       // suspended, so the access goes on without it; only the background suspends it.
-      guard front() else {
+      // Within an App Intent's request (YoSend from the Action button, Shortcuts, Siri) the request keeps the app up,
+      // as an extension's: refused here, every Yo sent from the background said "open busy" and did not go.
+      guard front() || SharedAccess.inRequest else {
         Logger(subsystem: "app.justyo", category: "state-access").error("background time refused")
         return false
       }

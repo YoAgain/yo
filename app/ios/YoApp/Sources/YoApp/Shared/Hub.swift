@@ -221,6 +221,8 @@ final class HubTransport: HttpTransport {
     // A conflict the core takes in and goes on from: the storage another write moved on (merged, written again), a
     // contact's device changed (the delivery goes again to the one named).
     if method == "PUT", route == "/v1/storage" { expectedStatus.insert(409) }
+    // A blob of this random id is there already: this one, stored by a try whose answer was lost (taken as stored).
+    if method == "PUT", route.hasPrefix("/v1/blobs/") { expectedStatus.insert(409) }
     if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(409) }
     // A group another member changed meanwhile: the hub answers with the group as it is and the core applies the
     // change to that revision.
@@ -435,7 +437,14 @@ enum Keychain {
     var errorCode: Int { Int(status) }
     init(status: OSStatus, file: String = #fileID, line: Int = #line, place: String = #function) {
       self.status = status
-      Diagnostics.record(self, place: place, file: file, line: line)
+      if status == errSecInteractionNotAllowed {
+        // Not unlocked since a restart (or the own group not known yet): the caller waits for the unlock, as the
+        // notification service says (lockedBeforeFirstUnlock). Counted, not a problem.
+        CountedErrors.record(domain: Self.errorDomain, place: "\(file):\(line) \(place)", code: String(status),
+          expected: true)
+      } else {
+        Diagnostics.record(self, place: place, file: file, line: line)
+      }
     }
   }
 
