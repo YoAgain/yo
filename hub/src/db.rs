@@ -18,6 +18,8 @@ use yo_wire::{DeviceId, UserId, KEY_LEN};
 const DAY_MS: u64 = 24 * 3600 * 1000;
 /// How long a crash or error group is kept after it was last seen, and an install's occurrence of one (spec 6.4).
 const DIAGNOSTICS_KEPT_DAYS: u64 = 90;
+/// Levels (`levels`) are kept by the hour this long, then one a day for good.
+const LEVELS_HOURLY_DAYS: u64 = 30;
 /// A blob not ready this long after it was stored belongs to no upload under way: its file never came into place.
 const NOT_READY_KEPT_MS: u64 = 3600 * 1000;
 
@@ -960,6 +962,41 @@ impl Db {
         Ok(())
     }
 
+    /// The levels at `now` into its hour (`levels`), counts only, nothing of who or what (6.6): the hourly sample
+    /// keeps an hour's first (a restart within the hour takes none); `problems_only` the open problems alone, right
+    /// after one is marked done, replacing the hour's.
+    pub fn sample_levels(&self, now: u64, problems_only: bool) -> rusqlite::Result<()> {
+        const PROBLEMS: [(&str, &str); 2] = [
+            ("open-errors", "SELECT coalesce(sum(count), 0) FROM diagnostics WHERE done = 0 AND kind = 'error'"),
+            ("open-crashes", "SELECT coalesce(sum(count), 0) FROM diagnostics WHERE done = 0 AND kind = 'crash'"),
+        ];
+        const OTHERS: [(&str, &str); 4] = [
+            ("queue-envelopes", "SELECT count(*) FROM messages"),
+            ("queue-media-bytes", "SELECT coalesce(sum(size), 0) FROM blobs"),
+            ("active-24h", "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 86400000"),
+            ("active-30d", "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 30 * 86400000"),
+        ];
+        let others: &[_] = if problems_only { &[] } else { &OTHERS };
+        let hour = (now / 3_600_000) as i64;
+        self.write(|tx| {
+            let mut put = tx.prepare_cached(if problems_only {
+                "INSERT OR REPLACE INTO levels (kind, hour, value) VALUES (?1, ?2, ?3)"
+            } else {
+                "INSERT OR IGNORE INTO levels (kind, hour, value) VALUES (?1, ?2, ?3)"
+            })?;
+            for (kind, sql) in PROBLEMS.iter().chain(others) {
+                let mut query = tx.prepare_cached(sql)?;
+                let value: i64 = if query.parameter_count() == 1 {
+                    query.query_row([now as i64], |r| r.get(0))
+                } else {
+                    query.query_row([], |r| r.get(0))
+                }?;
+                put.execute(params![kind, hour, value])?;
+            }
+            Ok(())
+        })
+    }
+
     /// A crash or error report, with the install that sent it (none: the hub's own), by the day.
     pub fn diagnostic(
         &self,
@@ -1423,6 +1460,12 @@ impl Db {
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
         conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
         conn.execute("DELETE FROM diagnostic_installs WHERE day < ?1", [(kept / DAY_MS) as i64])?;
+        // Levels older than 30 days: the day's last alone (the one at the next midnight, UTC; spec 6.6).
+        conn.execute(
+            "DELETE FROM levels WHERE hour < ?1 AND EXISTS (SELECT 1 FROM levels l WHERE l.kind = levels.kind
+             AND l.hour > levels.hour AND l.hour <= ((levels.hour - 1) / 24 + 1) * 24)",
+            [(now.saturating_sub(LEVELS_HOURLY_DAYS * DAY_MS) / 3_600_000) as i64],
+        )?;
         Ok(messages)
     }
 
@@ -1988,6 +2031,87 @@ mod tests {
         assert_eq!(columns, ["kind", "minute", "n"], "no identifier of anyone or anything");
         db.prune(1000 * DAY_MS, DAY_MS).unwrap();
         assert_eq!(rows(&db).len(), 3, "kept for good: counts of no one");
+    }
+
+    #[test]
+    fn levels_are_counts_per_hour_then_per_day_for_good() {
+        let db = Db::open(":memory:").unwrap();
+        let hour = 3_600_000u64;
+        let now = 1000 * DAY + 5 * hour + 30_000;
+        assert!(matches!(register(&db, b"alice", 1, 1, now - 2 * DAY), Write::Done(_)));
+        assert!(matches!(register(&db, b"bob", 2, 2, now - hour), Write::Done(_)));
+        let conn = db.conn();
+        for (kind, signature, count, done) in [("error", "a", 3, 0), ("error", "b", 4, 1), ("crash", "c", 2, 0)] {
+            conn.execute(
+                "INSERT INTO diagnostics (kind, signature, count, first_seen, last_seen, app, os, model, payload, done)
+                 VALUES (?1, ?2, ?3, 0, 0, '', '', '', '{}', ?4)",
+                params![kind, signature, count, done],
+            )
+            .unwrap();
+        }
+        conn.execute("INSERT INTO messages (device_id, envelope, received_at) VALUES (X'01', X'00', 0)", []).unwrap();
+        conn.execute(
+            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at) VALUES (X'01', X'01', 700, 1, 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let rows = |db: &Db| -> Vec<(String, i64, i64)> {
+            db.conn()
+                .prepare("SELECT kind, hour, value FROM levels ORDER BY kind, hour")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let h = (now / hour) as i64;
+        let row = |kind: &str, hour, value| (kind.to_owned(), hour, value);
+        db.sample_levels(now, false).unwrap();
+        assert_eq!(
+            rows(&db),
+            [
+                row("active-24h", h, 1),
+                row("active-30d", h, 2),
+                row("open-crashes", h, 2),
+                row("open-errors", h, 3),
+                row("queue-envelopes", h, 1),
+                row("queue-media-bytes", h, 700),
+            ]
+        );
+        // The hourly sample keeps the hour's first; a problem marked done replaces the open problems of the hour.
+        db.diagnostic_done(1, true).unwrap();
+        db.sample_levels(now + 60_000, false).unwrap();
+        assert_eq!(rows(&db)[3], row("open-errors", h, 3));
+        db.sample_levels(now + 60_000, true).unwrap();
+        assert_eq!(rows(&db)[3], row("open-errors", h, 0));
+        assert_eq!(rows(&db).len(), 6);
+        let columns: Vec<String> = db
+            .conn()
+            .prepare("SELECT name FROM pragma_table_info('levels')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(columns, ["kind", "hour", "value"], "no identifier of anyone or anything");
+        // 30 days of hours, then the day's last (the one at the next midnight) alone, kept for good.
+        db.conn().execute("DELETE FROM levels", []).unwrap();
+        let day0 = 900 * 24i64;
+        for hour in day0 + 1..=day0 + 24 * 3 {
+            db.conn().execute("INSERT INTO levels VALUES ('queue-envelopes', ?1, ?1)", [hour]).unwrap();
+        }
+        db.prune(now, DAY).unwrap();
+        let kept: Vec<i64> = rows(&db).iter().map(|r| r.1).collect();
+        assert_eq!(kept, [day0 + 24, day0 + 48, day0 + 72]);
+        db.prune(now + 1000 * DAY, DAY).unwrap();
+        assert_eq!(rows(&db).len(), 3, "kept for good: counts of no one");
+        let recent = (now / hour) as i64;
+        for hour in recent - 30..=recent {
+            db.conn().execute("INSERT INTO levels VALUES ('active-24h', ?1, 1)", [hour]).unwrap();
+        }
+        db.prune(now, DAY).unwrap();
+        assert_eq!(rows(&db).len(), 3 + 31, "the last 30 days by the hour");
     }
 
     #[test]

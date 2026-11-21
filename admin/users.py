@@ -310,6 +310,33 @@ def open_problems(db, now: int) -> dict:
             "days": [at(min(now, midnight + (1 - i) * DAY_MS)) for i in range(364, -1, -1)]}
 
 
+def levels(db, now: int, messages=None, blobs=None) -> dict:
+    """The hub's levels (`levels`: counts only, sampled at each hour's start; older than 30 days only the day's last,
+    taken at the next midnight, UTC) as the page's histories. A sample at an hour's start is the level at the end of
+    the hour before, so its day is (hour - 1) // 24. "active_days" {day: users seen in its 24 hours} (today left out:
+    the page has active_day), "queue_hours" {hour: [envelopes, bytes]} (48 hours) and "queue_days" {day: [...]} with
+    the current values for this hour and today, "open_report_history" [{t, errors_open, crashes_open}]."""
+    rows = {}
+    for kind, hour, value in db.execute("SELECT kind, hour, value FROM levels ORDER BY hour"):
+        rows.setdefault(kind, {})[hour] = value
+    hour_now, today = now // 3600000, now // DAY_MS
+    by_day = lambda kind: {(h - 1) // 24: v for h, v in rows.get(kind, {}).items()}  # noqa: E731 (in order: the day's last)
+    env, media = rows.get("queue-envelopes", {}), rows.get("queue-media-bytes", {})
+    hours = {str(h): [v, media.get(h, 0)] for h, v in env.items() if hour_now - h < 48}
+    day_media = by_day("queue-media-bytes")
+    days = {str(d): [v, day_media.get(d, 0)] for d, v in by_day("queue-envelopes").items()}
+    if isinstance(messages, int) and isinstance(blobs, (list, tuple)) and len(blobs) == 2:
+        hours[str(hour_now)] = days[str(today)] = [messages, blobs[1] or 0]
+    errors, crashes = rows.get("open-errors", {}), rows.get("open-crashes", {})
+    return {
+        "active_days": {str(d): v for d, v in by_day("active-24h").items() if d < today},
+        "queue_hours": hours,
+        "queue_days": days,
+        "open_report_history": [{"t": h * 3600000 - 1, "errors_open": errors.get(h, 0), "crashes_open": crashes.get(h, 0)}
+                                for h in sorted(set(errors) | set(crashes))],
+    }
+
+
 def hub(name: str, path: str) -> dict:
     """Each part on its own: one that fails (a table or column the hub's schema no longer has) comes out as None (or
     empty) with its error in "errors", the others still show."""
@@ -362,7 +389,7 @@ def hub(name: str, path: str) -> dict:
              "reason": REASONS.get(reason, str(reason)), "at": at}
             for a, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "reports") else [])
         ], [])
-        return {
+        out = {
             "users": users,
             "reports": reports,
             # The team's to-dos: their own table from the hub's schema 7, the X'' thread before it.
@@ -482,8 +509,11 @@ def hub(name: str, path: str) -> dict:
                 "SELECT coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at >= ? GROUP BY 1 ORDER BY 2 DESC",
                 (midnight,)).fetchall() if has_app else [], []),
             "size": part("size", lambda: os.path.getsize(path)),
-            "errors": errors,
         }
+        # The hub's hourly levels as the page's histories (see levels); a hub without the table has none.
+        out.update(part("levels", lambda: levels(db, now, out["messages"], out["blobs"]) if has_table(db, "levels") else {}, {}))
+        out["errors"] = errors
+        return out
     finally:
         db.close()
 

@@ -79,8 +79,8 @@ mkdir "$sample/state"
 ```
 
 Active users per day are the collector's count of users seen since UTC midnight (the hub keeps one last-seen day
-per device); the admin keeps the highest count per day, counts only, for 60 days in `STATE_DIRECTORY/active-days.json`,
-so the chart fills from the first day this version runs. Sign-ups per day come from `users.created_at` (30 UTC days).
+per device); the days before come from the hub's own `levels` (`active-24h` at each midnight, counts only, kept for
+good), as do the queue and the open problems over time. Sign-ups per day come from `users.created_at` (30 UTC days).
 
 Missing sample tables produce per-section errors without hiding feedback or tables. To serve this
 snapshot, export the five required authentication settings from a private local env file, set

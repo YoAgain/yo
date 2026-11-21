@@ -178,6 +178,9 @@ Retention: **kept for good**. Linked to account: no.
 - **Live stream** `/v1/admin/live`: each `yo-in`/`media-in` the moment it is counted, as `{"k":"yo"}` or `{"k":"media"}`.
   Nothing is stored. Not linked.
 - **`diagnostic_days`** (day, kind, count): crash and error reports per day, kept 14 days. Not linked.
+- **`levels`** (kind, hour, value): sampled once an hour (the open problems also right after one is marked done):
+  `open-errors`, `open-crashes`, `queue-envelopes`, `queue-media-bytes`, `active-24h`, `active-30d`; every hour for
+  30 days, then one a day (at midnight, UTC) for good. Not linked.
 - **`blob_quota`** (user, day, count, bytes): each user's uploads per day, for the quota, kept 2 days. Linked: yes.
 
 **Admin, derived from the hub database** (`admin/users.py`, read-only):
@@ -190,9 +193,7 @@ Retention: **kept for good**. Linked to account: no.
 
 | File | Content | Retention |
 |---|---|---|
-| `active-days.json` | {day: users seen that day} per hub | 60 days |
 | `version-days.json` | per day [current, update, must, unknown] device counts, and devices per build | per day for good; per hour 48 hours |
-| `queue.json` | Yos and bytes waiting for offline phones | per hour 48 hours; per day 400 days |
 
 The admin's users table (name, devices, last seen, push platform, build, backup) is a live read of the hub database,
 not a copy.

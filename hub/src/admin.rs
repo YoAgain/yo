@@ -210,6 +210,8 @@ async fn put_diagnostics(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {
     let id = change["id"].as_i64().filter(|id| *id > 0).ok_or_else(bad)?;
     let done = change["done"].as_bool().ok_or_else(bad)?;
     hub.db.diagnostic_done(id, done)?;
+    // The open problems right after the change, for the operator's history (`levels`).
+    hub.db.sample_levels(now_ms(), true)?;
     get_diagnostics(State(hub)).await
 }
 

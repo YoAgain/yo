@@ -77,6 +77,7 @@ CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, install BLO
     read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
 CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER);
 CREATE TABLE events (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID;
+CREATE TABLE levels (kind TEXT NOT NULL, hour INTEGER NOT NULL, value INTEGER NOT NULL, PRIMARY KEY (kind, hour)) WITHOUT ROWID;
 """
 
 # ---- names --------------------------------------------------------------------------------------------------------
@@ -647,6 +648,12 @@ def main():
         return [yos, yos * rng.randint(60_000, 140_000)]
     write("queue.json", {"live": {"hours": {str(h): queue_at(h) for h in range(now // HOUR - 47, now // HOUR)},
                                   "days": {str(d): queue_at(d) for d in range(today - 30, today)}}})
+    # The active users and the queue into the hubs' levels, as migrate_levels.py brought the JSON of before.
+    sys.path.insert(0, ADMIN_DIR)
+    import migrate_levels  # noqa: E402
+    for hub_name, path in paths.items():
+        with sqlite3.connect(path) as db:
+            db.executemany("INSERT OR IGNORE INTO levels VALUES (?, ?, ?)", migrate_levels.rows(hub_name, state, now))
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
         hours[str(h)] = max(0, int(rng.gauss(5, 3)))

@@ -2104,7 +2104,7 @@ if (document.body.classList.contains("login")) {
       liveChart({ line, bars: d.values.map((v) => v || 0), ...axisOf(d.names) }, cls, foot, say), foot);
   };
   // The queue: Yos waiting for offline phones (the line) and the size of the photos and videos waiting (the bars), as
-  // admin.py keeps them (the last value per hour for 48 hours, per day for good).
+  // the hub keeps them (users.py from its levels: per hour for 48 hours, per day for good, now live).
   const queueSlots = (h) => {
     if (range === 1) {
       const h1 = Math.floor(Date.now() / 3600000), q = h.queue_hours || {}, hrs = Array.from({ length: 24 }, (_, i) => h1 - 23 + i);

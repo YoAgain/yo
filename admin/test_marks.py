@@ -18,37 +18,24 @@ class MarksTests(unittest.TestCase):
                                      "ACCESS_TEAM": "invalid", "ACCESS_AUD": "test", "STATE_DIRECTORY": self.temp.name}):
             self.admin = load("admin")
 
-    def test_open_report_history(self):
-        hour = 3600000
-        def record(t, errors, changed=None):
-            data = {"open_report_counts": {"error": errors, "crash": 2}}
-            return self.admin.problem_history({"at": t, "live": data}, changed)["live"]["open_report_history"]
-
-        record(hour, 8)
-        record(2 * hour, 7)
-        self.assertEqual(record(2 * hour + 1, 4)[-1]["errors_open"], 7)
-        closed = record(2 * hour + 2, 3, "live")[-1]
-        self.assertEqual(closed, {"t": 2 * hour + 2, "errors_open": 3, "crashes_open": 2})
-        recent = record(24 * hour, 5)[-1]
-        points = record(31 * 24 * hour, 0)
-        self.assertEqual(points[:-1], [closed, recent])
-        self.assertEqual(points[-1]["errors_open"], 0)
-
-    def test_active_days_keep_the_highest_count_per_day(self):
-        admin, day = self.admin, 20400
-        now = day * 86400000 + 5000
-        out = admin.active_days({"at": now, "live": {"active_day": 3}, "dev": {"error": "x"}}, now)
-        self.assertEqual(out["live"]["active_days"], {str(day): 3})
-        self.assertEqual(out["dev"]["active_days"], {})
-        admin.active_days({"at": now, "live": {"active_day": 2}}, now)  # lower later in the day: kept at 3
-        out = admin.active_days({"at": now + 86400000, "live": {"active_day": 1}}, now + 86400000)
-        self.assertEqual(out["live"]["active_days"], {str(day): 3, str(day + 1): 1})
-        # An old snapshot (from yesterday) never writes today's value; 60 days later the old ones are gone.
-        out = admin.active_days({"at": now, "live": {"active_day": 9}}, now + 86400000)
-        self.assertEqual(out["live"]["active_days"][str(day + 1)], 1)
-        later = now + 61 * 86400000
-        self.assertEqual(admin.active_days({"at": later, "live": {"active_day": 4}}, later)["live"]["active_days"], {str(day + 61): 4})
-        self.assertEqual(admin.active_days({"stale": True})["stale"], True)
+    def test_histories_come_from_the_hubs_levels(self):
+        users, hour, day = load("users"), 3600000, 20400
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE levels (kind TEXT, hour INTEGER, value INTEGER, PRIMARY KEY (kind, hour))")
+        h0 = day * 24  # midnight starting `day`: the levels at the end of day - 1
+        db.executemany("INSERT INTO levels VALUES (?, ?, ?)", [
+            ("active-24h", h0 - 24, 4), ("active-24h", h0, 5), ("active-24h", h0 + 3, 9),
+            ("queue-envelopes", h0, 2), ("queue-media-bytes", h0, 70), ("queue-envelopes", h0 + 3, 1),
+            ("open-errors", h0, 8), ("open-crashes", h0, 2), ("open-errors", h0 + 3, 3)])
+        now = (h0 + 3) * hour + 600_000
+        out = users.levels(db, now, 6, (1, 900))
+        self.assertEqual(out["active_days"], {str(day - 2): 4, str(day - 1): 5}, "today's from active_day")
+        self.assertEqual(out["queue_hours"], {str(h0): [2, 70], str(h0 + 3): [6, 900]}, "this hour: now")
+        self.assertEqual(out["queue_days"], {str(day - 1): [2, 70], str(day): [6, 900]})
+        self.assertEqual(out["open_report_history"], [
+            {"t": h0 * hour - 1, "errors_open": 8, "crashes_open": 2},
+            {"t": (h0 + 3) * hour - 1, "errors_open": 3, "crashes_open": 0}])
+        self.assertEqual(users.levels(db, now + 48 * hour)["queue_hours"], {})
 
     def test_version_days_keep_the_latest_per_day_for_good(self):
         admin, day = self.admin, 20400

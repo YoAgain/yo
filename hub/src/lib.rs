@@ -341,12 +341,22 @@ impl Hub {
     async fn every_minute(self: Arc<Self>) {
         let mut every = tokio::time::interval(MINUTE);
         let mut minutes = 0u64;
+        let mut sampled = None;
         loop {
             every.tick().await;
             self.replay.forget_expired(now_ms());
             self.forget_pushes();
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
             let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;
+            // The levels, once an hour at its first minute: counts only (`levels`), the operator's page.
+            let hour = now_ms() / 3_600_000;
+            if sampled != Some(hour) {
+                match self.blocking(|hub| hub.db.sample_levels(now_ms(), false)).await {
+                    Ok(Ok(())) => sampled = Some(hour),
+                    Ok(Err(error)) => eprintln!("yo-hub: levels: {error}"),
+                    Err(_) => {}
+                }
+            }
             if minutes.is_multiple_of(60) {
                 self.limiter.forget_idle(DAY);
                 self.requests.forget_full(self.clock_ms());
