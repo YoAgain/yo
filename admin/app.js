@@ -2283,7 +2283,7 @@ if (document.body.classList.contains("login")) {
     const box = el("div", "srows");
     for (const r of rows) {
       const first = heading && !box.childElementCount;
-      const row = el(first ? "h2" : "div", `srow${first ? " gh" : ""}${r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
+      const row = el(first ? "h2" : "div", `srow${first ? " gh" : ""}${r.keepValueColumn || r.values || r.bar != null || r.stack || r.node ? "" : " wide"}${r.go ? " go" : ""}`);
       let cachedCard;
       if (r.title || r.values?.length) hint(row, () => {
         if (cachedCard) return cachedCard;
@@ -2572,7 +2572,7 @@ if (document.body.classList.contains("login")) {
     };
     // Accounts: activity (who is active, how many stay, how much they send) and the accounts' properties (secured,
     // deleted), as the overview's rows: a label, its value, a sparkline where there is a history, a popup per slot.
-    // The Accounts stats card: account metrics as the overview's rows (secured bar, new accounts secured, deleted,
+    // The Accounts stats card: account metrics as the overview's rows (secured bar, new accounts secured,
     // Yos per user), each with its history in the hover.
     const statsRows = (h) => {
       const mau = h.active_month || 0, dau = h.active_today ?? 0, t = today0();
@@ -2604,9 +2604,7 @@ if (document.body.classList.contains("login")) {
               title: { cap: 1, head: "Secured, all accounts", nodes: [g, ...(sc?.values?.length ? [historyPlot(sc.values.map((v, i) => h.secured_days?.[i]?.[0] ? v : null), sc.names, "")] : [])], rows: [{ label: `${dayName(dd[0])} – today`, value: pctText(now) }, { section: "New accounts, the bars above" },
                 { label: "Secured, last 7 days", value: made ? pctText((100 * withKey) / made) : "–" }] } };
           })(),
-          ...(rangeCount("account-gone", gone) ? [{ ico: "trash", label: "Deleted", value: num(rangeCount("account-gone", gone)), cls: "warn", values: gone.values.map((v) => v || 0), scls: "warm",
-            tip: (i) => ({ head: gone.names[i], rows: [{ color: "#e67e22", label: "Deleted", value: num(gone.values[i] || 0) }] }) }] : []),
-          { ico: "user", label: "Yos / user", value: mean(yoN, usersInRange), values: per.some(v => v != null) ? per : null,
+          { ico: "user", label: "Yos / user", keepValueColumn: true, value: mean(yoN, usersInRange), values: per.some(v => v != null) ? per : null,
             title: { ...meanTip(spanWord(), yoN, usersInRange), note: !range ? "The hub has no all-time count of distinct active accounts." :
               daily ? "Accepted Yos divided by distinct active accounts in the range. Each bar uses that day’s counts." :
               "Accepted Yos divided by distinct active accounts in the range. Account activity is unavailable for individual slots." },
