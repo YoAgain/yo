@@ -775,11 +775,11 @@ if (document.body.classList.contains("login")) {
       const every = Math.max(1, Math.ceil(np / 16));
       line.forEach((v, i) => { if (v != null) out.push(svg("circle", { class: i % every && i !== np - 1 && i !== pick ? "dot hide" : "dot", cx: px(i).toFixed(1), cy: y(v).toFixed(1), r: 2.6 })); });
     }
-    // A second line on its own scale (Active over Accounts); a gap where the hub has no sample yet.
+    // Active share uses the full 0–100 % range and leaves unsampled slots empty.
     if (line2) {
       const have = line2.filter((v) => v != null);
       if (have.length) {
-        const lo = Math.min(...have), hi = Math.max(...have), y = (v) => padTop + (B - padTop - 3) * (hi === lo ? 0.5 : 1 - (v - lo) / (hi - lo));
+        const y = (v) => padTop + (B - padTop - 3) * (1 - v / 100);
         const pts = [], dots = [];
         line2.forEach((v, i) => {
           if (v == null) return;
@@ -798,12 +798,15 @@ if (document.body.classList.contains("login")) {
     node.replaceChildren(svg("line", { x1: pad, x2: W - pad, y1: B, y2: B, stroke: "var(--line)" }), ...out, ax(pad, from, "start"), ax(W - pad, to, "end"));
   };
   // Accounts: the active accounts (the hub's active-48h, hourly, then daily) at the end of each slot; none before sampling began.
-  let active48 = [];
-  const activeLine = (key, d) => {
-    if (key !== "uc" || !active48.length || !d.hourEnds) return null;
-    const at = (hr, i) => { let v = null; for (const [t, n] of active48) { if (t > hr) break; if (t > d.hourStarts[i]) v = n; } return v; };
-    return [null, ...d.hourEnds.map(at)];
-  };
+  const activeSlots = (d, samples) => d.hourEnds?.map((end, i) => {
+    const total = d.values[i + 1];
+    let count = null;
+    for (const [hour, n] of samples) {
+      if (hour > end) break;
+      if (hour > d.hourStarts[i]) count = n;
+    }
+    return count != null && total > 0 ? { count, total, percent: 100 * count / total } : null;
+  });
   const drawArea = (key) => {
     const d = areaData[key], node = $(`${key}-svg`);
     if (!d || !node) return;
@@ -831,7 +834,7 @@ if (document.body.classList.contains("login")) {
     node.setAttribute("viewBox", `0 0 ${W} ${H}`);
     if (combo) {
       const hv = areaHover[key] ?? -1;
-      paintCombo(node, { line: d.values, line2: activeLine(key, d), bars: d.incs, pick: hv, hover: hv, from: range === 1 ? "24 hours ago" : d.names[0], to: range === 1 ? "now" : d.names[d.names.length - 1] });
+      paintCombo(node, { line: d.values, line2: d.active && [null, ...d.active.map(slot => slot?.percent)], bars: d.incs, pick: hv, hover: hv, from: range === 1 ? "24 hours ago" : d.names[0], to: range === 1 ? "now" : d.names[d.names.length - 1] });
       return;
     }
     // No numbers in the plot: the total is the title's, the time is on the axis under the bars.
@@ -855,19 +858,20 @@ if (document.body.classList.contains("login")) {
   };
   const areaChart = (key, total, perDay, hours, today, week) => {
     set(`${key}-n`, num(total));
-    active48 = hubNow?.active48 || [];
     if (!areaTips[key] && $(`${key}-svg`)) {
       areaTips[key] = true;
       hoverTip($(`${key}-svg`), () => areaData[key]?.incs?.length || 0, (i) => {
         const d = areaData[key], what = { yc: sentMode === "sent" ? "sent" : "delivered", uc: "signed up" }[key] || "";
+        const active = d?.active?.[i];
         const c = key === "uc" ? "var(--amethyst-soft)" : "var(--ok)";
         return d ? { head: d.names[i], rows: [{ section: range === 7 && d.incs.length === 28 ? "These six hours" : slotWord() }, { color: c, label: what[0].toUpperCase() + what.slice(1), value: num(d.incs[i]) },
           { section: "In all" }, { color: c, line: true, label: "Total", value: num(d.values[i + 1]) },
           ...(key === "yc" && sentMode !== "sent" ? [{ section: "One per device; before 2026-11-21 incl. bots" }] : []),
-          ...(activeLine(key, d)?.[i + 1] != null ? [{ color: "var(--ok)", line: true, label: "Active (48 h)", value: num(activeLine(key, d)[i + 1]) }] : [])] } : "";
+          ...(active ? [{ color: "var(--ok)", line: true, label: "Active", value: `${Math.round(active.percent)} % (${num(active.count)} of ${num(active.total)})` }] : [])] } : "";
       }, (i) => { areaHover[key] = i; drawArea(key); });
     }
     areaData[key] = { ...runningTotal(perDay, hours, total || 0, week), overlay: OVERLAY[key] || null, word: WORD[key] };
+    if (key === "uc") areaData[key].active = activeSlots(areaData[key], hubNow?.active48 || []);
     drawArea(key);
     // Under the chart, its activity as bars: per hour (1 day), per six hours (7), per day (30), per stretch of days (Total).
     const st = $(`${key}-strip`), inc = areaData[key].incs, top = Math.max(1, ...inc), sl = 140 / inc.length;
