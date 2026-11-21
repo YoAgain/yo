@@ -15,11 +15,11 @@ Berlin). Slots are whole multiples from Berlin midnight; the config is read agai
 `/run/yo-status-live/last.json` holds the numbers (no names) for the admin page; the journal says `sent`.
 
 A release card on demand: `status.py --release "Yo 1.0.0 RC17" NOTES` (NOTES a file, `-` for stdin) puts the title
-compact on amethyst and the notes' `- ` bullets below as rows in the friend list's colours (one feature a row, two
-lines at most, seven rows, `+n more` for the rest; the card as tall as its rows, up to portrait 1080×1350) and sends
-it to the same one user. Run with the bot's `YO_STATE` and env file, `yo send` goes over the running listener's
-control socket: no second device and no restart. `--save PATH` only writes the card. The hub's operations repository
-calls it after tagging (`./release-yo TAG`).
+and "New release" on amethyst, the notes' `- ` bullets below as a bullet list (each wrapped whole, hanging indent,
+`+n more` for what does not fit; the card as tall as its content, 1080×600 to 1080×1350) and sends it to the same
+one user. Run with the bot's `YO_STATE` and env file, `yo send` goes over the running listener's control socket: no
+second device and no restart. `--save PATH` only writes the card. The hub's operations repository calls it after
+tagging (`./release-yo TAG`).
 
 Needs Pillow (`apt install python3-pil`); [Montserrat-Bold.ttf](Montserrat-Bold.ttf) is under the SIL Open Font
 License ([Montserrat-OFL.txt](Montserrat-OFL.txt)).
