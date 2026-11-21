@@ -78,7 +78,8 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
       guard let gate, let touch = touches.first else { return }
-      gate.blocked = touches.count != 1
+      // A finger that lands while the list still moves only stops it, as in a table view: no Yo, no photo.
+      gate.blocked = touches.count != 1 || listMoving
       gate.touch = touch
       gate.origin = touch.location(in: nil)
       pressed(!gate.blocked)
@@ -91,6 +92,16 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
           self.startFollowing()
         }
       }
+    }
+
+    /// The scroll view around the bar is gliding or being dragged.
+    private var listMoving: Bool {
+      var view = self.view?.superview
+      while let current = view {
+        if let scroll = current as? UIScrollView { return scroll.isDecelerating || scroll.isDragging }
+        view = current.superview
+      }
+      return false
     }
 
     private func checkMovement() {

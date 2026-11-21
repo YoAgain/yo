@@ -185,6 +185,14 @@ import XCTest
       let away = (c["away"] as? [Double]).map { CGPoint(x: $0[0], y: $0[1]) }
       try Burst.tap(points, n: n, interval: interval, hold: c["hold"] as? Double ?? 1, away: away)
       return ["taps": n, "seconds": Double(n) * interval]
+    case "touches":
+      // Fingers as given, in one record (no waiting for the app to be still between them): each path is a list of
+      // [x, y, seconds] in screen points, down at the first, moving through the next, lifting at the last. XCTest
+      // leaves out time with no finger down: a finger off the screen holds the gap. A fling, then a tap 0.5 s on:
+      // paths=[[[200,700,0],[200,620,0.07]],[[600,1200,0.074],[600,1200,0.49]],[[200,450,0.5],[200,450,0.57]]].
+      let paths = (c["paths"] as? [[[Double]]] ?? []).filter { $0.count >= 2 }
+      try Burst.paths(paths)
+      return ["paths": paths.count]
     case "sleep":
       Thread.sleep(forTimeInterval: c["seconds"] as? Double ?? 1)
       return [:]
@@ -338,6 +346,64 @@ import XCTest
       }
     }
     let end = Date.now.addingTimeInterval(Double(n) * interval + 30)
+    while !done.done && Date.now < end { RunLoop.current.run(until: .now + 0.02) }
+    if let error = done.error { throw Driver.Failure(description: "\(error)") }
+  }
+
+  /// Finger paths ([x, y, seconds] each, the first down, the last up), synthesized as one record.
+  static func paths(_ paths: [[[Double]]]) throws {
+    guard let pathClass = NSClassFromString("XCPointerEventPath"),
+      let recordClass = NSClassFromString("XCSynthesizedEventRecord"),
+      !paths.isEmpty
+    else { throw Driver.Failure(description: "no event synthesis in this XCTest") }
+    typealias InitPath = @convention(c) (AnyObject, Selector, CGPoint, Double) -> Unmanaged<AnyObject>
+    typealias Move = @convention(c) (AnyObject, Selector, CGPoint, Double) -> Void
+    typealias Lift = @convention(c) (AnyObject, Selector, Double) -> Void
+    typealias InitRecord = @convention(c) (AnyObject, Selector, NSString, Int) -> Unmanaged<AnyObject>
+    typealias Add = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+    typealias Synthesize =
+      @convention(c) (AnyObject, Selector, AnyObject, @escaping @convention(block) (Bool, NSError?) -> Void) -> Void
+    func imp<T>(_ object: AnyObject, _ name: String, _: T.Type) throws -> (Selector, T) {
+      let selector = NSSelectorFromString(name)
+      guard object.responds(to: selector), let method = class_getMethodImplementation(object_getClass(object), selector)
+      else { throw Driver.Failure(description: "no \(name)") }
+      return (selector, unsafeBitCast(method, to: T.self))
+    }
+    func alloc(_ cls: AnyClass) -> AnyObject {
+      (cls as! NSObject.Type).perform(NSSelectorFromString("alloc"))!.takeUnretainedValue()
+    }
+    guard let synthesizer = XCUIDevice.shared.perform(NSSelectorFromString("eventSynthesizer"))?.takeUnretainedValue()
+    else { throw Driver.Failure(description: "no event synthesizer") }
+    let (synthesizeSelector, synthesize) = try imp(synthesizer, "synthesizeEvent:completion:", Synthesize.self)
+    final class Done: @unchecked Sendable {
+      var done = false
+      var error: NSError?
+    }
+    let done = Done()
+    let first = alloc(recordClass)
+    let (initRecord, makeRecord) = try imp(first, "initWithName:interfaceOrientation:", InitRecord.self)
+    let record = makeRecord(first, initRecord, "touches" as NSString, UIInterfaceOrientation.portrait.rawValue)
+      .takeUnretainedValue()
+    let (addSelector, add) = try imp(record, "addPointerEventPath:", Add.self)
+    var last = 0.0
+    for points in paths {
+      let raw = alloc(pathClass)
+      let (initPath, makePath) = try imp(raw, "initForTouchAtPoint:offset:", InitPath.self)
+      let path = makePath(raw, initPath, CGPoint(x: points[0][0], y: points[0][1]), points[0][2]).takeUnretainedValue()
+      let (moveSelector, move) = try imp(path, "moveToPoint:atOffset:", Move.self)
+      let (liftSelector, lift) = try imp(path, "liftUpAtOffset:", Lift.self)
+      for point in points.dropFirst() { move(path, moveSelector, CGPoint(x: point[0], y: point[1]), point[2]) }
+      lift(path, liftSelector, points[points.count - 1][2])
+      last = max(last, points[points.count - 1][2])
+      add(record, addSelector, path)
+    }
+    synthesize(synthesizer, synthesizeSelector, record) { _, error in
+      DispatchQueue.main.async {
+        done.error = error
+        done.done = true
+      }
+    }
+    let end = Date.now.addingTimeInterval(last + 30)
     while !done.done && Date.now < end { RunLoop.current.run(until: .now + 0.02) }
     if let error = done.error { throw Driver.Failure(description: "\(error)") }
   }

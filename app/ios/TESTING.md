@@ -19,7 +19,7 @@ app/ios/dev/sim/drive.py ~/yo-chaos/dA audit                # Xcode's accessibil
 xcrun simctl io "Yo Chaos A" screenshot shot.png
 ```
 
-`drive.py` ops: `burst` (fast taps, see Speed), `launch` (`env=YO_HUB:https://127.0.0.1:9` takes the hub away: "offline"), `activate`, `terminate`,
+`drive.py` ops: `burst` (fast taps, see Speed), `touches` (finger paths in one go, see Deliberate taps), `launch` (`env=YO_HUB:https://127.0.0.1:9` takes the hub away: "offline"), `activate`, `terminate`,
 `home`, `tap`/`press`/`doubletap`/`exists`/`wait`/`gone`/`swipe` by `label`, `contains`, `id`, `type`, `index` (`sb=true`
 for the system's alerts and Notification Center), `tapxy`/`pressxy`/`drag` by points (`drag sb=true x=100 y=1 x2=100
 y2=700 velocity=600` pulls down Notification Center), `type`, `clear`, `tree`, `audit`, `shot`, `quit`.
@@ -251,3 +251,19 @@ after scrolling, and after waiting more than four seconds: No stays one third, Y
 left-handed, with their existing colors. Tapping the name does nothing; choices and VoiceOver's Accept
 and Yo / Decline actions still work. The Rust list model has no request expansion state, so no core
 model or test change is needed for this presentation rule.
+
+## Deliberate taps
+
+Only a tap sends a Yo: a finger that lifts where it came down. Measured 2026-11-21 in the Simulator (iPhone 17 Pro,
+iOS 26.4, 18 bars) with `drive.py touches`, which plays the fingers without waiting for the app to settle:
+
+| Gesture | Yo |
+|---|---|
+| Tap on a resting list | sent |
+| Fling, then a tap 0.25 s, 1.0 s or 2.3 s later while the list still glides | none: the tap only stops the list |
+| The same tap 4.5 s later, the list at rest | sent |
+| Slow drag starting on a bar (45 pt in 1 s), and a creep of 11 pt | none |
+
+The scroll view already keeps its touches; the bar's touch observer also refuses a touch that lands while the list
+glides or is dragged (`isDecelerating`, `isDragging`), as a table view selects no row then.
+
