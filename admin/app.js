@@ -516,6 +516,52 @@ if (document.body.classList.contains("login")) {
   // t: a text ("head · line · line") or { head, note, rows }.
   // The card a click or tap pins open (a row with something to operate in it); it closes on a click outside or Escape.
   let pinned = null, clearMark;
+  const cardTriggers = new WeakSet();
+  let preview;
+  const cancelPreview = () => {
+    if (!preview) return;
+    clearTimeout(preview.timer);
+    preview = null;
+    tipBox.hidden = true;
+  };
+  const delayCard = (node, show, track, leave) => {
+    cardTriggers.add(node);
+    const schedule = (point, source) => {
+      if (pinned) return;
+      if (preview?.node === node && preview.source === source) {
+        preview.point = point;
+        if (preview.ready) show(point);
+        return;
+      }
+      cancelPreview();
+      preview = { node, source, point, ready: false };
+      preview.timer = setTimeout(() => {
+        if (!node.isConnected) { cancelPreview(); return; }
+        preview.ready = true;
+        show(preview.point);
+      }, 2000);
+    };
+    const mouse = e => {
+      if (pinned || e.pointerType !== "mouse" || e.composedPath().find(el => cardTriggers.has(el)) !== node) return;
+      track?.(e);
+      schedule(e, "mouse");
+    };
+    node.addEventListener("pointerenter", mouse);
+    node.addEventListener("pointermove", mouse);
+    node.addEventListener("pointerleave", e => {
+      if (pinned || e.pointerType !== "mouse") return;
+      if (preview?.node === node && preview.source === "mouse") cancelPreview();
+      leave?.(-1);
+    });
+    node.addEventListener("focus", () => {
+      if (!node.matches(":focus-visible")) return;
+      const r = node.getBoundingClientRect();
+      schedule({ clientX: r.left + r.width / 2, clientY: r.top }, "focus");
+    });
+    node.addEventListener("blur", () => {
+      if (preview?.node === node && preview.source === "focus") { cancelPreview(); leave?.(-1); }
+    });
+  };
   const unpin = () => {
     pinned = null;
     clearMark?.(-1);
@@ -544,6 +590,7 @@ if (document.body.classList.contains("login")) {
     });
     node.addEventListener("click", (event) => {
       if (pinned) return;
+      cancelPreview();
       tipBox.classList.add("pin");
       if (show(event) === false) { unpin(); return; }
       pinned = node;
@@ -554,11 +601,7 @@ if (document.body.classList.contains("login")) {
     if (!t) return node;
     const tv = () => (typeof t === "function" ? t() : t);
     const at = () => { const r = node.getBoundingClientRect(); showTip(tv(), r.left + r.width / 2, r.top); };
-    node.tabIndex = node.tabIndex < 0 ? 0 : node.tabIndex;
-    node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !pinned && !e.target.closest?.("svg.spark")) showTip(tv(), e.clientX, e.clientY); });
-    node.addEventListener("pointerleave", (e) => { if (!pinned && e.pointerType === "mouse") tipBox.hidden = true; });
-    node.addEventListener("focus", () => { if (!pinned && node.matches(":focus-visible")) at(); });
-    node.addEventListener("blur", () => { if (!pinned) tipBox.hidden = true; });
+    delayCard(node, e => showTip(tv(), e.clientX, e.clientY));
     pinCard(node, at);
     return node;
   };
@@ -653,13 +696,15 @@ if (document.body.classList.contains("login")) {
         ...(u.note ? [el("span", "tn", u.note)] : []), extra, tipRow({ section: "Services" }), ...rows, every] };
     });
   };
-  document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && !pinned) tipBox.hidden = true; }, true);
+  document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && !pinned) cancelPreview(); }, true);
   const hoverTip = (node, count, text, mark) => {
+    const slots = () => typeof count === "function" ? count() : count;
+    const slotAt = (e, n) => {
+      const r = node.getBoundingClientRect();
+      return n && r.width ? Math.min(n - 1, Math.max(0, Math.floor((e.clientX - r.left) * n / r.width))) : -1;
+    };
     const show = (e) => {
-      if (pinned) return;
-      const n = typeof count === "function" ? count() : count, r = node.getBoundingClientRect();
-      if (!n || !r.width) return false;
-      const i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n))), t = text(i);
+      const n = slots(), i = slotAt(e, n), t = i >= 0 && text(i);
       if (!t) { tipBox.hidden = true; mark?.(-1); return false; }
       mark?.(i);
       const card = typeof t === "string" ? { head: t } : t;
@@ -677,11 +722,10 @@ if (document.body.classList.contains("login")) {
       if (node.closest(".area")) plot.classList.add("area", node.closest("#t-uc") ? "c-acc" : "c-green");
       showTip({ ...card, nodes: [plot, ...(card.nodes || [])] }, e.clientX, e.clientY);
     };
-    node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") show(e); });
+    delayCard(node, show, e => mark?.(slotAt(e, slots())), mark);
     pinCard(node, show, mark);
-    node.addEventListener("pointerleave", (e) => { if (!pinned && e.pointerType === "mouse") { tipBox.hidden = true; mark?.(-1); } });
   };
-  window.addEventListener("scroll", () => { if (!pinned) tipBox.hidden = true; }, { passive: true, capture: true });
+  window.addEventListener("scroll", () => { if (!pinned) cancelPreview(); }, { passive: true, capture: true });
   // The painter of every running-total chart (the overview's two and the details'): bars (each slot's count, between
   // the line's points when there is one point more, else under them; up to half the height under a line), the line with
   // its dots over them, the first and last slot as the axis. Sized to its svg in pixels, so text stays text-sized.
