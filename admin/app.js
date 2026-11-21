@@ -163,8 +163,7 @@ if (document.body.classList.contains("login")) {
   $("range").addEventListener("click", (e) => { const b = e.target.closest("button[data-r]"); if (b) setRange(+b.dataset.r); });
 
   // ---- server: every three seconds --------------------------------------------------------------------------------
-  // The server's last hour (a point a minute, kept by admin.py): bars under CPU, memory, disk and network; blue,
-  // orange above 70 %, red above 90 %.
+  // Network traffic over the server's last hour.
   const serverBars = (all) => {
     // As many bars as Usage shows (7, 30, or 12 months): the hour in as many slices, each its average.
     const n = range === 1 ? 6 : range >= 7 && range <= 30 ? range : 12, size = Math.max(1, Math.ceil(all.length / n)), hist = [];
@@ -173,27 +172,20 @@ if (document.body.classList.contains("login")) {
       hist.push([part[part.length - 1][0], avg(1), avg(2), avg(3), avg(4), avg(5)]);
     }
     const names = hist.map(([t]) => clock(t));
-    const pctRow = (key, i) => {
-      const v = hist.map((p) => p[i] ?? 0);
-      spark(key, null, v, names, (k, x) => `${Math.round(x)} %`, undefined, 100);
-      [...$(`${key}-spark`).children].forEach((b, k) => b.classList.add(v[k] > 90 ? "hot" : v[k] > 70 ? "warm" : "cool"));
-    };
-    // CPU, memory, disk: the live value as one gauge (no history), orange above 70 %, red above 90 %.
-    const gauge = (key, i) => {
-      // The last minute's average, not the newest sample alone (a single sample jumps).
-      const t1 = all.length ? all[all.length - 1][0] : 0, win = all.filter((p) => p[0] >= t1 - 60000 && p[i] != null);
-      const avg = win.length ? win.reduce((n, p) => n + p[i], 0) / win.length : 0;
-      const v = Math.max(0, Math.min(100, avg)), row = $(`c-${key}`);
-      $(`${key}-spark`).hidden = true;
-      let g = row.querySelector(".gauge");
-      if (!g) { g = el("span", "gauge"); g.append(el("span")); row.append(g); }
-      g.firstChild.style.width = `${v}%`;
-      g.className = `gauge ${v > 90 ? "hot" : v > 70 ? "warm" : "cool"}`;
-      sparkData[key] = { values: hist.map((p) => p[i] ?? 0), names, tip: (k, x) => `${Math.round(x)} %`, scale: 100, cls: "cool" };
-    };
-    gauge("cpu", 1); gauge("mem", 2); gauge("disk", 3);
     spark("net", null, hist.map((p) => (p[4] || 0) + (p[5] || 0)), names, (k) => `↓ ${rate(hist[k][4])} ↑ ${rate(hist[k][5])}`);
     [...$("net-spark").children].forEach((b) => b.classList.add("cool"));
+  };
+  const serverGauge = (key, percent) => {
+    const known = Number.isFinite(percent);
+    const value = known ? Math.max(0, Math.min(100, Math.round(percent))) : 0;
+    const row = $(`c-${key}`);
+    set(`${key}-n`, known ? `${value} %` : "–");
+    row.classList.toggle("hot", value > 90);
+    $(`${key}-spark`).setAttribute("hidden", "");
+    let gauge = row.querySelector(".gauge");
+    if (!gauge) { gauge = el("span", "gauge"); gauge.append(el("span")); row.append(gauge); }
+    gauge.firstChild.style.width = `${value}%`;
+    gauge.className = `gauge ${value > 90 ? "hot" : value > 70 ? "warm" : "cool"}`;
   };
   // A service chip: its dot; state, uptime, memory, restarts and version in its card.
   const svcInfo = {};
@@ -236,21 +228,20 @@ if (document.body.classList.contains("login")) {
     reservedData = s.reserved;
     part(() => {
       const c = s.cpu || {};
-      set("cpu-n", c.percent == null ? "–" : `${Math.round(c.percent)} %`);
-      $("c-cpu").classList.toggle("hot", c.percent > 90);
+      serverGauge("cpu", c.percent);
       $("c-cpu").dataset.tip = [c.cores ? `${c.cores} cores` : "", c.load?.length ? `load ${c.load.map((x) => x.toFixed(2)).join(" · ")}` : "", s.uptime == null ? "" : `up ${span(s.uptime)}`].filter(Boolean).join(" · ");
     });
     part(() => {
       const m = s.memory;
-      if (!m) { set("mem-n", "–"); return; }
+      serverGauge("mem", m?.total ? 100 * (m.total - m.available) / m.total : null);
+      if (!m) return;
       const used = m.total - m.available;
-      set("mem-n", `${Math.round((100 * used) / m.total)} %`); $("c-mem").classList.toggle("hot", used / m.total > 0.9);
       $("c-mem").dataset.tip = `${bytes(used)} of ${bytes(m.total)}${m.swap_total ? ` · swap ${bytes(m.swap_total - m.swap_free)}` : ""}`;
     });
     part(() => {
       const d = s.disk;
-      if (!d) { set("disk-n", "–"); return; }
-      set("disk-n", `${Math.round((100 * d.used) / d.total)} %`); $("c-disk").classList.toggle("hot", d.used / d.total > 0.9);
+      serverGauge("disk", d?.total ? 100 * d.used / d.total : null);
+      if (!d) return;
       $("c-disk").dataset.tip = `of ${bytes(d.total)} · ${bytes(d.free)} free`;
     });
     part(() => {
@@ -610,7 +601,7 @@ if (document.body.classList.contains("login")) {
       const n = typeof count === "function" ? count() : count, r = node.getBoundingClientRect();
       if (!n || !r.width) return;
       const i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n))), t = text(i);
-      if (!t) { tipBox.hidden = true; return; }
+      if (!t) { tipBox.hidden = true; mark?.(-1); return; }
       showTip(t, e.clientX, e.clientY);
       mark?.(i);
     };
@@ -889,13 +880,13 @@ if (document.body.classList.contains("login")) {
     if (h) {
       const node = $("pr-spark"), p = problemSplit(h), sb = sparkBars(p.er, "warm", null, p.cr, p.recorded);
       node.replaceChildren(...sb.childNodes);
-      node.hidden = false;
+      node.removeAttribute("hidden");
       node._split = p;
       set("pr-from", p.names[0] || "");
       set("pr-to", p.names.at(-1) || "");
       if (!node._h) {
         node._h = 1;
-        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: problemRows(q, i) }; },
+        hoverTip(node, () => node._split.cr.length, (i) => problemTip(node._split, i),
           (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
       }
     }
@@ -2081,7 +2072,7 @@ if (document.body.classList.contains("login")) {
     values.forEach((v, i) => {
       if (!top2) { const h = v ? Math.max(2, (v / top) * 26) : 1.5; s.append(rect(i, 28 - h, h, v ? `b ${cls || ""}`.trim() : "b zero")); return; }
       const g = svg("g", {}), h = tot[i] ? Math.max(2, (tot[i] / top) * 26) : 1.5, hb = tot[i] ? (h * (v || 0)) / tot[i] : 0;
-      if (recorded && !recorded[i]) g.setAttribute("opacity", "0.65");
+      if (recorded && !recorded[i]) { s.append(g); return; }
       if (!tot[i]) g.append(rect(i, 28 - h, h, "b zero"));
       if (hb) g.append(rect(i, 28 - hb, hb, `b ${cls || ""}`.trim()));
       if (h - hb > 0 && tot[i]) g.append(rect(i, 28 - h, h - hb, "b hot"));
@@ -2228,36 +2219,20 @@ if (document.body.classList.contains("login")) {
       : Math.max((h.diagnostic_days || []).filter((r) => r.kind === "crash").reduce((a, r) => a + r.count, 0), ev?.total || 0);
     return { values, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
   };
-  // The counts of the range's problems: all reports (sum of counts), the installs behind them, their share of the phones seen.
-  const problemRows = (q, i) => {
-    const t = problemTotals;
-    return [{ label: "Open report counts", value: q.recorded[i] ? "recorded" : "estimated" }, { color: "#e67e22", label: "Errors reports", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crash reports", value: num(q.cr[i]) },
-      { label: "Errors open (causes)", value: num(q.ec[i]) }, { label: "Crashes open (causes)", value: num(q.cc[i]) }, { label: "Groups", value: num(q.gr[i]) },
-      ...(t ? [{ label: "Installs affected (range)", value: t.installs == null ? "–" : num(t.installs) }, { label: "Of phones seen", value: t.installs == null || !t.seen ? "–" : pctText((100 * t.installs) / t.seen) }] : [])];
-  };
-  // Before recording began, estimate reports from the currently open groups.
+  const problemTip = (p, i) => p.recorded[i] ? { head: p.names[i], rows: [
+    { color: "#e67e22", label: "Open error reports", value: num(p.er[i]) },
+    { color: "var(--bad)", label: "Open crash reports", value: num(p.cr[i]) },
+  ] } : null;
   const problemSplit = (h) => {
-    const now = Date.now(), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
-    const t0 = open.length ? Math.min(...open.map((d) => d.first_seen)) : now;
-    // Each open group's reports (its count) arrive at an even point of its kind between the oldest group and now.
-    const groups = (kind) => open.filter((d) => d.kind === kind).sort((x, y) => x.first_seen - y.first_seen)
-      .map((d, i, l) => ({ at: t0 + ((i + 1) / l.length) * (now - t0), n: d.count || 0, cause: diagCause(d) }));
-    const eg = groups("error"), cg = groups("crash");
-    const upTo = (l, t) => l.filter((x) => x.at <= t), sum = (l) => l.reduce((n, x) => n + x.n, 0);
-    const ends = range === 1 ? Array.from({ length: 24 }, (_, i) => Math.min(now, (Math.floor(now / 3600000) - 22 + i) * 3600000))
-      : Array.from({ length: range || 30 }, (_, i) => Math.min(now, (today0() - (range || 30) + 2 + i) * 86400000));
-    const names = range === 1 ? ends.map((t, i) => clock((Math.floor(now / 3600000) - 23 + i) * 3600000)) : ends.map((t, i) => dayName(today0() - (range || 30) + 1 + i));
-    const at = (t) => { const e = upTo(eg, t), c = upTo(cg, t); return { er: sum(e), cr: sum(c), ec: new Set(e.map((x) => x.cause)).size, cc: new Set(c.map((x) => x.cause)).size, gr: e.length + c.length }; };
-    const points = h.open_report_history || [];
-    let next = 0;
-    const cols = ends.map((end, i) => {
-      // Closed slots exclude the next slot's midnight/hour boundary.
-      const until = i === ends.length - 1 ? end : end - 1;
-      while (next < points.length && points[next].t <= until) next++;
-      const col = at(end), point = points[next - 1];
-      return point ? { ...col, er: point.errors_open, cr: point.crashes_open, recorded: true } : col;
-    });
-    return { names, recorded: cols.map((x) => !!x.recorded), er: cols.map((x) => x.er), cr: cols.map((x) => x.cr), ec: cols.map((x) => x.ec), cc: cols.map((x) => x.cc), gr: cols.map((x) => x.gr) };
+    const hourly = range === 1, size = hourly ? 3600000 : 86400000, count = hourly ? 24 : range || 30;
+    const first = Math.floor(Date.now() / size) - count + 1;
+    const slots = Array(count).fill(null);
+    for (const point of h.open_report_history || []) {
+      const i = Math.floor(point.t / size) - first;
+      if (i >= 0 && i < count) slots[i] = point;
+    }
+    return { names: slots.map((_, i) => hourly ? clock((first + i) * size) : dayName(first + i)),
+      recorded: slots.map(Boolean), er: slots.map((p) => p?.errors_open), cr: slots.map((p) => p?.crashes_open) };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
@@ -2492,10 +2467,11 @@ if (document.body.classList.contains("login")) {
         { ico: "chat", label: "Feedback", value: num(openFeedback), cls: openFeedback ? "warn" : "", title: summary(openFeedback, kinds.Feedback), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "var(--ok)", label: "Feedback", value: num(fb[i]) }] }) },
         { ico: "warn", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary(openReports, kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
-        (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
+        (() => { const p = problemSplit(h), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
+          const causes = new Set(open.map(diagCause)).size, reports = open.reduce((n, d) => n + (d.count || 0), 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${p.ec.at(-1) + p.cc.at(-1)}${matchMedia("(max-width: 430px)").matches ? "" : p.ec.at(-1) + p.cc.at(-1) === 1 ? " cause" : " causes"} · ${num(p.er.at(-1) + p.cr.at(-1))} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: p.ec.at(-1) + p.cc.at(-1) ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
-            tip: (i) => ({ head: p.names[i], rows: problemRows(p, i) }) }; })(),
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "How problems are counted", rows: [{ label: "1  Report", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: `${causes}${matchMedia("(max-width: 430px)").matches ? "" : causes === 1 ? " cause" : " causes"} · ${num(reports)} · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"}`, cls: causes ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
+            tip: (i) => problemTip(p, i) }; })(),
         (() => {
           // Phones as one bar: fine (green), error only (orange), crash (red); the value is the share fine. Hover: the three
           // shares, crash-free (est.) with its explanation, iOS and Android.
