@@ -696,7 +696,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             user?.let { removedUsers.remove(it) }
             val friend = Friend(name = spelled, color = nextColor(state.value.friends), user = user)
             if (friend.user != null) c.setFriend(friend.user, friend.name, friend.color.toUByte())
-            mutable.update { it.copy(friends = listOf(friend) + it.friends) }; listFriends(); persist()
+            mutable.update { it.copy(friends = it.friends + friend) }; listFriends(); persist()
         }
         store(c)
     }
@@ -727,7 +727,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val known = known(spelled, found.user)
         mutable.update { it.copy(invitation = Invitation(known?.name ?: spelled, found.user, known != null)) }
     }
-    /** "Add & Yo" (or "Yo"): the friend on top as `add` puts it, then one Yo as a tap on its bar sends. */
+    /** "Add & Yo" (or "Yo"): the friend added as `add` puts it, then one Yo as a tap on its bar sends (and lifts it). */
     suspend fun acceptInvite(invitation: Invitation) {
         mutable.update { it.copy(invitation = null) }
         val c = client ?: return
@@ -883,7 +883,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             val old = friends.firstOrNull { it.group == group.id }
             val row = (old ?: Friend(name = group.name, color = nextColor(friends), group = group.id))
                 .copy(name = group.name.ifEmpty { copy(ProductText.GROUP) }, request = !group.accepted)
-            friends = if (old == null) listOf(row) + friends else friends.map { if (it.key == old.key) row else it }
+            friends = if (old == null) friends + row else friends.map { if (it.key == old.key) row else it }
         }
         mutable.update { it.copy(friends = friends, requestsOpen = c.requestsOpen()) }; listFriends(); persist()
     }

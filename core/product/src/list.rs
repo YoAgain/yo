@@ -233,6 +233,9 @@ pub struct List {
     order: Vec<String>,
     proposed: Vec<String>,
     source_order: Vec<String>,
+    /// Bars added after the list was first given (a contact added or a request, a group made or joined), oldest
+    /// first: they stand at the bottom, whatever place the platform gave them, until their first Yo lifts them.
+    fresh: Vec<String>,
     states: BTreeMap<String, State>,
     rising: Vec<String>,
     batch_at: Option<u64>,
@@ -273,7 +276,18 @@ impl List {
         match input {
             Input::Friends(friends) => {
                 self.deleted.retain(|id| friends.iter().any(|f| &f.id == id));
-                let source: Vec<_> = friends.iter().map(|f| f.id.clone()).collect();
+                // Adding is no activity: a new bar starts below all others (the add row's neighbour).
+                if !self.friends.is_empty() {
+                    for f in &friends {
+                        if !self.friends.contains_key(&f.id) && !self.fresh.contains(&f.id) {
+                            self.fresh.push(f.id.clone());
+                        }
+                    }
+                }
+                self.fresh.retain(|id| friends.iter().any(|f| &f.id == id));
+                let mut source: Vec<_> =
+                    friends.iter().map(|f| f.id.clone()).filter(|id| !self.fresh.contains(id)).collect();
+                source.extend(self.fresh.iter().cloned());
                 if source != self.source_order {
                     self.proposed = source.clone();
                     self.source_order = source;
@@ -600,6 +614,7 @@ impl List {
         }
         if self.batch_at.is_some_and(|at| at <= self.now) {
             for id in self.rising.drain(..) {
+                self.fresh.retain(|key| key != &id);
                 if self.friends.contains_key(&id) {
                     self.order.retain(|key| key != &id);
                     self.order.insert(0, id);
@@ -896,6 +911,59 @@ mod tests {
         assert!(background.deletion.is_none());
         assert_eq!(order(&l), ["a", "c"]);
         assert!(l.apply(4000, Input::Tick).committed_deletes.is_empty());
+    }
+    #[test]
+    fn added_bars_start_at_the_bottom_until_their_first_yo() {
+        let mut l = model();
+        l.apply(0, receive("c"));
+        l.apply(300, Input::Tick);
+        assert_eq!(order(&l), ["c", "a", "b"]);
+        // The platform puts a new contact (a request at first) on top: the core keeps it at the bottom.
+        let mut fs = friends(&["n", "c", "a", "b"]);
+        fs[0].request = true;
+        l.apply(400, Input::Friends(fs.clone()));
+        assert_eq!(order(&l), ["c", "a", "b", "n"]);
+        // Accepted: no move. A stale platform order cannot lift it either.
+        fs[0].request = false;
+        l.apply(500, Input::Friends(fs));
+        l.apply(600, Input::Friends(friends(&["c", "n", "a", "b"])));
+        assert_eq!(order(&l), ["c", "a", "b", "n"]);
+        // A second new one goes below the first.
+        l.apply(700, Input::Friends(friends(&["m", "c", "a", "b", "n"])));
+        assert_eq!(order(&l), ["c", "a", "b", "n", "m"]);
+        // A Yo received lifts it like any bar; one sent lifts the other.
+        l.apply(800, receive("n"));
+        l.apply(1_100, Input::Tick);
+        assert_eq!(order(&l), ["n", "c", "a", "b", "m"]);
+        l.apply(1_200, Input::SendFinished { id: "m".into(), kind: Kind::Yo });
+        l.apply(1_200 + SENT_MS, Input::Tick);
+        assert_eq!(order(&l), ["m", "n", "c", "a", "b"]);
+        // Once lifted they are ordinary bars: the platform's order (written back from the core's) is kept.
+        l.apply(3_000, Input::Friends(friends(&["m", "n", "c", "a", "b"])));
+        assert_eq!(order(&l), ["m", "n", "c", "a", "b"]);
+    }
+    #[test]
+    fn a_new_group_starts_at_the_bottom_until_its_first_yo() {
+        let mut l = model();
+        let mut fs = friends(&["a", "b", "c"]);
+        fs.insert(0, Friend { id: "g".into(), name: "Team".into(), request: true, group: true });
+        l.apply(0, Input::Friends(fs.clone()));
+        assert_eq!(order(&l), ["a", "b", "c", "g"]);
+        fs[0].request = false;
+        l.apply(100, Input::Friends(fs));
+        assert_eq!(order(&l), ["a", "b", "c", "g"]);
+        l.apply(200, Input::Received { id: "g".into(), kind: Kind::Yo, token: "t".into(), sender: Some("u".into()) });
+        l.apply(500, Input::Tick);
+        assert_eq!(order(&l), ["g", "a", "b", "c"]);
+    }
+    #[test]
+    fn the_first_list_keeps_its_order() {
+        let mut l = List::new();
+        l.apply(0, Input::Friends(friends(&["c", "a", "b"])));
+        assert_eq!(order(&l), ["c", "a", "b"]);
+        // A bar removed and the rest unchanged: nothing moves.
+        l.apply(100, Input::Friends(friends(&["c", "b"])));
+        assert_eq!(order(&l), ["c", "b"]);
     }
     #[test]
     fn latest_activity_first_in_one_batch() {

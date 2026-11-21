@@ -157,7 +157,8 @@ final class Friends {
 
   private static func typed(_ friend: Friend) -> Bool { friend.user == nil && friend.group == nil }
 
-  /// One bar per group this account is in (spec 4.9), new ones on top; a group left goes.
+  /// One bar per group this account is in (spec 4.9), new ones at the bottom until their first Yo
+  /// (`yo_product::list`); a group left goes.
   func takeGroups(_ groups: [YoGroup]) {
     Perf.timed("friends.groups") {
       var list = all
@@ -173,7 +174,7 @@ final class Friends {
           var bar = Friend(name: name, color: nextColor)
           bar.group = group.id
           bar.request = !group.accepted
-          list.insert(bar, at: 0)
+          list.append(bar)
         }
         if let index = list.firstIndex(where: { $0.group == group.id }), list[index].request != !group.accepted {
           list[index].request = !group.accepted
@@ -204,8 +205,9 @@ final class Friends {
     return Color.rows.indices.min { (used[$0] ?? 0, $0) < (used[$1] ?? 0, $1) } ?? 0
   }
 
-  /// Adds a name on top; an empty or known one (in any spelling) is ignored. A gone friend gives its place to the
-  /// name's new owner. Where both user ids are known, they decide.
+  /// Adds a name at the bottom (it rises with its first Yo, `yo_product::list`); an empty or known one (in any
+  /// spelling) is ignored. A gone friend gives its place to the name's new owner. Where both user ids are known, they
+  /// decide.
   func add(_ typed: String, user: String? = nil) {
     let name = Username.clean(typed)
     let skeleton = Username.skeleton(name)
@@ -216,7 +218,7 @@ final class Friends {
     }
     guard !name.isEmpty, !all.contains(where: { !$0.gone && same($0) }) else { return }
     var list = all.filter { !same($0) }  // gone ones only
-    list.insert(Friend(name: name, color: nextColor, user: user), at: 0)
+    list.append(Friend(name: name, color: nextColor, user: user))
     all = list
   }
 
@@ -294,10 +296,7 @@ final class Friends {
         }
         result[user] = list[index]
       }
-      if changed {
-        let newKeys = Set(added.map(\.key))
-        all = list.filter { newKeys.contains($0.key) }.reversed() + list.filter { !newKeys.contains($0.key) }
-      }
+      if changed { all = list }
       return result
     }
   }

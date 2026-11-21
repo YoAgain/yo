@@ -145,12 +145,11 @@ extension FriendList {
     return true
   }
 
-  /// "Add & Yo" (or "Yo"): the friend on top as `add` puts it, then one Yo as a tap on its bar sends.
+  /// "Add & Yo" (or "Yo"): the friend added as `add` puts it, then one Yo as a tap on its bar sends (and lifts it).
   func acceptInvite(_ invitation: Invitation) {
     if !invitation.known {
       withAnimation(.snappy) {
         friends.add(invitation.name, user: invitation.user)
-        if !scrolled { position.scrollTo(edge: .top) }
       }
     }
     let skeleton = Username.skeleton(invitation.name)
@@ -166,7 +165,7 @@ extension FriendList {
     send(to: friend, origin: nil)
   }
 
-  /// A name to add, once the hub said who it is: added as its owner spells it, on top; without an answer, not at all. One already
+  /// A name to add, once the hub said who it is: added as its owner spells it, at the bottom; without an answer, not at all. One already
   /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or why the hub did not
   /// answer, or nil.
   enum AddProblem { case said(String), unreachable(ProductProblem) }
@@ -184,7 +183,6 @@ extension FriendList {
     case .new(let spelled, let user):
       withAnimation(.snappy) {
         friends.add(spelled, user: user)
-        if !scrolled { position.scrollTo(edge: .top) }
       }
     }
     return nil
