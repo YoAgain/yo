@@ -813,7 +813,7 @@ body.dash { max-width: 1400px; }
 /* Releases over time: a band per build, the current green, older ones greyer (their shade set inline), below the
    hub's minimum reddish; the picked slot a thin line. */
 .hc-chart.rchart { cursor: pointer; }
-.hc-chart .rb { fill: var(--muted); stroke: var(--card); stroke-width: .6; stroke-linejoin: round; }
+.hc-chart .rb { stroke: var(--card); stroke-width: .6; stroke-linejoin: round; }
 .hc-chart .rb.r-current { fill: var(--ok); } .hc-chart .rb.r-must { fill: #c0645a; } .hc-chart .rb.r-must.r-old { fill: #8e4f49; }
 .hc-chart .rb.r-older { fill: #5e5867; }
 .hc-chart .rmark { stroke: var(--text); stroke-width: 1; stroke-dasharray: 2 2; opacity: .7; }
@@ -1337,8 +1337,8 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .dial.filled .dial-fill { display: inline; stroke: var(--accent, #5dade2); stroke-dasharray: var(--fill) 100; }
 .dial.warn { --accent: var(--warn); }
 .dial.bad { --accent: var(--bad); }
-:is(#c-upd, #c-svc) .dial-arc { stroke: var(--accent, #49505c); }
-:is(#c-upd, #c-svc) .dial-face { color: var(--accent, var(--muted)); font-size: 16px; }
+:is(#problem-dial, #c-svc) .dial-arc { stroke: var(--accent, #49505c); }
+#c-svc .dial-face { color: var(--accent, var(--muted)); font-size: 16px; }
 #net-n { white-space: pre; font-size: 10px; line-height: 1.25; }
 .live-face { gap: 2px; font-size: 15px; }
 .live-face .live-strip { width: 26px; height: 7px; }
@@ -1407,3 +1407,37 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .overview-grid .spark > .zero:last-child,
 .overview-grid .spark > g:last-child .zero,
 .overview-grid .area .cb.zero.now { fill: var(--muted) !important; }
+
+.topbar #t-system { gap: 10px 24px; max-width: 100%; }
+.dial-group { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; min-width: 0; }
+#problem-trend .b { fill: var(--accent, var(--muted)); filter: none; }
+@media (max-width: 540px) {
+  .dial-group { gap: 5px; }
+  .topbar #t-system { width: 100%; }
+}
+.ctip { box-sizing: border-box; width: min(300px, calc(100vw - 16px)); max-height: calc(100dvh - 16px);
+  overflow: auto; white-space: normal; overflow-wrap: anywhere; padding: 12px 14px; gap: 6px; }
+.ctip > * { flex-shrink: 0; }
+.ctip .th { text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-size: 11px; padding-right: 24px; }
+.ctip .tn { max-width: none; }
+.tip-close { display: none; position: absolute; top: 3px; right: 5px; width: 28px; height: 28px; padding: 0;
+  border: 0; background: transparent; color: var(--text); font-size: 19px; cursor: pointer; }
+.pin .tip-close { display: block; }
+.ctip .tr { grid-template-columns: 12px minmax(0, 1fr) minmax(0, auto); }
+.ctip .tsec { margin-top: 5px; padding-top: 8px; }
+.ctip .area.dchart, .ctip svg.spark, .ctip .tip-plot { width: 100%; max-width: none; }
+.ctip .tip-plot { margin: 0; height: auto; }
+.ctip .tip-plot > svg, .ctip .area.dchart > svg { display: block; position: static; width: 100%; height: 64px; }
+.ctip .area.dchart > svg { height: 100%; }
+.ctip .chart-axis { border-top: 1px solid var(--line); padding-top: 3px; font-size: 10px; }
+.ctip .hc-sel { justify-content: space-between; }
+.dial-defs { position: absolute; }
+.ctip .tip-plot.area { min-height: 0; }
+.ctip .tip-plot .line.act { stroke: var(--ok); }
+.ctip .tip-plot .dot.act { fill: var(--ok); }
+.ctip .level-fill { fill: var(--ok); opacity: .12; }
+.ctip .tip-details summary { cursor: pointer; color: var(--muted); }
+.ctip .tip-details summary:has(.tr) { list-style: none; }
+.ctip .tip-details[open] > .tr { margin-top: 4px; }
+.ctip .tip-details .dcard { margin-top: 6px; height: auto; }
+.ctip .tip-details pre { white-space: pre-wrap; }

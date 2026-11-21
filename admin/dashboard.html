@@ -14,12 +14,19 @@
 <main class="ov" id="overview">
 <div class="topbar full">
   <button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button>
-  <svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs><path id="dial-path" d="M11 45 A24 24 0 1 1 45 45" pathLength="100"/></defs></svg>
+  <svg width="0" height="0" aria-hidden="true" class="dial-defs"><defs><path id="dial-path" d="M11 45 A24 24 0 1 1 45 45" pathLength="100"/></defs></svg>
   <div id="t-system" role="group" aria-label="Live activity and server status">
+    <div class="dial-group" role="group" aria-label="Yo">
     <button type="button" class="dial" id="live" aria-label="Yos per minute">
       <span class="dial-face live-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/></svg><b id="live-n">–</b><span class="live-strip" aria-hidden="true"><svg id="live-spark" viewBox="0 0 100 24" preserveAspectRatio="none"></svg><span class="live-lane" id="live-lane"></span></span></span>
       <span>Yos/min</span>
     </button>
+    <button type="button" class="dial" id="problem-dial">
+      <span class="dial-face live-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/></svg><b id="problem-n">–</b><span class="live-strip" id="problem-trend" aria-hidden="true"></span></span>
+      <span>Problems</span>
+    </button>
+    </div>
+    <div class="dial-group" role="group" aria-label="Server">
     <button type="button" class="dial" id="c-cpu">
       <span class="dial-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/><use class="dial-fill" href="#dial-path"/></svg><b id="cpu-n">–</b></span><span>CPU</span>
     </button>
@@ -32,13 +39,11 @@
     <button type="button" class="dial" id="c-net">
       <span class="dial-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/></svg><b id="net-n">–</b></span><span>LAN</span>
     </button>
-    <button type="button" class="dial" id="c-upd">
-      <span class="dial-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/></svg><b id="upd-n">–</b></span><span>Updates</span>
-    </button>
     <button type="button" class="dial" id="c-svc">
-      <span class="dial-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/></svg><b id="svc-n">–</b></span><span>Services</span>
+      <span class="dial-face"><svg class="dial-arc" viewBox="0 0 56 56" aria-hidden="true"><use href="#dial-path"/></svg><b id="svc-n">–</b></span><span>Status</span>
     </button>
-        <select id="st-every" aria-label="How often the status bot reports" hidden>
+    </div>
+    <select id="st-every" aria-label="How often the status bot reports" hidden>
           <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
           <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
   </div>
