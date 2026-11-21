@@ -1336,3 +1336,57 @@ fn a_registration_tried_again_after_a_lost_answer_keeps_its_device() {
     assert!(disk.db().registered().unwrap());
     assert_eq!(yos(&drain(&new), &b.user_id()), 1, "the Yo for the device the hub took arrives");
 }
+
+/// More Yos to a stranger than a request's bucket holds (spec 4.10, 10 at once a pair): each send is fine, the rest
+/// waits quietly. The stranger says yes: their key comes, and all that waited goes at once as a contact's, also when
+/// the notification service took the key in while the app slept (the app's hold of the `429` is in its memory only).
+#[test]
+fn the_app_layer_holds_yos_past_a_requests_bucket_until_the_yes() {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.requests_per_pair = 10;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb, pc) = (username(n), username(n + 1), username(n + 2));
+    let transport = || Arc::new(App(Http::new(hub.url())));
+    let disk = Disk::new();
+    let a = shared_client(transport(), &disk, &pa, Some("ALICE"));
+    let b = client(&hub, &pb, "BOB", Disk::new());
+    let c = client(&hub, &pc, "CAROL", Disk::new());
+    for other in [&b, &c] {
+        other.sync(0).unwrap();
+        other.maintenance().unwrap();
+    }
+    let burst = |to: &YoClient, name: &str| {
+        a.send_yo(name.to_owned()).unwrap();
+        for i in 1..14 {
+            a.send_yo(to.user_id()).unwrap_or_else(|e| panic!("Yo {i}: {e:?}"));
+            a.deliver().unwrap_or_else(|e| panic!("deliver {i}: {e:?}"));
+        }
+        assert!(a.request_held(to.user_id()), "past the bucket they wait");
+        let held = a.waiting() as usize;
+        assert_eq!(yos(&drain(to), &a.user_id()), 14 - held);
+        held
+    };
+    // B says yes while the app is open: its next read takes the key, and what waited goes with it.
+    let held = burst(&b, &pb);
+    assert_eq!(a.waiting_unheld(), 0, "no banner: only a request's bucket holds them");
+    b.accept(a.user_id()).unwrap();
+    for _ in 0..2 {
+        a.sync(0).unwrap();
+    }
+    assert_eq!(a.waiting(), 0);
+    assert!(!a.request_held(b.user_id()));
+    assert_eq!(yos(&drain(&b), &a.user_id()), held, "what waited, once each");
+    // C says yes while the app sleeps: the notification service takes the key in, and the app sends at once.
+    let held = burst(&c, &pc);
+    c.accept(a.user_id()).unwrap();
+    let guest = guest_client(transport(), &disk);
+    guest.sync(0).unwrap();
+    guest.acknowledge_events();
+    drop(guest);
+    a.deliver().unwrap();
+    assert_eq!(a.waiting(), 0, "the key from the extension lets them go");
+    assert_eq!(yos(&drain(&c), &a.user_id()), held);
+    a.send_yo(c.user_id()).unwrap();
+    assert_eq!(a.waiting(), 0, "a contact's Yo goes at once");
+}

@@ -206,7 +206,9 @@ final class Inbox {
     if lastSend[key] == this { lastSend[key] = nil }
     // Their old app: the bar says "Needs Update" and the Yo waits for it; nothing failed here. A group nobody else is
     // in: the list asks to delete it, a "Not Sent · Tap to Retry" beside that would only fail again (as Android).
-    if problem != nil, problem != productText(text: .needsUpdate, lang: .english), problem != Self.groupEmpty {
+    // A request past the hub's bucket waits by itself: the bar says so, no banner (nothing went wrong, spec 4.10).
+    if problem != nil, problem != productText(text: .needsUpdate, lang: .english), problem != Self.groupEmpty,
+      problem != Self.requestWaiting {
       let retry: (@MainActor () -> Void)?
       if unsent[friend.key] != nil || delivering != nil {
         retry = { self.resume(accounts: accounts, friends: friends) }
@@ -260,6 +262,9 @@ final class Inbox {
   }
 
   static let groupEmpty = productText(text: .groupEmpty, lang: .english)
+  /// The bar's words for Yos a stranger's request bucket holds (spec 4.10): they go at the hub's time, or at once
+  /// with their yes.
+  static let requestWaiting = productText(text: .waitingToSend, lang: .english)
 
   private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
     if let group = friend.group {
@@ -285,22 +290,27 @@ final class Inbox {
     }
     let target = friend.user ?? friend.name
     do {
-      let (events, contacts, waiting) = try await Hub.run {
-        try Perf.timed("send.core") { (try client.send(target: .contact(id: target), kind: .yo), client.contacts(), client.waiting()) }
+      let (events, contacts, waiting, unheld) = try await Hub.run {
+        try Perf.timed("send.core") {
+          (try client.send(target: .contact(id: target), kind: .yo), client.contacts(), client.waiting(), client.waitingUnheld())
+        }
       }
       guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
       if waiting > 0 {
-        // The core keeps it and sends it; until the hub took it the banner says so.
-        Problems.shared.report(.waiting, retry: { self.resume(accounts: accounts, friends: friends) })
+        // The core keeps it and sends it; until the hub took it the banner says so. Not a request past its bucket:
+        // that one waits quietly (its bar says so) and goes by itself, at once with their yes.
+        if unheld > 0 { Problems.shared.report(.waiting, retry: { self.resume(accounts: accounts, friends: friends) }) }
         deliverLater(accounts: accounts, friends: friends)
       }
-      if friend.user == nil, let contact = contacts.first(where: { contact in
+      let user = friend.user ?? contacts.first(where: { contact in
         contact.handles.contains { Username.skeleton($0) == Username.skeleton(friend.name) }
-      }) {
+      })?.user
+      if friend.user == nil, let user, let contact = contacts.first(where: { $0.user == user }) {
         _ = friends.friend(user: contact.user, handles: contact.handles)
       }
       await take(events, contacts: contacts, client: client, friends: friends)
       Stats.sentYo(to: friend.name)
+      if waiting > 0, let user, (try? await Hub.run({ client.requestHeld(user: user) })) == true { return Self.requestWaiting }
       return nil
     } catch YoError.NotOnYo {
       if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client {
@@ -372,8 +382,8 @@ final class Inbox {
       while let client = accounts.client, !Task.isCancelled, !HubTransport.unsupported {  // too old: nothing goes
         deliverAgain = false
         try? await Task.sleep(for: .seconds(pause))
-        guard let (events, contacts, waiting) = try? await Hub.run({
-          (try client.deliver(), client.contacts(), client.waiting())
+        guard let (events, contacts, waiting, unheld) = try? await Hub.run({
+          (try client.deliver(), client.contacts(), client.waiting(), client.waitingUnheld())
         }) else {
           pause = min(pause * 2, 30)
           continue
@@ -383,7 +393,7 @@ final class Inbox {
           continue
         }
         await take(events, contacts: contacts, client: client, friends: friends)
-        if waiting == 0 { Problems.shared.resolve(.waiting) }
+        if unheld == 0 { Problems.shared.resolve(.waiting) }  // a request past its bucket waits quietly
         if waiting == 0 && !deliverAgain { break }  // none waits, and no send asked meanwhile
         pause = waiting < before ? 1 : min(pause * 2, 30)  // going out: at the hub's pace; else waiting longer
         before = waiting

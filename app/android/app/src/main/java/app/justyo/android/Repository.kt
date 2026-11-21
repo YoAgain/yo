@@ -603,7 +603,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                         if (events.isEmpty()) refresh()
                     }
                     mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
-                    if (c.waiting() == 0u) Problems.resolve(ProductProblem.WAITING)
+                    if (c.waitingUnheld() == 0u) Problems.resolve(ProductProblem.WAITING)
                     media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
                 catch (e: YoException.Replaced) { signOut(replaced = true); break }
@@ -754,11 +754,16 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 Lat.mark("send.begin")
                 val events = c.send(sendTarget(friend.target), MessageKind.Yo)
                 Lat.mark("send.end")
-                // The hub has it: the bar says so now; what the send brought along and the bookkeeping follow.
-                showSent(friend)
+                // The hub has it: the bar says so now; what the send brought along and the bookkeeping follow. A
+                // request past the hub's bucket (spec 4.10) waits by itself, at once with their yes: the bar says
+                // "Waiting to Send", no banner.
+                if (friend.user?.let { c.requestHeld(it) } == true) {
+                    listFriends()
+                    present { notice(it, friend.key, copy(ProductText.WAITING_TO_SEND), false) }
+                } else showSent(friend)
                 Lat.mark("sent.shown"); Lat.frame("sent")
                 // Taken by the core, not by the hub yet (offline after sealing): "Waiting to Send" until it went.
-                if (c.waiting() > 0u) Problems.report(ProductProblem.WAITING, ::retryNow)
+                if (c.waitingUnheld() > 0u) Problems.report(ProductProblem.WAITING, ::retryNow)
                 absorb(events, c)
                 recordStat(friend,true)
                 changes.withLock { persist() }
@@ -830,7 +835,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             var pause = 1000L
             while (c === client && !state.value.update) {
                 try {
-                    if (c.waiting() == 0u) { Problems.resolve(ProductProblem.WAITING); break }
+                    if (c.waitingUnheld() == 0u) Problems.resolve(ProductProblem.WAITING)
+                    if (c.waiting() == 0u) break
                     absorb(c.deliver(), c)
                 } catch (e: CancellationException) { throw e } catch (_: Exception) { /* Tried again with backoff; the banner says "Waiting to Send". */ }
                 delay(pause); pause = (pause * 2).coerceAtMost(30000)

@@ -1095,7 +1095,7 @@ impl Client {
 
     /// Why what waits for `user` waits now (`outbox_view`), and until when if the hub said.
     fn waits_for(&self, user: &str, now: u64) -> (OutboxReason, Option<u64>) {
-        let wait = self.request_wait.get(user).map(|(until, _)| *until).filter(|until| *until > now);
+        let wait = self.request_wait.get(user).map(|(until, _)| *until).filter(|_| self.request_holds(user, now));
         let contact = |flag: fn(&Contact) -> bool| self.state.contacts.get(user).is_some_and(flag);
         let reason = match self.last_answer.get(user).copied() {
             _ if self.delivering.contains(user) => OutboxReason::Sending,
@@ -1126,6 +1126,28 @@ impl Client {
     /// Envelopes waiting to be taken by the hub; not those held for a blocked user (spec 4.8).
     pub fn waiting(&self) -> usize {
         self.state.outbox.iter().filter(|item| !self.blocked(&item.user)).count()
+    }
+
+    /// Whether what waits for `user` is a request past its bucket (`429`, spec 4.10): it goes by itself at the hub's
+    /// time, or at once when their key comes (a yes). Nothing went wrong: the app says it waits, quietly.
+    pub fn request_held(&self, user: &str) -> bool {
+        self.request_holds(user, (self.clock)()) && self.state.outbox.iter().any(|item| item.user == user)
+    }
+
+    /// `waiting` but for requests past their bucket (`request_held`): what the hub should have taken by now.
+    pub fn waiting_unheld(&self) -> usize {
+        let now = (self.clock)();
+        self.state
+            .outbox
+            .iter()
+            .filter(|item| !self.blocked(&item.user) && !self.request_holds(&item.user, now))
+            .count()
+    }
+
+    /// A request's `429` holds `user` now: until its time, and only while their key is not here.
+    fn request_holds(&self, user: &str, now: u64) -> bool {
+        self.request_wait.get(user).is_some_and(|(until, _)| *until > now)
+            && self.state.contacts.get(user).is_none_or(|c| c.profile_key.is_none())
     }
 
     fn blocked(&self, user: &str) -> bool {

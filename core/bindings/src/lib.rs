@@ -945,6 +945,17 @@ impl YoClient {
         self.look(|c| c.waiting()).map_or(0, |n| n.try_into().unwrap_or(u32::MAX))
     }
 
+    /// `waiting` but for requests past their bucket: the "Waiting to Send" banner's count (those wait quietly).
+    pub fn waiting_unheld(&self) -> u32 {
+        self.look(|c| c.waiting_unheld()).map_or(0, |n| n.try_into().unwrap_or(u32::MAX))
+    }
+
+    /// What waits for `user` (id) is a request past its bucket (spec 4.10): it goes at the hub's time, or at once
+    /// with their yes. The bar says "Waiting to Send", no banner: nothing went wrong.
+    pub fn request_held(&self, user: String) -> bool {
+        self.look(|c| c.request_held(&user)).unwrap_or(false)
+    }
+
     /// Yos received since the app last showed them, by the app or the notification service: the badge.
     pub fn unread(&self) -> u32 {
         self.look(|c| c.unread()).unwrap_or(0)

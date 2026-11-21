@@ -97,7 +97,9 @@ extension FriendList {
       run(friend, BarSendText.sentYo, seconds: own.undoSeconds) { _ in
         Prepared(
           send: {
-            if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
+            // A request past its bucket is no failure: it waits by itself and goes with their yes.
+            if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends),
+              problem != Inbox.requestWaiting {
               if problem == Inbox.groupEmpty { emptyGroup = friend }
               showSent(to: friend, problem)
               return false

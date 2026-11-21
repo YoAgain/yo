@@ -166,7 +166,10 @@ impl Client {
         // Users whose envelopes another flush is sending, or that cannot be written to now: theirs wait, in order.
         let mut waiting = self.delivering.clone();
         let now = (self.clock)();
-        self.request_wait.retain(|_, (until, _)| *until > now);
+        // A request's hold ends at its time or with their key, however it came (an extension may have taken it in).
+        let contacts = &self.state.contacts;
+        self.request_wait
+            .retain(|user, (until, _)| *until > now && contacts.get(user).is_none_or(|c| c.profile_key.is_none()));
         let mut encrypted = false;
         let mut i = 0;
         while i < self.state.outbox.len() {
