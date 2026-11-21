@@ -2391,10 +2391,14 @@ if (document.body.classList.contains("login")) {
     // The Accounts stats card: account metrics as the overview's rows (secured bar, new accounts secured, deleted,
     // Yos per user), each with its history in the hover.
     const statsRows = (h) => {
-      const hd = healthData || {}, mau = h.active_month || 0, dau = h.active_today ?? 0, act = dau, yoN = last24sum("yo-in"), t = today0();
+      const mau = h.active_month || 0, dau = h.active_today ?? 0, yoN = h.events ? last24sum("yo-in") : null, t = today0();
       const ds = Array.from({ length: 14 }, (_, i) => t - 13 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
       const active = ds.map((d) => (d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0));
       const per = ds.map((d, i) => (active[i] ? (yo.get(d) || 0) / active[i] : 0));
+      const mean = (yos, users) => yos != null && users ? (yos / users).toFixed(1) : "–";
+      const meanTip = (head, yos, users) => ({ head, note: "Accepted Yos divided by accounts seen in this period. The hub keeps no per-recipient history for a median.",
+        rows: [{ label: "Mean", value: mean(yos, users) }, { label: "Median", value: "Unavailable" },
+          { color: "var(--ok)", label: "Accepted Yos", value: num(yos) }, { ico: "user", label: "Active accounts", value: num(users) }] });
       const ret = Object.fromEntries((areaSub.yc || []).map(([l, v]) => [String(l).replace(/^Retention /, ""), v]));
       const sc = sparkData.sc, gone = evSlots("account-gone");
       const wk = (h.secured_days || []).slice(-7).filter(Boolean), made = wk.reduce((n, d) => n + d[0], 0), withKey = wk.reduce((n, d) => n + d[1], 0);
@@ -2416,8 +2420,9 @@ if (document.body.classList.contains("login")) {
           })(),
           { ico: "trash", label: "Deleted", value: num(sumOf(gone)), cls: sumOf(gone) ? "warn" : "", values: gone.values.map((v) => v || 0), scls: "warm",
             tip: (i) => ({ head: gone.names[i], rows: [{ color: "#e67e22", label: "Deleted", value: num(gone.values[i] || 0) }] }) },
-          { ico: "send", label: "Yos per user", value: act ? (yoN / act).toFixed(1) : "–", values: per,
-            tip: (i) => ({ head: dayName(ds[i]), rows: [{ color: "var(--ok)", label: "Yos per active user", value: per[i] ? per[i].toFixed(1) : "–" }, { ico: "user", label: "Active", value: num(active[i]) }] }) },
+          { ico: "send", label: "Yos per user (mean)", value: mean(yoN, dau), values: per,
+            title: meanTip("Last 24 hours", yoN, dau),
+            tip: (i) => meanTip(dayName(ds[i]), h.events ? yo.get(ds[i]) ?? 0 : null, active[i]) },
       ];
     };
     // The Yos card: Media, Groups and Bots as rows (value, sparkline; the bars and the totals in the hover).
