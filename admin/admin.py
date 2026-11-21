@@ -656,6 +656,12 @@ def stats() -> dict:
     return out
 
 
+def failed_unit_count() -> int:
+    result = subprocess.run(["systemctl", "show", "--property=NFailedUnits", "--value"],
+                            capture_output=True, text=True, timeout=5, check=True)
+    return int(result.stdout.strip())
+
+
 def stats_now() -> dict:
     cpu, net = section("cpu/network", cpu_net) or (None, None)
     uname = os.uname()
@@ -672,6 +678,8 @@ def stats_now() -> dict:
         "hub_dev": section("hub_dev", lambda: unit(os.environ.get("YO_HUB_DEV_UNIT", "yo-hub-dev.service"))),
         "tunnel": section("tunnel", lambda: unit(os.environ.get("ADMIN_TUNNEL_UNIT", "cloudflared.service"))),
         "yogpt": section("yogpt", lambda: unit(os.environ.get("YOGPT_UNIT", "yo-yogpt.service"))),
+        "stbot": section("stbot", lambda: unit(os.environ.get("STATUS_UNIT", "yo-status@live.service"))),
+        "failed_units": section("failed_units", failed_unit_count),
         "reserved": section("reserved", reserved_names),
     }
 

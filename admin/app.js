@@ -59,11 +59,13 @@ if (document.body.classList.contains("login")) {
     if (!n) return;
     const down = SVCS.filter(([id]) => $(id)?.classList.contains("bad")).map(([, name]) => name);
     const known = SVCS.every(([id]) => $(id)?.classList.contains("ok"));
-    const level = down.length ? "bad" : updData?.level;
-    const healthy = known && updData && !updData.unavailable;
+    const failed = srvNow?.failed_units;
+    const reboot = srvNow?.reboot?.needed ?? (!updData?.stale && updData?.reboot);
+    const level = down.length || failed > 0 ? "bad" : reboot || updData?.level ? "warn" : null;
+    const healthy = known && failed === 0 && updData && !updData.unavailable;
     n.textContent = level ? "!" : healthy ? "✓" : "–";
     state("c-svc", level);
-    $("c-svc").setAttribute("aria-label", ["Status", down.length ? "Down: " + down.join(", ") : known ? "Services running" : "Services unknown", updData?.summary || "Updates unknown", updData?.reboot && "Reboot needed"].filter(Boolean).join(" · "));
+    $("c-svc").setAttribute("aria-label", ["Status", down.length ? "Down: " + down.join(", ") : known ? "Services running" : "Services unknown", updData?.summary || "Updates unknown", failed > 0 && `${failed} failed units`, reboot && "Reboot needed"].filter(Boolean).join(" · "));
   };
   new MutationObserver(svcSum).observe(document.querySelector(".svcbar") || document.body, { subtree: true, attributes: true, attributeFilter: ["class"] });
   const bytes = (n) => {
@@ -189,22 +191,22 @@ if (document.body.classList.contains("login")) {
   const drawTitle = () => { const n = Object.values(svcDown).filter(Boolean).length; document.title = n ? `(${n} down) Yo admin` : "Yo admin"; };
   const service = (id, u) => {
     u = u || {};
-    const ok = u.state === "active";
-    svcDown[id] = !ok; drawTitle();
-    if ($(`t-${id}`)) state(`t-${id}`, ok ? "ok" : "bad");
+    const ok = u.state ? u.state === "active" : null;
+    svcDown[id] = ok === false; drawTitle();
+    if ($(`t-${id}`)) state(`t-${id}`, ok == null ? null : ok ? "ok" : "bad");
     svcInfo[id] = { ok, rows: [
-      ["State", ok ? "running" : u.state || "not running", ok ? "ok" : "bad"],
+      ["State", ok ? "running" : u.state || "unknown", ok == null ? "" : ok ? "ok" : "bad"],
       ["Up", ok && u.since ? span(Date.now() / 1000 - u.since) : "–"],
       ["Memory", u.memory != null ? bytes(u.memory) : "–"],
       ["Restarts", num(u.restarts || 0), u.restarts ? "warn" : ""],
       ...(u.version ? [["Version", u.version.split(" ")[0]]] : []),
     ] };
-    if (id === "yogpt") drawCli();
+
   };
-  // CLI: YoGPT and the status bot together, green only while both run (the status bot: on, its last report sent).
+  // CLI: YoGPT and the status bot together, green only while both units run.
   function drawCli() {
     const y = svcInfo.yogpt, b = svcInfo.stbot;
-    state("t-cli", y?.ok === false || b?.ok === false ? "bad" : y && b ? "ok" : null);
+    state("t-cli", y?.ok === false || b?.ok === false ? "bad" : y?.ok && b?.ok ? "ok" : null);
     svcInfo.cli = { parts: [["YoGPT", y], ["Status bot", b]], select: true };
   }
   async function tick() {
@@ -226,8 +228,22 @@ if (document.body.classList.contains("login")) {
     part(() => {
       const n = s.network || {};
       // Below 100 KB/s in KB/s ("79K"), from there in Mbit/s with one decimal ("1.4M").
-      const k = (v) => (v == null ? "–" : v >= 100000 ? `${((v * 8) / 1e6).toFixed(1)}M` : `${Math.round(v / 1000)}K`);
-      set("net-n", `↓${k(n.rx_per_s)}\n↑${k(n.tx_per_s)}`);
+      const k = v => {
+        if (v == null) return "–";
+        if (v < 100000) return Math.round(v / 1000) + "K";
+        let speed = v * 8 / 1e6;
+        for (const suffix of ["M", "G", "T"]) {
+          if (speed < 999.5) return speed.toFixed(speed < 9.95 ? 1 : 0) + suffix;
+          speed /= 1000;
+        }
+        return "999T+";
+      };
+      const line = (arrow, value) => {
+        const row = el("span");
+        row.append(el("small", "", arrow), k(value));
+        return row;
+      };
+      $("net-n").replaceChildren(line("↓", n.rx_per_s), line("↑", n.tx_per_s));
     });
     part(() => {
       const version = s.hub && s.hub.version;
@@ -238,6 +254,8 @@ if (document.body.classList.contains("login")) {
     part(() => service("tunnel", s.tunnel));
     part(() => {
       service("yogpt", s.yogpt);
+      service("stbot", s.stbot);
+      drawCli();
       const people = last?.live?.yogpt_contacts;
       if (s.yogpt?.state === "active" && people != null) svcInfo.yogpt.rows.push(["Knows", `${num(people)} people`]);
     });
@@ -251,7 +269,7 @@ if (document.body.classList.contains("login")) {
     const summary = stale ? "Update data unavailable" : u.apt.error || u.apt.packages == null ? "Package check unavailable"
       : u.apt.packages ? `${u.apt.packages} updates (${u.apt.security} security)` : "Up to date";
     const unavailable = stale || u.apt.error || u.apt.packages == null;
-    const level = !stale && (u.reboot || u.apt.security) ? "bad" : !unavailable && u.apt.packages ? "warn" : null;
+    const level = !unavailable && u.apt.security > 0 ? "warn" : null;
     updData = u ? { ...u, summary, stale, unavailable, level } : null;
     svcSum();
   };
@@ -529,9 +547,8 @@ if (document.body.classList.contains("login")) {
     const schedule = (point, source) => {
       if (pinned) return;
       if (preview?.node === node && preview.source === source) {
-        preview.point = point;
-        if (preview.ready) show(point);
-        return;
+        if (preview.ready) { show(point); return; }
+        if (point.clientX === preview.point.clientX && point.clientY === preview.point.clientY) return;
       }
       cancelPreview();
       preview = { node, source, point, ready: false };
@@ -539,7 +556,7 @@ if (document.body.classList.contains("login")) {
         if (!node.isConnected) { cancelPreview(); return; }
         preview.ready = true;
         show(preview.point);
-      }, 2000);
+      }, 500);
     };
     const mouse = e => {
       if (pinned || e.pointerType !== "mouse" || e.composedPath().find(el => cardTriggers.has(el)) !== node) return;
@@ -672,20 +689,20 @@ if (document.body.classList.contains("login")) {
       const kernel = !!(u.installed_kernel && u.running_kernel && u.installed_kernel !== u.running_kernel), lts = !!(u.release?.result && !/no new release/i.test(u.release.result));
       const yn = (b) => (b ? "yes" : "no");
       return { cap: 1, head: "Updates", note: u.unavailable ? u.summary : null, rows: [{ label: "Updates", value: u.stale || u.apt.error || u.apt.packages == null ? "unknown" : u.apt.packages ? `${num(u.apt.packages)}${u.apt.security ? ` (${num(u.apt.security)} security)` : ""}` : "none" },
-        { label: "Reboot needed", value: yn(u.reboot) }, u.reboot_packages?.length ? { label: "Packages", value: u.reboot_packages.join(", ") } : null, { label: "Kernel update", value: yn(kernel) }, { label: "New Ubuntu LTS", value: yn(lts) }] };
+        { label: "Reboot needed", value: yn(srvNow?.reboot?.needed ?? u.reboot) }, u.reboot_packages?.length ? { label: "Packages", value: u.reboot_packages.join(", ") } : null, { label: "Kernel update", value: yn(kernel) }, { label: "New Ubuntu LTS", value: yn(lts) }] };
     };
     hint($("c-svc"), () => {
       const rows = [["hub", "Hub"], ["dev", "Dev"], ["tunnel", "Tunnel"], ["yogpt", "YoGPT"], ["stbot", "Status bot"]].map(([id, name]) => {
         const i = svcInfo[id], r = (k) => i?.rows?.find(([n]) => n === k)?.[1], up = r("Up"), row = el("div", "tr"), mark = el("span", "tm");
-        mark.append(el("span", `dot ${!i ? "" : i.ok ? "ok" : "bad"}`));
-        row.append(mark, el("span", "tl", name), el("b", "tv", !i ? "unknown" : i.ok ? (up && up !== "–" ? up : "running") : r("State") || "off"));
+        mark.append(el("span", `dot ${i?.ok == null ? "" : i.ok ? "ok" : "bad"}`));
+        row.append(mark, el("span", "tl", name), el("b", "tv", i?.ok == null ? "unknown" : i.ok ? (up && up !== "–" ? up : "running") : r("State") || "off"));
         if (!i?.rows?.length) return row;
         const detail = el("details", "tip-details"), summary = el("summary");
         summary.append(row);
-        detail.append(summary, ...i.rows.map(([label, value, cls]) => tipRow({ label, value, cls })));
+        detail.append(summary, ...i.rows.concat(id === "stbot" ? botReportRows : []).map(([label, value, cls]) => tipRow({ label, value, cls })));
         return detail;
       });
-      const sel = $("st-every"), every = el("label", "hc-sel", "Status bot every");
+      const sel = $("st-every"), every = el("label", "hc-sel", "Status bot schedule");
       sel.hidden = false; every.append(sel);
       const u = updateDetails(), extra = el("details", "tip-details");
       extra.append(el("summary", null, "Package and release details"));
@@ -693,7 +710,7 @@ if (document.body.classList.contains("login")) {
         if (extra.open && extra.childElementCount === 1) extra.append(...DETAIL.upd());
       });
       return { head: "Status", nodes: [tipRow({ section: "Updates" }), ...u.rows.filter(Boolean).map(tipRow),
-        ...(u.note ? [el("span", "tn", u.note)] : []), extra, tipRow({ section: "Services" }), ...rows, every] };
+        ...(u.note ? [el("span", "tn", u.note)] : []), extra, tipRow({ section: "Services" }), ...rows, tipRow({ label: "Failed units", value: num(srvNow?.failed_units) }), every] };
     });
   };
   document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && !pinned) cancelPreview(); }, true);
@@ -1718,7 +1735,7 @@ if (document.body.classList.contains("login")) {
     liveShown = { key: shown, v: m[n - 1] };
     // The rate: the last five whole minutes, one decimal below ten.
     const rate = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
-    set("live-n", rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1).replace(/\.0$/, ""));
+    set("live-n", rate >= 999.5 ? short(rate) : rate >= 10 ? Math.round(rate).toString() : rate.toFixed(1).replace(/\.0$/, ""));
     const hour = m.reduce((a, b) => a + b, 0);
     if (!box._h) { box._h = 1; hint(box, () => box._tip); }
     box._tip = { head: "Yos per minute", nodes: [plotWithAxis(sparkBars(m, ""), "Last hour", "now")],
@@ -1868,13 +1885,13 @@ if (document.body.classList.contains("login")) {
   }
 
   // ---- status bot (skills/status): its last report in one line on the Overview, how often it sends right there -----
+  let botReportRows = [];
   const drawStatus = (d) => {
     const l = d.last, c = d.config || {}, at = l && l.at ? l.at * 1000 : null;
-    svcInfo.stbot = { rows: [
+    botReportRows = [
       ["Last report", l ? `${clock(at)} · ${l.sent ? "sent" : "not sent"}` : "none yet", l && !l.sent ? "bad" : ""],
-      ["Every", !c.every_minutes ? "off" : c.every_minutes === 1440 ? "day (09:00 Berlin)" : `${c.every_minutes} min`],
-    ], ok: !!(c.every_minutes && l?.sent) };
-    drawCli();
+      ["Schedule", !c.every_minutes ? "on demand" : c.every_minutes === 1440 ? "day (09:00 Berlin)" : `${c.every_minutes} min`],
+    ];
     redrawDetail(["svc", "server"]);
     if (document.activeElement !== $("st-every")) $("st-every").value = String(c.every_minutes ?? 0);
   };
@@ -1887,7 +1904,7 @@ if (document.body.classList.contains("login")) {
   $("st-every").addEventListener("change", async (e) => {
     try {
       drawStatus(await (await postJSON("/status", { every_minutes: Number(e.target.value) })).json());
-    } catch { if (svcInfo.stbot) { svcInfo.stbot.rows.push(["", "not saved, try again", "bad"]); redrawDetail(["svc", "server"]); } }
+    } catch { if (svcInfo.stbot) { botReportRows.push(["", "not saved, try again", "bad"]); redrawDetail(["svc", "server"]); } }
   });
 
   // ---- one page of widgets; the Database widget is always open. Rows of Attention and Usage jump there: Feedback to
@@ -2647,9 +2664,16 @@ if (document.body.classList.contains("login")) {
           const rise = recorded.length ? recorded.at(-1) - recorded[0] : 0;
           const fast = recorded.length > 1 && rise >= Math.max(3, Math.ceil(recorded[0] * 0.5));
           state("problem-dial", fast || open.some(d => d.kind === "crash") || p.cr.at(-1) > 0 ? "bad" : rise > 0 ? "warn" : null);
-          set("problem-n", num(openCount));
+          set("problem-n", openCount >= 1000 ? short(openCount) : num(openCount));
           const trend = historyPlot(levels, names, "warm");
-          $("problem-trend").replaceChildren(...(trend.querySelector("svg") ? [trend.querySelector("svg").cloneNode(true)] : []));
+          const peak = Math.max(1, ...recorded);
+          let path = "";
+          levels.forEach((v, i) => {
+            if (v == null) return;
+            const x = 1 + 26 * i / Math.max(1, levels.length - 1);
+            path += `${levels[i - 1] == null ? "M" : "L"}${x} ${7 - 6 * v / peak}h0`;
+          });
+          $("problem-trend").replaceChildren(svg("path", { d: path }));
           problemCard = { head: "Problems", nodes: [trend], rows: [{ label: "Open problems", value: num(openCount) },
             { label: "Unread feedback", value: num(openFeedback) }, { label: "Open causes", value: num(causes) },
             { label: "Open user reports", value: num(openReports) }], note: sampled ? "Trend counts recorded open errors and crashes." : "Trend counts unread feedback and open diagnostic causes." };

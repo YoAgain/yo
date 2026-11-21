@@ -488,6 +488,8 @@ class FakeServer:
             "hub": {**unit(time.time() - 4 * 3600 - 1200, 61 << 20), "version": "3cf0c99 2026-11-19T13:02:00Z"},
             "hub_dev": unit(time.time() - 26 * 3600, 23 << 20),
             "tunnel": unit(self.boot, 38 << 20, 1),
+            "failed_units": 0,
+            "stbot": unit(self.boot, 24 << 20),
             "yogpt": unit(time.time() - 26 * 3600, 112 << 20),
             "reserved": reserved,
             # The last hour, a point a minute, as admin.remember keeps it.
