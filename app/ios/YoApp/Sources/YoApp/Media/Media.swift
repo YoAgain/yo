@@ -191,6 +191,11 @@ final class MediaOutbox {
   @ObservationIgnored private var oneShot: [UUID: CheckedContinuation<Bool, Never>] = [:]
   @ObservationIgnored private var wake: Task<Void, Never>?
   @ObservationIgnored private weak var accounts: AccountStore?
+  /// Being sealed and written: a second send of the same id meanwhile adds nothing (one blob per id) and is not taken.
+  @ObservationIgnored private var adding: Set<UUID> = []
+  /// Gone from the line, their blobs deleted once the queue without them is on disk: never a queue on disk naming a
+  /// blob that is gone (a crash or a failed write in between left one that could never upload).
+  @ObservationIgnored private var unlinked: Set<UUID> = []
 
   private static var directory: URL { MediaStorage.directory("Outbox") }
   private static func blob(_ id: UUID) -> URL { directory.appending(path: "\(id.uuidString).blob") }
@@ -221,6 +226,7 @@ final class MediaOutbox {
     }
     var read: [Item] = []
     var legacy = false
+    var named = false  // the queue read whole: a blob it does not name is no item's
     if let data {
       var json: Data?
       switch ManifestSeal.open(data, of: Self.index) {
@@ -230,12 +236,14 @@ final class MediaOutbox {
       }
       if let decoded = json.flatMap({ try? JSONDecoder().decode([Item].self, from: $0) }) {
         read = decoded
+        named = true
       } else {
         guard MediaStorage.quarantine(Self.index) else { return false }
       }
     }
     items = read.filter { $0.held != true }
     for gone in read where gone.held == true { try? FileManager.default.removeItem(at: Self.blob(gone.id)) }
+    if named { Self.sweep(keeping: Set(items.map(\.id)).union(adding)) }
     loaded = true
     note()
     if legacy { save() }
@@ -247,8 +255,35 @@ final class MediaOutbox {
   private func save() -> Bool {
     guard loaded else { return false }
     note()
-    guard let json = try? JSONEncoder().encode(items), let data = ManifestSeal.seal(json) else { return false }
-    return ManifestSeal.write(data, to: Self.index)
+    guard let json = try? JSONEncoder().encode(items), let data = ManifestSeal.seal(json),
+      ManifestSeal.write(data, to: Self.index)
+    else { return false }
+    let gone = unlinked.subtracting(items.map(\.id))
+    unlinked = []
+    if !gone.isEmpty {
+      let blobs = gone.map(Self.blob)
+      Task.detached(priority: .utility) { for blob in blobs { try? FileManager.default.removeItem(at: blob) } }
+    }
+    return true
+  }
+
+  /// Blobs no item names: left by a crash after the queue was written without them, before they were deleted. One
+  /// written after the queue was read belongs to a send under way and stays.
+  private static func sweep(keeping: Set<UUID>) {
+    let dir = directory
+    let read = Date.now
+    Task.detached(priority: .utility) {
+      let files = FileManager.default
+      guard let names = try? files.contentsOfDirectory(atPath: dir.path) else { return }
+      for name in names where name.hasSuffix(".blob") {
+        guard let id = UUID(uuidString: String(name.dropLast(5))), !keeping.contains(id) else { continue }
+        let blob = dir.appending(path: name)
+        guard let written = (try? files.attributesOfItem(atPath: blob.path))?[.modificationDate] as? Date,
+          written < read
+        else { continue }
+        try? files.removeItem(at: blob)
+      }
+    }
   }
 
   /// What waits, and for whom something did not go.
@@ -266,6 +301,9 @@ final class MediaOutbox {
   ) async -> Bool {
     guard let client, client === accounts.client, load() else { return false }
     guard !items.contains(where: { $0.id == id }) else { return true }
+    guard !adding.contains(id) else { return false }
+    adding.insert(id)
+    defer { adding.remove(id) }
     let width = UInt16(clamping: file.width)
     let height = UInt16(clamping: file.height)
     guard
@@ -273,8 +311,7 @@ final class MediaOutbox {
         (try sealMedia(plain: file.data, width: width, height: height), client.userId())
       })
     else { return false }
-    guard !items.contains(where: { $0.id == id }) else { return true }
-    var item = Item(
+    let item = Item(
       id: id, owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
       durationMs: file.durationMs, created: at)
     let blob = Self.blob(item.id)
@@ -405,8 +442,7 @@ final class MediaOutbox {
     switch outcome {
     case .sent, .dropped:
       items.remove(at: at)
-      let blob = Self.blob(item.id)
-      Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
+      unlinked.insert(item.id)  // its blob goes once the queue without it is written (`save`)
     case .refused:
       // Never dropped: kept until a tap on its bar (or the banner) tries it again.
       items[at].failed = true
