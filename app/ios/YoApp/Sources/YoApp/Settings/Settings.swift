@@ -149,16 +149,8 @@ struct SettingsView: View {
       // It fits at its height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      // The title "Yodentity" and no close button: the system's grabber pulls the sheet down and away. The bar stays
-      // (see-through), so a push or pop never changes its height and the pushed page's bar does not jump in. The
-      // list keeps the system's own top margin below it, and while it does not scroll no edge effect fades the card.
-      .toolbar(.visible, for: .navigationBar)
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        // The root's own title, in a bar laid out as a pushed page's, so a push or pop never moves it.
-        ToolbarItem(placement: .principal) { Text("Yodentity").font(.headline) }
-      }
-      .toolbarBackground(.hidden, for: .navigationBar)
+      // No title and no bar on the root: the system's grabber pulls the sheet down and away.
+      .toolbar(.hidden, for: .navigationBar)
       .scrollEdgeEffectHidden(!typeSize.isAccessibilitySize, for: .top)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
@@ -188,9 +180,10 @@ struct SettingsView: View {
     }
     // Every page scrolls only when it does not fit.
     .scrollBounceBehavior(.basedOnSize)
-    // Always this height (just over half: three groups of rows and the profile card fit): a full page opens as a
-    // sheet of its own on top.
-    .presentationDetents([.fraction(0.68)])
+    // Just the height of the groups of rows (no title bar above them), on any screen: a fraction of the screen would
+    // cut them off on a small iPhone and leave space under them on a large one. A full page opens as a sheet of its
+    // own on top. With larger text the rows no longer fit: the full height, scrolling.
+    .presentationDetents(typeSize > .large ? [.large] : [.custom(SettingsDetent.self)])
     // The grabber on every page: toggled with the path, it moved the bar mid-push (the pushed page's back button and
     // title began at the grabber's height, then dropped into place).
     .presentationDragIndicator(.visible)
@@ -228,4 +221,9 @@ struct SettingsView: View {
     // The list's compact top under the inline title, as on the first page.
     .listSectionSpacing(.compact)
   }
+}
+
+/// The height of the settings root's groups of rows, as far as the screen allows.
+private struct SettingsDetent: CustomPresentationDetent {
+  static func height(in context: Context) -> CGFloat? { min(context.maxDetentValue, 470) }
 }
