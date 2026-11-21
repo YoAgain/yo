@@ -28,7 +28,7 @@ TEAM = os.environ["ACCESS_TEAM"]
 AUD = os.environ["ACCESS_AUD"]
 # Public origin used for POST origin checks.
 ORIGIN = os.environ.get("ADMIN_ORIGIN", "https://localhost")
-SESSION_SECONDS = 12 * 3600
+SESSION_SECONDS = 30 * 86400  # a month, renewed on every page load: the admin stays signed in while it is used
 COOKIE = "__Host-yo_admin"
 HUB_URLS = {"live": os.environ.get("YO_HUB_URL", "http://localhost:8080"),
             "dev": os.environ.get("YO_HUB_DEV_URL", "http://localhost:8090")}
@@ -815,7 +815,8 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/":
             if logged_in:
                 collector.snapshot()
-            return self.send(200, page("dashboard.html" if logged_in else "login.html"))
+            # Signed in: the session starts again from now (sliding), so an admin in use never logs itself out.
+            return self.send(200, page("dashboard.html" if logged_in else "login.html"), extra={"Set-Cookie": session_cookie(who)} if logged_in else None)
         if path == "/stats.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
