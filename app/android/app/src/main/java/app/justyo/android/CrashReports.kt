@@ -58,7 +58,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
      * only the report JSON, counted errors only their counts) are sent the same way, by the install id.
      */
     var enabled: Boolean
-        get() = preferences.getBoolean("enabled", true)
+        get() = preferences.getBoolean("enabled", true) && !TestLab.isRunning(context)
         set(value) { preferences.edit { putBoolean("enabled", value) }; if (!value) InstallId.forget(context) }
     @Synchronized fun history(): List<String> = rows().map { it.getString("text") }.reversed()
     private fun rows(): List<JSONObject> = runCatching { val array=JSONArray(preferences.getString("history","[]"));(0 until array.length()).map { array.getJSONObject(it) } }.getOrDefault(emptyList())
