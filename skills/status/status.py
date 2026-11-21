@@ -14,6 +14,11 @@ the numbers (no names) to STATUS_LAST for the admin page. Rendering needs Pillow
 Bold next to this file.
 
   STATUS_TO_USER=<32 hex> YO_STATE=… YO_HUB=… status.py [--once]     (once before: yo register NAME)
+
+A release card on demand: `status.py --release "Yo 1.0.0 RC17" NOTES` (NOTES a file, - for stdin: the release notes,
+their "- " bullets the features) renders the title big and the features below and sends it to the same one user. Run
+with the bot's YO_STATE, `yo send` goes over the running listener's control socket: no second device, no restart.
+`--save PATH` writes the card there instead of sending it.
 """
 
 import argparse
@@ -41,6 +46,7 @@ FONT = os.path.join(HERE, "Montserrat-Bold.ttf")
 BERLIN = ZoneInfo("Europe/Berlin")
 EVERY = (0, 15, 30, 60, 120, 1440)
 DAILY_AT = 9 * 60  # minutes after Berlin midnight
+FLAT = ("#1ABC9C", "#2ECC71", "#3498DB", "#34495E")  # turquoise, emerald, peter river, wet asphalt
 USER_ID = re.compile(r"[0-9a-f]{32}")
 ON_DEMAND = 30  # seconds between reports asked for with a Yo
 # Exit codes systemd does not restart (yo-status@.service): no valid STATUS_TO_USER.
@@ -131,12 +137,97 @@ def render(path, n, base, when):
     draw.text((80, 70), "Yo", font=ImageFont.truetype(FONT, 120), fill="white")
     draw.text((80, 214), f"Server · {when:%H:%M} Berlin", font=ImageFont.truetype(FONT, 40), fill="#ecdff2")
     font = ImageFont.truetype(FONT, 56)
-    for i, ((label, value), colour) in enumerate(zip(rows(n, base), ("#1ABC9C", "#2ECC71", "#3498DB", "#34495E"))):
+    for i, ((label, value), colour) in enumerate(zip(rows(n, base), FLAT)):
         top = 1080 - (4 - i) * 150
         draw.rectangle((0, top, 1080, top + 150), fill=colour)
         draw.text((80, top + 75), label, font=font, fill="white", anchor="lm")
         draw.text((1000, top + 75), value, font=font, fill="white", anchor="rm")
     image.save(path, "JPEG", quality=88)
+
+
+MAX_LINES = 8  # feature lines on a release card, "+n more" included
+BULLET = re.compile(r"^\s*[-*•]\s+(.*\S)")
+
+
+def features(notes):
+    """The release notes' bullets, plain (no Markdown marks); without bullets, its paragraphs after the first."""
+    plain = lambda line: re.sub(r"\*\*|__|`|\[([^]]*)\]\([^)]*\)", lambda m: m.group(1) or "", line).strip()  # noqa: E731
+    found = [plain(m.group(1)) for m in map(BULLET.match, notes.splitlines()) if m]
+    if not found:
+        found = [plain(" ".join(p.split())) for p in re.split(r"\n\s*\n", notes) if p.strip()][1:]
+    return [f for f in found if f]
+
+
+def wrap(text, font, width, most):
+    """`text` in lines no wider than `width`, at most `most` of them (the last cut with an ellipsis)."""
+    lines = []
+    for word in text.split():
+        if lines and font.getlength(f"{lines[-1]} {word}") <= width:
+            lines[-1] += f" {word}"
+        else:
+            lines.append(word)
+    if len(lines) > most:
+        lines = lines[:most]
+        while lines[-1] and font.getlength(lines[-1] + "…") > width:
+            lines[-1] = lines[-1].rsplit(" ", 1)[0] if " " in lines[-1] else lines[-1][:-1]
+        lines[-1] = lines[-1].rstrip(" ,;:.") + "…"
+    return lines
+
+
+def render_release(path, title, items):
+    """A 1080×1080 JPEG: amethyst top with the title as big as fits, the features as Flat UI rows at the bottom,
+    MAX_LINES lines at most, "+n more" for the rest."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    font, line = ImageFont.truetype(FONT, 42), 56
+    blocks, used = [], 0
+    for i, item in enumerate(items):
+        room = MAX_LINES - used - (1 if i < len(items) - 1 else 0)
+        lines = wrap(item, font, 920, 2)  # a feature: two lines at most, short
+        if len(lines) > room:
+            break
+        blocks.append(lines)
+        used += len(lines)
+    more = len(items) - len(blocks)
+    if more:
+        blocks.append([f"+{more} more"])
+    count = sum(map(len, blocks))
+    pad = max(12, min(34, (700 - count * line) // max(1, 2 * len(blocks))))
+    image = Image.new("RGB", (1080, 1080), "#9B59B6")
+    draw = ImageDraw.Draw(image)
+    top = 1080 - sum(len(b) * line + 2 * pad for b in blocks)
+    size = 140
+    while size > 40 and ImageFont.truetype(FONT, size).getlength(title) > 920:
+        size -= 4
+    big = ImageFont.truetype(FONT, size)
+    middle = top // 2
+    draw.text((80, middle - 10), title, font=big, fill="white", anchor="ls")
+    draw.text((80, middle + 40), "New release", font=ImageFont.truetype(FONT, 40), fill="#ecdff2", anchor="lt")
+    for i, lines in enumerate(blocks):
+        height = len(lines) * line + 2 * pad
+        colour = "#7F8C8D" if more and i == len(blocks) - 1 else FLAT[i % len(FLAT)]
+        draw.rectangle((0, top, 1080, top + height), fill=colour)
+        for j, text in enumerate(lines):
+            draw.text((80, top + pad + j * line + line // 2), text, font=font, fill="white", anchor="lm")
+        top += height
+    image.save(path, "JPEG", quality=88)
+
+
+def release(to, title, notes, save=None):
+    """The release card for `title` and `notes` to the one recipient (or into `save`)."""
+    items = features(notes)
+    if save:
+        return render_release(save, title, items)
+    # In the bot's own directory: the listener that sends it has a /tmp of its own (PrivateTmp).
+    with tempfile.TemporaryDirectory(dir=os.environ.get("YO_STATE")) as d:
+        path = os.path.join(d, "release.jpg")
+        render_release(path, title, items)
+        try:
+            send_photo(to, recipient(), path)
+        except yocli.Failed as failed:
+            yocli.log(f"release card not sent: {yocli.reason(failed)}")
+            sys.exit(1)
+    yocli.log(f"release card sent: {title}")
 
 
 def report(cfg, to):
@@ -201,11 +292,18 @@ def timed(to, lock):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="one report now, then end")
+    parser.add_argument("--release", nargs=2, metavar=("TITLE", "NOTES"), help="a release card now (NOTES: file, -)")
+    parser.add_argument("--save", metavar="PATH", help="with --release: write the card there, send nothing")
     args = parser.parse_args()
     to = recipient()
-    if not to:
+    if not to and not args.save:
         yocli.log("stopped: STATUS_TO_USER is not a user id (32 hex)")
         sys.exit(NO_RECIPIENT)
+    if args.release:
+        title, source = args.release
+        with (sys.stdin if source == "-" else open(source)) as f:
+            notes = f.read(64 * 1024)
+        return release(to, " ".join(title.split())[:60], notes, args.save)
     yocli.registered()
     if args.once:
         return report(config(), to)

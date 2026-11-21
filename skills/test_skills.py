@@ -215,6 +215,12 @@ class StatusRules(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertEqual(self.config(bad), off)
 
+    def test_release_features_are_the_bullets_plain(self):
+        notes = "Seventeenth release candidate.\n\n- iOS: **bold** `code`\n* [Link](https://x) text\n  - nested\n"
+        self.assertEqual(status.features(notes), ["iOS: bold code", "Link text", "nested"])
+        self.assertEqual(status.features("Intro.\n\nOne thing.\n\nTwo\nlines."), ["One thing.", "Two lines."])
+        self.assertEqual(status.features(""), [])
+
     def test_sends_only_to_the_fixed_user_id(self):
         user = "ab" * 16
         self.assertEqual(status.recipient(" " + user.upper() + "\n"), user)

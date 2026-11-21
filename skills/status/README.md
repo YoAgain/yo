@@ -14,6 +14,12 @@ How often is set on the admin page (tab Status), which writes `/var/lib/yo-admin
 Berlin). Slots are whole multiples from Berlin midnight; the config is read again every minute. After each slot
 `/run/yo-status-live/last.json` holds the numbers (no names) for the admin page; the journal says `sent`.
 
+A release card on demand: `status.py --release "Yo 1.0.0 RC17" NOTES` (NOTES a file, `-` for stdin) puts the
+title big on amethyst and the notes' `- ` bullets below as Flat UI rows (two lines each at most, eight lines in all,
+`+n more` for the rest) and sends it to the same one user. Run with the bot's `YO_STATE` and env file, `yo send`
+goes over the running listener's control socket: no second device and no restart. `--save PATH` only writes the
+card. The hub's operations repository calls it after tagging (`./release-yo TAG`).
+
 Needs Pillow (`apt install python3-pil`); [Montserrat-Bold.ttf](Montserrat-Bold.ttf) is under the SIL Open Font
 License ([Montserrat-OFL.txt](Montserrat-OFL.txt)).
 
