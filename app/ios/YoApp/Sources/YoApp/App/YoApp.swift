@@ -87,6 +87,7 @@ struct YoApp: App {
       Self.forget(friends, inbox, outbox)
       friends.add("YoGPT")
     }
+    accounts.wiping = { outbox.clear(wiping: true) }
     notifications = NotificationDelegate(inbox: inbox, friends: friends, accounts: accounts)
     friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
     AppDelegate.silentSync = { await inbox.syncOnce(accounts: accounts, friends: friends) }

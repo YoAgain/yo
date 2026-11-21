@@ -316,14 +316,15 @@ final class MediaOutbox {
   }
 
 
-  /// Signed out (the files went with MediaStorage.clearAll).
-  func clear() {
+  /// Signed out (the files went with MediaStorage.clearAll). `wiping`: they go with it after this, so the queue
+  /// counts as read (empty) and is not read back from the disk before they went.
+  func clear(wiping: Bool = false) {
     generation += 1
     let pending = oneShot.values
     oneShot = [:]
     for continuation in pending { continuation.resume(returning: false) }
     items = []
-    loaded = false
+    loaded = wiping
     waiting = 0
     unsentTo = []
     wake?.cancel()
@@ -471,14 +472,29 @@ final class MediaOutbox {
     let blob = Self.blob(item.id)
     return await outcome {
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
+      guard let ciphertext = try await Self.ciphertext(blob) else { return .dropped }
       let (events, contacts) = try await Hub.run {
-        (try client.uploadMediaTo(target: sendTarget(to: item.to), media: media, ciphertext: try Data(contentsOf: blob)),
+        (try client.uploadMediaTo(target: sendTarget(to: item.to), media: media, ciphertext: ciphertext),
          client.contacts())
       }
       await received?(events, contacts, client)
       guard generation == self.generation else { return .dropped }
       return .uploaded
     }
+  }
+
+  /// Nil when its file is gone: it can never go, so it leaves the line instead of waiting for a tap that cannot send
+  /// it. Reported once, as it should not happen.
+  nonisolated private static func ciphertext(_ blob: URL) async throws -> Data? {
+    try await Task.detached(priority: .userInitiated) {
+      do {
+        return try Data(contentsOf: blob)
+      } catch {
+        Diagnostics.recordUnreported(error, place: "upload(_:client:generation:)")
+        if let error = error as? CocoaError, error.code == .fileReadNoSuchFile { return nil }
+        throw error
+      }
+    }.value
   }
 
   private func send(_ item: Item, client: YoClient, generation: Int) async -> Outcome {

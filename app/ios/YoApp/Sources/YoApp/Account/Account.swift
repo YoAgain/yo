@@ -190,6 +190,8 @@ final class AccountStore {
     openNow()
   }
   @ObservationIgnored var leaving: @MainActor () -> Void = {}
+  /// `reset` wipes the media files: what waited in memory for them goes too.
+  @ObservationIgnored var wiping: @MainActor () -> Void = {}
 
   init() {
     let saved = UserDefaults.standard.data(forKey: Self.key)
@@ -1046,6 +1048,8 @@ final class AccountStore {
     passkeyTurnedOff = false
     wordsSaved = true
     Availability.shared.local = false
+    // Else the same account signed in again (recovery, replaced) sends the outbox's items without their files.
+    wiping()
     // Registration waits for this bounded lock attempt and disk cleanup, never for a stale extension or network step.
     let before = deleting
     deleting = Task.detached(priority: .userInitiated) {
