@@ -1101,7 +1101,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                         onClick = {
                             when {
                                 sharing -> model.cancelShares()
-                                clear -> picked = null
+                                clear -> toggleCamera()
                                 else -> toggleCamera()
                             }
                         },
@@ -1113,7 +1113,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                         Icon(
                             if (cameraOn || clear) Icons.Default.Close else Icons.Default.CameraAlt,
                             stringResource(
-                                if (clear) R.string.clear_selection
+                                if (sharing) R.string.clear_selection
                                 else if (cameraOn) R.string.ui_close_camera
                                 else R.string.ui_camera
                             ),

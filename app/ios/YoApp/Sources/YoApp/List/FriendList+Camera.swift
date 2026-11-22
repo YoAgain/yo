@@ -178,14 +178,15 @@ extension FriendList {
       var transaction = Transaction()
       transaction.disablesAnimations = true
       withTransaction(transaction) {
-        // With media picked: back to the live camera; with nothing picked: closed.
+        // Closed in one press, with media picked or not; the selection goes with it.
         if cameraOn && selecting {
           picked = []
           libraryItems = []
+          cameraSwitched(false)
         } else if cameraOn || !sheetUp { cameraSwitched(!cameraOn) }
       }
     } label: {
-      Label(cameraOn ? (selecting ? "Clear Selection" : "Close Camera") : "Camera",
+      Label(cameraOn ? "Close Camera" : "Camera",
             systemImage: cameraOn ? "xmark" : "camera.fill")
     }
     .font(.system(size: 30))
