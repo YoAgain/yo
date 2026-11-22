@@ -664,7 +664,9 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
 
     var menu by remember { mutableStateOf<Friend?>(null) }
     var leaving by remember { mutableStateOf<Friend?>(null) }
-    var cameraOn by remember { mutableStateOf(false) }
+    // Kept over a configuration change (rotation, dark mode, split screen, a font size), which recreates the
+    // activity: camera mode and what was picked closed with each turn of the phone.
+    var cameraOn by rememberSaveable { mutableStateOf(false) }
     var controlsStrip by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     var cameraVersion by remember { mutableIntStateOf(0) }
     var hintEpoch by remember { mutableIntStateOf(0) }
@@ -672,7 +674,18 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     // A photo or video went out since the camera opened: its hint is not needed again until the next opening (iOS).
     var hintNeeded by remember { mutableStateOf(true) }
     // Up to ten photos and videos from the library, in order (iOS's picker); a tap on a name sends them all.
-    var picked by remember { mutableStateOf<List<Uri>?>(null) }
+    var picked by rememberSaveable(stateSaver = PickedSaver) { mutableStateOf<List<Uri>?>(null) }
+    // Back after the process ended: the camera only with its permission still given, picked items only where they
+    // can still be read (the photo picker's grant ends with the process).
+    LaunchedEffect(Unit) {
+        if (cameraOn && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
+            cameraOn = false
+        val restored = picked ?: return@LaunchedEffect
+        val readable = withContext(Dispatchers.IO) {
+            restored.filter { uri -> runCatching { context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false }.getOrDefault(false) }
+        }
+        if (picked == restored) picked = readable.takeIf { it.isNotEmpty() }
+    }
     var viewing by remember { mutableStateOf<List<Received>?>(null) }
     val heldFinger = remember { HeldFinger() }
     var recording by remember { mutableStateOf<String?>(null) }
@@ -1353,3 +1366,7 @@ internal class RowActions {
         if (offline) Box(Modifier.padding(start = 0.dp).width(18.dp).offset(x = (-6).dp).clearAndSetSemantics {}) { Text(".".repeat(dots), maxLines = 1, style = style) }
     }
 }
+
+/** The library picks over an activity's recreation (a Bundle holds an ArrayList of Uris). */
+private val PickedSaver = androidx.compose.runtime.saveable.Saver<List<Uri>?, ArrayList<Uri>>(
+    save = { it?.let(::ArrayList) }, restore = { it.takeIf { list -> list.isNotEmpty() } })
