@@ -171,6 +171,8 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     dragHandle: @Composable (() -> Unit)? = { BottomSheetDefaults.DragHandle() },
     /** A fixed height, as a share of the tallest a sheet may be (iOS's detents), instead of the content's own. */
     height: Float? = null,
+    /** With `height`: a page longer than that grows the sheet, up to the tallest, instead of hiding its end below. */
+    grows: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) = ModalBottomSheet(
     onDismissRequest = onDismissRequest, sheetState = state, containerColor = containerColor, contentColor = contentColor,
@@ -184,11 +186,16 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     val insets = with(density) { (WindowInsets.statusBars.getTop(this) + WindowInsets.navigationBars.getBottom(this)).toDp() }
     val handle = if (dragHandle != null) 48.dp else 0.dp
     val tallest = (screen - insets - handle).coerceAtLeast(0.dp)
-    Column(if (height != null) Modifier.height(tallest * height) else Modifier.heightIn(max = tallest), content = content)
+    Column(when {
+        height == null -> Modifier.heightIn(max = tallest)
+        grows -> Modifier.heightIn(min = tallest * height, max = tallest)
+        else -> Modifier.height(tallest * height)
+    }, content = content)
 }
 
-/** Settings (iOS SettingsView): a fixed height per page, never measured: half for the pages that fit there (the first
- *  page, Account, Blocked, Account Security and App Icon), full for every other; its pages pushed in with a back arrow. */
+/** Settings (iOS SettingsView): a height chosen per page: half for the pages that fit there (the first page, Account,
+ *  Blocked, Account Security and App Icon; all but the first grow on a screen too short for them), full for every
+ *  other; its pages pushed in with a back arrow. */
 @Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
     // The whole state (counters and the last sync included): the list underneath takes it without them.
     val s by model.repository.state.collectAsStateWithLifecycle()
@@ -198,7 +205,9 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     // The way here: a contact's page is reached from Contacts.
     val trail = rememberSaveable { mutableStateOf(listOf("Profile")) }
     FittedSheet(onDismissRequest = onClose, state = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        height = if (trail.value.last() in HalfPages) 0.5f else 1f) {
+        // On a short screen a half page may not fit (Account's "Delete Your Account" fell below): it grows to what it
+        // needs. The first page alone stays at half, its card filling the room the rows leave.
+        height = if (trail.value.last() in HalfPages) 0.5f else 1f, grows = trail.value.last() != "Profile") {
         Settings(model, s, trail, onClose = { hideThen(onClose) }, onAddFriends = { hideThen(onAddFriends) })
     }
 }
