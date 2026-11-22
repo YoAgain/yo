@@ -401,3 +401,93 @@ fn a_non_contact_group_sender_name_is_learned() {
         "a non-contact member has the sender's username"
     );
 }
+
+/// A hub with its database in a file the test opens beside it, that file.
+fn hub_on_disk() -> (TestHub, rusqlite::Connection, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("yo-groups-commitment-{}", random_u64()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = yo_hub::config::Config::for_tests();
+    config.db_path = dir.join("hub.sqlite").to_string_lossy().into_owned();
+    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let db = rusqlite::Connection::open(&config.db_path).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    (hub, db, dir)
+}
+
+/// The requests to `path` a transport sent.
+fn asked(of: &Http, path: &str) -> usize {
+    of.sent.lock().unwrap().iter().filter(|(_, p, _)| p == path).count()
+}
+
+/// Reads and the work after them, `n` times.
+fn rounds(c: &mut Client, n: usize) {
+    for _ in 0..n {
+        c.sync(0).unwrap();
+        c.after_sync().unwrap();
+    }
+}
+
+/// YoGPT's case: an account that told its access key before the hub kept commitments (spec 4.9) has none there,
+/// while its device holds it told. Its key going into a group it joined tells the access key with the commitment
+/// again, once, and then goes in; the device does not ask for its own credential after every read (it did, 404 each
+/// time, about 15 a second).
+#[test]
+fn a_commitment_the_hub_lacks_is_told_again_and_not_asked_for_after_every_read() {
+    let (hub, db, dir) = hub_on_disk();
+    let https = [(); 2].map(|_| Http::new(hub.url()));
+    let base = random_u64() % 1_000_000_000;
+    let mut a = register(https[0].clone(), &username(base), Some("ANN"));
+    let mut c = register(https[1].clone(), &username(base + 7), Some("BOT"));
+    rounds(&mut c, 2);
+    let user = yo_tests::user_id(c.user_id()).to_vec();
+    let gone = db.execute("DELETE FROM profile_commitments WHERE user_id = ?1", [&user]).unwrap();
+    assert_eq!(gone, 1, "the commitment was told at first");
+    let (id, _) = a.create_group("BOTS", &[c.user_id().to_owned()]).unwrap();
+    take(&mut c);
+    c.accept_group(&id).unwrap();
+    rounds(&mut c, 3);
+    let told: usize =
+        db.query_row("SELECT count(*) FROM profile_commitments WHERE user_id = ?1", [&user], |row| row.get(0)).unwrap();
+    assert_eq!(told, 1, "the commitment is at the hub again");
+    let before = asked(&https[1], yo_wire::api::GROUP_CREDENTIAL);
+    assert!(before <= 2, "its own credential asked for {before} times");
+    rounds(&mut c, 10);
+    assert_eq!(asked(&https[1], yo_wire::api::GROUP_CREDENTIAL), before, "keyed: not asked for again");
+    // And the group works for it: Ann's Yo reaches the bot.
+    a.send_group(&id, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(&mut c)), [(id.clone(), a.user_id().to_owned())]);
+    hub.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A hub that keeps refusing the own credential (`404`, `403`): after the access key told again it is asked for at
+/// most once a pass after a growing pause (a minute first), not after every read.
+#[test]
+fn an_own_credential_refused_for_good_is_asked_for_after_a_pause_only() {
+    let hub = TestHub::start();
+    let https = [(); 2].map(|_| Http::new(hub.url()));
+    let base = random_u64() % 1_000_000_000;
+    let mut a = register(https[0].clone(), &username(base), Some("ANN"));
+    let mut c = register(https[1].clone(), &username(base + 7), Some("BOT"));
+    rounds(&mut c, 2);
+    let (id, _) = a.create_group("BOTS", &[c.user_id().to_owned()]).unwrap();
+    take(&mut c);
+    for _ in 0..200 {
+        https[1].fault(yo_wire::api::GROUP_CREDENTIAL, yo_tests::Fault::Answer(404));
+    }
+    let credential = |h: &Http| asked(h, yo_wire::api::GROUP_CREDENTIAL);
+    let access = |h: &Http| asked(h, yo_wire::api::ACCESS_KEY);
+    let (asked_before, told_before) = (credential(&https[1]), access(&https[1]));
+    c.accept_group(&id).unwrap();
+    rounds(&mut c, 20);
+    // One pass: refused, the access key told again, asked once more, refused: a pause.
+    assert_eq!(credential(&https[1]) - asked_before, 2);
+    assert_eq!(access(&https[1]) - told_before, 1);
+    // A minute on (within the hub's five minutes for signatures): one more pass, then a longer pause.
+    c.set_clock_skew(61_000);
+    rounds(&mut c, 20);
+    assert_eq!(credential(&https[1]) - asked_before, 4);
+    c.set_clock_skew(122_000);
+    rounds(&mut c, 20);
+    assert_eq!(credential(&https[1]) - asked_before, 4, "the second pause is longer");
+}

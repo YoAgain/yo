@@ -46,6 +46,12 @@ const MAX_HELD: usize = 64;
 const CHANGE_TRIES: usize = 4;
 /// Endorsements are used until this long before they expire, then fetched anew.
 const ENDORSED_MARGIN_S: u64 = 3600;
+/// The own key into the groups after the hub refused its credential: a pause this long first, doubled each time.
+const KEY_PAUSE_FIRST_MS: u64 = 60_000;
+/// The longest pause.
+const KEY_PAUSE_MAX_MS: u64 = 3_600_000;
+/// The own credential from the hub that does not verify: paused as a refused one.
+const UNVERIFIED: Error = Error::Protocol("the own profile key credential does not verify");
 
 fn secret(key: &GroupKey) -> GroupSecretParams {
     GroupSecretParams::derive_from_master_key(GroupMasterKey::new(*key))
@@ -203,8 +209,9 @@ impl Client {
             // Joined in the account's storage too, saved with it.
             self.store_group(id);
             self.persist()?;
-            // The hub has the commitment first, so the own entry's key can go in.
+            // The hub has the commitment first, so the own entry's key can go in, at once.
             self.profile_keys()?;
+            self.key_pause = (0, 0);
             self.key_groups()?;
             self.deliver()
         })();
@@ -364,32 +371,43 @@ impl Client {
             presentation: Vec::new().into(),
         };
         let Some(key) = key else { return Ok(invited()) };
+        match self.presentation(zk, secret, user, key) {
+            Ok(Some(presentation)) => Ok(NewMember { user: Vec::new().into(), presentation: presentation.into() }),
+            // No commitment told, or another key than the one held here: invited.
+            Ok(None) | Err(Error::Refused(status::NOT_FOUND | status::FORBIDDEN)) => Ok(invited()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A profile key credential presentation for `user` holding `key` (spec 4.9): `None` one that does not verify;
+    /// `Refused(404)` the hub has no commitment of theirs, `Refused(403)` another key's.
+    fn presentation(
+        &mut self,
+        zk: &ServerPublicParams,
+        secret: &GroupSecretParams,
+        user: &str,
+        key: [u8; 32],
+    ) -> Result<Option<Vec<u8>>> {
         let context = zk.create_profile_key_credential_request_context(
             crate::identity::random(),
-            user_aci,
+            aci(user)?,
             ProfileKey::create(key),
         );
         let body = encode(&api::ProfileCredentialRequest {
             user_id: user_bytes(user)?,
             request: zkgroup::serialize(&context.get_request()).into(),
         });
-        let response = self.signed("POST", api::GROUP_CREDENTIAL, &body)?;
-        match response.status {
-            status::OK => {}
-            // No commitment told, or another key than the one held here: invited.
-            status::NOT_FOUND | status::FORBIDDEN => return Ok(invited()),
-            _ => return Err(refused(&response)),
-        }
+        let response = expect(self.signed("POST", api::GROUP_CREDENTIAL, &body)?, status::OK)?;
         let issued: ExpiringProfileKeyCredentialResponse =
             zkgroup::deserialize(&response.body).map_err(|_| bad_answer())?;
         let now = Timestamp::from_epoch_seconds(self.now_s());
         let Ok(credential) = zk.receive_expiring_profile_key_credential(&context, &issued, now) else {
             self.note("a profile key credential that does not verify".into());
-            return Ok(invited());
+            return Ok(None);
         };
         let presentation =
             zk.create_expiring_profile_key_credential_presentation(crate::identity::random(), *secret, credential);
-        Ok(NewMember { user: Vec::new().into(), presentation: zkgroup::serialize(&presentation).into() })
+        Ok(Some(zkgroup::serialize(&presentation)))
     }
 
     /// The group as the hub answered it, taken in: members and title decrypted, endorsements checked.
@@ -557,21 +575,46 @@ impl Client {
 
     /// The own entry's profile key into each group joined and not keyed yet, once the hub has the commitment: tried
     /// again after each read until the hub's answer has it keyed (also on a new phone, the group from the storage).
+    /// The hub without the commitment (`404`: told before hubs kept them, or lost) is told the access key with it
+    /// again, and the key tried once more; refused still (or `403`, another key's), it waits a pause that doubles up
+    /// to an hour, not the next read.
     fn key_groups(&mut self) -> Result<()> {
-        if !self.state.access_key_told {
+        if !self.state.access_key_told || self.wall() < self.key_pause.0 {
             return Ok(());
         }
         let due: Vec<String> = (self.state.groups.iter())
             .filter(|(_, g)| g.accepted && !g.keyed && !g.left && g.revision > 0)
             .map(|(id, _)| id.clone())
             .collect();
+        let mut told_again = false;
         for id in &due {
-            match self.change(id, Intent::Key) {
+            let mut result = self.change(id, Intent::Key);
+            if matches!(result, Err(Error::Refused(status::NOT_FOUND))) && !told_again {
+                told_again = true;
+                self.note("group key: the hub has no commitment, told again".into());
+                self.state.access_key_told = false;
+                self.persist()?;
+                // Its keys queued for contacts first (`deliver` false): then the hub is told in a later round.
+                self.profile_keys_with(false)?;
+                if !self.state.access_key_told {
+                    return Ok(());
+                }
+                result = self.change(id, Intent::Key);
+            }
+            match result {
                 Err(error) if not_now(&error) => return Err(error),
+                // The own credential: the same for every group, none of the others gets it either.
+                Err(error @ (Error::Refused(status::NOT_FOUND | status::FORBIDDEN) | UNVERIFIED)) => {
+                    self.note(format!("group key: {error}"));
+                    let pause = (self.key_pause.1 * 2).clamp(KEY_PAUSE_FIRST_MS, KEY_PAUSE_MAX_MS);
+                    self.key_pause = (self.wall() + pause, pause);
+                    return Ok(());
+                }
                 Err(error) => self.note(format!("group key: {error}")),
                 Ok(()) => {}
             }
         }
+        self.key_pause = (0, 0);
         Ok(())
     }
 
@@ -664,11 +707,11 @@ impl Client {
                     actions.push(GroupAction { kind: api::ACTION_TITLE, data: title(&secret, name)?.into() });
                 }
                 Intent::Rename(_) => {}
+                // Refused (`404`, `403`): the caller's to handle (`key_groups`).
                 Intent::Key if !group.keyed => {
-                    let member = self.new_member(&zk, &secret, &me)?;
-                    if !member.presentation.as_slice().is_empty() {
-                        actions.push(GroupAction { kind: api::ACTION_PROFILE_KEY, data: member.presentation });
-                    }
+                    let Some(key) = self.state.profile_key else { return Ok(()) };
+                    let Some(presentation) = self.presentation(&zk, &secret, &me, key)? else { return Err(UNVERIFIED) };
+                    actions.push(GroupAction { kind: api::ACTION_PROFILE_KEY, data: presentation.into() });
                 }
                 Intent::Key => {}
             }

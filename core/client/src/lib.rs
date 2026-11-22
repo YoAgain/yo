@@ -550,6 +550,9 @@ pub struct Client {
     zk: Option<zkgroup::ServerPublicParams>,
     /// Today's group auth credential, for the day it is (seconds), fetched once a day.
     group_auth: Option<(u64, zkgroup::auth::AuthCredentialWithPniZkc)>,
+    /// The own key into the groups waits until then (wall ms), after the hub refused its credential, and the pause
+    /// it waited (`key_groups`); in memory, a restart tries at once.
+    key_pause: (u64, u64),
     /// Deliveries the hub took on a group send endorsement alone (`endorsed_deliveries`).
     endorsed_sent: u64,
 }
@@ -898,6 +901,7 @@ impl Client {
             skew_ms: 0,
             zk: groups::test_zk(),
             group_auth: None,
+            key_pause: (0, 0),
             endorsed_sent: 0,
         }
     }
