@@ -295,7 +295,7 @@ pub fn user_of(username: &str) -> String {
 
 pub fn random_u64() -> u64 {
     let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes).unwrap();
+    getrandom::fill(&mut bytes).unwrap();
     u64::from_le_bytes(bytes)
 }
 

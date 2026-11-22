@@ -100,7 +100,7 @@ pub(crate) async fn post_register(
         app: named_app(&headers).map(str::to_owned),
     };
     let mut fresh: UserId = [0; 16];
-    getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+    getrandom::fill(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     let spelling = std::str::from_utf8(handle.value.as_slice()).map_err(|_| bad())?;
     let skeleton = hub.stored_handle(&handle);
     let most = PREKEY_TARGET * 2;

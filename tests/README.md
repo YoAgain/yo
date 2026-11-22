@@ -1,7 +1,7 @@
 # Tests
 
 Everything runs against a real hub on a real socket, with clients over real HTTP. `dev/cargo` runs cargo in the
-pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed.
+pinned toolchain (Docker); `cargo` works the same where Rust 1.100.0 is installed.
 
 All files under `tests/` but `speed.rs` are modules of one test binary, `e2e` (`--test e2e scenarios::` runs one
 file); `speed` is its own, so its timings never share the process.

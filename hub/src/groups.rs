@@ -57,7 +57,7 @@ fn test_public() -> zkgroup::ServerPublicParams {
 
 fn random() -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).expect("randomness");
+    getrandom::fill(&mut bytes).expect("randomness");
     bytes
 }
 

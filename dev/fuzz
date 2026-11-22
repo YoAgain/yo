@@ -16,6 +16,6 @@ for target in $targets; do
   [ -d "$root/fuzz/seeds/$target" ] && cp -n "$root/fuzz/seeds/$target/"* "$root/fuzz/corpus/$target/" 2>/dev/null || true
   docker run --rm -i --network host -e CARGO_HOME=/cargo -e CARGO_TERM_COLOR=never \
     -v "$HOME/.cache/yo-cargo:/cargo" -v "$root:/yo" -w /yo/fuzz "$image" \
-    cargo +nightly-2026-10-20 fuzz run "$target" -- -max_total_time="$seconds" 2>&1 \
+    cargo +nightly-2026-11-21 fuzz run "$target" -- -max_total_time="$seconds" 2>&1 \
     | grep -E "^#[0-9]+.*(DONE|pulse)|Done [0-9]+ runs|SUMMARY|panicked|ERROR|crash-|cov:" | tail -3
 done

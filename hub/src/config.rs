@@ -181,7 +181,7 @@ impl BlobConfig {
     /// A new directory of its own under the system's temporary one: for tests.
     pub fn for_tests() -> Self {
         let mut n = [0u8; 8];
-        getrandom::getrandom(&mut n).expect("random");
+        getrandom::fill(&mut n).expect("random");
         BlobConfig {
             dir: std::env::temp_dir().join(format!("yo-hub-blobs-{}-{}", std::process::id(), u64::from_le_bytes(n))),
             budget_bytes: Self::DEFAULT_BUDGET_BYTES,

@@ -146,7 +146,7 @@ impl Blobs {
     /// A new file in `tmp/` for an upload.
     pub fn incoming(&self) -> io::Result<(tokio::fs::File, Incoming)> {
         let mut name = [0u8; 16];
-        getrandom::getrandom(&mut name).map_err(io::Error::other)?;
+        getrandom::fill(&mut name).map_err(io::Error::other)?;
         let path = self.dir.join("tmp").join(hex(&name));
         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
         Ok((tokio::fs::File::from_std(file), Incoming { path, kept: false }))

@@ -159,7 +159,7 @@ fn secret(path: &Path, make: bool) -> Result<Option<[u8; 32]>, Failure> {
         Ok(bytes) => bytes.try_into().map(Some).map_err(|_| Failure::new(format!("{}: not 32 bytes", path.display()))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && make => {
             let mut bytes = [0u8; 32];
-            getrandom::getrandom(&mut bytes).map_err(|e| Failure::new(e.to_string()))?;
+            getrandom::fill(&mut bytes).map_err(|e| Failure::new(e.to_string()))?;
             write_private(path, &bytes).map_err(io)?;
             Ok(Some(bytes))
         }

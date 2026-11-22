@@ -14,33 +14,34 @@ license = "MIT"
 tls_codec = { version = "=0.5.0", features = ["derive"] }
 # The one migration from the Ed25519 keys of before (an Edwards point to its Montgomery form): libsignal's version.
 curve25519-dalek = "=5.0.0"
-sha2 = "=0.10.9"
-hmac = "=0.12.1"
-chacha20poly1305 = "=0.10.1"
-zeroize = "=1.9.1"
-getrandom = { version = "=0.2.17", features = ["std"] }
-base64 = "=0.22.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "=1.0.151"
+sha2 = "=0.11.1"
+chacha20poly1305 = "=0.11.0"
+zeroize = "=1.9.2"
+getrandom = { version = "=0.4.3", features = ["std"] }
+base64 = "=0.23.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
 thiserror = "=2.0.21"
-tokio = { version = "=1.53.2", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
-axum = "=0.8.4"
-rusqlite = { version = "=0.32.1", features = ["bundled"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "http2", "json"] }
-jsonwebtoken = "=9.3.1"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
+axum = "=0.8.9"
+# fallible_uint: u64 columns (times, counts), behind a feature since rusqlite 0.35.
+rusqlite = { version = "=0.43.0", features = ["bundled", "fallible_uint"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "http2", "json"] }
+# Its crypto from aws-lc-rs, which reqwest's rustls already links.
+jsonwebtoken = { version = "=12.0.0", features = ["aws_lc_rs"] }
 uniffi = "=0.32.2"
 proptest = "=1.12.0"
-rand_core = { version = "=0.6.4", features = ["getrandom"] }
 # libsignal (AGPL-3.0) for the sessions: PQXDH, the Double Ratchet with SPQR. Its tag here, its commit in Cargo.lock (--locked).
 # The client core links it, and the hub for its sender certificates (spec 6.1).
-libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.5" }
 # Its profile key and the access key derived from it (spec 4.10), from the same tag (AGPL-3.0 too).
-zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.5" }
 # Its curve (Curve25519 keys, XEdDSA signatures) for the account key: what yo-wire checks (spec 3.1, 6.4).
-libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.5" }
 # Its account entropy pool, the recovery key, and the backup key derived from it (spec 7).
-libsignal-account-keys = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+libsignal-account-keys = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.5" }
 async-trait = "=0.1.92"
+# Pinned to 0.9: libsignal (v0.108.5) takes rand 0.9 RNGs; rand 0.10's rng() does not fit its CryptoRng bound.
 rand = "=0.9.5"
 
 [profile.release]

@@ -17,7 +17,7 @@ use yo_wire::{decode, encode};
 
 /// HKDF-SHA256 without salt (RFC 5869), up to 32 bytes: the derivation spec 7 and 6.9 name.
 pub fn hkdf(ikm: &[u8], info: &[u8], out: &mut [u8]) {
-    hkdf::Hkdf::<sha2_11::Sha256>::new(None, ikm).expand(info, out).expect("valid HKDF output length");
+    hkdf::Hkdf::<sha2::Sha256>::new(None, ikm).expand(info, out).expect("valid HKDF output length");
 }
 
 /// The key the storage is sealed under: HKDF(the account key's secret, "yo storage v1").
