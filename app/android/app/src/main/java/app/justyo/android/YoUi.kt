@@ -773,9 +773,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     fun tap(friend: Friend) {
         Lat.mark("tap")
         if(importingShares) return
-        if (shares.isNotEmpty() && (friend.request || friend.blocked || friend.gone)) return
-        if(!touch(friend)) return
-        if (friend.request) {
+        val action = barTap(friend.request, friend.blocked, friend.gone, shares.isNotEmpty(), picked != null, cameraOn,
+            repo.state.value.listRows[friend.key]?.unsent == true)
+        if (action == BarTap.Nothing || !touch(friend)) return
+        if (action == BarTap.Accept) {
             view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             repo.command {
                 val session = sessionId
@@ -787,10 +788,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         view.performHapticFeedback(if(android.os.Build.VERSION.SDK_INT>=30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
         hintEpoch++
         if (cameraOn) hintNeeded = false
-        when {
-            shares.isNotEmpty() -> model.stage(friend,shares)
-            picked!=null -> { model.stage(friend,picked!!); picked=null }
-            cameraOn -> {
+        when (action) {
+            BarTap.StageShares -> model.stage(friend,shares)
+            BarTap.StagePicked -> { model.stage(friend,picked!!); picked=null }
+            BarTap.TakePhoto -> {
                 val session=repo.sessionId
                 scope.launch {
                     try { val uri=camera.photo(); model.stage(friend,listOf(uri),true,session) }
@@ -798,7 +799,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 }
             }
             // "Not Sent · Tap to Retry": what waits for this bar goes again, no new Yo.
-            repo.state.value.listRows[friend.key]?.unsent == true -> repo.retryBar(friend)
+            BarTap.Retry -> repo.retryBar(friend)
             else -> repo.command { send(friend) }
         }
     }

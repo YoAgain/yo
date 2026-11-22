@@ -97,6 +97,22 @@ internal class BarTapLock {
     fun locked(key: String) = (until[key] ?: 0) > SystemClock.elapsedRealtime()
 }
 
+/** What a tap on a bar does (the list's `tap`). A request's tap is its yes, a plain Yo, whatever media wait to go
+ *  (picked, shared): they stay for the next name, as on iOS. Shared media go to nobody blocked or gone. */
+internal enum class BarTap { Nothing, Accept, StageShares, StagePicked, TakePhoto, Retry, Yo }
+
+internal fun barTap(
+    request: Boolean, blocked: Boolean, gone: Boolean, shares: Boolean, picked: Boolean, camera: Boolean, unsent: Boolean,
+): BarTap = when {
+    shares && (blocked || gone) -> BarTap.Nothing
+    request -> BarTap.Accept
+    shares -> BarTap.StageShares
+    picked -> BarTap.StagePicked
+    camera -> BarTap.TakePhoto
+    unsent -> BarTap.Retry
+    else -> BarTap.Yo
+}
+
 internal fun rowShade(friends: List<Friend>, index: Int): Color {
     val color = Math.floorMod(friends[index].color, RowColors.size)
     var start = index
