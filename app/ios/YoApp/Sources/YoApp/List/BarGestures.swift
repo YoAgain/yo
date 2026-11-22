@@ -283,6 +283,13 @@ struct CameraEdgePan: UIGestureRecognizerRepresentable {
       super.touchesCancelled(touches, with: event)
       released()
     }
+    /// A pan that failed (a vertical scroll from the edge zone) gets no more touches, so neither of the above ever
+    /// came and the speculatively started camera kept running with the camera off (the green dot in the list). UIKit
+    /// resets every recognizer once its touches are over, whatever its end: released here too.
+    override func reset() {
+      super.reset()
+      released()
+    }
   }
 
   final class Coordinator: NSObject, UIGestureRecognizerDelegate {
