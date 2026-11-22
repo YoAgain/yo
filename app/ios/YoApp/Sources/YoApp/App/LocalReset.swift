@@ -17,6 +17,10 @@ enum LocalReset {
       for item in (try? files.contentsOfDirectory(at: place, includingPropertiesForKeys: nil)) ?? [] {
         if item.lastPathComponent == "yo-state.lock." + generation { continue }
         if item.lastPathComponent == "Library" { continue }  // the App Group's Preferences go below
+        // The container's own record (.com.apple.mobile_container_manager.metadata.plist): without it iOS took the
+        // App Group for gone and gave the app a new, empty one at its next start, so the account signed in after a
+        // Sign Out did not open after the app was closed ("Can't Open Your Account", gone: shared, key).
+        if item.lastPathComponent.hasPrefix(".com.apple.") { continue }
         try? files.removeItem(at: item)
       }
     }
