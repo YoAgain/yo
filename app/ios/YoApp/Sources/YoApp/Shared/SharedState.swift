@@ -51,6 +51,15 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
   private static let opening = NSLock()
   nonisolated(unsafe) private static var opened: StateDb?
 
+  /// The database's files, when it no longer opens: the next `database()` makes a new one (the cached one sees the
+  /// file gone).
+  static func removeDatabase() {
+    guard let folder else { return }
+    for name in ["tables.sqlite", "tables.sqlite-wal", "tables.sqlite-shm"] {
+      try? FileManager.default.removeItem(at: folder.appending(path: name))
+    }
+  }
+
   /// Opened once per process, again when it went (signed out, a local reset). Throws before the first unlock or
   /// without a group.
   static func database() throws -> StateDb {

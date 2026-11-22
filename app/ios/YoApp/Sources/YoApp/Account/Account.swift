@@ -1075,13 +1075,18 @@ final class AccountStore {
       await MediaStorage.clearAll()
       // Closing a client may wait for a network step; generation retirement fences its later shared writes.
       Task.detached(priority: .userInitiated) { old?.close() }
-      let shared = SharedStateFile.available ? (try? SharedStateFile.database()) : nil
+      let available = SharedStateFile.available
+      let shared = available ? (try? SharedStateFile.database()) : nil
       let held = SharedStateFile.take(within: 3)
       defer { if held { SharedStateFile.give() } }
       // Retire the lock even if an extension never releases its old turn; cleared before a full wipe as well.
       SharedStateFile.rotateLock()
       StateFile.forget()
-      if let shared { Diagnostics.attempt({ try shared.clear() }) }
+      // A database that no longer opens ("file is not a database") cannot be cleared: it goes, else every sign-in
+      // and sign-up after registered into it and failed ("Something went wrong") until Yo was deleted.
+      if available, shared.flatMap({ db in Diagnostics.attempt({ try db.clear() }) }) == nil {
+        SharedStateFile.removeDatabase()
+      }
       if fullLocalReset { LocalReset.wipe() }
     }
     RecoveryWords.delete()
