@@ -186,18 +186,8 @@ struct YoApp: App {
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
       .animation(.smooth(duration: 0.5), value: AppUpdate.shared.needed)
-      .alert("Update Not Finished", isPresented: Binding(get: { accounts.updateStalled && !accounts.broken }, set: { _ in })) {
-        Button("Try Again") { accounts.retryUpdate() }
-      } message: {
-        Text("Yo couldn’t finish updating your account on this iPhone. Nothing is lost. Check your connection and try again.")
-      }
-      .alert(accounts.hubDown ? "Server Not Reachable" : "Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
-        Button(accounts.hubDown ? "Try Again" : "Sign In Again") { Task { await accounts.recover() } }
-      } message: {
-        Text(accounts.hubDown
-          ? "Yo can’t reach its server right now. Your account is fine; try again in a moment."
-          : "Yo can’t open your account on this iPhone. Sign in again to keep using it.\n\n(\(accounts.brokenWhy))")
-      }
+      // Above every sheet, also one still appearing (`AccountAlert`).
+      .onChange(of: AccountAlert.content(accounts), initial: true) { _, _ in AccountAlert.shared.update(accounts) }
       .onChange(of: accounts.account == nil) { _, out in
         // Out (signed out, deleted, or taken to another iPhone): this phone's friends go too.
         if out {
@@ -263,6 +253,7 @@ struct YoApp: App {
           guard phase == .active else { return }
           Perf.mark("app.active")
           accounts.openNow()  // also resumes an unfinished old-install update
+          AccountAlert.shared.update(accounts)  // one raised before the window was there
           Task { await inbox.collectDelivered() }
           Launch.later {
             await accounts.refreshSupport()
