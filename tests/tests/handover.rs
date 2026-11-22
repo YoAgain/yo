@@ -242,30 +242,62 @@ fn a_guest_acknowledges_nothing_it_could_not_save() {
     assert_eq!(texts(&b.sync(0).unwrap()), ["keep me"]);
 }
 
-/// A guest keeps at most `GUEST_EVENTS` events for the app (an app not opened for long, the notification service
-/// woken again and again): the rest stays at the hub, and the app gets all of it.
+/// A guest holds at most `GUEST_EVENTS` events for the app (an app not opened for long, the notification service
+/// woken again and again): past them the oldest go, the guest still reads every envelope, and a push always shows its
+/// Yo. The app gets the newest `GUEST_EVENTS`, once.
 #[test]
-fn a_guest_keeps_a_bounded_backlog_for_the_app() {
+fn a_guest_past_its_bound_still_reads_the_newest() {
     let hub = TestHub::start();
     let (mut a, mut b, _, disk) = chat(&hub);
     let n = yo_core::GUEST_EVENTS + 40;
+    let mut guest = Client::restore_guest(Http::new(hub.url()), &disk.blob()).unwrap();
+    guest.persist_to(disk.clone(), KEY).unwrap();
+    // Two bursts, a push after each: the second goes past the bound.
+    let mut shown = Vec::new();
+    for burst in [0..yo_core::GUEST_EVENTS, yo_core::GUEST_EVENTS..n] {
+        for i in burst {
+            a.send(b.user_id(), text(&format!("{i}"))).unwrap();
+        }
+        shown.extend(texts(&guest.sync(0).unwrap()));
+        guest.after_sync().unwrap();
+    }
+    assert_eq!(shown, (0..n).map(|i| i.to_string()).collect::<Vec<_>>(), "the guest reads and shows every one");
+    assert_eq!(guest.dropped(), 40, "the oldest held for the app went");
+    // The next push: its Yo is read and shown, though the app has not taken the others.
+    a.send(b.user_id(), text("newest")).unwrap();
+    assert_eq!(texts(&guest.sync(0).unwrap()), ["newest"]);
+    guest.after_sync().unwrap();
+    assert_eq!(texts(&guest.sync(0).unwrap()), Vec::<String>::new(), "nothing twice");
+    drop(guest);
+    b.reload(&disk.blob()).unwrap();
+    let mut all = Vec::new();
+    for _ in 0..3 {
+        all.extend(texts(&b.sync(0).unwrap()));
+        b.acknowledge_events();
+    }
+    let newest: Vec<String> =
+        (n + 1 - yo_core::GUEST_EVENTS..n).map(|i| i.to_string()).chain(["newest".into()]).collect();
+    assert_eq!(all, newest, "the app gets the newest, once");
+}
+
+/// The notification service ends after its sync, before any ack: the next one is read again, seen, and passed over;
+/// the new one shows, also with more waiting than one fetch brings.
+#[test]
+fn a_guest_after_one_that_did_not_acknowledge_shows_the_new_one() {
+    let hub = TestHub::start();
+    let (mut a, b, _, disk) = chat(&hub);
+    let n = 2 * yo_wire::limits::MAX_INBOX_FETCH + 10;
     for i in 0..n {
         a.send(b.user_id(), text(&format!("{i}"))).unwrap();
     }
     let mut guest = Client::restore_guest(Http::new(hub.url()), &disk.blob()).unwrap();
     guest.persist_to(disk.clone(), KEY).unwrap();
-    let mut kept = 0;
-    for _ in 0..10 {
-        kept += texts(&guest.sync(0).unwrap()).len();
-        guest.after_sync().unwrap();
-    }
-    assert!(kept <= yo_core::GUEST_EVENTS, "{kept} kept by the guest");
+    assert_eq!(texts(&guest.sync(0).unwrap()).len(), n);
     drop(guest);
-    b.reload(&disk.blob()).unwrap();
-    let mut all = Vec::new();
-    for _ in 0..10 {
-        all.extend(texts(&b.sync(0).unwrap()));
-        b.acknowledge_events();
+    for round in 0..2 {
+        a.send(b.user_id(), text(&format!("new {round}"))).unwrap();
+        let mut guest = Client::restore_guest(Http::new(hub.url()), &disk.blob()).unwrap();
+        guest.persist_to(disk.clone(), KEY).unwrap();
+        assert_eq!(texts(&guest.sync(0).unwrap()), [format!("new {round}")]);
     }
-    assert_eq!(all.len(), n, "the app gets every one, once");
 }

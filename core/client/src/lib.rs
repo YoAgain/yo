@@ -105,7 +105,8 @@ const DEFERRED: usize = 256;
 /// Names a contact is remembered by at most: the newest.
 const HANDLES_KEPT: usize = 4;
 /// Events a guest (the notification service) keeps for the app at most: bounds its state while the app is closed.
-pub const GUEST_EVENTS: usize = 256;
+/// Past it the oldest go (`bound_guest_events`); the guest never stops reading, so a push always shows its Yo.
+pub const GUEST_EVENTS: usize = 2048;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
 /// How often a send updates its view of a user's device and tries again before it leaves the rest to the next call.

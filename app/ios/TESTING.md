@@ -271,14 +271,11 @@ tapped with `tapxy sb=true`.
 | Crash reports | MetricKit delivers none in the Simulator and the app has no crash trigger: device only |
 | Group named like a person, a group "#HUNT4" | separate bars; a Yo to each goes to the right one |
 | `sim.sh notify` after these runs | the probe read the inbox (200) and found nothing new while a Yo waited there (left at the hub, unacknowledged; the app showed it on opening): open, see Left |
+| Hunt 5: 300 Yos from a friend with Yo closed, then `sim.sh notify` and one more Yo | before: the notification service read 256 (`GUEST_EVENTS`) and stopped; its next push found nothing, a bare "Yo" (on an iPhone every push until the app is opened). Fixed: a guest holds at most 2048 for the app and drops the oldest past them, never stops reading; the newest shows ("Yo from …", badge 302 then 303). The Simulator now runs YoNotify itself on a push (simctl log: "Received replacement content"), so a probe run after it finds nothing new: the service took it |
 | Clock change, App Switcher | the Simulator takes the Mac's clock; App Switcher leaves Yo inactive (in front), as home and back above |
 
 ## Left
 
-- `sim.sh notify` late on 2026-11-22: the notification service (probe) read the inbox and returned nothing new while
-  a Yo waited there unacknowledged, for direct and group Yos alike. Consistent with a guest stopping at `GUEST_EVENTS`
-  (core receive.rs: events the app has not taken or acknowledged, 256), not confirmed; on a device it would be a bare
-  "Yo" for every push. Check on TestFlight first.
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
 - Sending a photo while signing out within its 1.5 s, and the shared state's deletion racing an extension's write:
   guarded since (outgoing media bound to its account, `Media.swift`; received media checked by generation; the old

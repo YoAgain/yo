@@ -79,14 +79,9 @@ impl Client {
                 }
                 Err(error) => self.drop_one(error.to_string()),
             }
+            self.bound_guest_events();
         }
-        let mut backlogged = false;
         for item in inbox.items {
-            // A guest stops where the app's events reach their bound: the rest stays at the hub, unacknowledged.
-            if self.guest_events.is_some() && self.state.events.len() >= GUEST_EVENTS {
-                backlogged = true;
-                break;
-            }
             // Not sealed to this account, or its sender certificate was not good when the hub took it (spec 6.1).
             let payload = match self.open(item.envelope.as_slice(), item.received_ms) {
                 Ok(payload) => payload,
@@ -117,10 +112,10 @@ impl Client {
                 }
                 Err(error) => self.drop_one(error.to_string()),
             }
+            self.bound_guest_events();
             done.push(item.id);
         }
         self.state.deferred = parked;
-        let full = full && !backlogged;
         if later && !full && stopped.is_none() {
             return Ok((false, done));
         }
@@ -134,6 +129,19 @@ impl Client {
         match stopped {
             Some(error) => Err(error),
             None => Ok((full, Vec::new())),
+        }
+    }
+
+    /// A guest holds at most `GUEST_EVENTS` events for the app (an app not opened for long): past them the oldest go,
+    /// so the newest envelope is always read and shown, and the state stays bounded.
+    fn bound_guest_events(&mut self) {
+        let Some(returned) = self.guest_events else { return };
+        let over = self.state.events.len().saturating_sub(GUEST_EVENTS);
+        if over > 0 {
+            self.state.events.drain(..over);
+            self.guest_events = Some(returned.saturating_sub(over));
+            self.dropped += over as u64;
+            self.note(format!("{over} events held for the app, too many waiting"));
         }
     }
 
