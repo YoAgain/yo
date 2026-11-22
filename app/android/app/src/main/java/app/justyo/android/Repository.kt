@@ -1138,7 +1138,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         mutable.update { it.copy(media = received) }
         present { time ->
             state.value.friends.forEach { friend -> mediaChanged(time,friend.key,
-                received.filter { it.target == friend.target }.map { if(it.video) ListKind.VIDEO else ListKind.PHOTO }) }
+                received.filter { it.target == friend.target }.map { if(it.video) ListKind.VIDEO else ListKind.PHOTO })
+                // Kept from before a restart, no Yo told the list who sent it: the newest one's sender (a known one stays).
+                if (friend.group != null) MediaQueue.newestSender(received, friend.target)?.let { mediaSender(time, friend.key, it) }
+            }
             tick(time)
         }
     }

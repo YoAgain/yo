@@ -380,6 +380,9 @@ class MediaQueue(
          *  still loading stays on its bar, loading; the viewer never waits for a file or takes one in while open. */
         fun openable(media: List<Received>, target: String) =
             media.filter { it.target == target && it.ready && !it.consumed }.sortedBy { it.at }
+        /** Who sent the newest photo or video waiting on a bar: a group's bar names them after a restart. */
+        fun newestSender(media: List<Received>, target: String) =
+            media.filter { it.target == target && !it.consumed }.maxByOrNull { it.at }?.sender
         private fun receivedFile(id: String) = "in-"+id.toByteArray().sha256Hex()
         fun mediaJson(m: YoMedia) = JSONObject().put("id",Repository.encode(m.id)).put("key",Repository.encode(m.key))
             .put("sha",Repository.encode(m.sha256)).put("size",m.size.toLong()).put("width",m.width.toInt()).put("height",m.height.toInt())

@@ -17,6 +17,15 @@ class MediaOpenableTest {
         assertEquals(listOf("early", "late"), MediaQueue.openable(media, "a").map { it.id })
     }
 
+    @Test fun aGroupBarNamesTheNewestWaitingSender() {
+        val media = listOf(item("old", at = 1, ready = true).copy(sender = "mia"),
+            item("new", at = 5, ready = false).copy(sender = "ben"),
+            item("seen", at = 9, ready = true, consumed = true).copy(sender = "ida"),
+            item("elsewhere", target = "b", at = 7, ready = true).copy(sender = "max"))
+        assertEquals("ben", MediaQueue.newestSender(media, "a"))
+        assertEquals(null, MediaQueue.newestSender(media, "c"))
+    }
+
     @Test fun nothingOpensWhileAllStillLoad() {
         assertEquals(emptyList<Received>(), MediaQueue.openable(listOf(item("v", at = 1, ready = false)), "a"))
     }
