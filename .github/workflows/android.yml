@@ -3,6 +3,7 @@ on:
   pull_request:
     paths: ['app/android/**', 'core/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/android.yml']
   push:
+    branches: ['**']  # not tags: a release runs once, by its release event
     paths: ['app/android/**', 'core/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/android.yml']
   release:
     types: [published]
@@ -10,7 +11,7 @@ permissions:
   contents: read
 concurrency:
   group: android-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # every commit on main keeps its own result
 jobs:
   android:
     runs-on: ubuntu-latest

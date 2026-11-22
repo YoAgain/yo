@@ -4,6 +4,7 @@ name: CLI
 # a published release → `yo-linux-x86_64` and `skills.tar.gz` attached to it.
 on:
   push:
+    branches: ['**']  # not tags: a release runs once, by its release event
     paths: ['app/cli/**', 'core/**', 'skills/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/cli.yml']
   release:
     types: [published]
@@ -11,7 +12,7 @@ permissions:
   contents: read
 concurrency:
   group: cli-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # every commit on main keeps its own result
 jobs:
   build:
     runs-on: ubuntu-latest
