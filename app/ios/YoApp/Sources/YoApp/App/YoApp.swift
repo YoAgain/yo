@@ -537,6 +537,8 @@ private final class ForegroundTurns: @unchecked Sendable {
   /// Not in the background (inactive counts): a process there is not suspended.
   private var front: Bool
   private var turns: [UUID: @Sendable () -> Void] = [:]
+  /// Has been active since this launch: a background launch never was (see `init`).
+  private var seenActive = false
   private var observers: [NSObjectProtocol] = []
 
   init(state: UIApplication.State) {
@@ -564,11 +566,24 @@ private final class ForegroundTurns: @unchecked Sendable {
   var isActive: Bool { gate.withLock { active } }
   var isFront: Bool { gate.withLock { front } }
 
-  private func setFront(_ front: Bool) { gate.withLock { self.front = front } }
+  /// Leaving for the background takes back the turns taken while inactive (below).
+  private func setFront(_ front: Bool) {
+    let expired = gate.withLock {
+      self.front = front
+      guard !front else { return [@Sendable () -> Void]() }
+      let expired = Array(turns.values)
+      turns.removeAll()
+      return expired
+    }
+    for expire in expired { expire() }
+  }
 
+  /// Once Yo has been active, also while inactive in front (Face ID or a passkey over it, Notification Center pulled
+  /// down): iOS may refuse background time there, and a hub step right after Face ID (Delete Account) failed with
+  /// "can't reach its server" before the app was active again. Not suspended in front; leaving takes such a turn back.
   func hold(_ expire: @escaping @Sendable () -> Void) -> (@Sendable () -> Void)? {
     gate.withLock {
-      guard active else { return nil }
+      guard active || (seenActive && front) else { return nil }
       let id = UUID()
       turns[id] = expire
       return { _ = self.gate.withLock { self.turns.removeValue(forKey: id) } }
@@ -578,7 +593,7 @@ private final class ForegroundTurns: @unchecked Sendable {
   private func setActive(_ active: Bool) {
     let expired = gate.withLock {
       self.active = active
-      if active { front = true }
+      if active { (front, seenActive) = (true, true) }
       guard !active else { return [@Sendable () -> Void]() }
       let expired = Array(turns.values)
       turns.removeAll()
