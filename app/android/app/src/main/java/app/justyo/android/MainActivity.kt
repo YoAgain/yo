@@ -151,7 +151,11 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun error(text: String) { repository.command { error(text) } }
+    /** [text] in the snackbar or the onboarding note: thrown inside a command, which says what failed. `kotlin.error`:
+     *  a plain `error(text)` here was this method itself (the outer receiver's member wins over the library function),
+     *  so every call (a passkey prompt cancelled, a share that could not be read) started a command that started the
+     *  next, without end: three cores busy for as long as the process lived, also cached in the background. */
+    fun error(text: String) { repository.command { kotlin.error(text) } }
 
 }
 class MainActivity : ComponentActivity() {
