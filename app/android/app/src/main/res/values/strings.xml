@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="settings_title">Yodentity</string>
     <string name="ui_account_key">Account Key</string>
     <string name="ui_add_group">New Group</string>
     <string name="ui_anyone_with_this_key_can_sign_in_as_you_keep_it_safe_and_don">Anyone with this key can sign in as you. Keep it safe and don’t share it.</string>

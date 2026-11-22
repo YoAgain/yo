@@ -307,8 +307,11 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     LaunchedEffect(Unit) { repo.refreshSupport() }
 
     Column(Modifier.fillMaxWidth()) {
-        // The first page has no title and no bar (iOS too): the sheet's handle or back closes it.
-        if (page != "Profile") TopAppBar(
+        // The first page: its title alone, centred (iOS "Yodentity"), no way back; the sheet's handle or back closes it.
+        // A bottom sheet's title line, not a whole app bar: the page fits at half height.
+        if (page == "Profile") Box(Modifier.fillMaxWidth().height(40.dp), contentAlignment = Alignment.TopCenter) {
+            Text(stringResource(R.string.settings_title), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        } else TopAppBar(
             title = { Text(title, maxLines = 1) },
             navigationIcon = {
                 // A full page over a half one is iOS's own sheet on top: it closes (✕) back to where it was opened.

@@ -149,11 +149,15 @@ struct SettingsView: View {
       // It fits at its height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      // No title and no close button: the system's grabber pulls the sheet down and away. The bar stays (empty,
-      // see-through), so a push or pop never changes its height and the pushed page's bar does not jump in (hidden
+      // The title "Yodentity" and no close button: the system's grabber pulls the sheet down and away. The bar stays
+      // (see-through), so a push or pop never changes its height and the pushed page's bar does not jump in (hidden
       // on the root, the pushed page's back button and title dropped into place after the push).
       .toolbar(.visible, for: .navigationBar)
       .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        // The root's own title, in a bar laid out as a pushed page's, so a push or pop never moves it.
+        ToolbarItem(placement: .principal) { Text("Yodentity").font(.headline) }
+      }
       .toolbarBackground(.hidden, for: .navigationBar)
       .scrollEdgeEffectHidden(!typeSize.isAccessibilitySize, for: .top)
       .task { await accounts.refreshSupport() }
