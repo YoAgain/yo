@@ -2,6 +2,7 @@
 // to make (res/drawable-nodpi/intro_tap.png is iOS's IntroTap@3x.png). Help & About shows the same cards.
 package app.justyo.android
 
+import android.animation.ValueAnimator
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.core.*
@@ -27,12 +28,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
@@ -44,6 +48,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -181,26 +186,52 @@ internal val IntroHeight = PageHeight + 48.dp
 /** Still for the first part of each round, then [curve] over the rest; then it starts again. */
 private fun delayed(rest: Float, curve: Easing) = Easing { f -> if (f < rest) 0f else curve.transform((f - rest) / (1f - rest)) }
 
+/** A hint's endless round, 0 to 1 every [millis]: at most [HintFps] frames a second, not the screen's 120 Hz (an
+ *  infinite transition drew every frame and kept a core at ~65 % on Help & About). Read only while drawing or placing,
+ *  so a frame neither recomposes nor measures the page. Still (the round's end) when the system's animations are off. */
+@Composable private fun hintProgress(millis: Int, easing: Easing): State<Float> = produceState(1f, millis, easing) {
+    if (!ValueAnimator.areAnimatorsEnabled()) return@produceState
+    val start = withFrameMillis { it }
+    while (true) {
+        withFrameMillis { now -> value = easing.transform(((now - start) % millis) / millis.toFloat()) }
+        delay(1000L / HintFps)
+    }
+}
+
+/** Enough for a finger and a ring; a frame costs the main and render threads a little each. */
+private const val HintFps = 30
+
 /** A finger taps the bar: a ring grows and fades under it. */
 @Composable private fun TapHint(y: Float, width: Dp, height: Dp) {
-    val progress by rememberInfiniteTransition("tap").animateFloat(0f, 1f,
-        infiniteRepeatable(tween(1200, easing = delayed(0.25f, EaseOut))), label = "tap")
-    val ring = lerp(18.dp, 64.dp, progress)
+    val progress = hintProgress(1200, delayed(0.25f, EaseOut))
     val x = width * 0.5f
     val top = height * y
-    Box(Modifier.offset { IntOffset((x - ring / 2).roundToPx(), (top - ring / 2).roundToPx()) }.size(ring)
-        .border(3.dp, Color.White.copy(alpha = 0.8f * (1f - progress)), CircleShape))
+    Box(Modifier.offset { IntOffset((x - RingMax / 2).roundToPx(), (top - RingMax / 2).roundToPx()) }.size(RingMax)
+        .drawBehind {
+            val p = progress.value
+            val stroke = 3.dp.toPx()
+            val ring = lerp(18.dp, RingMax, p).toPx()
+            drawCircle(Color.White.copy(alpha = 0.8f * (1f - p)), (ring - stroke) / 2, style = Stroke(stroke))
+        })
     Icon(Icons.Default.TouchApp, null, Modifier.offset { IntOffset((x - 6.dp).roundToPx(), (top + 6.dp).roundToPx()) }.size(40.dp)
-        .graphicsLayer { val scale = 0.86f + 0.14f * progress; scaleX = scale; scaleY = scale }, tint = Color.White)
+        .graphicsLayer { val scale = 0.86f + 0.14f * progress.value; scaleX = scale; scaleY = scale }, tint = Color.White)
 }
+
+private val RingMax = 64.dp
 
 /** A finger swipes in from the edge, the camera following it. */
 @Composable private fun SwipeHint(width: Dp, height: Dp) {
-    val progress by rememberInfiniteTransition("swipe").animateFloat(0f, 1f,
-        infiniteRepeatable(tween(1800, easing = delayed(0.22f, EaseInOut))), label = "swipe")
-    Box(Modifier.offset { IntOffset((width * (0.92f - 0.52f * progress)).roundToPx(), 0) }.size(width * (0.08f + 0.52f * progress), height)
+    val progress = hintProgress(1800, delayed(0.22f, EaseInOut))
+    // The camera's strip grows from the right edge: its width is set while measuring, so a frame only lays it out again.
+    Box(Modifier.offset { IntOffset((width * (0.92f - 0.52f * progress.value)).roundToPx(), 0) }
+        .layout { measurable, _ ->
+            val w = (width * (0.08f + 0.52f * progress.value)).roundToPx()
+            val placeable = measurable.measure(Constraints.fixed(w, height.roundToPx()))
+            layout(w, placeable.height) { placeable.place(0, 0) }
+        }
         .clipToBounds().background(Color.Black.copy(alpha = 0.35f)), contentAlignment = Alignment.Center) {
         Icon(Icons.Default.CameraAlt, null, Modifier.requiredSize(34.dp), tint = Color.White)
     }
-    Icon(Icons.Default.TouchApp, null, Modifier.offset { IntOffset((width * (0.82f - 0.5f * progress)).roundToPx(), (height * 0.45f).roundToPx()) }.size(40.dp), tint = Color.White)
+    Icon(Icons.Default.TouchApp, null, Modifier.offset { IntOffset((width * (0.82f - 0.5f * progress.value)).roundToPx(), (height * 0.45f).roundToPx()) }
+        .size(40.dp), tint = Color.White)
 }
