@@ -27,7 +27,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Spoof `CF-Connecting-IP` | Only with `YO_TRUST_CLOUDFLARE`; warning when not listening on loopback | operator: check the published port |
 | Lose recent commits to an OS crash or power cut | SQLite WAL `synchronous = NORMAL`; process crashes preserve commits | Recent acknowledged deliveries and other state changes can roll back; see durability below |
 | Act as a replaced device | Every write checks the device in its own transaction (`410`) | – |
-| Replay a signed request | 5-minute window, cache keyed by signature (`verify_strict`) | the cache is in memory: a restart within 5 min |
+| Replay a signed request | 5-minute window, cache keyed by signature; a signature has one encoding (its scalar reduced, `yo_wire::xeddsa_verify`) | the cache is in memory: a restart within 5 min |
 | Probe without an account | username taken (by design), device replaced (`410` vs `401`) | device ids are random and unpublished |
 | A delivery's `409` names a user's account and device keys | Needed for sealed delivery (4.4); public keys, user ids come from lookups anyway | – |
 | Panics on input | 6 fuzz targets (`dev/fuzz`), nightly in CI | – |

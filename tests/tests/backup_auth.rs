@@ -158,3 +158,41 @@ fn what_k_and_the_storage_key_seal_lands_on_the_sizes() {
     }
     assert_eq!(seen, SEALED_SIZES.into_iter().collect(), "grew through every bucket");
 }
+
+/// The same XEdDSA signature written another way: its scalar plus the group order, where that still fits the
+/// signature's 253 bits (most do). An accepting verifier would take it as a new signature.
+fn other_encoding(signature: &[u8]) -> Option<Vec<u8>> {
+    const ORDER: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let mut s: [u8; 32] = signature[32..].try_into().unwrap();
+    let sign = s[31] & 0x80;
+    s[31] &= 0x7f;
+    let mut carry = 0u16;
+    for (byte, add) in s.iter_mut().zip(ORDER) {
+        let sum = *byte as u16 + add as u16 + carry;
+        *byte = sum as u8;
+        carry = sum >> 8;
+    }
+    (s[31] & 0xe0 == 0).then(|| [&signature[..32], &s[..31], &[s[31] | sign]].concat())
+}
+
+#[test]
+fn a_signature_written_another_way_is_still_a_replay() {
+    let hub = TestHub::start();
+    let mut t = register(&hub);
+    let user = yo_tests::user_id(t.user_id());
+    let code = words(9);
+    t.put_backup(&backup::make(&[1; 32], b"{}", &code, PasskeyDoor::None).unwrap()).unwrap();
+    let key = Door::Code(&code).auth_key();
+    let now = yo_hub::now_ms();
+    let (first, other) = (0..64)
+        .find_map(|n| {
+            let first = sign(&key, &to_be_signed("GET", &api::backup_path(&user), now + n, b""));
+            other_encoding(&first).map(|other| ((first, now + n), (other, now + n)))
+        })
+        .unwrap();
+    assert_eq!(get_as(&hub, &user, Some(first)).0, 200);
+    assert_eq!(get_as(&hub, &user, Some(other)), (404, Vec::new()), "the same signature, its scalar not reduced");
+}

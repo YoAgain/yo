@@ -48,11 +48,30 @@ impl From<tls_codec::Error> for Error {
     }
 }
 
+/// The order of Curve25519's prime-order group (`l`), little-endian: an XEdDSA signature's scalar is below it.
+pub const GROUP_ORDER: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+];
+
 /// Whether `signature` is the XEdDSA signature of the Curve25519 key `key` (its 32 bytes) over `message`, as libsignal
 /// makes and checks it: the account key's (spec 3.1, 6.4), an auth key's (6.2, 7), the hub's (6.10).
+/// Its scalar must be reduced (below `GROUP_ORDER`), as every signer makes it: libsignal takes it modulo the order,
+/// so without this one signature would have a second encoding, which a replay cache keyed by signatures (6.2) took
+/// as another.
 pub fn xeddsa_verify(key: &[u8; KEY_LEN], message: &[u8], signature: &[u8]) -> bool {
-    libsignal_core::curve::PublicKey::from_djb_public_key_bytes(key)
-        .is_ok_and(|key| key.verify_signature(message, signature))
+    signature.len() == SIGNATURE_LEN
+        && scalar_reduced(&signature[32..])
+        && libsignal_core::curve::PublicKey::from_djb_public_key_bytes(key)
+            .is_ok_and(|key| key.verify_signature(message, signature))
+}
+
+/// A signature's scalar (its last 32 bytes, the top bit the key's sign) below `GROUP_ORDER`.
+fn scalar_reduced(s: &[u8]) -> bool {
+    let top = s[31] & 0x7f;
+    let rest = s[..31].iter().rev();
+    // Compared from the most significant byte down.
+    std::iter::once(&top).chain(rest).zip(GROUP_ORDER.iter().rev()).find(|(a, b)| a != b).is_some_and(|(a, b)| a < b)
 }
 
 /// Whether 32 bytes are a Curve25519 public key a signature can be checked against: canonical, in the prime-order

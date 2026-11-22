@@ -77,4 +77,36 @@ mod tests {
         assert!(verify(&public, "GET", "/v1/inbox?wait=5", 1001, b"", &sig).is_err());
         assert!(verify(&public, "GET", "/v1/inbox?wait=5", 1000, b"x", &sig).is_err());
     }
+
+    /// One signature, one form: its scalar plus the group order (the same signature to libsignal) is refused, or a
+    /// replay cache keyed by the signature would take it as new.
+    #[test]
+    fn a_scalar_not_reduced_is_refused() {
+        let key = KeyPair::generate(&mut rand::rng());
+        let public: [u8; KEY_LEN] = key.public_key.public_key_bytes().try_into().unwrap();
+        let (mut tried, mut refused) = (0, 0);
+        for time in 0..64 {
+            let message = to_be_signed("GET", "/v1/inbox", time, b"");
+            let sig = key.private_key.calculate_signature(&message, &mut rand::rng()).unwrap();
+            assert!(verify(&public, "GET", "/v1/inbox", time, b"", &sig).is_ok());
+            let mut s: [u8; 32] = sig[32..].try_into().unwrap();
+            let sign = s[31] & 0x80;
+            s[31] &= 0x7f;
+            let mut carry = 0u16;
+            for (byte, add) in s.iter_mut().zip(crate::GROUP_ORDER) {
+                let sum = *byte as u16 + add as u16 + carry;
+                *byte = sum as u8;
+                carry = sum >> 8;
+            }
+            if s[31] & 0xe0 != 0 {
+                continue;
+            }
+            s[31] |= sign;
+            tried += 1;
+            let other = [&sig[..32], &s[..]].concat();
+            refused += verify(&public, "GET", "/v1/inbox", time, b"", &other).is_err() as u32;
+        }
+        assert!(tried > 0);
+        assert_eq!(refused, tried);
+    }
 }
