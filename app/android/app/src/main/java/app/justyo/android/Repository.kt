@@ -646,11 +646,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
 
     /** Settings › Status › Renew Push Registration (as Signal's): a new FCM token, sent to the hub even if it has the
-     *  old one. Throws what failed (Firebase, the connection, the hub) for the red banner. */
+     *  old one. Throws what failed (Firebase, the connection, the hub) for the red banner. A token Google Play services
+     *  will not delete now (SERVICE_NOT_AVAILABLE, on a Galaxy A34 every time, while pushes came) does not stop it: the
+     *  token Firebase has is sent to the hub again; only no token at all or the hub's refusal fails. */
     suspend fun renewPush() = withContext(Dispatchers.IO) {
         if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) error("no Firebase in this build")
         val messaging = com.google.firebase.messaging.FirebaseMessaging.getInstance()
-        com.google.android.gms.tasks.Tasks.await(messaging.deleteToken(), 20, java.util.concurrent.TimeUnit.SECONDS)
+        try { com.google.android.gms.tasks.Tasks.await(messaging.deleteToken(), 20, java.util.concurrent.TimeUnit.SECONDS) }
+        catch (_: java.util.concurrent.ExecutionException) {} catch (_: java.util.concurrent.TimeoutException) {}
         registerPush(com.google.android.gms.tasks.Tasks.await(messaging.token, 20, java.util.concurrent.TimeUnit.SECONDS), again = true)
     }
 

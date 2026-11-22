@@ -880,7 +880,8 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
             good = if (!notifications) false else if (pushToken) true else null,
             onClick = if (notifications) null else { { openNotificationSettings(context) } }),
         // As Signal's: a new token to the hub. What failed is said on the row as well: the red banner is under this sheet.
-        Setting(copy(ProductText.RENEW_PUSH), value = renewFailed, good = renewFailed?.let { false },
+        // The failure under the title: as the row's value it took the title's width ("Registrat-ion" broke in two).
+        Setting(copy(ProductText.RENEW_PUSH), supporting = renewFailed, good = renewFailed?.let { false },
             enabled = !renewing && s.username != null, leading = {
             Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
                 if (renewing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Refresh, null)
