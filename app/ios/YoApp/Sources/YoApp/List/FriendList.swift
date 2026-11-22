@@ -621,8 +621,10 @@ struct FriendList: View {
           .background(cameraOn || edgeActive || edgeSettling ? Color.clear : shade)
           .contentShape(.contextMenuPreview, Rectangle())
           .contextMenu {
-            if !cameraOn && !friend.request {
-              menu(for: friend)
+            // A request's long press is its own menu, never a yes (a held finger lifting would be the bar's tap,
+            // and that accepts and sends a Yo to the stranger one meant to report).
+            if !cameraOn {
+              if friend.request { requestMenu(for: friend) } else { menu(for: friend) }
             }
           }
         if friend.request {
@@ -695,15 +697,25 @@ struct FriendList: View {
         leaving = friend
       }
     } else {
-      Menu("Block", systemImage: "hand.raised") {
-        Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
-        Section("Report") {
-          Button("Spam") { report(friend, .spam) }
-          Button("Abuse") { report(friend, .abuse) }
-          Button("Something Else") { report(friend, .other) }
-        }
-      }
+      blockMenu(for: friend)
       Button("Remove", systemImage: "trash", role: .destructive) { remove(friend) }
+    }
+  }
+
+  /// A request's menu: a person's Block and Report, and Decline (the No) for a person or a group.
+  @ViewBuilder func requestMenu(for friend: Friend) -> some View {
+    if friend.group == nil { blockMenu(for: friend) }
+    Button("Decline", systemImage: "xmark", role: .destructive) { chooseRequest(friend, yes: false) }
+  }
+
+  func blockMenu(for friend: Friend) -> some View {
+    Menu("Block", systemImage: "hand.raised") {
+      Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
+      Section("Report") {
+        Button("Spam") { report(friend, .spam) }
+        Button("Abuse") { report(friend, .abuse) }
+        Button("Something Else") { report(friend, .other) }
+      }
     }
   }
 
