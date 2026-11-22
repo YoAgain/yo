@@ -305,7 +305,10 @@ final class AccountStore {
         if await Self.surely(&tries) { broken = true }
       } catch {
         Availability.shared.local = true
-        if UIApplication.shared.isProtectedDataAvailable {
+        // Counted only while Yo is on the screen: in the background (launched by a widget's, the Action button's or a
+        // push's request) iOS may refuse every access its background time, and 30 s of that signed the account out
+        // and registered it again, the Yo just sent from the widget lost with the state.
+        if UIApplication.shared.isProtectedDataAvailable, Self.onScreen {
           unavailableTries += 1
           let now = ContinuousClock.now
           if unavailableSince == nil { unavailableSince = now }
@@ -328,6 +331,11 @@ final class AccountStore {
 
   /// A full disk or an unfinished registration: never a reason to sign in again, which would replace this device.
   nonisolated private static func notNow(_ error: YoError) -> Bool { retryLater(error: error) }
+
+  /// A scene of Yo's in front (active or not): not a background launch, nor Yo left.
+  private static var onScreen: Bool {
+    UIApplication.shared.connectedScenes.contains { $0.activationState != .background && $0.activationState != .unattached }
+  }
 
   /// Broken only on the third try in a row: extensions may hold the file or keychain briefly (a burst of pushes).
   private static func surely(_ tries: inout Int) async -> Bool {
