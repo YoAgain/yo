@@ -267,7 +267,9 @@ pub fn notification_line(name: &str, kind: list::Kind, request: bool, lang: Lang
     line
 }
 
+/// "Mia in #Hey", also for a group named "#Hey" (not "##Hey").
 pub fn notification_group_name(name: &str, group: &str, lang: Language) -> String {
+    let group = group.strip_prefix('#').unwrap_or(group);
     if group.is_empty() {
         return name.into();
     }
@@ -682,6 +684,7 @@ mod tests {
         assert_eq!(notification_line("Mia", Photo, false, English), "Yo from Mia 📷");
         assert_eq!(notification_line("Mia", Video, false, German), "Yo von Mia 🎥");
         assert_eq!(notification_group_name("Mia", "Hey", English), "Mia in #Hey");
+        assert_eq!(notification_group_name("Mia", "#Hey", English), "Mia in #Hey");
         assert_eq!(notification_group_name("Mia", "", English), "Mia");
         let user = notification_thread("user", None);
         let group = notification_thread("user", Some("id"));
