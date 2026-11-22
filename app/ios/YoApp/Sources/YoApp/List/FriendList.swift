@@ -87,6 +87,8 @@ struct FriendList: View {
   @State var newGroupName = ""
   @State var membersOf: Friend?
   @State var problem: (title: String, message: String)?
+  /// The camera button tapped with camera access turned off in Settings.
+  @State var cameraRefused = false
   /// A scanned or tapped invite, verified by the hub, waiting for "Add & Yo" (`invited`).
   @State var inviting: Invitation?
   /// The Yo codes the camera saw (`codesSighted`).
@@ -325,6 +327,14 @@ struct FriendList: View {
           Button("OK", role: .cancel) {}
         } message: {
           Text(problem?.message ?? "")
+        }
+        .alert("Camera Access Is Off", isPresented: $cameraRefused) {
+          Button("Open Settings") {
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+          }
+          Button("Not Now", role: .cancel) {}
+        } message: {
+          Text("To send photos and videos, allow Yo to use the camera in Settings.")
         }
         .alert(
           "First Yo Sent!", isPresented: $firstYo.isPresent,

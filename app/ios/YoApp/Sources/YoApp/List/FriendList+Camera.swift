@@ -197,10 +197,15 @@ extension FriendList {
 
   func switchCamera(_ on: Bool) async {
     guard on else { return camera.stop() }
+    let refusedBefore = Camera.refused
     _ = Self.outgoingThumbnailQueue  // enqueue decode warm-up before camera startup/capture
     // The microphone is asked too where the camera was allowed before videos had sound.
     if Camera.authorized, !Camera.microphoneUndecided { if cameraOn { camera.start() } }
-    else if await Camera.allowed() { if cameraOn { camera.start() } } else { cameraSwitched(false) }
+    else if await Camera.allowed() { if cameraOn { camera.start() } } else {
+      cameraSwitched(false)
+      // Turned off in Settings before: say so (it closed without a word). A "Don't Allow" just given is respected.
+      cameraRefused = refusedBefore
+    }
     await readZooms()
   }
 

@@ -109,6 +109,8 @@ final class Camera: NSObject, @unchecked Sendable {
 
   /// Never asks permission or starts capture: safe to call after the list settles.
   static var authorized: Bool { AVCaptureDevice.authorizationStatus(for: .video) == .authorized }
+  /// Turned off for Yo in Settings (not merely not asked yet).
+  static var refused: Bool { AVCaptureDevice.authorizationStatus(for: .video) == .denied }
 
   func prepare() async {
     await withCheckedContinuation { continuation in
