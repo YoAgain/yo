@@ -57,6 +57,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
@@ -660,6 +662,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
 
     var menu by remember { mutableStateOf<Friend?>(null) }
     var cameraOn by remember { mutableStateOf(false) }
+    var controlsStrip by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     var cameraVersion by remember { mutableIntStateOf(0) }
     var hintEpoch by remember { mutableIntStateOf(0) }
     var hint by remember { mutableStateOf(false) }
@@ -898,6 +901,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
     }
     rowActions.remove = { friend -> repo.requestRemove(friend) }
+    rowActions.inControls = { y -> cameraOn && controlsStrip.let { y >= it.top && y <= it.bottom } }
     Box(Modifier.fillMaxSize()) {
         if (cameraOn) key(cameraVersion) {
             AndroidView(
@@ -1039,7 +1043,9 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     }
                 }
             }
-            Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+            // Measured with its margin: in camera mode the bars under this strip send nothing (FriendBar).
+            Box(Modifier.fillMaxWidth().onGloballyPositioned { controlsStrip = it.boundsInWindow() }
+                .padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
                 val controls: @Composable () -> Unit = {
                     if (cameraOn) {
                         FloatingActionButton(
@@ -1260,6 +1266,8 @@ internal class RowActions {
     var decline: (Friend) -> Unit = {}
     var hold: (Friend, Boolean) -> Unit = { _, _ -> }
     var holdDrag: (Friend, Float, Float, Float, Float) -> Unit = { _, _, _, _, _ -> }
+    /** Whether a window y lies in the camera controls' strip (camera mode only). */
+    var inControls: (Float) -> Boolean = { false }
     var remove: (Friend) -> Unit = {}
 }
 
@@ -1301,7 +1309,8 @@ internal class RowActions {
             onUndo={actions.undo(friend)},onMedia={actions.media(friend)},onMediaTouch={actions.mediaTouch(it)},
             onDecline={actions.decline(friend)},
             onHold=if(holdable) { held -> actions.hold(friend, held) } else null,
-            onHoldDrag={ y, top, bottom, height -> actions.holdDrag(friend, y, top, bottom, height) })
+            onHoldDrag={ y, top, bottom, height -> actions.holdDrag(friend, y, top, bottom, height) },
+            inControls=actions.inControls)
     }
 }
 

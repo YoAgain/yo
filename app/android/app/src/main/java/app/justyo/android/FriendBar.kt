@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.layout.positionInWindow
@@ -130,6 +131,7 @@ internal data class BarContent(
     onMedia: () -> Unit, onDecline: () -> Unit, onHold: ((Boolean) -> Unit)?,
     onMediaTouch: (MediaTouch) -> Unit = {},
     onHoldDrag: (y: Float, barTop: Float, barBottom: Float, height: Float) -> Unit = { _, _, _, _ -> },
+    inControls: (windowY: Float) -> Boolean = { false },
 ) {
     val friend = bar.friend
     val resources = LocalResources.current
@@ -273,9 +275,21 @@ internal data class BarContent(
             if (loading) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
         }
     }
-    Column(Modifier.fillMaxWidth().pointerInput(friend.key) {
+    val currentInControls by rememberUpdatedState(inControls)
+    var rowTop by remember(friend.key) { mutableFloatStateOf(0f) }
+    Column(Modifier.fillMaxWidth().onGloballyPositioned { rowTop = it.positionInWindow().y }.pointerInput(friend.key) {
         awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            // In camera mode a finger in the controls' strip, beside them, is for the controls: no Yo, no video.
+            // Only its down and up are taken, so the list still scrolls from there.
+            if (currentInControls(rowTop + down.position.y)) {
+                down.consume()
+                do {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    event.changes.forEach { if (it.changedToUpIgnoreConsumed()) it.consume() }
+                } while (event.changes.any { it.pressed })
+                return@awaitEachGesture
+            }
             pressed = true
             currentPress(true)
             try {

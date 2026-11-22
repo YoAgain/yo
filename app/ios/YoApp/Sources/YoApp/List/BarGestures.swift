@@ -22,6 +22,8 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
   let gate: BarTouchGate
   var held: (Bool) -> Void = { _ in }
   var observesHold = false
+  /// Camera mode: a finger landing in the bottom controls' strip, beside them, is for the controls, not this bar.
+  var spareControls = false
   var pressed: (Bool) -> Void = { _ in }
   /// While held: where the finger is, the bar and the window's height (window points).
   var dragged: (_ y: CGFloat, _ bar: CGRect, _ height: CGFloat) -> Void = { _, _, _ in }
@@ -35,6 +37,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     observer.held = held
     observer.dragged = dragged
     observer.observesHold = observesHold
+    observer.spareControls = spareControls
     observer.cancelsTouchesInView = false
     observer.delaysTouchesBegan = false
     observer.delaysTouchesEnded = false
@@ -47,6 +50,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     observer.held = held
     observer.dragged = dragged
     observer.observesHold = observesHold
+    observer.spareControls = spareControls
   }
 
   func handleUIGestureRecognizerAction(_ observer: Observer, context: Context) {}
@@ -56,6 +60,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     var cancelled: () -> Void = {}
     var held: (Bool) -> Void = { _ in }
     var observesHold = false
+    var spareControls = false
     var pressed: (Bool) -> Void = { _ in }
     var dragged: (CGFloat, CGRect, CGFloat) -> Void = { _, _, _ in }
     private var holdTask: Task<Void, Never>?
@@ -79,7 +84,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
       guard let gate, let touch = touches.first else { return }
       // A finger that lands while the list still moves only stops it, as in a table view: no Yo, no photo.
-      gate.blocked = touches.count != 1 || listMoving
+      gate.blocked = touches.count != 1 || listMoving || (spareControls && underControls(touch))
       gate.touch = touch
       gate.origin = touch.location(in: nil)
       pressed(!gate.blocked)
@@ -100,6 +105,21 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
       while let current = view {
         if let scroll = current as? UIScrollView { return scroll.isDecelerating || scroll.isDragging }
         view = current.superview
+      }
+      return false
+    }
+
+    /// The finger is in the strip of the navigation stack's bottom toolbar (its own frame, a few points more each way).
+    private func underControls(_ touch: UITouch) -> Bool {
+      var responder: UIResponder? = view
+      while let current = responder {
+        if let toolbar = (current as? UIViewController)?.navigationController?.toolbar {
+          guard !toolbar.isHidden, toolbar.window != nil else { return false }
+          let strip = toolbar.convert(toolbar.bounds, to: nil).insetBy(dx: 0, dy: -8)
+          let y = touch.location(in: nil).y
+          return y >= strip.minY && y <= strip.maxY
+        }
+        responder = current.next
       }
       return false
     }

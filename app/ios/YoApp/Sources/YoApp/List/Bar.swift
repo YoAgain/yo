@@ -258,7 +258,7 @@ struct RowButton: View {
             holding = false
           }
         }
-      }, observesHold: hold != nil, pressed: { down in
+      }, observesHold: hold != nil, spareControls: cameraOn, pressed: { down in
         if cameraOn { shutterDown = down }
       }, dragged: { y, bar, height in
         if holding { holdDrag(y, bar, height) }
