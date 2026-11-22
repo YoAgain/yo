@@ -134,7 +134,18 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private val seen = LinkedHashSet<String>()
     private val removedUsers = mutableSetOf<String>()
     @Volatile private var foreground = false
-    private val syncing = Mutex()
+    /** Yo in front, taking touches (resumed): a Yo arriving now is seen on its bar, not notified. Leaving pauses at
+     *  once, but the stop that ends `foreground` comes only after the switch's animation (up to 2 s measured): a Yo
+     *  meanwhile went to the bar of an app no longer on screen, without a notification. */
+    @Volatile private var inFront = false
+    fun resumed(on: Boolean) {
+        inFront = on
+        // A notification posted while Yo stood paused (a system dialog over it, a split screen) is seen on its bar.
+        if (on) notifications.clear()
+    }
+    /** One inbox pass at a time, per session: a sign-out leaves the old client's long poll running until it ends
+     *  (up to 25 s, `shutdown` does not cut it), and the next account's listener and pushes waited behind it. */
+    @Volatile private var syncing = Mutex()
     private var listening: Job? = null
     /** A network came (back): the listener stops waiting out its backoff (up to 30 s) and the queues retry at once. */
     private val online = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
@@ -635,7 +646,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
 
     suspend fun syncPush() {
-        if (foreground && listening?.isActive == true) return
+        // The listener fetches for Yo in front. Leaving, it is stopped before it may have taken in what it fetched
+        // (kept by the core, `savedEvents`): this pass takes it in.
+        if (inFront && listening?.isActive == true) return
         // Woken by a push: a pooled connection may have died while the process was frozen or the phone slept, and a
         // request on it fails only after the ping times out; the push then ends in the fallback. A fresh one instead.
         transport.forgetConnections(now = true)
@@ -657,7 +670,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     /** [code]: why the inbox pass after the push failed (`YoWork.fallbackCode`), counted for the admin page. */
     suspend fun pushFallback(code: String) = changes.withLock {
-        if (!foreground) {
+        if (!inFront) {
             crashes.countNotificationFallback(code)
             try {
                 notifications.show(FALLBACK, "$FALLBACK:${java.util.UUID.randomUUID()}", null, null, MessageKind.Yo)
@@ -868,7 +881,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             else -> ListKind.YO
         }, token, if(friend.group != null) user else null) }
         recordStat(friend,false)
-        if (foreground) { chime(); arrivals.tryEmit(Unit) }
+        if (inFront) { chime(); arrivals.tryEmit(Unit) }
     }
     suspend fun refresh() = changes.withLock {
         val c = client ?: return@withLock
@@ -958,7 +971,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
         }
         try {
-            if (!foreground) notifications.show(friend.target, id, name, friend.name.takeIf { group != null }, kind,
+            if (!inFront) notifications.show(friend.target, id, name, friend.name.takeIf { group != null }, kind,
                 friend.key, client?.userId())
         } catch (_: SecurityException) {
             // Notification permission may be revoked between checking and posting.
@@ -1115,7 +1128,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
         notifications.clear()
         val old = client; client = null; sessionId++
-        listening?.cancel(); listening = null; retrying?.cancel(); retrying = null
+        listening?.cancel(); listening = null; retrying?.cancel(); retrying = null; syncing = Mutex()
         synchronized(unsentYos) { unsentYos.clear(); mediaUnsent.clear() }; Problems.clear()
         if (registeredPush?.first == sessionId - 1) runCatching { old?.setPush(0u, "") }
         registeredPush = null; pushSession.value = null

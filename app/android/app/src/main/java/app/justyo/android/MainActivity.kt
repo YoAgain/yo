@@ -169,7 +169,8 @@ class MainActivity : ComponentActivity() {
     }
     override fun onDestroy() { perf?.close(); super.onDestroy() }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); model.intent(intent) }
-    override fun onResume() { super.onResume(); model.refreshNotifications() }
+    override fun onResume() { super.onResume(); model.repository.resumed(true); model.refreshNotifications() }
+    override fun onPause() { model.repository.resumed(false); super.onPause() }
     override fun onStart() { super.onStart(); model.repository.active(true) }
     override fun onStop() { model.repository.active(false); super.onStop() }
 }
