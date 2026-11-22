@@ -71,7 +71,10 @@ internal class YoNotifications(private val context: Context) {
             else -> ListKind.YO
         }
         val kinds = (shown?.extras?.getIntArray(KINDS) ?: IntArray(0)).map { ListKind.entries.getOrElse(it) { ListKind.YO } } + listKind
-        val line = if (name == null && group == null) productAndroidNotificationLine(null, null, listKind, Words)
+        // Nobody to name ("You may have received a Yo", the push's fallback among them): the line alone, not a
+        // conversation with a made-up "Someone: Yo" in it.
+        val anonymous = name == null && group == null
+        val line = if (anonymous) productAndroidNotificationLine(null, null, listKind, Words)
             else productNotificationConversationLine(kinds, name ?: copy(ProductText.SOMEONE), group, false, Words)
         val style = shown?.let { NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it) }
             ?: NotificationCompat.MessagingStyle(Person.Builder().setName(copy(ProductText.YO)).build())
@@ -83,7 +86,7 @@ internal class YoNotifications(private val context: Context) {
         val pending = PendingIntent.getActivity(context, 0, open, PendingIntent.FLAG_IMMUTABLE)
         val notification = NotificationCompat.Builder(context, alert)
             .setSmallIcon(R.drawable.ic_yo_monochrome)
-            .setStyle(style)
+            .setStyle(style.takeUnless { anonymous })
             .setContentTitle(line)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(pending)
