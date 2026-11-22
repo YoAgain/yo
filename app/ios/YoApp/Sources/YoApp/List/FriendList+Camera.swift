@@ -263,6 +263,7 @@ extension FriendList {
     HitchScene.event("edge wipe", then: on ? "camera" : "list")
     publish(listModel.camera(now: listNow, on: on))
     if !on {
+      sightings.reset()  // a code still held up asks again at the next opening
       // Only the session closes: selection and pending batches stay until Clear Selection or Undo.
       if recordingFor != nil {  // a hold the camera closed under: no video waits
         recordingChanged(nil)

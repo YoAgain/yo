@@ -180,7 +180,7 @@ Yo's own words (bar titles, send and arrival lines, notifications, widget texts)
 encoding, widget selection, notification row) come from the core's `yo_product` via UniFFI, in English like iOS.
 Settings, dialogs and sheets are Material 3 Expressive standard components (segmented list items, switches, top
 app bars, sheets); the Yo look stays on the content (Flat UI bars, Montserrat Bold, Amethyst). Logical placement supports RTL. TalkBack, large fonts and RTL still need
-hardware acceptance. Nested settings, onboarding, camera and viewer use predictive back. Camera QR scanning reads recovery keys; safety numbers are compared as digits, as on iOS; native chooser targets support direct media shares. Presentation promotions persist and swipe removal has core-owned undo. Status counts the Yos (total, sent/received, the top friend); the long-press menu shows the last sent/received time.
+hardware acceptance. Nested settings, onboarding, camera and viewer use predictive back. Camera QR scanning reads recovery keys; in camera mode a Yo code in view asks as an opened invite link does, once while it stays in view (`CodeSightings`, read with ZXing only where the camera runs all its streams as they are); safety numbers are compared as digits, as on iOS; native chooser targets support direct media shares. Presentation promotions persist and swipe removal has core-owned undo. Status counts the Yos (total, sent/received, the top friend); the long-press menu shows the last sent/received time.
 
 The release APK contains a manually maintained startup baseline profile, in addition to
 library profiles; no device performance measurements are claimed. An independent

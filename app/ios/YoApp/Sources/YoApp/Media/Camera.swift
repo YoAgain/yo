@@ -46,6 +46,22 @@ final class Camera: NSObject, @unchecked Sendable {
   }
 
   private lazy var movieOutput = AVCaptureMovieFileOutput()
+  /// QR codes in view, read by the session itself (no frames of ours): the Yo codes' names go to `codes`.
+  private lazy var codeOutput = AVCaptureMetadataOutput()
+  private let codeQueue = DispatchQueue(label: "yo.camera-codes", qos: .utility)
+  /// Only `codeQueue` touches it.
+  private var codesTo: AsyncStream<[String]>.Continuation?
+
+  /// The invite names of the Yo codes in view, each time the camera sees one (other QR codes are left out). One
+  /// listener: a newer one takes over.
+  func codes() -> AsyncStream<[String]> {
+    let (stream, continuation) = AsyncStream.makeStream(of: [String].self, bufferingPolicy: .bufferingNewest(1))
+    codeQueue.async { [self] in
+      codesTo?.finish()
+      codesTo = continuation
+    }
+    return stream
+  }
   private let queue = DispatchQueue(label: "yo.camera", qos: .userInitiated)
   private var configured = false
   private var input: AVCaptureDeviceInput?
@@ -310,6 +326,14 @@ final class Camera: NSObject, @unchecked Sendable {
     if photoOutput.isResponsiveCaptureSupported { photoOutput.isResponsiveCaptureEnabled = true }
     if photoOutput.isZeroShutterLagSupported { photoOutput.isZeroShutterLagEnabled = true }
     if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+    // Where the session cannot take it as well, no codes are read: photos and videos come first.
+    if session.canAddOutput(codeOutput) {
+      session.addOutput(codeOutput)
+      if codeOutput.availableMetadataObjectTypes.contains(.qr) {
+        codeOutput.setMetadataObjectsDelegate(self, queue: codeQueue)
+        codeOutput.metadataObjectTypes = [.qr]
+      }
+    }
     previewOutput.alwaysDiscardsLateVideoFrames = true
     previewOutput.setSampleBufferDelegate(self, queue: previewQueue)
     if session.canAddOutput(previewOutput) { session.addOutput(previewOutput) }
@@ -408,6 +432,15 @@ extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
     guard let pixels = previewContext.createCGImage(small, from: small.extent) else { return }
     let image = UIImage(cgImage: pixels)
     previewLock.withLock { latestPreview = image }
+  }
+}
+
+extension Camera: AVCaptureMetadataOutputObjectsDelegate {
+  func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject],
+                      from connection: AVCaptureConnection) {
+    let names = objects.compactMap { ($0 as? AVMetadataMachineReadableCodeObject)?.stringValue }
+      .compactMap { URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }.compactMap(Invite.name(in:))
+    if !names.isEmpty { codesTo?.yield(names) }
   }
 }
 

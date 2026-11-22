@@ -104,6 +104,7 @@ extension FriendList {
         else { return }
         if await invited(name), Invite.shared.pending == name { Invite.shared.pending = nil }
       }
+      .task { for await names in camera.codes() { codesSighted(names) } }
   }
 
   /// New Yos since the last batch (`Inbox.batchSeconds`): one haptic, each sender's bar on top once.

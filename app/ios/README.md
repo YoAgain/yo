@@ -13,7 +13,8 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 - Camera mode (the original's camera context): the bars turn see-through over the live picture; tap a name for a
   photo (with the shutter's haptic), hold it for a video (the bar fills over 10 s); a ring at the bar's left undoes
   the send for 2 s, while the photo already uploads: the Yo goes only when the ring is done, and one still held
-  after a crash is never sent. Photo library, zoom and front/back at the bottom. Received photos and videos wait as a round thumbnail; hold or tap it to see them once.
+  after a crash is never sent. Photo library, zoom and front/back at the bottom. A Yo code in view asks as an
+  opened invite link does ("Add & Yo"), once while it stays in view (`CodeSightings.swift`). Received photos and videos wait as a round thumbnail; hold or tap it to see them once.
 - Invite links: https://justyo.co/NAME (your code, Invite on the list) and yo://NAME open Yo and add NAME as a
   friend; before an account the name waits through the way in (`Invite.swift`). The first Yo sent says what it does.
 - Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
@@ -48,6 +49,7 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   retrying after durable storage without delaying the photo.
   `app/ios/tests/shared-access.sh` tests the lock helper on Linux (Swift 6), without a device.
   `app/ios/tests/blob-ack.sh` checks storage ordering, failed acknowledgements and the service/app file handoff.
+  `app/ios/tests/code-scan.sh` checks which QR codes the camera takes for Yo codes, and that each asks once.
   Yo Dev (`dev/push.sh`) is built without the extensions and keeps its state to itself, in the same kind of
   database in its own folder.
 

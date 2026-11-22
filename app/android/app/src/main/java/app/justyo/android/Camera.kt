@@ -15,7 +15,11 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.SessionConfig
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.heifwriter.HeifWriter
 import androidx.camera.video.FileOutputOptions
@@ -34,6 +38,7 @@ import uniffi.yo.productRecordZoom
 import uniffi.yo.productCameraZoomChoices
 import uniffi.yo.productCameraZoomNext
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.*
 import kotlin.coroutines.resume
@@ -61,6 +66,10 @@ class YoCamera(private val context: Context) {
     private var image: ImageCapture? = null
     private var video: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
+    /** The invite names of the Yo codes in view (other QR codes left out), on the main thread; never while filming. */
+    var codes: ((List<String>) -> Unit)? = null
+    private var codeReader: java.util.concurrent.ExecutorService? = null
+    @Volatile private var filming = false
     private var binding = 0
     private var previewView: PreviewView? = null
     private var physicalRotation: Int? = null
@@ -108,7 +117,13 @@ class YoCamera(private val context: Context) {
                 val movie = VideoCapture.Builder(recorder).setTargetRotation(rotation)
                     .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY).build()
                 camera?.cameraInfo?.zoomState?.removeObservers(owner)
-                camera=p.bindToLifecycle(owner,selector,preview,photo,movie)
+                // QR codes are read only where the camera runs all four streams as they are: a phone that would
+                // have to share one stream for them, or cannot at all, reads none (photos and videos come first).
+                val codes = codeAnalysis()
+                val all = runCatching { p.getCameraInfo(selector).isSessionConfigSupported(SessionConfig(listOf(preview,photo,movie,codes))) }
+                camera = if (all.getOrDefault(false)) try { p.bindToLifecycle(owner,selector,preview,photo,movie,codes) }
+                    catch (_: IllegalArgumentException) { p.unbindAll(); p.bindToLifecycle(owner,selector,preview,photo,movie) }
+                else p.bindToLifecycle(owner,selector,preview,photo,movie)
                 image=photo; video=movie; zoom=1f; heldZoomStart=null
                 // The range is known once the camera runs: the choices follow it.
                 camera?.cameraInfo?.zoomState?.observe(owner) { range ->
@@ -121,6 +136,28 @@ class YoCamera(private val context: Context) {
                 failed(context.getString(R.string.camera_open_failed))
             }
         },ContextCompat.getMainExecutor(context))
+    }
+    /** Small frames, four a second, read off the main thread; the analyzer drops each at once while filming. */
+    private fun codeAnalysis(): ImageAnalysis {
+        codeReader?.shutdown()
+        val reader = java.util.concurrent.Executors.newSingleThreadExecutor().also { codeReader = it }
+        val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(ResolutionSelector.Builder().setResolutionStrategy(ResolutionStrategy(
+                android.util.Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)).build())
+            .build()
+        var last = 0L
+        analysis.setAnalyzer(reader) { image ->
+            try {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (filming || now - last < 250) return@setAnalyzer
+                last = now
+                val name = inviteName(readQr(image).text.trim().toUri()) ?: return@setAnalyzer
+                main.post { if (!filming) codes?.invoke(listOf(name)) }
+            } catch (_: com.google.zxing.NotFoundException) { /* No code in this frame. */ }
+            catch (_: Exception) { /* A malformed code never stops the camera. */ }
+            finally { image.close() }
+        }
+        return analysis
     }
     /** The zoom a filming hold started at; the finger drawn out of the bar zooms from there, lifted it goes back. */
     private var heldZoomStart: Float? = null
@@ -197,11 +234,13 @@ class YoCamera(private val context: Context) {
         recording=pending.start(ContextCompat.getMainExecutor(context)) { event ->
             if(event is VideoRecordEvent.Finalize) {
                 recording=null
+                filming=false
                 val ok=!event.hasError() || event.error==VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED
                 done(if(ok) Uri.fromFile(file) else null)
                 if(!ok) file.delete()
             }
         }
+        filming=true
     }
     fun stopVideo() { cancelWaiting(); recording?.stop() }
     private fun cancelWaiting() { waiting?.let { (retry, done) -> waiting=null; main.removeCallbacks(retry); done(null) } }
@@ -210,6 +249,9 @@ class YoCamera(private val context: Context) {
         cancelWaiting()
         recording?.close()
         provider?.unbindAll()
+        codeReader?.shutdown()
+        codeReader = null
+        filming = false
         orientation.disable()
         physicalRotation = null
         previewView = null

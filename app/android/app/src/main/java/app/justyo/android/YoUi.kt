@@ -675,6 +675,17 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     val heldFinger = remember { HeldFinger() }
     var recording by remember { mutableStateOf<String?>(null) }
     val camera=remember { YoCamera(context) }
+    // A Yo code in the live camera's view is taken as an opened invite link, once while it stays in view (iOS); one's
+    // own says nothing, and nothing asks while filming or a dialog is up.
+    val sightings=remember { CodeSightings() }
+    LaunchedEffect(cameraOn) { sightings.reset() }
+    camera.codes = { names ->
+        val me = s.username?.let { uniffi.yo.usernameSkeleton(it) }
+        val canAsk = cameraOn && picked == null && recording == null && viewing == null && menu == null && leaving == null
+            && s.invitation == null && s.pendingInvite == null
+        sightings.sighted(names.filter { uniffi.yo.usernameSkeleton(it) != me }, android.os.SystemClock.elapsedRealtime(), canAsk)
+            ?.let { name -> repo.command { invite(name) } }
+    }
     val permissions=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         cameraOn=result[Manifest.permission.CAMERA]==true
         if(!cameraOn) model.error(uiResources.getString(R.string.ui_allow_camera_access_in_android_settings_to_send_photos))

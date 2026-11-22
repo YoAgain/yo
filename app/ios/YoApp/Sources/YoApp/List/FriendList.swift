@@ -89,6 +89,8 @@ struct FriendList: View {
   @State var problem: (title: String, message: String)?
   /// A scanned or tapped invite, verified by the hub, waiting for "Add & Yo" (`invited`).
   @State var inviting: Invitation?
+  /// The Yo codes the camera saw (`codesSighted`).
+  @State var sightings = CodeSightings()
   @State var firstYo: Notifications?
   enum Notifications { case allowed, notAsked, denied }
   static let firstYoKey = "firstYo.shown"

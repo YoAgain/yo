@@ -145,6 +145,16 @@ extension FriendList {
     return true
   }
 
+  /// Yo codes in the live camera's view (Camera.codes): one is taken as an opened invite link (`Invite`), once while it
+  /// stays in view (CodeSightings); one's own says nothing, and nothing asks while a video records or an alert is up.
+  func codesSighted(_ names: [String]) {
+    let me = accounts.account.map { Username.skeleton($0.username) }
+    let names = names.filter { Username.skeleton($0) != me }
+    let canAsk = cameraOn && !selecting && recordingFor == nil && viewing == nil && !sheetUp && inviting == nil
+      && Invite.shared.pending == nil && accounts.client != nil
+    if let name = sightings.sighted(names, at: .now, canAsk: canAsk) { Invite.shared.pending = name }
+  }
+
   /// "Add & Yo" (or "Yo"): the friend added as `add` puts it, then one Yo as a tap on its bar sends (and lifts it).
   func acceptInvite(_ invitation: Invitation) {
     if !invitation.known {

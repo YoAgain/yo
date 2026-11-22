@@ -25,6 +25,24 @@ fun inviteName(uri: Uri): String? {
     if (uri.scheme?.lowercase() == "yo" && raw?.lowercase() in setOf("camera", "open")) return null
     return raw?.takeIf { it.isNotBlank() && it.lowercase() !in setOf("privacy", "security") }
 }
+/** Yo codes the camera sees: each asks once, as an opened invite link does (iOS CodeSightings). A code stays answered
+ *  while it is in view, also after its dialog was closed; out of view for [AwayMs] (or the camera closed), it may ask
+ *  again. [sighted] with `canAsk` false (a dialog up, a video recording) asks nothing; a new code waits for the next. */
+class CodeSightings {
+    private val asked = HashMap<String, Long>()
+    fun sighted(names: List<String>, now: Long, canAsk: Boolean): String? {
+        asked.entries.removeAll { now - it.value >= AwayMs }
+        var ask: String? = null
+        for (name in names) {
+            val key = name.lowercase()
+            if (key in asked) asked[key] = now
+            else if (canAsk && ask == null) { asked[key] = now; ask = name }
+        }
+        return ask
+    }
+    fun reset() = asked.clear()
+    companion object { const val AwayMs = 3000L }
+}
 data class Friend(
     val key: String = UUID.randomUUID().toString(), val name: String, val color: Int,
     val user: String? = null, val group: String? = null, val blocked: Boolean = false,

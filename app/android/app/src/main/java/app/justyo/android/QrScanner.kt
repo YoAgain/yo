@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -36,6 +37,15 @@ internal fun scanned(result: com.google.zxing.Result): ScannedQr {
     return ScannedQr(result.text,segments?.fold(byteArrayOf()) { all,part -> all+part } ?: result.text.toByteArray(Charsets.ISO_8859_1))
 }
 
+/** The QR code in a camera frame (its luminance plane); throws NotFoundException where there is none. */
+internal fun readQr(image: ImageProxy): com.google.zxing.Result {
+    val plane=image.planes.first();val width=image.width;val height=image.height
+    val data=ByteArray(width*height);val buffer=plane.buffer
+    for(row in 0 until height) for(col in 0 until width) data[row*width+col]=buffer.get(row*plane.rowStride+col*plane.pixelStride)
+    val source=PlanarYUVLuminanceSource(data,width,height,0,0,width,height,false)
+    return MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)),mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
+}
+
 @Composable internal fun QrScanner(onClose: ()->Unit,onCode: (ScannedQr)->Unit) {
     val context=LocalContext.current
     val owner=LocalLifecycleOwner.current
@@ -62,12 +72,7 @@ internal fun scanned(result: com.google.zxing.Result): ScannedQr {
                     val now=android.os.SystemClock.elapsedRealtime()
                     if(now-lastScan<100) return@setAnalyzer
                     lastScan=now
-                    val plane=image.planes.first();val width=image.width;val height=image.height
-                    val data=ByteArray(width*height);val buffer=plane.buffer
-                    for(row in 0 until height) for(col in 0 until width) data[row*width+col]=buffer.get(row*plane.rowStride+col*plane.pixelStride)
-                    val source=PlanarYUVLuminanceSource(data,width,height,0,0,width,height,false)
-                    val result=MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)),mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
-                    val code=scanned(result)
+                    val code=scanned(readQr(image))
                     if(completed.compareAndSet(false,true)) main.execute { if(!disposed.get()) deliver(code) }
 
                 } catch(_: NotFoundException) { /* Next frame. */ }
