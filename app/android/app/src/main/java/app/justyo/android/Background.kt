@@ -80,7 +80,7 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
         val repo = applicationContext.repository
         val state = repo.state.first { !it.loading }
         if (state.broken) {
-            if (inputData.getBoolean("urgent", false)) repo.pushFallback()
+            if (inputData.getBoolean("urgent", false)) repo.pushFallback("stateBroken")
             return@withContext Result.failure()
         }
         if (state.username == null) return@withContext Result.success()
@@ -92,14 +92,7 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
                         repo.registerPush(token)
                     }
                 }
-                "inbox" -> try {
-                    repo.syncPush()
-                } catch (e: Exception) {
-                    if (e is CancellationException || e is YoException.Replaced) throw e
-                    // Once more after a moment (a network still waking up) before the fallback says a Yo may have come.
-                    kotlinx.coroutines.delay(3_000)
-                    repo.syncPush()
-                }
+                "inbox" -> syncWithRetries(repo)
                 "send" -> repo.sendWidgetYo(inputData.getString("friend"), inputData.getString("account"), inputData.getBoolean("latest", false))
                 else -> return@withContext Result.failure()
             }
@@ -109,13 +102,41 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
         } catch (_: YoException.Replaced) {
             repo.signOut(replaced = true)
             Result.failure()
-        } catch (_: Exception) {
-            if (runAttemptCount == 0 && inputData.getBoolean("urgent", false)) repo.pushFallback()
+        } catch (e: Exception) {
+            if (runAttemptCount == 0 && inputData.getBoolean("urgent", false)) repo.pushFallback(fallbackCode(e))
             if (runAttemptCount < 4) Result.retry() else Result.failure()
         }
     }
 
+    /** As Signal's fetch after a push: the inbox pass is tried again while the phone's network wakes up (out of Doze,
+     *  back on Wi-Fi: its first requests fail at once), for up to a minute, before the fallback says a Yo may have
+     *  come. Two tries 3 s apart showed it for a network that took longer, and the Yo came with WorkManager's retry. */
+    private suspend fun syncWithRetries(repo: Repository) {
+        val deadline = System.currentTimeMillis() + 60_000
+        for (pause in INBOX_PAUSES) {
+            try { return repo.syncPush() } catch (e: Exception) {
+                if (e is CancellationException || e is YoException.Replaced) throw e
+                if (System.currentTimeMillis() + pause > deadline) throw e
+            }
+            kotlinx.coroutines.delay(pause)
+        }
+        repo.syncPush()
+    }
+
     companion object {
+        private val INBOX_PAUSES = listOf(2_000L, 4_000L, 8_000L, 15_000L, 25_000L)
+
+        /** The counted fallback's code: what the last inbox pass failed with (iOS's codes), never a message. */
+        fun fallbackCode(error: Throwable): String = when (error) {
+            is YoException.Network -> "network"
+            is YoException.Refused -> "hubStatus/${error.status}"
+            is YoException.Protocol -> "protocol"
+            is YoException.State -> "state"
+            is YoException.Save -> "save"
+            is YoException -> error::class.simpleName.orEmpty().replaceFirstChar { it.lowercase() }
+            else -> "other/${error.javaClass.simpleName}"
+        }
+
         fun enqueue(context: Context, action: String, friend: String? = null, account: String? = null,
                     urgent: Boolean = false, expedited: Boolean = false, latest: Boolean = false) {
             val builder = OneTimeWorkRequestBuilder<YoWork>()

@@ -92,6 +92,8 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
                 .put("place", if (category == "state") "StateDb" else "ForegroundInbox").put("code", reason)
                 .put("details", "day=$day count=$value")
                 .put("count", value.coerceAtMost(100_000).toString())
+            // The phone's network after a minute of tries (no signal, a captive Wi-Fi): counted, never a problem (iOS's).
+            if (category == "fallback" && reason in EXPECTED_FALLBACKS) body.put("severity", "expected")
             fun upload() = helpDiagnostic(transport, InstallId.current(context), false, body.toString()).toInt()
             var status = upload()
             if (status == 400) {
@@ -113,7 +115,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
             finally { previous?.uncaughtException(thread,error) }
         }
     }
-    companion object { private var installed=false }
+    companion object { private var installed=false; internal val EXPECTED_FALLBACKS = setOf("network") }
     private fun readBounded(input: java.io.InputStream): ByteArray {
         val output=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192)
         while(output.size()<=1024*1024) { val n=input.read(buffer,0,minOf(buffer.size,1024*1024+1-output.size()));if(n<0) break;output.write(buffer,0,n) }

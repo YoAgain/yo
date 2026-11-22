@@ -655,9 +655,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
     }
 
-    suspend fun pushFallback() = changes.withLock {
+    /** [code]: why the inbox pass after the push failed (`YoWork.fallbackCode`), counted for the admin page. */
+    suspend fun pushFallback(code: String) = changes.withLock {
         if (!foreground) {
-            crashes.countNotificationFallback("pushSyncFailed")
+            crashes.countNotificationFallback(code)
             try {
                 notifications.show(FALLBACK, "$FALLBACK:${java.util.UUID.randomUUID()}", null, null, MessageKind.Yo)
             } catch (_: SecurityException) { }
