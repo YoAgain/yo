@@ -290,7 +290,9 @@ final class AccountStore {
         return
       } catch YoError.Replaced {
         accountLog.error("open: replaced")
-        return reset()
+        reset()
+        replacedHere = true
+        return
       } catch YoError.State where account.flatMap({ SyncedAccount.load($0.userID) }) != nil {
         accountLog.error("open: state does not open, signing in again from the iCloud Keychain")
       // A state that does not open (e.g. an older build's): re-register as a new device from the iCloud Keychain.
@@ -1030,6 +1032,14 @@ final class AccountStore {
   func replaced(_ client: YoClient) {
     guard client === self.client else { return }
     reset()
+    replacedHere = true
+  }
+
+  /// The hub said another phone took the account (410): the welcome says so, once, instead of only showing the way
+  /// in as if signed out. Kept over a restart (the app may be ended before the welcome showed it).
+  var replacedHere: Bool {
+    get { UserDefaults.standard.bool(forKey: "account.replacedHere") }
+    set { UserDefaults.standard.set(newValue, forKey: "account.replacedHere") }
   }
 
   /// This phone forgets the account (the hub keeps the backup; the iCloud Keychain keeps it for the phone that has it).

@@ -151,6 +151,10 @@ struct Onboarding: View {
     .task {
       guard !looked else { return }
       looked = true
+      // Another phone took the account: said on the welcome and on the Sign In card over it.
+      let moved = accounts.replacedHere ? AccountError.hub(.Replaced).errorDescription : nil
+      accounts.replacedHere = false
+      problem = moved
       // A cold start signs in from the iCloud Keychain silently (also a fresh install after a Sign Out on the old one);
       // right after a Sign Out in this run the card comes instead.
       let fresh = !Self.signedOutThisRun
@@ -164,7 +168,10 @@ struct Onboarding: View {
       guard (try? await Task.sleep(for: .seconds(0.4))) != nil, step == .welcome else { return }
       inbox.playYo()
       // Otherwise any iCloud Keychain accounts bring up the Sign In card. No passkey is looked for unasked.
-      if !SyncedAccount.all().isEmpty { withAnimation(.smooth) { go(.logIn) } }
+      if !SyncedAccount.all().isEmpty {
+        withAnimation(.smooth) { go(.logIn) }
+        problem = moved
+      }
     }
   }
 
