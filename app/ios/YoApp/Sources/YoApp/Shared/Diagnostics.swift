@@ -28,6 +28,11 @@ enum Diagnostics {
         CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
           code: "Replaced", expected: true)
         return
+      case .NotOnYo, .Blocked, .GroupEmpty:
+        // An answer the person is shown ("Not on Yo", blocked, the group empty): about them, not a fault of the app.
+        CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
+          code: name(yo), expected: true)
+        return
       case .Save:
         // The state's turn not had or ended (another process, background time over): the step runs again. A failure
         // of the database itself is counted by the state (StateFailureCounts).

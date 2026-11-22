@@ -210,7 +210,8 @@ final class HubTransport: HttpTransport {
     // commitment told (invited instead), a name too short at sign-up (the hub's 400, shown as such).
     // A 410 on any route: this device was replaced (the account signed in on another phone), the core says so
     // (Replaced) and the app shows it; every request until then answers the same.
-    var expectedStatus: Set<UInt16> = [401, 410, 429, 502, 503, 504]
+    // A 507: no room at the hub now (a recipient's inbox full, the blob budget or the database's disk): later again.
+    var expectedStatus: Set<UInt16> = [401, 410, 429, 502, 503, 504, 507]
     if method == "POST", route == "/v1/lookup" || route == "/v1/group-credential" { expectedStatus.insert(404) }
     // No backup behind the passkey or key chosen: shown as such (AccountError.noBackup).
     if method == "GET", route.hasPrefix("/v1/backup/") { expectedStatus.insert(404) }
@@ -224,6 +225,8 @@ final class HubTransport: HttpTransport {
     // A blob of this random id is there already: this one, stored by a try whose answer was lost (taken as stored).
     if method == "PUT", route.hasPrefix("/v1/blobs/") { expectedStatus.insert(409) }
     if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(409) }
+    // A Yo to an account deleted meanwhile: the core takes it as gone and the bar says "Not on Yo".
+    if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(404) }
     // A group another member changed meanwhile: the hub answers with the group as it is and the core applies the
     // change to that revision.
     if method == "POST", route.hasPrefix("/v1/groups/") { expectedStatus.insert(409) }
