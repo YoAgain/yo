@@ -127,6 +127,16 @@ pub(crate) fn signature_of(headers: &HeaderMap, now: u64) -> Option<(u64, [u8; 6
     (now.abs_diff(time) <= limits::MAX_SKEW_MS).then_some((time, signature))
 }
 
+/// `401`; for a time outside the window with the hub's time (spec 6.2), so the device corrects its clock by it.
+fn out_of_window(headers: &HeaderMap, now: u64) -> Refusal {
+    match header(headers, HEADER_TIME).and_then(|t| t.parse::<u64>().ok()) {
+        Some(time) if now.abs_diff(time) > limits::MAX_SKEW_MS => {
+            Refusal(StatusCode::UNAUTHORIZED, yo_wire::request::clock_body(now))
+        }
+        _ => refuse(StatusCode::UNAUTHORIZED),
+    }
+}
+
 impl Hub {
     pub(crate) fn authenticate(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Res<Signed> {
         self.authenticate_hash(method, uri, headers, &sha256(body))
@@ -143,7 +153,7 @@ impl Hub {
         let unauthorized = || refuse(StatusCode::UNAUTHORIZED);
         let device_id: DeviceId = header(headers, HEADER_DEVICE).and_then(b64_array).ok_or_else(unauthorized)?;
         let now = crate::now_ms();
-        let (time, signature) = signature_of(headers, now).ok_or_else(unauthorized)?;
+        let (time, signature) = signature_of(headers, now).ok_or_else(|| out_of_window(headers, now))?;
         let Some(device) = self.db.device(&device_id)? else {
             // A replaced device learns that it was replaced.
             return Err(if self.db.is_gone(&device_id)? { refuse(StatusCode::GONE) } else { unauthorized() });

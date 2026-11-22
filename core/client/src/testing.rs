@@ -72,6 +72,16 @@ impl Client {
         self.skew_ms = ms;
     }
 
+    /// `ms` more passed on the monotonic clock that times what waits in memory (a `429`'s wait, the group key's pause).
+    pub fn pass_time_for_tests(&mut self, ms: u64) {
+        self.passed_ms += ms;
+    }
+
+    /// How far off the hub told this device's clock is (spec 6.2), ms.
+    pub fn hub_offset_for_tests(&self) -> i64 {
+        self.hub_offset_ms.get()
+    }
+
     /// Every event handed out so far acknowledged.
     pub fn acknowledge_events(&mut self) {
         self.acknowledge_only(|_| true);

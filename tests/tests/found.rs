@@ -150,6 +150,8 @@ fn a_chat_started_while_blocked_works_after_the_unblock() {
 /// A phone whose clock ran two hours ahead signed with that time and saved it as the floor for every later
 /// signature (spec 6.2: strictly increasing). With the clock set right again every request stayed two hours ahead,
 /// refused (`401`), until the real time caught up: the device was cut off for as long as its clock had been wrong.
+/// And a phone whose clock is off by more than the hub's window got `401` on every request, silently (the Android
+/// hunt): now the hub tells its time and the device signs and dates its messages by it.
 /// (yo-scale: also a clock a few minutes too far ahead, set back to within the window.)
 #[test]
 fn a_clock_set_right_again_reaches_the_hub_at_once() {
@@ -158,15 +160,38 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
     let http = Http::new(hub.url());
     let mut a = by_name(http.clone(), &format!("Late{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &format!("Early{n}"), None).unwrap();
-    a.set_clock_skew(2 * 3600 * 1000);
-    assert!(a.sync(0).is_err(), "two hours off: the hub refuses");
+    const HOUR: i64 = 3_600_000;
+    let near = |offset: i64, want: i64| (offset - want).abs() < 10_000;
+    // Sent before the hub told its time: dated two hours ahead, the floor of every later time (spec 6.2's rule
+    // for signing times holds for them too: a floor far ahead of the clock is dropped).
+    b.sync(0).unwrap();
+    a.set_clock_skew(2 * HOUR);
+    a.send(b.user_id(), yo_tests::tagged("early".into())).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["early"]);
+    b.acknowledge_events();
+    for skew in [2 * HOUR, -2 * HOUR] {
+        a.set_clock_skew(skew);
+        b.send(a.user_id(), yo_tests::tagged("off".into())).unwrap();
+        assert_eq!(texts(&a.sync(0).unwrap()), ["off"], "{skew}: corrected by the hub's time");
+        assert!(near(a.hub_offset_for_tests(), -skew), "{}", a.hub_offset_for_tests());
+        a.acknowledge_events();
+        a.send(b.user_id(), yo_tests::tagged("dated".into())).unwrap();
+        let sent_at = b.sync(0).unwrap().into_iter().find_map(|e| match e {
+            Event::Message { sent_at_ms, .. } => Some(sent_at_ms),
+            _ => None,
+        });
+        let now = yo_hub::now_ms();
+        assert!(sent_at.is_some_and(|at| at.abs_diff(now) < 10_000), "{skew}: dated by the hub's time: {sent_at:?}");
+        b.acknowledge_events();
+    }
     a.set_clock_skew(0);
     b.send(a.user_id(), yo_tests::tagged("on time".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["on time"]);
+    assert!(near(a.hub_offset_for_tests(), 0), "set right: the offset follows");
     a.acknowledge_events();
-    // Also after a restart from what it saved while its clock was wrong.
-    a.set_clock_skew(2 * 3600 * 1000);
-    assert!(a.sync(0).is_err());
+    // Also after a restart from what it saved while its clock was wrong (the offset is learned anew).
+    a.set_clock_skew(2 * HOUR);
+    a.sync(0).unwrap();
     let saved = a.saved();
     let mut a = Client::restore(http, &saved).unwrap();
     b.send(a.user_id(), yo_tests::tagged("still?".into())).unwrap();
@@ -174,12 +199,12 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
     a.send(b.user_id(), yo_tests::tagged("yes".into())).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["yes"]);
     a.acknowledge_events();
-    // A clock 4 minutes fast is within the window; 8 minutes is not, and once back at 4 the floor it left (4 minutes
-    // ahead of this clock, 8 of the hub's) must not hold.
+    // A clock 4 minutes fast is within the window; at 8 minutes the hub's time corrects it; back at 4 the floor it
+    // left must not hold.
     a.set_clock_skew(4 * 60 * 1000);
     assert!(a.sync(0).is_ok(), "4 minutes off: within the window");
     a.set_clock_skew(8 * 60 * 1000);
-    assert!(a.sync(0).is_err(), "8 minutes off: refused");
+    assert!(a.sync(0).is_ok(), "8 minutes off: corrected");
     a.set_clock_skew(4 * 60 * 1000);
     b.send(a.user_id(), yo_tests::tagged("back".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);

@@ -9,7 +9,11 @@ pub struct Response {
 }
 
 /// One HTTP request to the hub, relative to its base URL. Blocking: call the core off the main thread.
-/// An `Err` is a transport failure (no answer); any answer, whatever its status, is `Ok`.
+/// An `Err` is a transport failure (no answer); any answer, whatever its status, is `Ok`. A failure that starts with
+/// `CLOCK_FAILURE` is a TLS handshake that refused the hub's certificate for its dates: the phone's clock is off.
 pub trait Transport: Send + Sync {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String>;
 }
+
+/// How a transport's failure starts when TLS refused the hub's certificate for its dates (`Transport`).
+pub const CLOCK_FAILURE: &str = "clock:";

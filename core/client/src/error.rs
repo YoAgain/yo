@@ -3,6 +3,10 @@ pub enum Error {
     /// The hub could not be reached; nothing was lost, try again.
     #[error("network: {0}")]
     Network(String),
+    /// The hub refused this device's time though corrected by the hub's (spec 6.2), or the phone cannot reach the
+    /// hub for its date (TLS): the user should check the phone's date and time. Nothing was lost, try again.
+    #[error("the phone's clock is off")]
+    Clock,
     /// The hub refused with this status.
     #[error("refused: {0}")]
     Refused(u16),

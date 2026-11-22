@@ -23,7 +23,7 @@ impl Client {
     }
 
     /// A signed request; a `401` is retried once, signed anew (the same millisecond from another process makes the same
-    /// signature, which the hub takes once; a refused request was not processed).
+    /// signature, which the hub takes once; a refused request was not processed), by the hub's time if it told it.
     pub(super) fn signed(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
         let (headers, _) = self.sign(method, path, body);
         let response = self.unsigned(method, path, &headers, body)?;
@@ -31,7 +31,16 @@ impl Client {
             return Ok(response);
         }
         let (headers, _) = self.sign(method, path, body);
-        self.unsigned(method, path, &headers, body)
+        self.signed_again(self.unsigned(method, path, &headers, body)?)
+    }
+
+    /// The answer to a request signed anew after a `401`: the time refused again though corrected by the hub's, the
+    /// phone's clock is off beyond what this can mend (`Error::Clock`).
+    pub(super) fn signed_again(&self, response: Response) -> Result<Response> {
+        match response.status == status::UNAUTHORIZED && yo_wire::request::clock_of(&response.body).is_some() {
+            true => Err(Error::Clock),
+            false => Ok(response),
+        }
     }
 
     pub(super) fn unsigned(
@@ -42,6 +51,9 @@ impl Client {
         body: &[u8],
     ) -> Result<Response> {
         let response = self.transport.request(method, path, headers, body).map_err(Error::Network)?;
+        if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(HEADER_DEVICE)) {
+            self.hub_told_time(&response);
+        }
         if response.status == status::GONE && headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(HEADER_DEVICE)) {
             self.replaced.set(true);
         }
@@ -69,7 +81,7 @@ impl Client {
         let response = match response.status {
             status::UNAUTHORIZED => {
                 let (headers, _) = self.sign("POST", api::LOOKUP, &body);
-                self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?
+                self.signed_again(self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?)?
             }
             _ => response,
         };

@@ -81,6 +81,7 @@ pub enum Text {
     LongerNameOffline,
     NoSuchUser,
     NoConnection,
+    CheckDateTime,
     ThatsYou,
     InviteAddYo,
     InviteYo,
@@ -120,6 +121,7 @@ pub enum Problem {
     Blocked,
     NotSent,
     Waiting,
+    WrongClock,
     Failed,
 }
 
@@ -143,6 +145,7 @@ pub fn product_problem_of(error: &crate::YoError) -> Problem {
         E::Refused { status } => product::problem_of_refusal(*status).unwrap_or(Problem::Failed),
         E::NotOnYo => Problem::NotOnYo,
         E::Blocked => Problem::Blocked,
+        E::Clock => Problem::WrongClock,
         _ => Problem::Failed,
     }
 }

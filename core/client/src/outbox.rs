@@ -139,7 +139,9 @@ impl Client {
             .outbox
             .iter()
             .filter(|item| item.device.is_none() && !self.blocked(&item.user) && !self.delivering.contains(&item.user))
-            .filter(|item| self.state.contacts.get(&item.user).is_none_or(|c| now >= c.outdated_at + OUTDATED_RETRY_MS))
+            .filter(|item| {
+                self.state.contacts.get(&item.user).is_none_or(|c| passed(now, c.outdated_at, OUTDATED_RETRY_MS))
+            })
             .map(|item| item.user.clone())
             .collect();
         for user in users {
@@ -165,7 +167,7 @@ impl Client {
         }
         // Users whose envelopes another flush is sending, or that cannot be written to now: theirs wait, in order.
         let mut waiting = self.delivering.clone();
-        let now = (self.clock)();
+        let now = self.monotonic();
         // A request's hold ends at its time or with their key, however it came (an extension may have taken it in).
         let contacts = &self.state.contacts;
         self.request_wait
@@ -318,6 +320,13 @@ impl Client {
         let mut result = Ok(());
         for (item, answer) in deliveries.items.iter().zip(answers) {
             self.delivering.remove(&item.user);
+            // Signed with a time the hub's window missed: its clock kept, the envelope goes again, signed anew.
+            if let Some(Ok(response)) = &answer {
+                if !item.sealed && self.hub_told_time(response) {
+                    changed = true;
+                    continue;
+                }
+            }
             if let Some(answer) = &answer {
                 self.last_answer.insert(item.user.clone(), answer.as_ref().map_or(0, |r| r.status));
             }
@@ -388,7 +397,7 @@ impl Client {
                 Some(Ok(response)) if matches!(limit_of(&response), Some(Limit::Recipient(_))) => {
                     if let Some(Limit::Recipient(wait)) = limit_of(&response) {
                         let key_refused = self.request_wait.contains_key(&item.user);
-                        self.request_wait.insert(item.user.clone(), ((self.clock)() + wait, key_refused));
+                        self.request_wait.insert(item.user.clone(), (self.monotonic() + wait, key_refused));
                     }
                 }
                 Some(Ok(response)) if gone_for_good(response.status) => {

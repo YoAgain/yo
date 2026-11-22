@@ -126,6 +126,9 @@ final class HubTransport: HttpTransport {
   nonisolated(unsafe) static var answered: (@Sendable () -> Void)?
 
   static var unsupported: Bool { tooOld.load(ordering: .relaxed) }
+  /// TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`, "Check Your
+  /// Phone's Date & Time").
+  static let badDates: Set<Int> = [NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid]
 
   let base: URL
   /// The inbox waits up to a minute; the notification extension has 30 s in all.
@@ -339,8 +342,10 @@ final class HubTransport: HttpTransport {
         let error = error as NSError
         if error.domain == NSURLErrorDomain, quiet.contains(error.code) {
           // Not counted.
-        } else if error.domain == NSURLErrorDomain, Self.offline.contains(error.code) {
-          // The phone's network, not Yo: counted as expected; the core tries again.
+        } else if error.domain == NSURLErrorDomain,
+          Self.offline.contains(error.code) || HubTransport.badDates.contains(error.code)
+        {
+          // The phone's network or its clock, not Yo: counted as expected; the core tries again.
           CountedErrors.record(domain: error.domain, place: diagnosticPlace, code: String(error.code), expected: true)
         } else {
           Diagnostics.record(error, place: diagnosticPlace)
@@ -350,7 +355,8 @@ final class HubTransport: HttpTransport {
         if let diagnosticPlace { Diagnostics.record(NSError(domain: "HubTransport", code: 413), place: diagnosticPlace) }
         done(Data(), nil, "answer too large")
       } else {
-        done(data, response, error?.localizedDescription)
+        let dates = (error as NSError?).map { $0.domain == NSURLErrorDomain && HubTransport.badDates.contains($0.code) }
+        done(data, response, error.map { (dates == true ? "clock: " : "") + $0.localizedDescription })
       }
     }
   }

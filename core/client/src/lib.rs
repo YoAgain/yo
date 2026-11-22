@@ -116,7 +116,7 @@ const OUTDATED_RETRY_MS: u64 = 3600 * 1000;
 /// Errors that say "not now", not "never" (spec 6.6): no network, `429`, `426`, `507`, `5xx`.
 pub fn retryable(error: &Error) -> bool {
     match error {
-        Error::Network(_) => true,
+        Error::Network(_) | Error::Clock => true,
         Error::Refused(status) => {
             matches!(*status, status::RATE_LIMITED | status::UPGRADE_REQUIRED | status::INSUFFICIENT_STORAGE | 500..)
         }
@@ -546,6 +546,11 @@ pub struct Client {
     /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus
     /// it.
     skew_ms: i64,
+    /// How far the hub's clock is from this device's, as its last `401` for a time outside its window told (spec
+    /// 6.2): signing times and the times of messages sent are corrected by it. In memory: each process learns it.
+    hub_offset_ms: std::cell::Cell<i64>,
+    /// Time passed in tests beyond the monotonic clock's (`pass_time_for_tests`).
+    passed_ms: u64,
     /// The hub's zkgroup public params the app pins (spec 4.9, `set_zk_params`): none, no groups.
     zk: Option<zkgroup::ServerPublicParams>,
     /// Today's group auth credential, for the day it is (seconds), fetched once a day.
@@ -588,6 +593,12 @@ fn hub_signed<'a>(
 }
 
 const HOUR_MS: u64 = 3_600_000;
+
+/// Whether `every` has passed since `at` by a saved wall clock time; a time ahead of `now` (the clock was set back)
+/// counts as passed, so nothing waits until the clock catches up.
+pub(crate) fn passed(now: u64, at: u64, every: u64) -> bool {
+    now < at || now >= at.saturating_add(every)
+}
 
 fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
@@ -743,7 +754,7 @@ impl Client {
                         answered = false;
                         break;
                     }
-                    Ok(_) | Err(Error::Refused(status::UNAUTHORIZED)) | Err(Error::NotOnYo) => {}
+                    Ok(_) | Err(Error::Refused(status::UNAUTHORIZED) | Error::Clock | Error::NotOnYo) => {}
                     Err(error) => return Err(error),
                 }
             } else if let Some(pending) = self.state.registering.as_mut() {
@@ -899,6 +910,8 @@ impl Client {
             recovery_lookups_per_day: RECOVERY_LOOKUPS_PER_DAY,
             certificate_asked_at: 0,
             skew_ms: 0,
+            hub_offset_ms: std::cell::Cell::new(0),
+            passed_ms: 0,
             zk: groups::test_zk(),
             group_auth: None,
             key_pause: (0, 0),
@@ -1099,7 +1112,10 @@ impl Client {
 
     /// Why what waits for `user` waits now (`outbox_view`), and until when if the hub said.
     fn waits_for(&self, user: &str, now: u64) -> (OutboxReason, Option<u64>) {
-        let wait = self.request_wait.get(user).map(|(until, _)| *until).filter(|_| self.request_holds(user, now));
+        let mono = self.monotonic();
+        let wait = (self.request_wait.get(user).map(|(until, _)| *until))
+            .filter(|_| self.request_holds(user, mono))
+            .map(|until| now + until.saturating_sub(mono));
         let contact = |flag: fn(&Contact) -> bool| self.state.contacts.get(user).is_some_and(flag);
         let reason = match self.last_answer.get(user).copied() {
             _ if self.delivering.contains(user) => OutboxReason::Sending,
@@ -1135,12 +1151,12 @@ impl Client {
     /// Whether what waits for `user` is a request past its bucket (`429`, spec 4.10): it goes by itself at the hub's
     /// time, or at once when their key comes (a yes). Nothing went wrong: the app says it waits, quietly.
     pub fn request_held(&self, user: &str) -> bool {
-        self.request_holds(user, (self.clock)()) && self.state.outbox.iter().any(|item| item.user == user)
+        self.request_holds(user, self.monotonic()) && self.state.outbox.iter().any(|item| item.user == user)
     }
 
     /// `waiting` but for requests past their bucket (`request_held`): what the hub should have taken by now.
     pub fn waiting_unheld(&self) -> usize {
-        let now = (self.clock)();
+        let now = self.monotonic();
         self.state
             .outbox
             .iter()
@@ -1148,7 +1164,7 @@ impl Client {
             .count()
     }
 
-    /// A request's `429` holds `user` now: until its time, and only while their key is not here.
+    /// A request's `429` holds `user` now (`monotonic`): until its time, and only while their key is not here.
     fn request_holds(&self, user: &str, now: u64) -> bool {
         self.request_wait.get(user).is_some_and(|(until, _)| *until > now)
             && self.state.contacts.get(user).is_none_or(|c| c.profile_key.is_none())
@@ -1159,8 +1175,33 @@ impl Client {
     }
 
     /// This device's wall clock: the system's, off by the skew a test set.
-    pub(crate) fn wall(&self) -> u64 {
+    fn device_wall(&self) -> u64 {
         wall_ms().saturating_add_signed(self.skew_ms)
+    }
+
+    /// The hub's time as this device knows it: its wall clock corrected by what the hub told (spec 6.2).
+    pub(crate) fn wall(&self) -> u64 {
+        self.device_wall().saturating_add_signed(self.hub_offset_ms.get())
+    }
+
+    /// A monotonic clock (ms, from this process's start) for what waits in memory: a clock set back or ahead does not
+    /// move it.
+    pub(crate) fn monotonic(&self) -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = START.get_or_init(std::time::Instant::now);
+        1 + start.elapsed().as_millis() as u64 + self.passed_ms
+    }
+
+    /// A `401` that tells the hub's time (its window missed): the offset to this device's clock kept; whether it was
+    /// one.
+    pub(crate) fn hub_told_time(&self, response: &Response) -> bool {
+        let told =
+            (response.status == status::UNAUTHORIZED).then(|| yo_wire::request::clock_of(&response.body)).flatten();
+        if let Some(hub) = told {
+            let offset = hub as i64 - self.device_wall() as i64;
+            self.hub_offset_ms.set(offset);
+        }
+        told.is_some()
     }
 
     fn persist(&self) -> Result<()> {
@@ -1946,8 +1987,12 @@ impl Client {
         let received = response
             .map_err(Error::Network)
             .and_then(|response| match response.status {
-                // As `signed`: the same signature seen before (another process of this device): asked anew.
-                status::UNAUTHORIZED => self.receive_all(0).map(|()| false),
+                // As `signed`: the same signature seen before (another process of this device), or a time outside the
+                // hub's window (its time kept): asked anew.
+                status::UNAUTHORIZED => {
+                    self.hub_told_time(&response);
+                    self.receive_all(0).map(|()| false)
+                }
                 _ => self.inbox(response, wait.time, true).map(|(more, ids)| {
                     saved_later = ids;
                     more
@@ -2256,6 +2301,74 @@ mod handle_tests {
             assert_eq!(client.sender(key).unwrap().unwrap().0, user);
             assert_eq!(transport.0.load(Ordering::SeqCst), expected);
         }
+    }
+
+    /// A hub that checks only the time of a signed request against its own clock (spec 6.2): outside the window
+    /// `401` telling its time (the second field added: a hub that keeps telling a time that will not do), else `204`.
+    struct ClockHub(std::sync::Mutex<Vec<u64>>, i64);
+    impl Transport for ClockHub {
+        fn request(
+            &self,
+            _: &str,
+            _: &str,
+            headers: &[(String, String)],
+            _: &[u8],
+        ) -> std::result::Result<Response, String> {
+            let time: u64 = headers.iter().find(|(n, _)| n == HEADER_TIME).unwrap().1.parse().unwrap();
+            self.0.lock().unwrap().push(time);
+            let now = wall_ms();
+            match now.abs_diff(time) > yo_wire::limits::MAX_SKEW_MS || self.1 != 0 {
+                true => Ok(Response {
+                    status: status::UNAUTHORIZED,
+                    body: yo_wire::request::clock_body(now.saturating_add_signed(self.1)),
+                }),
+                false => Ok(Response { status: status::NO_CONTENT, body: Vec::new() }),
+            }
+        }
+    }
+
+    #[test]
+    fn a_clock_off_by_an_hour_is_corrected_by_the_hubs_time() {
+        let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
+        let mut client = Client::registering(transport.clone(), "CLOCK", None, None, None, Push::none()).unwrap();
+        for skew in [3_600_000i64, -3_600_000, 0] {
+            client.set_clock_skew(skew);
+            let before = transport.0.lock().unwrap().len();
+            client.set_push(Push::none()).unwrap();
+            let sent = transport.0.lock().unwrap()[before..].to_vec();
+            // Asked twice: refused (the offset learned before is wrong now), then by the hub's time.
+            assert_eq!(sent.len(), 2, "{skew}: {sent:?}");
+            assert!(sent.last().unwrap().abs_diff(wall_ms()) < 5_000, "{skew}: signed by the hub's time");
+            assert!((client.hub_offset_for_tests() + skew).abs() < 5_000);
+            // Once learned, the next goes at once.
+            let before = transport.0.lock().unwrap().len();
+            client.set_push(Push::none()).unwrap();
+            assert_eq!(transport.0.lock().unwrap().len() - before, 1, "{skew}");
+        }
+        // A hub whose time never fits: no silent `401`, the typed error the apps show, and "try again later".
+        let lying = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 3_600_000));
+        let mut client = Client::registering(lying, "LIAR", None, None, None, Push::none()).unwrap();
+        let error = client.set_push(Push::none()).unwrap_err();
+        assert_eq!(error, Error::Clock);
+        assert!(retryable(&error));
+    }
+
+    #[test]
+    fn what_waits_in_memory_is_timed_by_the_monotonic_clock() {
+        let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
+        let mut client = Client::registering(transport, "MONO", None, None, None, Push::none()).unwrap();
+        let user = hex(&[9; 16]);
+        client.request_wait.insert(user.clone(), (client.monotonic() + 60_000, false));
+        // The phone's clock set back an hour during the wait: it ends after the wait all the same.
+        client.set_clock(Arc::new(|| wall_ms() - 3_600_000));
+        client.set_clock_skew(-3_600_000);
+        assert!(client.request_holds(&user, client.monotonic()));
+        client.pass_time_for_tests(61_000);
+        assert!(!client.request_holds(&user, client.monotonic()));
+        // Saved wall times ahead of the clock (set back) count as passed: nothing waits for the clock to catch up.
+        assert!(passed(1_000, 5_000, HOUR_MS));
+        assert!(!passed(5_000 + HOUR_MS - 1, 5_000, HOUR_MS));
+        assert!(passed(5_000 + HOUR_MS, 5_000, HOUR_MS));
     }
 
     #[test]

@@ -144,6 +144,29 @@ fn every_signed_route_wants_its_devices_signature() {
     assert_ne!(name, b_name);
 }
 
+/// Spec 6.2: a time outside the window is `401` telling the hub's time, so the device can correct its clock; any
+/// other `401` (a replay, a bad signature) tells nothing.
+#[test]
+fn a_time_outside_the_window_is_told_the_hubs_time() {
+    let hub = TestHub::start();
+    let (mut a, http, _) = account(&hub);
+    a.sync(0).unwrap();
+    let (_, _, headers, _) = http.recorded.lock().unwrap().last().cloned().unwrap();
+    let path = api::inbox_path(0);
+    let with_time = |time: u64| -> Vec<(&str, String)> {
+        headers.iter().map(|(n, v)| (n.as_str(), if n == "yo-time" { time.to_string() } else { v.clone() })).collect()
+    };
+    for off in [-3_600_000i64, 6 * 60 * 1000, 3_600_000] {
+        let (code, body) = raw(&hub, "GET", &path, &with_time(yo_hub::now_ms().saturating_add_signed(off)), Vec::new());
+        assert_eq!(code, status::UNAUTHORIZED);
+        let told = yo_wire::request::clock_of(&body).expect("the hub's time");
+        assert!(told.abs_diff(yo_hub::now_ms()) < 10_000, "{off}: {told}");
+    }
+    // Within the window but signed for another time (a bad signature), or a replay: no time.
+    let (code, body) = raw(&hub, "GET", &path, &with_time(yo_hub::now_ms()), Vec::new());
+    assert_eq!((code, body.len()), (status::UNAUTHORIZED, 0));
+}
+
 /// Spec 2 (strict decoding), 6.3: a body that is not the route's type, empty, or with a byte after it is `400`.
 #[test]
 fn a_malformed_body_is_400_on_every_route() {

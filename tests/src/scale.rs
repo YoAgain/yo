@@ -1772,7 +1772,7 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
             }
         }
         2 => {
-            // A wrong clock for a while: hours off, refused by the hub until it is set right.
+            // A wrong clock for a while: hours off, corrected by the hub's time (spec 6.2) until it is set right.
             a.wrong_clock = 3 + rng.below(10) as u32;
             let off = (360_000 + rng.below(3 * 3600 * 1000)) as i64;
             let off = if rng.below(2) == 0 { off } else { -off };

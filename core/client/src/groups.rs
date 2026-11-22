@@ -579,7 +579,7 @@ impl Client {
     /// again, and the key tried once more; refused still (or `403`, another key's), it waits a pause that doubles up
     /// to an hour, not the next read.
     fn key_groups(&mut self) -> Result<()> {
-        if !self.state.access_key_told || self.wall() < self.key_pause.0 {
+        if !self.state.access_key_told || self.monotonic() < self.key_pause.0 {
             return Ok(());
         }
         let due: Vec<String> = (self.state.groups.iter())
@@ -607,7 +607,7 @@ impl Client {
                 Err(error @ (Error::Refused(status::NOT_FOUND | status::FORBIDDEN) | UNVERIFIED)) => {
                     self.note(format!("group key: {error}"));
                     let pause = (self.key_pause.1 * 2).clamp(KEY_PAUSE_FIRST_MS, KEY_PAUSE_MAX_MS);
-                    self.key_pause = (self.wall() + pause, pause);
+                    self.key_pause = (self.monotonic() + pause, pause);
                     return Ok(());
                 }
                 Err(error) => self.note(format!("group key: {error}")),
@@ -832,7 +832,9 @@ impl Client {
         if users.is_empty() {
             return Ok(());
         }
-        let sent_at_ms = self.wall().max(self.state.last_sent_ms + 1);
+        // Strictly increasing, as signing times (spec 6.2): a floor far ahead of this clock (set back) is dropped.
+        let (wall, floor) = (self.wall(), self.state.last_sent_ms);
+        let sent_at_ms = if floor >= wall + crate::SIGN_AHEAD_MS { wall } else { wall.max(floor + 1) };
         self.state.last_sent_ms = sent_at_ms;
         let keep = shown(&content);
         // A Yo to accepted contacts or joined members carries the profile key (spec 4.10); never to a request.

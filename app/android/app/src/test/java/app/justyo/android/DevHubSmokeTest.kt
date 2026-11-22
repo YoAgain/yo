@@ -11,7 +11,7 @@ import java.util.UUID
 class DevHubSmokeTest {
     @Test(timeout = 120000) fun registrationStateAndRecoveryBackup() {
         assumeTrue(System.getenv("YO_DEV_SMOKE") == "1")
-        val transport = HubTransport { error("Dev hub requires a newer build") }
+        val transport = HubTransport("unreachable") { error("Dev hub requires a newer build") }
         val diagnostics = object : StateDiagnostics { override fun failure(kind: String) = Unit }
         val path = File.createTempFile("yo-smoke", ".sqlite").apply { delete() }
         val key = randomBytes(32)

@@ -107,6 +107,7 @@ copy! {
     LongerNameOffline => ("Choose a longer name, or try again when connected.", "Wähle einen längeren Namen oder versuche es mit Verbindung erneut."),
     NoSuchUser => ("No Such User", "Unbekannter Name"),
     NoConnection => ("No Connection", "Keine Verbindung"),
+    CheckDateTime => ("Check Your Phone’s Date & Time", "Datum & Uhrzeit des Telefons prüfen"),
     ThatsYou => ("That’s You", "Das bist du"),
     InviteAddYo => ("Add to your list and send a Yo?", "Zu deiner Liste hinzufügen und ein Yo senden?"),
     InviteYo => ("Send a Yo?", "Ein Yo senden?"),
@@ -152,6 +153,8 @@ pub enum Problem {
     NotSent,
     /// Sends the hub has not taken yet; they go by themselves (the banner goes when they went).
     Waiting,
+    /// The phone's date and time are off beyond what Yo corrects by the hub's (spec 6.2): the user sets them.
+    WrongClock,
     /// Refused for good, or something else broke.
     Failed,
 }
@@ -167,6 +170,7 @@ impl Problem {
             Self::Blocked => Text::Blocked,
             Self::NotSent => Text::NotSentRetry,
             Self::Waiting => Text::WaitingToSend,
+            Self::WrongClock => Text::CheckDateTime,
             Self::Failed => Text::SomethingWentWrong,
         }
         .get(lang)

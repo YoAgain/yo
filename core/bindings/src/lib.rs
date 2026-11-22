@@ -26,6 +26,10 @@ pub enum YoError {
     Network { message: String },
     #[error("refused: {status}")]
     Refused { status: u16 },
+    /// The phone's date and time are off beyond what the hub's time corrects (spec 6.2), or TLS refused the hub's
+    /// certificate for its dates: the user checks them. Nothing was lost.
+    #[error("the phone's clock is off")]
+    Clock,
     #[error("not on Yo")]
     NotOnYo,
     #[error("blocked")]
@@ -61,7 +65,9 @@ impl From<yo_core::Error> for YoError {
     fn from(error: yo_core::Error) -> Self {
         use yo_core::Error as E;
         match error {
+            E::Network(message) if message.starts_with(yo_core::net::CLOCK_FAILURE) => YoError::Clock,
             E::Network(message) => YoError::Network { message },
+            E::Clock => YoError::Clock,
             E::Refused(status) => YoError::Refused { status },
             E::NotOnYo => YoError::NotOnYo,
             E::Blocked => YoError::Blocked,
@@ -106,6 +112,8 @@ pub struct Header {
 pub struct HttpResult {
     pub status: u16,
     pub body: Vec<u8>,
+    /// No answer: why. `clock: …` (`yo_core::net::CLOCK_FAILURE`) when TLS refused the hub's certificate for its
+    /// dates, so the app can say to check the phone's date and time.
     pub error: Option<String>,
 }
 
@@ -319,7 +327,7 @@ pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia
 #[uniffi::export]
 pub fn retry_later(error: &YoError) -> bool {
     match error {
-        YoError::Network { .. } | YoError::Save { .. } => true,
+        YoError::Network { .. } | YoError::Save { .. } | YoError::Clock => true,
         YoError::Refused { status } => yo_core::retryable(&yo_core::Error::Refused(*status)),
         _ => false,
     }

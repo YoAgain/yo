@@ -260,6 +260,7 @@ fn a_request_past_its_bucket_waits_its_retry_after_and_holds_no_one_else() {
     hub.hub.shift_clock(3_600_000);
     let later = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
     s.set_clock(Arc::new(move || later() + 3_600_000));
+    s.pass_time_for_tests(3_600_000);
     s.maintenance().unwrap();
     assert!(to_b(&hs) >= 1, "tried again after its wait");
     assert_eq!(yos(&b.sync(0).unwrap(), &s), 3);

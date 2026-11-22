@@ -15,7 +15,7 @@ impl Client {
             if response.status == status::UNAUTHORIZED {
                 // As `signed`: once more, signed anew.
                 let (headers, again) = self.sign("GET", &path, &[]);
-                (response, time) = (self.unsigned("GET", &path, &headers, &[])?, again);
+                (response, time) = (self.signed_again(self.unsigned("GET", &path, &headers, &[])?)?, again);
             }
             // The last batch is acknowledged only after `finish` has saved and handed out its events.
             let (more, ids) = self.inbox(response, time, true)?;
@@ -201,14 +201,14 @@ impl Client {
     pub(super) fn may_ask_roster(&mut self, user: &str) -> bool {
         let now = (self.clock)();
         let last = self.state.roster_asked.get(user).copied().unwrap_or(0);
-        if last != 0 && now < last + ROSTER_ASK_EVERY_MS {
+        if last != 0 && !passed(now, last, ROSTER_ASK_EVERY_MS) {
             return false;
         }
         if !self.recovery_lookup() {
             return false;
         }
         // Only the last minute's asks matter: older ones go, so the markers stay a handful.
-        self.state.roster_asked.retain(|_, at| now < *at + ROSTER_ASK_EVERY_MS);
+        self.state.roster_asked.retain(|_, at| !passed(now, *at, ROSTER_ASK_EVERY_MS));
         self.state.roster_asked.insert(user.to_owned(), now);
         true
     }
@@ -490,7 +490,11 @@ impl Client {
         let now = (self.clock)();
         let in_group = self.in_joined_group(user);
         let Some(contact) = self.state.contacts.get_mut(user) else { return Ok(()) };
-        if !(contact.accepted || in_group) || contact.blocked || contact.gone || now < contact.key_resent_at + HOUR_MS {
+        if !(contact.accepted || in_group)
+            || contact.blocked
+            || contact.gone
+            || !passed(now, contact.key_resent_at, HOUR_MS)
+        {
             return Ok(());
         }
         contact.key_resent_at = now;

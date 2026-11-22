@@ -483,11 +483,15 @@ fn an_own_credential_refused_for_good_is_asked_for_after_a_pause_only() {
     // One pass: refused, the access key told again, asked once more, refused: a pause.
     assert_eq!(credential(&https[1]) - asked_before, 2);
     assert_eq!(access(&https[1]) - told_before, 1);
-    // A minute on (within the hub's five minutes for signatures): one more pass, then a longer pause.
-    c.set_clock_skew(61_000);
+    // A minute on (the monotonic clock: a wall clock set back or ahead does not move it): one more pass, then a
+    // longer pause.
+    c.set_clock_skew(-3_600_000);
+    rounds(&mut c, 20);
+    assert_eq!(credential(&https[1]) - asked_before, 2, "a clock set back: the pause holds as it was");
+    c.pass_time_for_tests(61_000);
     rounds(&mut c, 20);
     assert_eq!(credential(&https[1]) - asked_before, 4);
-    c.set_clock_skew(122_000);
+    c.pass_time_for_tests(61_000);
     rounds(&mut c, 20);
     assert_eq!(credential(&https[1]) - asked_before, 4, "the second pause is longer");
 }

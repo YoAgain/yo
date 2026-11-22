@@ -34,7 +34,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             override fun failure(kind: String) = crashes.countStateFailure(kind)
         })
     }
-    val transport = HubTransport(reached = { connection.reached(it) }) { mutable.update { it.copy(update = true) } }
+    /** A friend without a name yet. */
+    private val yoUser = context.getString(R.string.yo_user)
+    val transport = HubTransport(context.getString(R.string.hub_unreachable), reached = { connection.reached(it) }) { mutable.update { it.copy(update = true) } }
     /** Offline as iOS says it: no network, or the hub not reached, for 4 s on end (a first second without is nothing);
      *  else what an action ran into (`Problems`), a tap on it tries again. */
     private inner class Connection {
@@ -890,14 +892,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         for (kept in c.friends()) {
             val old = friends.firstOrNull { it.user == kept.user }
             val contact = contacts.firstOrNull { it.user == kept.user }
-            val name = kept.name ?: contact?.handles?.firstOrNull() ?: old?.name ?: "Yo User"
+            val name = kept.name ?: contact?.handles?.firstOrNull() ?: old?.name ?: yoUser
             val row = old?.copy(name = name, blocked = kept.blocked, color = kept.color?.toInt() ?: old.color)
                 ?: Friend(name = name, color = kept.color?.toInt() ?: nextColor(friends), user = kept.user, blocked = kept.blocked)
             friends = if (old == null) friends + row else friends.map { if (it.key == row.key) row else it }
         }
         for (contact in contacts.filter { it.user !in removedUsers }) {
             val old = friends.firstOrNull { it.user == contact.user } ?: friends.firstOrNull { it.group == null && it.user == null && contact.handles.any { h -> usernameSkeleton(h) == usernameSkeleton(it.name) } }
-            val row = (old ?: Friend(name = contact.handles.firstOrNull() ?: contact.name ?: "Yo User", color = nextColor(friends), user = contact.user))
+            val row = (old ?: Friend(name = contact.handles.firstOrNull() ?: contact.name ?: yoUser, color = nextColor(friends), user = contact.user))
                 .copy(user = contact.user, blocked = contact.blocked, gone = contact.gone, request = !contact.accepted)
             friends = if (old == null) friends + row else friends.map { if (it.key == old.key) row else it }
         }
@@ -966,7 +968,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val name = profiles[user]?.takeIf { it.isNotBlank() }
             ?: contact?.name?.takeIf { it.isNotBlank() }
             ?: contact?.handles?.firstOrNull()
-            ?: state.value.friends.firstOrNull { it.user == user }?.name?.takeUnless { it == "Yo User" }
+            ?: state.value.friends.firstOrNull { it.user == user }?.name?.takeUnless { it == yoUser }
         if (name == null) {
             crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
         }

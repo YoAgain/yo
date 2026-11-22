@@ -8,6 +8,18 @@ pub const HEADER_DEVICE: &str = "yo-device";
 pub const HEADER_TIME: &str = "yo-time";
 pub const HEADER_SIGNATURE: &str = "yo-signature";
 pub const LABEL: &[u8] = b"yo request v1";
+/// A `401`'s body when the request's time is outside the hub's window: `clock` and the hub's time, ms (spec 6.2).
+const CLOCK: &str = "clock ";
+
+/// The body of a `401` for a time outside the window, telling the hub's time.
+pub fn clock_body(hub_ms: u64) -> Vec<u8> {
+    format!("{CLOCK}{hub_ms}").into_bytes()
+}
+
+/// The hub's time a `401`'s body tells (`clock_body`): the request's time was outside the window.
+pub fn clock_of(body: &[u8]) -> Option<u64> {
+    std::str::from_utf8(body).ok()?.strip_prefix(CLOCK)?.parse().ok()
+}
 
 #[derive(TlsSerialize, TlsSize)]
 struct SignedRequest {
@@ -62,6 +74,13 @@ pub fn verify_hash(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_clock_refusal_tells_the_hub_time() {
+        assert_eq!(super::clock_of(&super::clock_body(1_700_000_000_123)), Some(1_700_000_000_123));
+        assert_eq!(super::clock_of(b""), None);
+        assert_eq!(super::clock_of(b"clock soon"), None);
+    }
+
     use super::*;
     use libsignal_core::curve::KeyPair;
 

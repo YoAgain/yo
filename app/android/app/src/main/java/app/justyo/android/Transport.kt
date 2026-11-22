@@ -8,7 +8,11 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import uniffi.yo.*
 
-class HubTransport(private val reached: (Boolean) -> Unit = {}, private val unsupported: () -> Unit) : HttpTransport {
+class HubTransport(
+    private val unreachable: String,
+    private val reached: (Boolean) -> Unit = {},
+    private val unsupported: () -> Unit,
+) : HttpTransport {
     private val stopped = AtomicBoolean(false)
     // Separate pools: anonymous deliveries must carry no connection history from identified requests.
     private val signed = plain()
@@ -49,7 +53,14 @@ class HubTransport(private val reached: (Boolean) -> Unit = {}, private val unsu
                 }
                 HttpResult(response.code.toUShort(), bytes, null)
             }
-        } catch (_: Exception) { reached(false); HttpResult(0u, byteArrayOf(), "Could not reach the hub") }
+        } catch (e: Exception) {
+            reached(false)
+            // TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`).
+            val dates = generateSequence<Throwable>(e) { it.cause }.any {
+                it is java.security.cert.CertificateExpiredException || it is java.security.cert.CertificateNotYetValidException
+            }
+            HttpResult(0u, byteArrayOf(), if (dates) "clock: $unreachable" else unreachable)
+        }
     }
     /** Connections from before a suspension or on another network: dropped, so the next request opens a fresh one at
      *  once instead of waiting on a dead socket. Off the main thread (it calls from `onStart`): closing a TLS socket

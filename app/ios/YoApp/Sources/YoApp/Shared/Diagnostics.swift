@@ -28,8 +28,9 @@ enum Diagnostics {
         CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
           code: "Replaced", expected: true)
         return
-      case .NotOnYo, .Blocked, .GroupEmpty:
-        // An answer the person is shown ("Not on Yo", blocked, the group empty): about them, not a fault of the app.
+      case .NotOnYo, .Blocked, .GroupEmpty, .Clock:
+        // An answer the person is shown ("Not on Yo", blocked, the group empty, the phone's date and time): about
+        // them, not a fault of the app.
         CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
           code: name(yo), expected: true)
         return
@@ -177,6 +178,7 @@ enum Diagnostics {
     switch error {
     case .Network: "Network"
     case .Refused(let status): "Refused/\(status)"
+    case .Clock: "Clock"
     case .NotOnYo: "NotOnYo"
     case .Blocked: "Blocked"
     case .GroupEmpty: "GroupEmpty"
