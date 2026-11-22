@@ -244,14 +244,15 @@ struct Onboarding: View {
     } catch AccountError.taken {
       checked[Username.skeleton(asked)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
+    } catch AccountError.hub(.Refused(status: 400)) {
+      // The hub's refusal of the name (its least length, spec 3.3) reads as too short. `register` throws the
+      // hub's errors wrapped in AccountError: a bare YoError never comes here.
+      short.insert(Username.skeleton(asked))
+      tooShort = true
+      UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch {
-      // A refusal (400: too short) reads as too short; anything else as one plain line.
-      if case YoError.Refused = error {
-        short.insert(Username.skeleton(asked))
-        tooShort = true
-      } else {
-        problem = "Couldn’t sign up. Check your connection and try again."
-      }
+      // Its own words: too many tries (429), the keychain, no server, the phone's clock; else one plain line.
+      problem = (error as? AccountError)?.errorDescription ?? "Couldn’t sign up. Check your connection and try again."
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     }
   }
