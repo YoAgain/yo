@@ -232,10 +232,27 @@ snapshot), nor a tap on a name that is also under a sheet.
 | App Icon, Help & About, Status, About & Licenses, Send Feedback and a reply from the admin | ok |
 | Camera edge pan: a vertical scroll from the edge zone | `startRunning` at the touch; the Simulator's session stops itself at once (no camera), so a session left running cannot be seen here |
 
+## Lock, alerts and edge cases (2026-11-22, evening)
+
+Against the dev hub with throwaway CLI accounts (deleted afterwards): five friends with 16-character names, 18 groups
+named in Arabic, Hebrew, Japanese, emoji, Zalgo and with a # (the CLI refuses names over 32 bytes and control
+characters). The core built with the new dependencies opened the state the older build had written.
+
+| Flow | Result |
+|---|---|
+| "Can't Open Your Account" raised while the Settings sheet appears (0, 60, 200 ms into its animation) and while it is open | was lost behind the sheet (SwiftUI's `.alert` on the root), the list stayed "Offline": now a system alert in a window of its own (`AccountAlert`), shown over the sheet each time; its button runs and asks again |
+| The driver's tap on an element under that alert | XCTest's interruption handling presses the alert's button by itself: tap first, raise the alert after |
+| Background launch (`simctl push` with `content-available`) | the Simulator does not launch Yo for it; the order at a cold start is scene foreground, app foreground, active. Front now starts false and comes with the scene (a background launch never says it left) |
+| Tap on a notification (banner, Notification Center, by element or point) | opens nothing in the Simulator, the Settings app's own notification neither: the Simulator, not Yo. Yo Back from Notification Center works |
+| Home and back 8 times within a send each, 12 rounds of bursts with home/activate and `sim.sh notify` in between, CLI sending at the same time | every Yo arrived; no "held long", no lock timeout, no crash. Right after leaving, iOS gives no background time: the state's turn is refused (logged, expected) and taken again on return |
+| Passcode sheet over Yo (Show Recovery Key) while Yos arrive | no error; the list caught up on return |
+| Camera button with camera access off in Settings | closed again without a word: now "Camera Access Is Off" with Open Settings; granted, camera mode opens; a "Don't Allow" just given is not answered with it |
+| Large list (40 bars), RTL and emoji group names, AX5, Increase Contrast, an Arabic system language (Yo stays English, left to right) | ok; long names end in "…" on requests and counted bars, Yo and the count stay whole |
+| Dark Mode switched with the Settings sheet open, Yo staying in front | the sheet keeps the old appearance until Yo leaves and returns (it then follows); left as it is |
+| A friend whose account was deleted | "Not on Yo" after the next Yo to them |
+
 ## Left
 
-- (Since fixed with the core's `YoContact.gone`: a friend whose account was deleted shows "Not on Yo" on the bar, and
-  the name added again is asked of the hub anew. Not yet tried in the Simulator.)
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
 - Sending a photo while signing out within its 1.5 s, and the shared state's deletion racing an extension's write:
   guarded since (outgoing media bound to its account, `Media.swift`; received media checked by generation; the old
