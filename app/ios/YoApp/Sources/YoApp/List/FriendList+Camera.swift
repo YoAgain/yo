@@ -100,7 +100,7 @@ extension FriendList {
 
   /// In camera mode what to do, in a glass capsule over the controls.
   var title: some View {
-    Text(picked.isEmpty ? "Tap or hold a name" : "Tap a name to send selected media")
+    Text(libraryLoading ? "Loading selected media…" : picked.isEmpty ? "Tap or hold a name" : "Tap a name to send selected media")
       .font(.system(size: 15, weight: .semibold))
       .foregroundStyle(.white)
       .lineLimit(1)
@@ -213,6 +213,7 @@ extension FriendList {
   /// Loads in selection order; a selection superseded by another pick or closed cannot land.
   func load(_ items: [PhotosPickerItem]) {
     picked = []
+    libraryLoading = !items.isEmpty
     guard !items.isEmpty else { return }
     Task {
       var made: [Picked] = []
@@ -249,7 +250,10 @@ extension FriendList {
           made.append(photo)
         }
       }
-      if libraryItems == items { picked = made }
+      if libraryItems == items {
+        picked = made
+        libraryLoading = false
+      }
     }
   }
 

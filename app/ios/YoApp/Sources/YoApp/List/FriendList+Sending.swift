@@ -87,6 +87,8 @@ extension FriendList {
     defer { PerfProbe.frame("tap") }
     // A tap while a bar is swiped open only closes it, as in Mail.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
+    // The library's pick still loading: it goes with the next tap, never a photo from the camera instead.
+    if cameraOn && libraryLoading { return }
     // Here, as the finger lifts, not after the list has drawn the change.
     if cameraOn && picked.isEmpty { Haptic.shutter() } else { Haptic.tap() }
     if !cameraOn { Haptic.sendClick() }

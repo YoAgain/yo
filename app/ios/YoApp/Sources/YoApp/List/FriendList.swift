@@ -128,6 +128,8 @@ struct FriendList: View {
   /// Each hold's own mark: the 10 s limit sends only the video it was started for.
   @State var recordingRound: UUID?
   @State var libraryItems: [_PhotosUI_SwiftUI.PhotosPickerItem] = []
+  /// Picked in the library and still loading (a video takes seconds): a tap then neither takes a photo nor records.
+  @State var libraryLoading = false
   @State var picked: [Picked] = []
   /// The trimmer, open for a picked video longer than a Yo's.
   @State var videoTrim: VideoTrim?
@@ -569,7 +571,7 @@ struct FriendList: View {
       media: waiting,
       landing: landings.slot(friend.name),
       hint: cameraOn ? "Takes and sends a photo. Use Record Video to record a video." : nil,
-      hold: cameraOn && picked.isEmpty && !friend.request ? { hold(friend, $0, origin: $1) } : nil,
+      hold: cameraOn && picked.isEmpty && !libraryLoading && !friend.request ? { hold(friend, $0, origin: $1) } : nil,
       cancelHold: {
         guard recordingFor == friend else { return }
         recordingChanged(nil)
