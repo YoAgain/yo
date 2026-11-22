@@ -216,13 +216,17 @@ impl Hub {
         folded
     }
 
-    /// Devices pushed over a minute ago with nothing held: a push to them goes at once anyway.
-    pub(crate) fn forget_pushes(&self) {
-        let now = Instant::now();
+    /// Devices pushed longer ago than the longest window (`push_window`) with nothing held: a push to them goes at
+    /// once anyway. One forgotten sooner would lose a backlog device's pacing.
+    pub(crate) fn forget_pushes(&self, now: Instant) {
+        let limits = &self.config.limits;
+        let longest = Duration::from_secs(limits.push_backlog_interval_s)
+            .max(Duration::from_millis(limits.push_window_request_ms.max(limits.push_window_contact_ms)))
+            .max(Duration::from_secs(60));
         self.pushes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|_, pushed| pushed.held.is_some() || now.duration_since(pushed.at) < Duration::from_secs(60));
+            .retain(|_, pushed| pushed.held.is_some() || now.saturating_duration_since(pushed.at) < longest);
     }
 
     pub(crate) async fn push(self: Arc<Self>, wake: db::Wake, urgent: bool) {

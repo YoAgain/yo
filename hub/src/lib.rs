@@ -348,7 +348,7 @@ impl Hub {
         loop {
             every.tick().await;
             self.replay.forget_expired(now_ms());
-            self.forget_pushes();
+            self.forget_pushes(std::time::Instant::now());
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
             let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;
             // The levels, once an hour at its first minute: counts only (`levels`), the operator's page.
@@ -1139,7 +1139,38 @@ mod tests {
         hub.push_paced(wake(), false, Duration::from_millis(100), &runtime);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(pushes(&recorder), 5, "the contact's window ends it");
-        hub.forget_pushes();
+        hub.forget_pushes(std::time::Instant::now());
+    }
+
+    /// Spec 6.7: a device in backlog pacing gets one push per `push_backlog_interval_s`, also when its deliveries
+    /// come more than a minute apart: the hourly-minute cleanup forgets no push whose window is still open.
+    #[tokio::test]
+    async fn backlog_pacing_outlives_the_minutes_cleanup() {
+        let limits = config::Limits { push_backlog: 50, push_backlog_interval_s: 600, ..config::Limits::default() };
+        let (hub, recorder) = apns_hub(limits);
+        let wake = || db::Wake {
+            device_id: [1; 16],
+            push_platform: api::PUSH_APNS,
+            push_token: b"a1b2c3".to_vec(),
+            bot: false,
+            waiting: 51,
+        };
+        let runtime = tokio::runtime::Handle::current();
+        let window = hub.push_window(false, 51);
+        hub.push_paced(wake(), false, window, &runtime);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(pushes(&recorder), 1);
+        // Two minutes later (the cleanup runs every minute), the next delivery: still within its 10 minutes.
+        hub.forget_pushes(std::time::Instant::now() + Duration::from_secs(120));
+        hub.push_paced(wake(), false, window, &runtime);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(pushes(&recorder), 1, "held for the end of the backlog window, not pushed at once");
+        // Another device, pushed once with nothing held: forgotten past the longest window only.
+        hub.push_paced(db::Wake { device_id: [2; 16], ..wake() }, false, window, &runtime);
+        hub.forget_pushes(std::time::Instant::now() + Duration::from_secs(599));
+        assert_eq!(hub.pushes.lock().unwrap().len(), 2);
+        hub.forget_pushes(std::time::Instant::now() + Duration::from_secs(601));
+        assert_eq!(hub.pushes.lock().unwrap().len(), 1, "only the one with a push held is kept");
     }
 
     /// Spec 6.7: a device with more than `push_backlog` envelopes waiting gets one push per
