@@ -295,7 +295,6 @@
     <string name="signin_use_a_key">Not listed? Use a key: passkey or recovery key</string>
     <string name="signin_scan">Scan recovery key</string>
     <string name="signin_photo">Choose recovery key photo</string>
-    <string name="settings_title">Yodentity</string>
     <string name="how_recovery_works">How Account Recovery Works</string>
     <string name="recovery_help_intro">Your account is protected by an account key that only your devices hold.</string>
     <string name="recovery_help_passkey">Optionally, back up your account key with a passkey. Your screen lock or your password manager unlocks it on a new phone.</string>
