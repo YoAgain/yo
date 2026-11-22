@@ -96,12 +96,13 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE }
 /**
  * A long press on a bar, as iOS's menu: what waits to be sent and the last Yo (greyed), then a friend's Block, Report
  * (Spam, Abuse, Something Else) and Remove; a group's Members, Rename and Leave. A report asks to block too.
+ * [leaving]: a group's swipe, straight to the menu's own Leave question without the sheet.
  */
-@Composable fun FriendMenu(model: YoViewModel, friend: Friend, onClose: () -> Unit) = YoSystemTheme {
+@Composable fun FriendMenu(model: YoViewModel, friend: Friend, leaving: Boolean = false, onClose: () -> Unit) = YoSystemTheme {
     val s by model.repository.state.collectAsStateWithLifecycle()
     val repo = model.repository
     val res = LocalResources.current
-    var action by remember { mutableStateOf<FriendAction?>(null) }
+    var action by remember { mutableStateOf(if (leaving) FriendAction.LEAVE else null) }
     var rename by remember { mutableStateOf(friend.name) }
     var busy by remember { mutableStateOf(false) }
     var members by remember { mutableStateOf(false) }
@@ -109,7 +110,7 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE }
     var problem by remember { mutableStateOf<Pair<String, String>?>(null) }
     val stacks by repo.media.undo.collectAsStateWithLifecycle()
     if (members) { GroupMembersSheet(model, friend, onClose = { members = false; onClose() }); return@YoSystemTheme }
-    FittedSheet(onDismissRequest = onClose) {
+    if (!leaving) FittedSheet(onDismissRequest = onClose) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
             Text(if (friend.group == null) friend.name else "#" + friend.name.removePrefix("#"), Modifier.padding(start = 8.dp, bottom = 16.dp),
                 style = MaterialTheme.typography.headlineSmall)
@@ -171,7 +172,7 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE }
             FriendAction.RENAME -> stringResource(R.string.ui_rename)
             FriendAction.LEAVE -> stringResource(R.string.leave_action)
         }
-        val dismissAll = { action = null; if (reported) onClose() }
+        val dismissAll = { action = null; if (reported || leaving) onClose() }
         AlertDialog(
             onDismissRequest = { if (!busy) dismissAll() },
             title = { Text(title) },

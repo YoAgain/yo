@@ -661,6 +661,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     }
 
     var menu by remember { mutableStateOf<Friend?>(null) }
+    var leaving by remember { mutableStateOf<Friend?>(null) }
     var cameraOn by remember { mutableStateOf(false) }
     var controlsStrip by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
     var cameraVersion by remember { mutableIntStateOf(0) }
@@ -900,7 +901,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         if(recording==friend.key && camera.recordZoom(y,top,bottom,height))
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
     }
-    rowActions.remove = { friend -> repo.requestRemove(friend) }
+    // A group's swipe leaves it, asked first as from its menu (Yo has no group blocking); a friend's removes them.
+    rowActions.remove = { friend -> if(friend.group!=null) leaving=friend else repo.requestRemove(friend) }
     rowActions.inControls = { y -> cameraOn && controlsStrip.let { y >= it.top && y <= it.bottom } }
     Box(Modifier.fillMaxSize()) {
         if (cameraOn) key(cameraVersion) {
@@ -1144,6 +1146,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     })
     if(group) GroupSheet(model,s,onClose={group=false})
     menu?.let { friend -> FriendMenu(model,friend,onClose={menu=null}) }
+    leaving?.let { friend -> FriendMenu(model,friend,leaving=true,onClose={leaving=null}) }
     viewing?.let { queue -> MediaViewer(repo,queue,heldFinger,onClose={viewing=null}) }
 }
 
@@ -1278,6 +1281,7 @@ internal class RowActions {
         if(value==SwipeToDismissBoxValue.EndToStart) { actions.remove(friend);false } else true
     })
     val res = androidx.compose.ui.platform.LocalResources.current
+    val removeLabel = if (friend.group != null) R.string.leave_action else R.string.ui_remove
     // As iOS's bar actions: filming without holding, and the menu's and swipe's actions for screen readers.
     val a11y = Modifier.semantics {
         customActions = buildList {
@@ -1286,7 +1290,7 @@ internal class RowActions {
                 actions.hold(friend, recording != friend.key); true })
             if (!cameraOn && !friend.request) {
                 add(androidx.compose.ui.semantics.CustomAccessibilityAction(res.getString(R.string.contact_actions)) { actions.menu(friend); true })
-                add(androidx.compose.ui.semantics.CustomAccessibilityAction(res.getString(R.string.ui_remove)) { actions.remove(friend); true })
+                add(androidx.compose.ui.semantics.CustomAccessibilityAction(res.getString(removeLabel)) { actions.remove(friend); true })
             }
         }
     }
@@ -1299,7 +1303,7 @@ internal class RowActions {
                     Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 24.dp),
                     contentAlignment = Alignment.CenterEnd,
                 ) {
-                    Icon(Icons.Default.Delete, stringResource(R.string.ui_remove))
+                    Icon(Icons.Default.Delete, stringResource(removeLabel))
                 }
             }
         },

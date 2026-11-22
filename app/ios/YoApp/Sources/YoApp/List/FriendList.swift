@@ -592,12 +592,13 @@ struct FriendList: View {
         set: { open in swiped = open ? friend.key : swiped == friend.key ? nil : swiped }),
       enabled: !cameraOn,
       request: friend.request ? { yes in chooseRequest(friend, yes: yes) } : nil,
-      actionsEnabled: friend.group == nil,
       mirrored: leftHanded,
       activity: lastActivity(for: friend),
       began: { if swiped != friend.key { withAnimation(.snappy) { swiped = nil } } },
-      block: { blocking = (friend, false) },
-      remove: { remove(friend) }
+      // A group swipes open to Leave alone, the menu's own Leave with its confirmation; Yo has no group blocking.
+      block: friend.group == nil ? { blocking = (friend, false) } : nil,
+      removeTitle: friend.group == nil ? "Trash" : "Leave",
+      remove: { if friend.group == nil { remove(friend) } else { withAnimation(.snappy) { swiped = nil }; leaving = friend } }
     ) {
       VStack(spacing: 0) {
         // The bar itself lifts on a long press (a separate preview got the menu's inset platter), with its own colour

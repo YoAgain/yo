@@ -6,31 +6,33 @@ struct BarActivity {
   let accessibility: String
 }
 
-/// A bar that slides sideways under a horizontal swipe and shows Block and Remove underneath, as Mail's list does
-/// (`.swipeActions` exists only inside `List`). A vertical move stays the list's scroll.
+/// A bar that slides sideways under a horizontal swipe and shows its actions underneath, as Mail's list does
+/// (`.swipeActions` exists only inside `List`): a friend's Block and Trash, a group's Leave alone (no group blocking).
+/// A vertical move stays the list's scroll.
 struct SwipeActions<Content: View>: View {
   @Binding var open: Bool
   let enabled: Bool
   var request: ((Bool) -> Void)? = nil
-  let actionsEnabled: Bool
   let mirrored: Bool
   let activity: BarActivity
   let began: () -> Void
-  let block: () -> Void
+  let block: (() -> Void)?
+  let removeTitle: String
   let remove: () -> Void
   @ViewBuilder let content: Content
   @State private var dragged: CGFloat?
 
   private static var button: CGFloat { 128 }  // room for the row-sized words with air on both sides
-  private static var width: CGFloat { 2 * button }
+  private var width: CGFloat { (block == nil ? 1 : 2) * Self.button }
 
   var body: some View {
-    let resting: CGFloat = enabled && open ? -Self.width : 0
+    let width = width
+    let resting: CGFloat = enabled && open ? -width : 0
     let moved = enabled ? resting + (dragged ?? 0) : 0
     let direction: CGFloat = mirrored ? -1 : 1
     let revealing = moved > 0
-    let offset: CGFloat = request != nil || revealing ? moved : actionsEnabled
-      ? (moved < -Self.width ? -Self.width + (moved + Self.width) / 3 : moved) : 0
+    let offset: CGFloat = request != nil || revealing ? moved
+      : moved < -width ? -width + (moved + width) / 3 : moved
     content
       .overlay {
         // Open: a tap on the bar closes it (the bar does nothing else then).
@@ -61,11 +63,11 @@ struct SwipeActions<Content: View>: View {
             .transition(.identity)
         } else if offset < 0 {
           HStack(spacing: 0) {
-            if mirrored { action("Trash", .alizarin) { remove() } }
-            action("Block", Color(.systemGray)) { close(); block() }  // not a bar's own colour
-            if !mirrored { action("Trash", .alizarin) { remove() } }
+            if mirrored { action(removeTitle, .alizarin) { remove() } }
+            if let block { action("Block", Color(.systemGray)) { close(); block() } }  // not a bar's own colour
+            if !mirrored { action(removeTitle, .alizarin) { remove() } }
           }
-          .frame(width: max(Self.width, -offset))
+          .frame(width: max(width, -offset))
           .transition(.identity)
         }
       }
@@ -80,7 +82,7 @@ struct SwipeActions<Content: View>: View {
             request(end < 0)
           }
           withAnimation(.spring(duration: 0.35, bounce: 0.2)) {
-            open = request == nil && actionsEnabled && end < 0 && (speed < -400 || (speed < 400 && end < -Self.width / 2))
+            open = request == nil && end < 0 && (speed < -400 || (speed < 400 && end < -width / 2))
             dragged = nil
           }
         }
@@ -91,8 +93,8 @@ struct SwipeActions<Content: View>: View {
       }
       .accessibilityActions {
         if enabled && request == nil {
-          Button("Block") { block() }
-          Button("Trash") { remove() }
+          if let block { Button("Block") { block() } }
+          Button(removeTitle) { remove() }
         }
       }
   }
