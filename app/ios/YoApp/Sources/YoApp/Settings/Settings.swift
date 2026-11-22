@@ -88,17 +88,30 @@ struct SettingsView: View {
         if let account = accounts.account {
           Section {
             NavigationLink(value: Page.account) {
-              HStack(spacing: 14) {
-                Avatar(name: account.username, size: 56)
-                Text(account.username)
-                  .font(.yo(26, relativeTo: .title2))
-                  .lineLimit(1)
-                  .minimumScaleFactor(0.5)
-                if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) { RecoveryBadge() }
-                Spacer(minLength: 0)
-                YourCodeButton {
-                  YourCodePage.prepare(name: account.username)
-                  sheet = .code
+              let name = Text(account.username).font(.yo(26, relativeTo: .title2)).lineLimit(1)
+              let badge = accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey)
+              let code = YourCodeButton {
+                YourCodePage.prepare(name: account.username)
+                sheet = .code
+              }
+              // The whole name beside the picture; at large text sizes where it does not fit there, on a line of
+              // its own under it (it was cut to "IosH…").
+              ViewThatFits(in: .horizontal) {
+                HStack(spacing: 14) {
+                  Avatar(name: account.username, size: 56)
+                  name.fixedSize()
+                  if badge { RecoveryBadge() }
+                  Spacer(minLength: 0)
+                  code
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                  HStack(spacing: 14) {
+                    Avatar(name: account.username, size: 56)
+                    if badge { RecoveryBadge() }
+                    Spacer(minLength: 0)
+                    code
+                  }
+                  name.minimumScaleFactor(0.5)
                 }
               }
               .padding(.vertical, 2)
