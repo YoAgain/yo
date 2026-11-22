@@ -132,37 +132,42 @@ import uniffi.yo.usernameValid
     }
     SnackbarHost(snackbar,Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp))
     }
-    state.invitation?.let { invitation -> YoSystemTheme { AlertDialog(onDismissRequest=repo::dismissInvite,title={Text(invitation.name)},
-        text={Text(invitation.problem ?: copy(if(invitation.known) ProductText.INVITE_YO else ProductText.INVITE_ADD_YO))},
-        confirmButton={
-            if (invitation.problem != null) TextButton(onClick=repo::dismissInvite){Text(stringResource(android.R.string.ok))}
-            else TextButton(onClick={repo.command { acceptInvite(invitation) }}){Text(copy(if(invitation.known) ProductText.YO else ProductText.ADD_AND_YO))}
-        },
-        dismissButton=if (invitation.problem != null) null else {{TextButton(onClick=repo::dismissInvite){Text(copy(ProductText.CANCEL))}}}) } }
     // As iOS: without notifications it offers them, a Yo back would otherwise go unnoticed.
     val notificationsOn by model.notificationsEnabled.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    if(state.firstYo) YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},
-        text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()) +
-            if (notificationsOn) "" else " " + stringResource(R.string.first_sent_turn_on))},
-        confirmButton={
-            if (notificationsOn) TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}
-            else TextButton(onClick={ repo.clearError(); openNotificationSettings(context) }){Text(copy(ProductText.TURN_ON_NOTIFICATIONS))}
-        },
-        dismissButton=if (notificationsOn) null else {{ TextButton(onClick=repo::clearError){Text(stringResource(R.string.not_now))} }}) }
-    state.emptyGroup?.let { group -> YoSystemTheme { AlertDialog(onDismissRequest=repo::emptyGroupSeen,
-        title={Text(copy(ProductText.GROUP_EMPTY))},
-        text={Text(uiResources.getString(R.string.group_empty_delete, group.name))},
-        confirmButton={TextButton(onClick={ repo.command { deleteEmptyGroup(group) } }){Text(stringResource(R.string.delete_group))}},
-        dismissButton={TextButton(onClick=repo::emptyGroupSeen){Text(stringResource(R.string.ui_cancel))}}) } }
-    state.keyChanged?.let { change -> YoSystemTheme { AlertDialog(onDismissRequest=repo::keyChangeSeen,
-        title={Text(uiResources.getString(R.string.has_a_new_key, change.friend.name))},
-        text={Text(uiResources.getString(R.string.new_key_explanation, change.friend.name))},
-        confirmButton={
-            if (change.confirm) TextButton(onClick={ repo.keyChangeSeen(); repo.command { confirm(change.friend) } }){Text(stringResource(R.string.confirm_new_key))}
-            else TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))}
-        },
-        dismissButton=if (change.confirm) {{ TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))} }} else null) } }
+    // One alert at a time, as iOS: a link opened while "First Yo Sent!" is up would cover it with a second window
+    // and its scrim (only the edge of the first one showing). The others follow when it is closed.
+    val invitation = state.invitation; val group = state.emptyGroup; val change = state.keyChanged
+    when {
+        invitation != null -> { YoSystemTheme { AlertDialog(onDismissRequest=repo::dismissInvite,title={Text(invitation.name)},
+            text={Text(invitation.problem ?: copy(if(invitation.known) ProductText.INVITE_YO else ProductText.INVITE_ADD_YO))},
+            confirmButton={
+                if (invitation.problem != null) TextButton(onClick=repo::dismissInvite){Text(stringResource(android.R.string.ok))}
+                else TextButton(onClick={repo.command { acceptInvite(invitation) }}){Text(copy(if(invitation.known) ProductText.YO else ProductText.ADD_AND_YO))}
+            },
+            dismissButton=if (invitation.problem != null) null else {{TextButton(onClick=repo::dismissInvite){Text(copy(ProductText.CANCEL))}}}) } }
+        state.firstYo -> YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},
+            text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()) +
+                if (notificationsOn) "" else " " + stringResource(R.string.first_sent_turn_on))},
+            confirmButton={
+                if (notificationsOn) TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}
+                else TextButton(onClick={ repo.clearError(); openNotificationSettings(context) }){Text(copy(ProductText.TURN_ON_NOTIFICATIONS))}
+            },
+            dismissButton=if (notificationsOn) null else {{ TextButton(onClick=repo::clearError){Text(stringResource(R.string.not_now))} }}) }
+        group != null -> { YoSystemTheme { AlertDialog(onDismissRequest=repo::emptyGroupSeen,
+            title={Text(copy(ProductText.GROUP_EMPTY))},
+            text={Text(uiResources.getString(R.string.group_empty_delete, group.name))},
+            confirmButton={TextButton(onClick={ repo.command { deleteEmptyGroup(group) } }){Text(stringResource(R.string.delete_group))}},
+            dismissButton={TextButton(onClick=repo::emptyGroupSeen){Text(stringResource(R.string.ui_cancel))}}) } }
+        change != null -> { YoSystemTheme { AlertDialog(onDismissRequest=repo::keyChangeSeen,
+            title={Text(uiResources.getString(R.string.has_a_new_key, change.friend.name))},
+            text={Text(uiResources.getString(R.string.new_key_explanation, change.friend.name))},
+            confirmButton={
+                if (change.confirm) TextButton(onClick={ repo.keyChangeSeen(); repo.command { confirm(change.friend) } }){Text(stringResource(R.string.confirm_new_key))}
+                else TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))}
+            },
+            dismissButton=if (change.confirm) {{ TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))} }} else null) } }
+    }
 }
 @Composable fun BrandText(text: String, size: Int, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
     Text(text, modifier, maxLines = maxLines, softWrap = maxLines > 1,
