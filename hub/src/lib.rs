@@ -196,6 +196,8 @@ pub struct Hub {
     blocking: Arc<Semaphore>,
     /// Requests whose small body is being read and handled at once (`admit`).
     reading: Arc<Semaphore>,
+    /// Those under way by address (`Limits::reading_per_ip`).
+    reading_by_ip: Arc<Places>,
     /// How far tests move the clock of sender certificates and of envelopes' arrival.
     shifted_ms: AtomicI64,
 }
@@ -254,6 +256,7 @@ impl Hub {
             disk_full: AtomicBool::new(false),
             blocking: Arc::new(Semaphore::new(BLOCKING_AT_ONCE)),
             reading: Arc::new(Semaphore::new(READING_AT_ONCE)),
+            reading_by_ip: Arc::default(),
             shifted_ms: AtomicI64::new(0),
             config,
         });
@@ -752,6 +755,33 @@ mod tests {
             }
         }
         hub.closing.send_replace(true);
+    }
+
+    /// Bodies that never come hold places to read: one address holds `reading_per_ip` at most, so the others' requests
+    /// still find one (`503` for that address only).
+    #[tokio::test]
+    async fn one_address_holds_a_few_reading_places_only() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let mut config = Config::for_tests();
+        config.limits.reading_per_ip = 64;
+        let hub = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+        let request = |ip: [u8; 4], body: Body| {
+            let mut request = Request::post(api::REGISTER).header("content-length", "100").body(body).unwrap();
+            request.extensions_mut().insert(ConnectInfo(SocketAddr::from((ip, 9))));
+            request
+        };
+        let never = || Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+        let slow: Vec<_> =
+            (0..64).map(|_| tokio::spawn(hub.router().oneshot(request([192, 0, 2, 1], never())))).collect();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let more = hub.router().oneshot(request([192, 0, 2, 1], Body::from(vec![0; 100]))).await.unwrap();
+        assert_eq!(more.status(), StatusCode::SERVICE_UNAVAILABLE, "that address holds its places");
+        let other = hub.router().oneshot(request([198, 51, 100, 1], Body::from(vec![0; 100]))).await.unwrap();
+        assert_eq!(other.status(), StatusCode::BAD_REQUEST, "another address is read (and its junk refused)");
+        for request in slow {
+            request.abort();
+        }
     }
 
     #[test]

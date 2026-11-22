@@ -51,15 +51,32 @@ pub(crate) async fn too_old(State(hub): Hubs, request: Request, next: Next) -> R
     next.run(request).await
 }
 
-/// Before a body is read (spec 6.6): too large is `413` at once, beyond `READING_AT_ONCE` `503`, too slow `408`.
+/// Before a body is read (spec 6.6): too large is `413` at once, beyond `Limits::reading_per_ip` or `READING_AT_ONCE` `503`,
+/// too slow `408`.
 pub(crate) async fn admit(State(hub): Hubs, request: Request, next: Next) -> Response {
     let said = header(request.headers(), CONTENT_LENGTH).and_then(|v| v.parse::<usize>().ok());
     if said.is_some_and(|n| n > limits::MAX_BODY) {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
+    // One address's first: slow bodies from one place must not hold everyone's.
+    let peer = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|ConnectInfo(peer)| *peer);
+    let by_ip = match peer.filter(|peer| !hub.own_service(*peer, request.headers())) {
+        Some(peer) => {
+            let key = match hub.ip(peer, request.headers()) {
+                IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                IpAddr::V6(v6) => v6.octets(),
+            };
+            match crate::limiter::take_place(&hub.reading_by_ip, key, hub.config.limits.reading_per_ip, None) {
+                Some(place) => Some(place),
+                None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            }
+        }
+        None => None,
+    };
     let Ok(_place) = hub.reading.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let _by_ip = by_ip;
     let (parts, body) = request.into_parts();
     let Ok(read) = tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, limits::MAX_BODY)).await else {
         return StatusCode::REQUEST_TIMEOUT.into_response();

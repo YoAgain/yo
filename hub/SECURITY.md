@@ -20,6 +20,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Fill one user's inbox | 5000 per device, then `507` for that recipient only; strangers' deliveries 20/recipient/day, none with requests off (spec 4.10) | a contact's spam (block: the key rotates); scarce request tokens later (8) |
 | Tell contacts apart by the access key | One profile key per account (Signal's), its access key the same for every contact; the hub keeps a SHA-256 of the access key only, compared in constant time (4.10) | the hub learns a delivery is a contact's, and a key rotation after a block |
 | Spend another device's request budget | Counted only after the signature holds | – |
+| Hold every reading place with slow bodies | 64 of the 512 per address (`503` for it alone), 20 s per body | many addresses |
 | Hold memory with inbox waits | 4 inbox requests per device at once | – |
 | Use up a user's one-time prekeys | Lookups 50/device/day; last-resort Kyber prekey keeps sessions possible; replay of a last-resort message refused (4.1); refill below 16 | first messages then use the last resort (weaker forward secrecy for that message) |
 | Read a backup record | Fetch signed by a door's auth key, else `404` as for none; sealed part padded | – |

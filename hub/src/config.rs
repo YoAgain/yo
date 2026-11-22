@@ -74,6 +74,9 @@ pub struct Limits {
     pub blob_get_per_ip_minute: u32,
     /// Groups one user makes a day (spec 4.9): each is kept until its last member leaves.
     pub groups_per_user_day: u32,
+    /// Requests with a body read and handled at once from one address (`admit`, of `READING_AT_ONCE`): beyond,
+    /// `503` for that address only. The server's own services pass.
+    pub reading_per_ip: u32,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -127,6 +130,7 @@ impl Default for Limits {
             blob_put_per_ip_minute: 120,
             blob_get_per_ip_minute: 600,
             groups_per_user_day: 100,
+            reading_per_ip: 64,
         }
     }
 }
@@ -162,6 +166,7 @@ impl Limits {
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,
             groups_per_user_day: u32::MAX,
+            reading_per_ip: u32::MAX,
             ..Limits::default()
         }
     }
