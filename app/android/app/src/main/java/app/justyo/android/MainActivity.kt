@@ -90,7 +90,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
                     stage(friend,staged)
                 }
             } catch(e: CancellationException) { throw e }
-            catch(e: Exception) { if(version==shareImportVersion) { error(friendlyError(getApplication(),e));shares.value=runCatching { repository.pendingShares.items() }.getOrDefault(emptyList()) } }
+            catch(e: Exception) { if(version==shareImportVersion) { error(shareImportError(getApplication(),e));shares.value=runCatching { repository.pendingShares.items() }.getOrDefault(emptyList()) } }
             finally { if(version==shareImportVersion) importingShares.value=false }
         }
     }
@@ -178,3 +178,9 @@ class MainActivity : ComponentActivity() {
     override fun onStart() { super.onStart(); model.repository.active(true) }
     override fun onStop() { model.repository.active(false); super.onStop() }
 }
+
+/** A shared item the app may not read (no grant from the sharing app, or gone): the platform's text names the URI. */
+internal fun unreadableShare(e: Exception) = e is SecurityException || e is java.io.FileNotFoundException
+
+private fun shareImportError(context: Application, e: Exception) =
+    if (unreadableShare(e)) context.getString(R.string.ui_couldn_t_open_this_photo_or_video) else friendlyError(context, e)
