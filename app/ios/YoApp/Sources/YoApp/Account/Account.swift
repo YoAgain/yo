@@ -1095,6 +1095,7 @@ enum AccountError: LocalizedError {
     case .keychain: "Yo can’t use the keychain right now. Unlock your iPhone and try again."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
     case .hub(.Replaced): "Your account is in use on another iPhone."
+    case .hub(.Clock): productProblemText(problem: .wrongClock, lang: .english)
     // The raw error goes to the error log (Hub.run records it), never on screen.
     case .hub: "Something went wrong. Try again."
     }

@@ -128,7 +128,22 @@ final class HubTransport: HttpTransport {
   static var unsupported: Bool { tooOld.load(ordering: .relaxed) }
   /// TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`, "Check Your
   /// Phone's Date & Time").
-  static let badDates: Set<Int> = [NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid]
+  static func badDates(_ error: NSError) -> Bool {
+    guard error.domain == NSURLErrorDomain else { return false }
+    if error.code == NSURLErrorServerCertificateHasBadDate || error.code == NSURLErrorServerCertificateNotYetValid {
+      return true
+    }
+    // Under App Transport Security iOS says only "TLS failed" (-1200, seen for an expired certificate in iOS 26):
+    // the dates are in the trust's own verdict, which the error carries.
+    guard error.code == NSURLErrorSecureConnectionFailed || error.code == NSURLErrorServerCertificateUntrusted,
+      let value = error.userInfo[NSURLErrorFailingURLPeerTrustErrorKey],
+      CFGetTypeID(value as CFTypeRef) == SecTrustGetTypeID()
+    else { return false }
+    var failure: CFError?
+    guard !SecTrustEvaluateWithError(value as! SecTrust, &failure), let failure else { return false }
+    let code = CFErrorGetCode(failure)
+    return code == CFIndex(errSecCertificateExpired) || code == CFIndex(errSecCertificateNotValidYet)
+  }
 
   let base: URL
   /// The inbox waits up to a minute; the notification extension has 30 s in all.
@@ -274,7 +289,8 @@ final class HubTransport: HttpTransport {
         Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
       }
     }
-    Availability.network(answer.result.status == 0 || answer.result.status >= 500, started: started)
+    Availability.network(answer.result.status == 0 || answer.result.status >= 500,
+      clock: answer.result.error?.hasPrefix("clock: ") == true, started: started)
     if answer.result.status > 0 && answer.result.status < 500 { Self.answered?() }
     if Perf.on {
       let ms = (CACurrentMediaTime() - start) * 1000
@@ -343,7 +359,7 @@ final class HubTransport: HttpTransport {
         if error.domain == NSURLErrorDomain, quiet.contains(error.code) {
           // Not counted.
         } else if error.domain == NSURLErrorDomain,
-          Self.offline.contains(error.code) || HubTransport.badDates.contains(error.code)
+          Self.offline.contains(error.code) || HubTransport.badDates(error)
         {
           // The phone's network or its clock, not Yo: counted as expected; the core tries again.
           CountedErrors.record(domain: error.domain, place: diagnosticPlace, code: String(error.code), expected: true)
@@ -355,7 +371,7 @@ final class HubTransport: HttpTransport {
         if let diagnosticPlace { Diagnostics.record(NSError(domain: "HubTransport", code: 413), place: diagnosticPlace) }
         done(Data(), nil, "answer too large")
       } else {
-        let dates = (error as NSError?).map { $0.domain == NSURLErrorDomain && HubTransport.badDates.contains($0.code) }
+        let dates = (error as NSError?).map(HubTransport.badDates)
         done(data, response, error.map { (dates == true ? "clock: " : "") + $0.localizedDescription })
       }
     }
@@ -567,6 +583,10 @@ final class Availability {
   var remote = false { didSet { settle() } }
   /// Only after a moment unreachable (a launch's or a return's first try is not "offline").
   private(set) var offline = false
+  /// The last request failed because TLS refused the hub's certificate for its dates: the phone's clock is off.
+  private(set) var clock = false
+  /// Unreachable for the phone's clock, not its network: the banner says to check the date and time, not "Offline".
+  var wrongClock: Bool { offline && remote && clock && !local }
   private var pending: Task<Void, Never>?
   @ObservationIgnored private var front = true
   @ObservationIgnored private var since = ContinuousClock.now
@@ -599,9 +619,10 @@ final class Availability {
       self.offline = self.local || self.remote
     }
   }
-  nonisolated static func network(_ failed: Bool, started: ContinuousClock.Instant) {
+  nonisolated static func network(_ failed: Bool, clock: Bool, started: ContinuousClock.Instant) {
     Task { @MainActor in
       if failed && (!shared.front || started < shared.since) { return }
+      shared.clock = failed && clock
       shared.remote = failed
     }
   }

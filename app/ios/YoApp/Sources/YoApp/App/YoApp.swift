@@ -111,9 +111,12 @@ struct YoApp: App {
   }
 
   private func updateBanner() {
+    // A clock far off fails every request in TLS (the certificate's dates): not "Offline" but what to do about it.
+    let clock = Availability.shared.wrongClock
     let snapshot = DeleteNotice.shared.model.connectivity(
       now: DeleteNotice.now,
-      offline: Availability.shared.offline, failure: Problems.shared.text)
+      offline: Availability.shared.offline && !clock,
+      failure: clock ? productProblemText(problem: .wrongClock, lang: .english) : Problems.shared.text)
     if let receive = DeleteNotice.shared.receive { receive(snapshot) }
     else { DeleteNotice.shared.banner = snapshot.banner }
   }
@@ -172,6 +175,7 @@ struct YoApp: App {
       .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.banner)
       .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.deletion?.id)
       .onChange(of: Availability.shared.offline, initial: true) { _, _ in updateBanner() }
+      .onChange(of: Availability.shared.wrongClock) { _, _ in updateBanner() }
       .onChange(of: Problems.shared.text) { _, _ in updateBanner() }
       .task(id: phase) {
         guard phase == .active else { return }

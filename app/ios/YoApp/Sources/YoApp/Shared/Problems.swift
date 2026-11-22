@@ -44,7 +44,7 @@ import YoCore
   static func problem(of error: Error) -> ProductProblem {
     if let error = error as? YoError { return productProblemOf(error: error) }
     if (error as NSError).domain == NSURLErrorDomain {
-      return HubTransport.badDates.contains((error as NSError).code) ? .wrongClock : .noConnection
+      return HubTransport.badDates(error as NSError) ? .wrongClock : .noConnection
     }
     return .failed
   }
