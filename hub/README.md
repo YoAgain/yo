@@ -125,6 +125,8 @@ Operator To-Dos: `POST /v1/admin/todos`, plain UTF-8 body (1–4000 bytes),
 `Yo-Admin-Token` header matching `YO_ADMIN_TOKEN`; returns `201 {"id": integer}`.
 Unset/empty token or missing/wrong credential returns `404`; comparison is constant time.
 The route uses the crash-report rate (5/address/day) in its own bucket; no peer address grants access.
+Behind Cloudflare (`YO_TRUST_CLOUDFLARE=1`) every admin route answers only the server itself (loopback without
+`CF-Connecting-IP`, the admin page): through the tunnel even the right token is `404`.
 To-dos live in `todos` (schema 7; `GET`, done/reopen and `DELETE` on `/v1/admin/todos/{id}`); support threads live in `support_messages` by install id; crashes/errors live in `diagnostics`, their installs per day in `diagnostic_installs`.
 
 Reserved names live only in SQLite. New databases enforce reservations by default; existing databases migrate

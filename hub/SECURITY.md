@@ -24,6 +24,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Use up a user's one-time prekeys | Lookups 50/device/day; last-resort Kyber prekey keeps sessions possible; replay of a last-resort message refused (4.1); refill below 16 | first messages then use the last resort (weaker forward secrecy for that message) |
 | Read a backup record | Fetch signed by a door's auth key, else `404` as for none; sealed part padded | – |
 | Push to another path on Apple's host | Non-hex APNs tokens cleared | – |
+| Use the admin token from the internet | Behind Cloudflare the admin routes answer loopback without `CF-Connecting-IP` only (the admin page); else `404` | a process on the server |
 | Spoof `CF-Connecting-IP` | Only with `YO_TRUST_CLOUDFLARE`; warning when not listening on loopback | operator: check the published port |
 | Lose recent commits to an OS crash or power cut | SQLite WAL `synchronous = NORMAL`; process crashes preserve commits | Recent acknowledged deliveries and other state changes can roll back; see durability below |
 | Act as a replaced device | Every write checks the device in its own transaction (`410`) | – |

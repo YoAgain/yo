@@ -723,6 +723,37 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Behind Cloudflare the admin routes answer only the server itself (the admin page, on loopback without
+    /// `CF-Connecting-IP`): the right token through the tunnel, or from another address, is `404` as a wrong one.
+    #[tokio::test]
+    async fn behind_cloudflare_the_admin_routes_answer_only_the_server_itself() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let config = Config { admin_token: Some("test-token".into()), trust_cloudflare: true, ..Config::for_tests() };
+        let hub = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+        let loopback = SocketAddr::from(([127, 0, 0, 1], 9));
+        for (peer, through_tunnel, expected) in [
+            (Some(loopback), false, StatusCode::OK),
+            (Some(loopback), true, StatusCode::NOT_FOUND),
+            (Some(SocketAddr::from(([192, 0, 2, 1], 9))), false, StatusCode::NOT_FOUND),
+            (None, false, StatusCode::NOT_FOUND),
+        ] {
+            for path in ["/v1/admin/todos", "/v1/admin/live"] {
+                let mut request = Request::get(path).header("yo-admin-token", "test-token");
+                if through_tunnel {
+                    request = request.header("cf-connecting-ip", "192.0.2.7");
+                }
+                let mut request = request.body(Body::empty()).unwrap();
+                if let Some(peer) = peer {
+                    request.extensions_mut().insert(ConnectInfo(peer));
+                }
+                let response = hub.router().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), expected, "{path} from {peer:?}, tunnel {through_tunnel}");
+            }
+        }
+        hub.closing.send_replace(true);
+    }
+
     #[test]
     fn a_registration_id_out_of_range_or_an_auth_key_off_the_curve_is_refused() {
         let good = config::hub_public_key(&[3; 32]);

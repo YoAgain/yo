@@ -1,5 +1,6 @@
 //! The operator's routes behind `Yo-Admin-Token` (hub/README.md): support threads, the to-dos, diagnostics, reserved
-//! names, deleting a user, the live strip's stream of Yos. Missing, disabled and incorrect credentials all answer `404`.
+//! names, deleting a user, the live strip's stream of Yos. Missing, disabled and incorrect credentials all answer `404`;
+//! behind Cloudflare (`YO_TRUST_CLOUDFLARE`) so does every request but the server's own (`Hub::own_service`).
 
 use crate::error::{refuse, Res};
 use crate::request::{bad, Hubs, Peer, DAY};
@@ -48,7 +49,10 @@ async fn admin_only(State(hub): Hubs, request: Request, next: Next) -> Response 
     let supplied = request.headers().get("yo-admin-token").map(|v| v.as_bytes()).unwrap_or_default();
     // Hashed to one length before the constant-time comparison.
     let admitted = token.is_some_and(|token| bool::from(sha256(token.as_bytes()).ct_eq(&sha256(supplied))));
-    match admitted {
+    // Behind Cloudflare only the server itself (the admin page): never through the tunnel, whatever it carries.
+    let peer = request.extensions().get::<ConnectInfo<std::net::SocketAddr>>().map(|ConnectInfo(peer)| *peer);
+    let local = !hub.config.trust_cloudflare || peer.is_some_and(|peer| hub.own_service(peer, request.headers()));
+    match admitted && local {
         true => next.run(request).await,
         false => StatusCode::NOT_FOUND.into_response(),
     }
