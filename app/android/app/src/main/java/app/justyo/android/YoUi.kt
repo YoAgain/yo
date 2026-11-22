@@ -1288,8 +1288,11 @@ internal class RowActions {
 /** One row of the list: the swipe to remove around the bar. Skipped when nothing it shows changed. */
 @Composable internal fun FriendRow(repo: Repository, friend: Friend, bar: BarContent, shade: Color, cameraOn: Boolean, recording: String?,
     leftHanded: Boolean, holdable: Boolean, actions: RowActions) {
+    // The swipe state is remembered with its first callback: it reaches the bar as it is now (a renamed group's
+    // Leave names the new name), not as it was when the row first showed.
+    val current by rememberUpdatedState(friend)
     val dismiss = rememberSwipeToDismissBoxState(confirmValueChange={ value ->
-        if(value==SwipeToDismissBoxValue.EndToStart) { actions.remove(friend);false } else true
+        if(value==SwipeToDismissBoxValue.EndToStart) { actions.remove(current);false } else true
     })
     val res = androidx.compose.ui.platform.LocalResources.current
     val removeLabel = if (friend.group != null) R.string.leave_action else R.string.ui_remove
