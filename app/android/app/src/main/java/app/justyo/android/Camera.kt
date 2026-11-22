@@ -231,18 +231,39 @@ class YoCamera(private val context: Context) {
         val options=FileOutputOptions.Builder(file).setDurationLimitMillis(VideoLimitMs).build()
         var pending=capture.output.prepareRecording(context,options)
         if(ContextCompat.checkSelfPermission(context,Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED) pending=pending.withAudioEnabled()
+        var finished=false
+        fun finish(uri: Uri?) {
+            if(finished) return
+            finished=true
+            stopWatch?.let(main::removeCallbacks)
+            stopWatch=null
+            finishStuck=null
+            recording=null
+            filming=false
+            done(uri)
+            if(uri==null) file.delete()
+        }
+        // A recorder whose encoder never delivers a frame stays in "stopping" and never finalizes: the bar said
+        // "Recording" for good and the camera could not be closed. Past this wait it counts as a failed recording.
+        stopWatch=null
         recording=pending.start(ContextCompat.getMainExecutor(context)) { event ->
             if(event is VideoRecordEvent.Finalize) {
-                recording=null
-                filming=false
                 val ok=!event.hasError() || event.error==VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED
-                done(if(ok) Uri.fromFile(file) else null)
-                if(!ok) file.delete()
+                finish(if(ok) Uri.fromFile(file) else null)
             }
         }
+        val started=recording
+        finishStuck={ started?.close(); finish(null) }
         filming=true
     }
-    fun stopVideo() { cancelWaiting(); recording?.stop() }
+    private var stopWatch: Runnable?=null
+    private var finishStuck: (() -> Unit)?=null
+    fun stopVideo() {
+        cancelWaiting()
+        val active=recording ?: return
+        active.stop()
+        if(stopWatch==null) stopWatch=Runnable { stopWatch=null; finishStuck?.invoke() }.also { main.postDelayed(it, StopTimeoutMs) }
+    }
     private fun cancelWaiting() { waiting?.let { (retry, done) -> waiting=null; main.removeCallbacks(retry); done(null) } }
     fun close() {
         binding++
@@ -262,6 +283,8 @@ class YoCamera(private val context: Context) {
 }
 /** Media limits and encoding, the core's (`yo_product`). A longer shared video is refused: Android has no trimmer. */
 internal val VideoLimitMs = uniffi.yo.productVideoLimitMs().toLong()
+/** How long a stopped recording may take to finalize before it counts as failed (a stuck encoder). */
+private const val StopTimeoutMs = 5_000L
 internal val LargestVideo = uniffi.yo.productVideoLimitBytes().toLong()
 private val PhotoLongSide = uniffi.yo.productPhotoLongSide().toDouble()
 private val Encoding = uniffi.yo.productEncoding()
