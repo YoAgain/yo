@@ -274,6 +274,24 @@ tapped with `tapxy sb=true`.
 | Hunt 5: 300 Yos from a friend with Yo closed, then `sim.sh notify` and one more Yo | before: the notification service read 256 (`GUEST_EVENTS`) and stopped; its next push found nothing, a bare "Yo" (on an iPhone every push until the app is opened). Fixed: a guest holds at most 2048 for the app and drops the oldest past them, never stops reading; the newest shows ("Yo from …", badge 302 then 303). The widgets' list now follows: the service lifts the senders' bars in the shared list and reloads the widgets. The Simulator now runs YoNotify itself on a push (simctl log: "Received replacement content"), so a probe run after it finds nothing new: the service took it |
 | Clock change, App Switcher | the Simulator takes the Mac's clock; App Switcher leaves Yo inactive (in front), as home and back above |
 
+## Onboarding, recovery, contact safety, clock (2026-11-22, hunt 6)
+
+Against the dev hub on Simulators of their own (deleted afterwards), throwaway CLI accounts (deleted). A phone clock
+far off is stood in for by `launch env=YO_HUB:https://expired.badssl.com` (the same TLS refusal of the dates).
+
+| Flow | Result |
+|---|---|
+| Fresh install: welcome, name taken ("Name taken. Sign In"), home and back mid-typing (name kept), Sign Up; notification prompt only with the list | ok |
+| Sign Up offline | was "Couldn't sign up. Check your connection" for every failure, 429 included (the AccountError was matched as a YoError): fixed |
+| Clock far off | was "Offline" for good (iOS 26 says -1200 under ATS, not -1201): "Check Your Phone's Date & Time": fixed |
+| Recovery key shown (Face ID) and saved, restored by typing it on a second Simulator | ok |
+| The first phone after that | was the welcome as if signed out, unexplained: "Your account is in use on another iPhone." on it and the card: fixed |
+| Delete Account, Sign Up again with the same name; the old contact's Yo to the name | a new person: "Yo Request from …" | 
+| Long press on a request to report it | accepted it and sent the stranger a Yo (no menu, the held finger was a tap): its own menu with Block, Report and Decline: fixed |
+| Report Spam on a request, then Block | the report in the dev hub's reports; the blocked one's add and Yo show nothing |
+| State database corrupted, launch | 30 s "Offline", then the recovery's registration and every later Sign In failed in the unreadable file ("Something went wrong") until Yo was deleted: the reset removes it, the app signs in again by itself: fixed |
+| Identity key change of a contact | not reachable from a client: an account key stays one user's (spec 3.2); a reinstall without the backup is a new person (above). The alert's path pointed to "Profile": fixed |
+
 ## Left
 
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
