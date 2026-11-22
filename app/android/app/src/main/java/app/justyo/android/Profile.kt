@@ -349,10 +349,10 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                 shown == "Licenses" -> LicensesPage()
                 // At half height the first page never scrolls: the profile card takes the room the rows leave, so the
                 // gap under the last section is the one at the top. Accessibility font sizes keep the compact card and scroll.
-                shown == "Profile" && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-                    ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true }, Modifier.weight(1f), grow = true)
-                    ProfileRows(s, repo, ::open, onAddFriends)
-                }
+                shown == "Profile" && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f -> CardOverRows(
+                    card = { ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true }, Modifier.fillMaxHeight(), grow = true) },
+                    rows = { Column { ProfileRows(s, repo, ::open, onAddFriends) } },
+                )
                 else -> Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(top = 8.dp)) { when {
                     shown == "Profile" -> {
                         ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true })
@@ -711,6 +711,31 @@ private fun shareCode(context: Context, name: String) {
         gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends)),
     )
 }
+
+/** The first page at half height: the rows at their own height, the card in the room they leave, but never less than
+ *  the compact card. A half sheet too short for both (a short screen, larger text) scrolls instead of squeezing the
+ *  card to nothing. */
+@Composable private fun CardOverRows(card: @Composable () -> Unit, rows: @Composable () -> Unit) {
+    val scroll = rememberScrollState()
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val room = constraints.maxHeight
+        androidx.compose.ui.layout.SubcomposeLayout(Modifier.verticalScroll(scroll).padding(horizontal = 16.dp)) { c ->
+            val width = c.maxWidth
+            val below = subcompose("rows", rows).map { it.measure(androidx.compose.ui.unit.Constraints(maxWidth = width)) }
+            val rowsHeight = below.sumOf { it.height }
+            val cardHeight = maxOf(room - rowsHeight, CompactCard.roundToPx())
+            val top = subcompose("card", card).map { it.measure(androidx.compose.ui.unit.Constraints.fixed(width, cardHeight)) }
+            layout(width, cardHeight + rowsHeight) {
+                top.forEach { it.place(0, 0) }
+                var y = cardHeight
+                below.forEach { it.place(0, y); y += it.height }
+            }
+        }
+    }
+}
+
+/** The compact card's height: a 48 dp avatar, the card's 16 dp padding around it and the 12 dp under the card. */
+private val CompactCard = 48.dp + 32.dp + 12.dp
 
 /** The account's card. Given room (a weight at half height) it grows: the avatar from 64 up to 96 dp, the name with it,
  *  centred in the card; with none it is the compact card. */
