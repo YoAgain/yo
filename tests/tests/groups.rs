@@ -491,3 +491,20 @@ fn an_own_credential_refused_for_good_is_asked_for_after_a_pause_only() {
     rounds(&mut c, 20);
     assert_eq!(credential(&https[1]) - asked_before, 4, "the second pause is longer");
 }
+
+/// Groups one account makes are limited a day (each is kept until its last member leaves): past the limit `429`,
+/// another account is not held.
+#[test]
+fn the_groups_an_account_makes_are_limited() {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.groups_per_user_day = 2;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let mut p = people(&hub, 3);
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let others = [b.user_id().to_owned()];
+    for name in ["ONE", "TWO"] {
+        a.create_group(name, &others).unwrap();
+    }
+    assert!(a.create_group("THREE", &others).is_err(), "past the day's groups");
+    c.create_group("OTHER", &others).unwrap();
+}

@@ -72,6 +72,8 @@ pub struct Limits {
     pub blob_put_per_ip_minute: u32,
     /// Fetches, which name no one: by address only.
     pub blob_get_per_ip_minute: u32,
+    /// Groups one user makes a day (spec 4.9): each is kept until its last member leaves.
+    pub groups_per_user_day: u32,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -124,6 +126,7 @@ impl Default for Limits {
             blob_bytes_stored_per_user: GIB,
             blob_put_per_ip_minute: 120,
             blob_get_per_ip_minute: 600,
+            groups_per_user_day: 100,
         }
     }
 }
@@ -158,6 +161,7 @@ impl Limits {
             storage_per_user_hour: u32::MAX,
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,
+            groups_per_user_day: u32::MAX,
             ..Limits::default()
         }
     }

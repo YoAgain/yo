@@ -185,6 +185,7 @@ impl Hub {
         if request.actions.is_empty() {
             return self.answer(state, &me);
         }
+        self.db_room()?;
         if request.revision != state.revision.wrapping_add(1) {
             return Err(Refusal(StatusCode::CONFLICT, encode(&self.answer(state, &me)?)));
         }
@@ -274,8 +275,10 @@ pub(crate) async fn post_group_credential(State(hub): Hubs, Auth(device, body): 
     hub.profile_credential(&decode(&body)?)
 }
 
-/// `PUT /v1/groups/{id}`: a new group.
-pub(crate) async fn put_group(State(hub): Hubs, Path(id): Path<String>, Auth(_, body): Auth) -> Res<Vec<u8>> {
+/// `PUT /v1/groups/{id}`: a new group; so many a user a day, while the database's disk has room.
+pub(crate) async fn put_group(State(hub): Hubs, Path(id): Path<String>, Auth(device, body): Auth) -> Res<Vec<u8>> {
+    hub.limit_signed(&device, "group", &device.user_id, hub.config.limits.groups_per_user_day, DAY)?;
+    hub.db_room()?;
     Ok(encode(&hub.create_group(&path_id(&id)?, &decode(&body)?)?))
 }
 
