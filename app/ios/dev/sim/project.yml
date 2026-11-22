@@ -111,6 +111,7 @@ targets:
     sources:
       - ../../YoApp/Sources/Extensions/YoControls
       - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}  # the widgets' names (UIAppFonts)
+      - {path: ../../YoApp/Resources/Symbols.xcassets, buildPhase: resources}  # the controls' Yo symbols
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}

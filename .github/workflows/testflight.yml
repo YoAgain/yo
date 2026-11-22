@@ -253,7 +253,8 @@ jobs:
           export SSU_RESOURCES=$(dirname "$DEVELOPER_DIR")/Frameworks/SiriSSUKitModel.framework/Versions/A/Resources
           ls -d "$SSU_RESOURCES"
           # Xcode in place of the Linux SDK and its stand-ins.
-          # dev/actool.sh: Xcode's actool, keeping Info.plist's alternate icons through the merge of its partial plist.
+          # dev/actool.sh: Xcode's actool, keeping Info.plist's alternate icons through the merge of its partial plist,
+          # and compiling the controls' Yo symbols (Resources/Symbols.xcassets) into YoControls.
           export REAL_ACTOOL=$(xcrun -f actool) ACTOOL=$PWD/../dev/actool.sh DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
           "$GITHUB_WORKSPACE/.oad/ship.sh"

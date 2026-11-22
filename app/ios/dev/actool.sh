@@ -15,6 +15,14 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+# The controls' Yo symbols (Resources/Symbols.xcassets, custom SF Symbols): compile-app-icon.sh compiles icons only, so
+# when it compiles the app, the catalog goes into YoControls' own Assets.car here (the controls read their bundle's).
+appex=${bundle:+$bundle/PlugIns/YoControls.appex}
+if [ -n "$appex" ] && [ -d "$appex" ]; then
+  "$REAL_ACTOOL" "$(dirname "$0")/../YoApp/Resources/Symbols.xcassets" --compile "$appex" --platform iphoneos \
+    --minimum-deployment-target 26.0 --output-format human-readable-text --errors --warnings
+  [ -f "$appex/Assets.car" ] || { echo "actool.sh: no Assets.car in $appex" >&2; exit 1; }
+fi
 [ -n "$bundle" ] && [ -n "$partial" ] && [ -f "$partial" ] || exit 0
 python3 -I - "$bundle/Info.plist" "$partial" <<'PY'
 import plistlib, sys

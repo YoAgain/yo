@@ -1,4 +1,6 @@
 // Controls (Control Center, Lock Screen, Action button), widgets and the Live Activity; intents in YoIntents.swift.
+// The controls' Yo symbols (yo.wordmark, yo.back, yo.letter) are custom SF Symbols in Resources/Symbols.xcassets
+// (dev/symbols/make_symbols.py), compiled into this extension by dev/actool.sh.
 import AppIntents
 import Foundation
 import SwiftUI
@@ -35,7 +37,7 @@ struct SendYoControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     AppIntentControlConfiguration(kind: "app.justyo.ios.controls.send", provider: Provider()) { friend in
       ControlWidgetButton(action: friend.map(SendYoNowIntent.init(friend:)) ?? SendYoNowIntent()) {
-        Label(friend.map { "Yo \($0.name)" } ?? "Send Yo", systemImage: "hand.wave.fill")
+        Label(friend.map { "Yo \($0.name)" } ?? "Send Yo", image: "yo.wordmark")
       }
     }
     .displayName("Send Yo")
@@ -53,7 +55,7 @@ struct YoBackControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     StaticControlConfiguration(kind: "app.justyo.ios.controls.back") {
       ControlWidgetButton(action: YoBackNowIntent()) {
-        Label("Yo Back", systemImage: "arrowshape.turn.up.left.fill")
+        Label("Yo Back", image: "yo.back")
       }
     }
     .displayName("Yo Back")
@@ -77,7 +79,7 @@ struct OpenYoControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     StaticControlConfiguration(kind: "app.justyo.ios.controls.open") {
       ControlWidgetButton(action: OpenYoIntent()) {
-        Label("Open Yo", systemImage: "y.circle.fill")
+        Label("Open Yo", image: "yo.letter")
       }
     }
     .displayName("Open Yo")
