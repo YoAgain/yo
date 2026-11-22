@@ -375,8 +375,8 @@ struct FriendList: View {
           }
         } message: { friend in
           Text(
-            "\(friend.name) may have a new iPhone. If you didn’t expect this, compare safety numbers in Profile > "
-              + "Contacts.")
+            "\(friend.name) may have a new iPhone. If you didn’t expect this, compare safety numbers under Yodentity › "
+              + "\(accounts.account?.username ?? "your name") › Contacts.")
         }
         .overlay {
           ZStack {
