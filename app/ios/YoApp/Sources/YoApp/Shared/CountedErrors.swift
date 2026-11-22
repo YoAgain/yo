@@ -84,13 +84,16 @@ enum CountedErrors {
     SHA256.hash(data: Data(id.utf8)).prefix(3).map { String(format: "%02x", $0) }.joined()
   }
 
-  /// One line "day domain|place|code|expected|details" in one O_APPEND write, so processes never interleave.
+  /// One line "day domain|place|code|expected|details|build" in one O_APPEND write, so processes never interleave.
+  /// The build that counted it: the file waits for the app's next start in front (an Action button's Yo never
+  /// collects), often an update later, and the uploading build's name made a fixed failure look like the new build's
+  /// (IntentSend "open busy" 588 under RC21, counted by RC8 on that phone).
   static func record(domain: String, place: String, code: String, expected: Bool = false, details: String = "") {
     guard let file else { return }
     ensure(file)
     let clean = { (text: String) in String(text.map { $0 == "|" || $0.isNewline ? " " : $0 }.prefix(300)) }
     let line = "\(Int(Date.now.timeIntervalSince1970 / 86_400)) "
-      + [domain, place, code, expected ? "1" : "", details].map(clean).joined(separator: "|") + "\n"
+      + [domain, place, code, expected ? "1" : "", details, AppUpdate.header].map(clean).joined(separator: "|") + "\n"
     let fd = open(file.path, O_WRONLY | O_APPEND)
     guard fd >= 0 else { return }
     defer { close(fd) }
@@ -124,11 +127,14 @@ enum CountedErrors {
       let date = Date(timeIntervalSince1970: Double(day) * 86_400).formatted(format)
       for (key, count) in kinds.sorted(by: { $0.key < $1.key }) {
         let fields = key.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard fields.count == 5, !fields[0].isEmpty, !fields[1].isEmpty, !fields[2].isEmpty else { continue }
+        // Five fields: counted before the build was written down, by this build or an older one.
+        guard fields.count == 5 || fields.count == 6, !fields[0].isEmpty, !fields[1].isEmpty, !fields[2].isEmpty
+        else { continue }
+        let build = fields.count == 6 && !fields[5].isEmpty ? fields[5] : AppUpdate.header
         var payload = ["uuid": UUID().uuidString, "domain": fields[0], "place": fields[1], "code": fields[2],
           "count": String(min(count, 100_000)),
           "details": "\(date): \(count)" + (fields[4].isEmpty ? "" : " · " + fields[4]),
-          "app": AppUpdate.header, "os": ProcessInfo.processInfo.operatingSystemVersionString, "model": Diagnostics.model]
+          "app": build, "os": ProcessInfo.processInfo.operatingSystemVersionString, "model": Diagnostics.model]
         if fields[3] == "1" { payload["severity"] = "expected" }
         guard let json = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { continue }
         Diagnostics.append(String(decoding: json, as: UTF8.self), kind: "error", epoch: epoch)
