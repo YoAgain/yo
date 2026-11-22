@@ -143,8 +143,14 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
                 .setInputData(workDataOf("action" to action, "friend" to friend, "account" to account, "urgent" to urgent, "latest" to latest))
             if (expedited && Build.VERSION.SDK_INT >= 31) builder.setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             val manager = WorkManager.getInstance(context)
-            if (action == "send") manager.enqueue(builder.build())
-            else manager.enqueueUniqueWork("yo-$action", ExistingWorkPolicy.APPEND_OR_REPLACE, builder.build())
+            when (action) {
+                "send" -> manager.enqueue(builder.build())
+                // The newest token request replaces one still waiting: appended, it waited behind a retry that
+                // WorkManager timed by the wall clock, and after the clock was set back (hours ahead before) the hub
+                // got no token, so no push, for those hours. Asking for the token again is harmless.
+                "token" -> manager.enqueueUniqueWork("yo-token", ExistingWorkPolicy.REPLACE, builder.build())
+                else -> manager.enqueueUniqueWork("yo-$action", ExistingWorkPolicy.APPEND_OR_REPLACE, builder.build())
+            }
         }
 
         fun registerIfConfigured(context: Context) {
