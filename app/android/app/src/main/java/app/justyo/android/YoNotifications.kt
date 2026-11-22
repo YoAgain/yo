@@ -46,10 +46,9 @@ internal class YoNotifications(private val context: Context) {
     private val alert = "yo_alerts"
     private val silent = "yo_followups"
 
-    @SuppressLint("MissingPermission")
-    /** [friend] and [account]: the bar the Yo landed on, for the notification's "Yo Back" (as iOS's action). */
-    fun show(thread: String, id: String, name: String?, group: String?, kind: MessageKind, friend: String? = null, account: String? = null) {
-        if (!manager.areNotificationsEnabled()) return
+    // The channels from the start, not with the first Yo: Yo's notification settings list them (sound, importance)
+    // before anything came, and with notifications first turned off they are there once turned on.
+    init {
         manager.createNotificationChannels(listOf(
             NotificationChannel(alert, context.getString(R.string.yo_notification_channel), NotificationManager.IMPORTANCE_DEFAULT).apply {
                 enableVibration(true)
@@ -58,6 +57,12 @@ internal class YoNotifications(private val context: Context) {
             },
             NotificationChannel(silent, context.getString(R.string.yo_followup_channel), NotificationManager.IMPORTANCE_LOW),
         ))
+    }
+
+    @SuppressLint("MissingPermission")
+    /** [friend] and [account]: the bar the Yo landed on, for the notification's "Yo Back" (as iOS's action). */
+    fun show(thread: String, id: String, name: String?, group: String?, kind: MessageKind, friend: String? = null, account: String? = null) {
+        if (!manager.areNotificationsEnabled()) return
         if (manager.getNotificationChannel(alert)?.importance == NotificationManager.IMPORTANCE_NONE) return
         // One notification per conversation, updated in place with each Yo (MessagingStyle, as Android's messaging
         // guidance has it); the conversation's line counts them: "5× Yo from Leo · 1 photo" (the core's line).
