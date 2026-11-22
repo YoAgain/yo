@@ -15,14 +15,14 @@ jobs:
       matrix:
         target: [wire_envelope, wire_content, wire_cert, wire_api, hub_routes, core_receive]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: protoc (libsignal builds its protobufs)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Nightly and cargo-fuzz
         run: |
-          rustup toolchain install nightly-2026-10-20 --profile minimal
-          cargo install cargo-fuzz --version 0.13.1 --locked
-      - uses: actions/cache@v4
+          rustup toolchain install nightly-2026-11-21 --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -34,10 +34,10 @@ jobs:
           mkdir -p corpus/${{ matrix.target }}
           cp seeds/${{ matrix.target }}/* corpus/${{ matrix.target }}/ 2>/dev/null || true
           seconds=60; [ "${{ github.event_name }}" = schedule ] && seconds=900
-          cargo +nightly-2026-10-20 metadata --locked --format-version 1 >/dev/null  # fuzz/Cargo.lock is current
-          cargo +nightly-2026-10-20 fuzz run ${{ matrix.target }} -- -max_total_time=$seconds
+          cargo +nightly-2026-11-21 metadata --locked --format-version 1 >/dev/null  # fuzz/Cargo.lock is current
+          cargo +nightly-2026-11-21 fuzz run ${{ matrix.target }} -- -max_total_time=$seconds
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: crash-${{ matrix.target }}
           path: fuzz/artifacts/

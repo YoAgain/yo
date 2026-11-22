@@ -31,14 +31,14 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Host dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang cmake ninja-build
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.99.1'
+          toolchain: '1.100.0'
           targets: aarch64-linux-android,x86_64-linux-android
       - name: Install pinned Android toolchain
         run: |

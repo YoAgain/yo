@@ -33,8 +33,8 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: 1
       HOMEBREW_NO_INSTALL_CLEANUP: 1
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: joshuaswarren/omarchy-apple-dev
           ref: ${{ env.OAD_COMMIT }}
@@ -125,7 +125,7 @@ jobs:
 
       # Downloaded tools, kept between runs (the versions above are the key).
       - id: tools
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/ci-tools
           key: tools-xtool-${{ env.XTOOL_VERSION }}-rcodesign-${{ env.APPLE_CODESIGN_VERSION }}
@@ -151,13 +151,13 @@ jobs:
       # The Rust core is built only when it changed: the xcframework and bindings are kept under a hash of
       # everything they are made from, the cargo registry and target dir in case they have to be rebuilt.
       - id: core
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: app/ios/YoApp/build/core
           key: core-${{ env.DEVELOPER_DIR }}-${{ hashFiles('core/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/ios/dev/core.sh') }}
       - id: cargo
         if: steps.core.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -172,12 +172,12 @@ jobs:
           rustup target add aarch64-apple-ios
           app/ios/dev/core.sh
       - if: steps.core.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: app/ios/YoApp/build/core
           key: ${{ steps.core.outputs.cache-primary-key }}
       - if: steps.core.outputs.cache-hit != 'true' && steps.cargo.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cargo/registry
@@ -186,7 +186,7 @@ jobs:
           key: ${{ steps.cargo.outputs.cache-primary-key }}
 
       # SwiftPM's build directory, for an incremental app build.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: app/ios/YoApp/.build
           key: swiftpm-${{ env.DEVELOPER_DIR }}-${{ hashFiles('app/ios/YoApp/**') }}
@@ -327,7 +327,7 @@ jobs:
             dwarfdump --uuid "$bin" >> "$RUNNER_TEMP/dsym/uuids.txt" || true
           done
           ls -la "$RUNNER_TEMP/dsym"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         continue-on-error: true
         with:

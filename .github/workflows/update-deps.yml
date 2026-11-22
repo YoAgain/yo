@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: protoc (libsignal builds its protobufs)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Toolchain (rust-toolchain.toml) with clippy and rustfmt
@@ -50,7 +50,7 @@ jobs:
           cargo test --workspace
       - name: Pull request
         if: steps.deps.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v7.0.5
+        uses: peter-evans/create-pull-request@v8.1.3
         with:
           branch: deps/monthly
           delete-branch: true

@@ -19,14 +19,14 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Host dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang cmake ninja-build
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.99.1'
+          toolchain: '1.100.0'
           targets: aarch64-linux-android,x86_64-linux-android
       - name: Install pinned Android toolchain
         run: |
@@ -50,7 +50,7 @@ jobs:
           export YO_BUILD=$(date -u +%Y%m%d%H%M)  # the Yo-App build: the UTC minute, as iOS and the CLI
           cd app/android
           nice -n 10 ./gradlew --max-workers=4 assembleDebug assembleRelease testDebugUnitTest lint "${version[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: android-reports

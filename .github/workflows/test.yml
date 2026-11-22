@@ -8,12 +8,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: protoc (libsignal builds its protobufs)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Toolchain (rust-toolchain.toml) with clippy and rustfmt
         run: rustup show active-toolchain && rustup component add clippy rustfmt
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -31,10 +31,10 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: protoc (libsignal builds its protobufs)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -43,7 +43,7 @@ jobs:
           key: cargo-release-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Load test
         run: YO_DATE=$(date +%F)-ci YO_COMMIT=${GITHUB_SHA::7} cargo run --release --locked -p yo-tests --bin yo-load -- --clients 100 --seconds 10 --threads 4 --connections 32 --out load-results
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: load-results
           path: load-results/
