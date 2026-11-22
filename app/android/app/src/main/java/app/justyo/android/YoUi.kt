@@ -21,6 +21,8 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -568,18 +570,15 @@ private fun ListActionRow(
 @Composable
 private fun NotificationSettingsRow(onClick: () -> Unit) {
     val label = copy(uniffi.yo.ProductText.TURN_ON_NOTIFICATIONS)
-    val measurer = rememberTextMeasurer()
-    val density = LocalDensity.current
-    BoxWithConstraints(
+    Box(
         Modifier.fillMaxWidth().height(BarHeight).background(Color(0xFFE74C3C)).clickable(onClick = onClick)
             .padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
     ) {
-        val style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White)
-        val naturalWidth = measurer.measure(label, style, softWrap = false, maxLines = 1).size.width
-        val room = with(density) { maxWidth.toPx() }
-        val scale = (room / naturalWidth.coerceAtLeast(1)).coerceIn(0.5f, 1f)
-        Text(label, style = style.copy(fontSize = 36.sp * scale), maxLines = 1)
+        // One line that shrinks to fit (the system's autosize): scaled by hand it came out a hair wider than the
+        // room, wrapped, and the bar said only "Turn On".
+        BasicText(label, style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White), maxLines = 1,
+            softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = with(LocalDensity.current) { 12.dp.toSp() }, maxFontSize = 36.sp))
     }
 }
 
