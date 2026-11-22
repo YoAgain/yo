@@ -3,6 +3,7 @@ package app.justyo.android
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import androidx.camera.camera2.Camera2Config
@@ -11,6 +12,7 @@ import androidx.camera.core.CameraXConfig
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -112,11 +114,11 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
      *  back on Wi-Fi: its first requests fail at once), for up to a minute, before the fallback says a Yo may have
      *  come. Two tries 3 s apart showed it for a network that took longer, and the Yo came with WorkManager's retry. */
     private suspend fun syncWithRetries(repo: Repository) {
-        val deadline = System.currentTimeMillis() + 60_000
+        val deadline = SystemClock.elapsedRealtime() + 60_000
         for (pause in INBOX_PAUSES) {
             try { return repo.syncPush() } catch (e: Exception) {
                 if (e is CancellationException || e is YoException.Replaced) throw e
-                if (System.currentTimeMillis() + pause > deadline) throw e
+                if (SystemClock.elapsedRealtime() + pause > deadline) throw e
             }
             kotlinx.coroutines.delay(pause)
         }
@@ -149,9 +151,20 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
                 // WorkManager timed by the wall clock, and after the clock was set back (hours ahead before) the hub
                 // got no token, so no push, for those hours. Asking for the token again is harmless.
                 "token" -> manager.enqueueUniqueWork("yo-token", ExistingWorkPolicy.REPLACE, builder.build())
+                // The same for a push's inbox pass: one waiting (a retry WorkManager times by the wall clock, and
+                // after the clock was set back and a restart, for hours: no Yo was notified meanwhile) is replaced
+                // and the new one runs now; one running is followed, not cut (what it took in would go unnotified).
+                "inbox" -> manager.enqueueUniqueWork("yo-inbox", inboxPolicy(runCatching {
+                    manager.getWorkInfosForUniqueWork("yo-inbox").get(2, TimeUnit.SECONDS).map { it.state }
+                }.getOrNull()), builder.build())
                 else -> manager.enqueueUniqueWork("yo-$action", ExistingWorkPolicy.APPEND_OR_REPLACE, builder.build())
             }
         }
+
+        /** How a push's inbox pass joins the ones there ([states], null if unknown): after one running, else instead. */
+        internal fun inboxPolicy(states: List<WorkInfo.State>?): ExistingWorkPolicy =
+            if (states == null || WorkInfo.State.RUNNING in states) ExistingWorkPolicy.APPEND_OR_REPLACE
+            else ExistingWorkPolicy.REPLACE
 
         fun registerIfConfigured(context: Context) {
             if (FirebaseApp.getApps(context).isEmpty()) return

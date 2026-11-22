@@ -44,7 +44,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         private var pending: Job? = null
         fun reached(ok: Boolean) {
             // Any answer of the hub counts for Status' "Connected" (a long poll answers only after 25 s).
-            if (ok) { val now = System.currentTimeMillis(); if (now - (state.value.lastSync ?: 0) > 5000) mutable.update { it.copy(lastSync = now) } }
+            if (ok) { val now = android.os.SystemClock.elapsedRealtime(); if (now - (state.value.lastSync ?: 0) > 5000) mutable.update { it.copy(lastSync = now) } }
             if (remote != ok) return; remote = !ok; settle()
         }
         fun network(available: Boolean) { local = !available; if (available) remote = false; settle() }
@@ -613,7 +613,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                         // absorb refreshed the list for events; an empty answer may still have changed the core's lists
                         if (events.isEmpty()) refresh()
                     }
-                    mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
+                    mutable.update { it.copy(lastSync = android.os.SystemClock.elapsedRealtime()) }
                     if (c.waitingUnheld() == 0u) Problems.resolve(ProductProblem.WAITING)
                     media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
@@ -657,7 +657,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             absorb(c.savedEvents(), c)
             absorb(c.sync(0u), c)
             if (c === client) {
-                mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
+                mutable.update { it.copy(lastSync = android.os.SystemClock.elapsedRealtime()) }
             }
         }
         // As Signal's "you may have new messages": gone once the inbox came through.

@@ -294,7 +294,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
             good to contacts.size
         }
     }
-    val connected = s.lastSync != null && System.currentTimeMillis() - s.lastSync < 60_000
+    val connected = s.lastSync != null && android.os.SystemClock.elapsedRealtime() - s.lastSync < 60_000
     val title = when {
         page == "Account" -> s.username.orEmpty()
         page.startsWith("contact:") -> s.friends.firstOrNull { it.key == page.removePrefix("contact:") }?.name.orEmpty()
