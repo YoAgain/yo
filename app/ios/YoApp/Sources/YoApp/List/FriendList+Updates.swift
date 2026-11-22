@@ -60,8 +60,8 @@ extension FriendList {
         takeIntentSent()
       }
       .onReceive(NotificationCenter.default.publisher(for: IntentSent.changed)) { _ in takeIntentSent() }
-      // The top bar ("Offline", a deletion's undo) comes or goes as an inset over the list (YoApp): a list at its top
-      // stays at its top, so the first bar moves down under it whole instead of keeping its place half covered.
+      // The top bar ("Offline", a deletion's undo) comes or goes above the list (YoApp), the list's top inset changing
+      // with it: a list at its top stays at its top, its first bar whole under the bar.
       .onChange(of: DeleteNotice.shared.banner != nil || DeleteNotice.shared.deletion != nil) {
         guard !scrolled else { return }
         var instant = Transaction(); instant.disablesAnimations = true

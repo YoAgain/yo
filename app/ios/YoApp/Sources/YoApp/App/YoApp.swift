@@ -123,19 +123,9 @@ struct YoApp: App {
 
   var body: some Scene {
     WindowGroup {
-      // A build the hub no longer takes (426): only the update screen, nothing behind it (VoiceOver included).
-      Group {
-        if AppUpdate.shared.needed {
-          UpdateScreen().transition(.opacity)
-        } else if accounts.account == nil {
-          Onboarding().transition(.opacity)
-        } else if accounts.updating {
-          ProgressView("Yo is updating…").transition(.opacity)
-        } else {
-          FriendList().transition(.opacity)
-        }
-      }
-      .safeAreaInset(edge: .top, spacing: 0) {
+      // The top bar takes its own room above the screen. As a safe-area inset it was not kept by the list's scroll
+      // view, whose first bar stayed under it half covered. Its amethyst still reaches up behind the status bar.
+      VStack(spacing: 0) {
         if DeleteNotice.shared.deletion != nil || DeleteNotice.shared.banner != nil {
           HStack(spacing: 8) {
             if let deletion = DeleteNotice.shared.deletion {
@@ -168,6 +158,18 @@ struct YoApp: App {
           .accessibilityAddTraits(Problems.shared.retry == nil ? [] : [.isButton])
           .accessibilityAction { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { Problems.shared.retry?() } }
           .transition(.opacity)
+        }
+        // A build the hub no longer takes (426): only the update screen, nothing behind it (VoiceOver included).
+        Group {
+          if AppUpdate.shared.needed {
+            UpdateScreen().transition(.opacity)
+          } else if accounts.account == nil {
+            Onboarding().transition(.opacity)
+          } else if accounts.updating {
+            ProgressView("Yo is updating…").transition(.opacity)
+          } else {
+            FriendList().transition(.opacity)
+          }
         }
       }
       // A scene means Yo opens for the screen: open the core now (a background launch opens it only on demand).
