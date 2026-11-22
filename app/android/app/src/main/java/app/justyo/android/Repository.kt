@@ -36,7 +36,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     /** A friend without a name yet. */
     private val yoUser = context.getString(R.string.yo_user)
-    val transport = HubTransport(context.getString(R.string.hub_unreachable), reached = { connection.reached(it) }) { mutable.update { it.copy(update = true) } }
+    val transport = HubTransport(context.getString(R.string.hub_unreachable), reached = { connection.reached(it) },
+        clockOff = { connection.clockOff() }) { mutable.update { it.copy(update = true) } }
     /** Offline as iOS says it: no network, or the hub not reached, for 4 s on end (a first second without is nothing);
      *  else what an action ran into (`Problems`), a tap on it tries again. */
     private inner class Connection {
@@ -50,6 +51,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (remote != ok) return; remote = !ok; settle()
         }
         fun network(available: Boolean) { local = !available; if (available) remote = false; settle() }
+        /** The hub's certificate refused for its dates: reached, but the phone's clock is off. "Check Your Phone's
+         *  Date & Time" instead of "Offline", until a request goes through (a tap on it opens the date settings). */
+        fun clockOff() {
+            Problems.report(ProductProblem.WRONG_CLOCK)
+            if (remote) { remote = false; settle() }
+        }
         @Synchronized fun settle() {
             if (!local && !remote) { pending?.cancel(); pending = null; if (offline) { offline = false; show() }; return }
             if (offline || pending?.isActive == true) return

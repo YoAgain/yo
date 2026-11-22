@@ -20,7 +20,11 @@ object Problems {
     /** The banner's words now: the newest problem's. */
     val text = shown.asStateFlow()
 
-    fun report(problem: ProductProblem, retry: (() -> Unit)? = null) = add(problem, productProblemPassing(problem), retry)
+    fun report(problem: ProductProblem, retry: (() -> Unit)? = null) = add(problem, standing(problem), retry)
+
+    /** Stays until the hub answers: what goes by itself (the core's `passing`), and a wrong clock, which nothing
+     *  corrects until the person sets it; the first request that goes through then (a 2xx) ends it. */
+    internal fun standing(problem: ProductProblem) = productProblemPassing(problem) || problem == ProductProblem.WRONG_CLOCK
 
     /** What this phone itself lacks for an action (no screen lock), in its own words; it hides after 6 s as well. */
     fun say(text: String, retry: (() -> Unit)? = null) = add(text, false, retry)
@@ -54,11 +58,12 @@ object Problems {
         if (active[problem] === entry) { active.remove(problem); publish() }
     }
 
-    /** The hub answered (`status`): no connection and an unreachable hub are over; a 2xx also ends "Too Many Tries". */
+    /** The hub answered (`status`): no connection and an unreachable hub are over; a 2xx also ends "Too Many Tries"
+     *  and a wrong clock (a request signed and dated by it went through). */
     fun answered(status: Int) {
         if (status >= 500 || status == 429) return
         resolve(ProductProblem.NO_CONNECTION); resolve(ProductProblem.SERVER_UNREACHABLE)
-        if (status in 200..299) resolve(ProductProblem.TOO_MANY_TRIES)
+        if (status in 200..299) { resolve(ProductProblem.TOO_MANY_TRIES); resolve(ProductProblem.WRONG_CLOCK) }
     }
 
     /** The banner tapped: the newest problem's own retry; false when it has none. */

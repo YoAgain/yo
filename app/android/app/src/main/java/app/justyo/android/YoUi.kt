@@ -87,6 +87,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
+import uniffi.yo.ProductProblem
+import uniffi.yo.productProblemText
 import uniffi.yo.ProductText
 import uniffi.yo.productInvitedYou
 import uniffi.yo.usernameCanonical
@@ -974,7 +976,12 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         Column(Modifier.fillMaxSize()) {
         // "Offline" or a failed send (tap: again) above the list, never over its first bar (iOS's top inset).
         androidx.compose.animation.AnimatedVisibility(s.banner != null && s.deletion == null) {
-            ConnectionBanner(s.banner.orEmpty(), onRetry = repo::bannerTapped)
+            // "Check Your Phone's Date & Time": the system's date settings, in Yo's task (Back comes back here).
+            val clockText = remember { productProblemText(ProductProblem.WRONG_CLOCK, Words) }
+            ConnectionBanner(s.banner.orEmpty(), onRetry = {
+                if (s.banner == clockText) runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_DATE_SETTINGS)) }
+                else repo.bannerTapped()
+            })
         }
         LazyColumn(Modifier.fillMaxWidth().weight(1f),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
             if (showNotificationBar && !cameraOn) item(key = "notification-settings") {

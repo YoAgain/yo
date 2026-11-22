@@ -11,6 +11,8 @@ import uniffi.yo.*
 class HubTransport(
     private val unreachable: String,
     private val reached: (Boolean) -> Unit = {},
+    /** TLS refused the hub's certificate for its dates: the hub is there, the phone's clock is off. */
+    private val clockOff: () -> Unit = {},
     private val unsupported: () -> Unit,
 ) : HttpTransport {
     private val stopped = AtomicBoolean(false)
@@ -54,11 +56,10 @@ class HubTransport(
                 HttpResult(response.code.toUShort(), bytes, null)
             }
         } catch (e: Exception) {
-            reached(false)
-            // TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`).
-            val dates = generateSequence<Throwable>(e) { it.cause }.any {
-                it is java.security.cert.CertificateExpiredException || it is java.security.cert.CertificateNotYetValidException
-            }
+            // TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`), not the
+            // connection: it must not say "Offline".
+            val dates = refusedForDates(e)
+            if (dates) clockOff() else reached(false)
             HttpResult(0u, byteArrayOf(), if (dates) "clock: $unreachable" else unreachable)
         }
     }
@@ -75,4 +76,13 @@ class HubTransport(
     companion object {
         const val MAX_ANSWER = 11 * 1024 * 1024
     }
+}
+
+/** A certificate refused for its dates anywhere in [e]'s causes (Conscrypt: an SSLHandshakeException over a
+ *  CertificateException over a CertPathValidatorException over the expired or not yet valid certificate's exception). */
+internal fun refusedForDates(e: Throwable) = generateSequence(e) { it.cause }.take(16).any {
+    it is java.security.cert.CertificateExpiredException || it is java.security.cert.CertificateNotYetValidException ||
+        (it is java.security.cert.CertPathValidatorException &&
+            (it.reason == java.security.cert.CertPathValidatorException.BasicReason.EXPIRED ||
+                it.reason == java.security.cert.CertPathValidatorException.BasicReason.NOT_YET_VALID))
 }
