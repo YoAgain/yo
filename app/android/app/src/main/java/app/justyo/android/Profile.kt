@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
@@ -772,7 +773,9 @@ private val CompactCard = 48.dp + 32.dp + 12.dp
                     s.username.orEmpty(), Modifier.weight(1f, fill = false),
                     style = TextStyle(fontFamily = YoFont, fontSize = name, color = MaterialTheme.colorScheme.onSurface),
                     maxLines = 1, softWrap = false,
-                    autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = name),
+                    // The smallest step as at the default text size: with large text the name had no room left
+                    // beside the badge and the code button and was cut ("H3M").
+                    autoSize = TextAutoSize.StepBased(minFontSize = with(LocalDensity.current) { 13.dp.toSp() }, maxFontSize = name),
                 )
                 if (s.recoveryNeedsAttention) Badge { Text("1") }
             }

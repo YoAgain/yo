@@ -9,6 +9,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.clickable
@@ -65,6 +66,8 @@ internal val BarHeight = 89.dp
 private val BarFont = 36.sp
 /** A group's senders, two lines in one bar: the second, fixed size (iOS's too: 24 of 36 in an 89 bar). */
 private val BarSmallFont = 24.sp
+/** The least a small bar line shrinks to (fittedScales), at any text size. */
+private val SmallestBarFont = 7.dp
 private val DeclineRed = Color(0xFFE74C3C)
 
 internal class BarTapLock {
@@ -271,7 +274,9 @@ internal data class BarContent(
             val sign = productMediaSign(if (bar.media.any { it.video }) ListKind.VIDEO else ListKind.PHOTO)
             // Nothing downloaded yet: shown loading, and a finger on it opens nothing (MediaQueue.openable).
             val loading = bar.media.none { it.ready }
-            Text(sign, Modifier.alpha(if (loading) .35f else 1f), style = TextStyle(fontSize = 26.sp), maxLines = 1)
+            // A sign, not words: its size is the 40 dp box's at any text size (large text had it over the line).
+            Text(sign, Modifier.alpha(if (loading) .35f else 1f), style = TextStyle(fontSize = with(LocalDensity.current) { 26.dp.toSp() }),
+                maxLines = 1, softWrap = false)
             if (loading) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
         }
     }
@@ -360,12 +365,13 @@ private val CountDigits = Regex("[0-9]+(?=×)")
  * A34; a Yo's frame measured a dozen (3-4 ms per changed bar). Main thread only, as composition is.
  */
 internal class BarMeasure(private val measurer: TextMeasurer) {
-    private val widths = object : LinkedHashMap<Pair<String, TextStyle>, Int>(64, .75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, TextStyle>, Int>) = size > 512
+    private val sizes = object : LinkedHashMap<Pair<String, TextStyle>, IntSize>(64, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, TextStyle>, IntSize>) = size > 512
     }
-    fun width(text: String, style: TextStyle): Int = widths.getOrPut(text to style) {
-        measurer.measure(text, style, maxLines = 1, softWrap = false).size.width
+    fun size(text: String, style: TextStyle): IntSize = sizes.getOrPut(text to style) {
+        measurer.measure(text, style, maxLines = 1, softWrap = false).size
     }
+    fun width(text: String, style: TextStyle): Int = size(text, style).width
     /** The widest digit: a count's steady block. */
     val slot by lazy { ('0'..'9').maxOf { width(it.toString(), BarStyle) } }
 }
@@ -427,10 +433,9 @@ private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier,
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            lines.filter { it.isNotEmpty() }.forEach { line ->
-                // Only a name wider than the room even alone (the core places it whole): that line shrinks to fit.
-                val width = measure.width(line, style)
-                val scale = if (width > room) (room / width).coerceAtLeast(.5f) else 1f
+            // Only a name wider than the room even alone (the core places it whole): that line shrinks to fit.
+            val shown = lines.filter { it.isNotEmpty() }
+            shown.zip(fittedScales(shown, room, style)) { line, scale ->
                 Text(line, style = if (scale < 1f) style.copy(fontSize = BarSmallFont * scale) else style,
                     maxLines = 1, softWrap = false)
             }
@@ -458,13 +463,35 @@ private fun SmallTitle(text: String, room: Float, start: androidx.compose.ui.uni
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        lines.forEach { line ->
-            // A single word wider than the room: that line shrinks to fit.
-            val w = width(line)
-            val scale = if (w > room) (room / w).coerceAtLeast(.5f) else 1f
+        // A single word wider than the room: that line shrinks to fit.
+        lines.zip(fittedScales(lines, room, style)) { line, scale ->
             Text(line, style = if (scale < 1f) style.copy(fontSize = BarSmallFont * scale) else style,
                 maxLines = 1, softWrap = false)
         }
+    }
+}
+
+/**
+ * The small lines' sizes: a line wider than the room shrinks to fit it, and all of them shrink together where they are
+ * taller than the bar (large text in the system settings, scripts with tall letters such as Arabic). Never below
+ * [SmallestBarFont], which still fits a group's longest name ("#WWW…", 32 bytes) at the largest display and text
+ * size. Never cut.
+ */
+@Composable
+private fun fittedScales(lines: List<String>, room: Float, style: TextStyle): List<Float> {
+    val measure = rememberBarMeasure()
+    val density = LocalDensity.current
+    val tall = with(density) { BarHeight.toPx() - 2.dp.toPx() * (lines.size - 1).coerceAtLeast(0) }
+    val height = lines.sumOf { measure.size(it, style).height }.toFloat()
+    val fit = if (height > tall) tall / height else 1f
+    // In sp: large text scales small sizes more than large ones (Android 14's nonlinear font scaling).
+    val floor = with(density) { SmallestBarFont.toSp().value / style.fontSize.value }
+    return lines.map { line ->
+        val width = measure.width(line, style)
+        val scale = minOf(if (width > room) room / width else 1f, fit).coerceAtLeast(floor)
+        // Not proportional (nonlinear font scaling, the glyphs' rounding): measured again at the size found.
+        val scaled = if (scale < 1f) measure.width(line, style.copy(fontSize = style.fontSize * scale)) else 0
+        if (scaled > room) (scale * room / scaled).coerceAtLeast(floor) else scale
     }
 }
 
