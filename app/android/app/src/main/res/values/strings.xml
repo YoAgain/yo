@@ -194,6 +194,7 @@
     <string name="passkey_try">Try with Screen Lock</string>
     <string name="passkey_no_prf">Your password manager can’t do this. Try Google Password Manager.</string>
     <string name="problem_needs_screen_lock">Needs a Screen Lock</string>
+    <string name="delete_needs_screen_lock">Deleting your account asks for your screen lock first. Set one in Android Settings.</string>
     <string name="passkey_create_failed">Couldn’t create passkey. Try again.</string>
     <string name="passkey_try_again">That didn’t work. Try again.</string>
     <string name="google_backup_footer">Your account key is in your Google account, end-to-end encrypted: a new phone signs in by itself.</string>

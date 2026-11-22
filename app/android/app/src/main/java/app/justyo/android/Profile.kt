@@ -228,6 +228,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     var code by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
     var showingInfo by remember { mutableStateOf(false) }
+    var needsLock by remember { mutableStateOf(false) }
     var showingRecoveryHelp by remember { mutableStateOf(false) }
     var unblocking by remember { mutableStateOf<Friend?>(null) }
     var blockingNew by remember { mutableStateOf<Friend?>(null) }
@@ -249,7 +250,10 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
             res.getString(if (page == "Delete Account") R.string.ui_delete_account else R.string.ui_recovery_key),
             res.getString(R.string.ui_confirm_it_s_you))
         // No screen lock: said in the red banner (a snackbar would hide under this sheet); a tap on it opens Android's page.
-        if (intent != null) auth.launch(intent) else {
+        if (intent != null) auth.launch(intent) else if (page == "Delete Account") {
+            // The banner lies under this full-height page: the button did nothing to see. Said here instead.
+            needsLock = true
+        } else {
             afterAuth = null
             Problems.say(res.getString(R.string.problem_needs_screen_lock)) {
                 openSystemSettings(context, android.provider.Settings.ACTION_SECURITY_SETTINGS)
@@ -526,6 +530,16 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     )
     if (code) YourCodeSheet(s.username.orEmpty()) { code = false }
     if (showingRecoveryHelp) RecoveryHelpSheet(s) { showingRecoveryHelp = false }
+    if (needsLock) AlertDialog(
+        onDismissRequest = { needsLock = false },
+        title = { Text(stringResource(R.string.problem_needs_screen_lock)) },
+        text = { Text(stringResource(R.string.delete_needs_screen_lock)) },
+        confirmButton = { TextButton(onClick = {
+            needsLock = false
+            openSystemSettings(context, android.provider.Settings.ACTION_SECURITY_SETTINGS)
+        }) { Text(stringResource(R.string.ui_settings)) } },
+        dismissButton = { TextButton(onClick = { needsLock = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
     if (showingInfo && info != null) AlertDialog(
         onDismissRequest = { showingInfo = false },
         icon = { Icon(Icons.Outlined.Info, null) },
