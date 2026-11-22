@@ -5,6 +5,7 @@
 import Foundation
 import Security
 import UserNotifications
+import WidgetKit
 import YoCore
 
 @objc(YoNotificationService)
@@ -39,6 +40,7 @@ final class NotificationService: UNNotificationServiceExtension {
           in: events, name: { ShareBridge.name(of: $0, client: client) },
           group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
           ShareBridge.noteLast(senders, client: client)
+          Self.rise(senders, client: client)
           // iOS shows the push whatever its content, so it carries the newest Yo; the others are added beside it.
           let replaced = pending.update {
             ShareBridge.write(
@@ -73,6 +75,25 @@ final class NotificationService: UNNotificationServiceExtension {
       answered.signal()
       return lock.withLock { answer }
     }
+  }
+
+  /// The bars of `yos` (newest first) on top of the list the widgets show, as the app's list lifts them on taking
+  /// them: the app may not run before the widgets are next looked at. The app writes its own list when it does.
+  static func rise(_ yos: [ShareBridge.Yos], client: YoClient) {
+    guard let file = ShareBridge.friendsFile, let list = ShareBridge.readList(),
+      list.owner == Hub.bytes(client.userId())?.base64EncodedString()
+    else { return }
+    var rest = list.friends
+    var risen: [ShareBridge.Friend] = []
+    for yo in yos {
+      if let at = rest.firstIndex(where: { $0.to == yo.user }) { risen.append(rest.remove(at: at)) }
+    }
+    let friends = risen + rest
+    guard friends != list.friends,
+      let data = try? JSONEncoder().encode(ShareBridge.List(owner: list.owner, friends: friends))
+    else { return }
+    Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+    WidgetCenter.shared.reloadAllTimelines()
   }
 
   /// How long the app may hold the state before the push goes out unread.
