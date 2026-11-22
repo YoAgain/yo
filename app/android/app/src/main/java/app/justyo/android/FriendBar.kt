@@ -335,18 +335,21 @@ internal data class BarContent(
         }
         if (friend.request) {
             Row(Modifier.fillMaxWidth().height(BarHeight)) {
-                if (left) RequestChoice("Yo", color, Modifier.weight(2f), onTap)
-                RequestChoice(stringResource(R.string.ui_no), DeclineRed, Modifier.weight(1f), onDecline)
-                if (!left) RequestChoice("Yo", color, Modifier.weight(2f), onTap)
+                // Spoken as iOS says them: "Accept and Yo" and "Decline", not the bare words on the bar.
+                val accept = stringResource(R.string.accept_and_yo)
+                if (left) RequestChoice("Yo", accept, color, Modifier.weight(2f), onTap)
+                RequestChoice(stringResource(R.string.ui_no), stringResource(R.string.decline_request), DeclineRed, Modifier.weight(1f), onDecline)
+                if (!left) RequestChoice("Yo", accept, color, Modifier.weight(2f), onTap)
             }
         }
     }
 }
 
-@Composable private fun RequestChoice(text: String, color: Color, modifier: Modifier, onTap: () -> Unit) {
+@Composable private fun RequestChoice(text: String, spoken: String, color: Color, modifier: Modifier, onTap: () -> Unit) {
     Box(modifier.fillMaxHeight().background(color).clickable(
         interactionSource = null, indication = null, role = Role.Button, onClick = onTap,
-    ), contentAlignment = Alignment.Center) { BarWords(text) }
+    ).clearAndSetSemantics { contentDescription = spoken; role = Role.Button; onClick { onTap(); true } },
+        contentAlignment = Alignment.Center) { BarWords(text) }
 }
 
 private val CountDigits = Regex("[0-9]+(?=×)")

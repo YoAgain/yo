@@ -24,6 +24,7 @@
     <string name="ui_montserrat_sil_open_font_license_androidx_kotlin_jna_okhttp_">Montserrat: SIL Open Font License. AndroidX, Kotlin, JNA, OkHttp, ZXing: see bundled notices.</string>
     <string name="ui_name">Name</string>
     <string name="ui_no">No</string>
+    <string name="decline_request">Decline</string>
     <string name="ui_remove">Remove</string>
     <string name="ui_rename">Rename</string>
     <string name="ui_save_image">Save Image…</string>
