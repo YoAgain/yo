@@ -211,6 +211,27 @@ api.push.apple.com a request on a new connection took 420 ms, on an open one 138
   was not sent again for a new device registration of the same account; answers for a signed-out client changed the
   new account's state; the quiet passkey request after leaving the welcome; dead code.
 
+## Media, share sheet, intents, account (2026-11-22)
+
+The Simulator build has the share extension (YoShare) and the controls and widgets (YoControls) too. Other apps are
+driven through SpringBoard's coordinates (`tapxy sb=true`): Photos (`simctl launch … com.apple.mobileslideshow`, a
+photo, its share button, "Yo" in the share sheet) and Shortcuts (Yo's App Shortcuts are listed by themselves; the
+"To whom?" prompt is in `tree sb=true`, not in `simctl io screenshot`). Face ID: enrolled with `notifyutil` as above;
+the passcode prompt cannot be typed into. A screen-changing tap no longer ends the driver (its answer is one
+snapshot), nor a tap on a name that is also under a sheet.
+
+| Flow | Result |
+|---|---|
+| Sign Out, Sign In from the list, app closed and opened | was "Can't Open Your Account" (the wipe removed the App Group's container record, the system gave a new, empty group): fixed |
+| Delete Account: Return deletes, the button above the keyboard; Face ID, deleted | was "can't reach its server" after Face ID (no turn on the shared state while inactive): fixed |
+| Wait 5 s Before Sending: ring, Undo before the end (nothing arrives), or sent | ok |
+| Camera mode: library photo and video to a friend, the X closes to the list in one press | a tap while a video still loaded took a camera photo: fixed |
+| Group photo notification and line | "in ##HUNT" for a group named with its #: fixed (core) |
+| Share sheet from Photos: photo to a friend and a group, video to a friend | ok; Done was purple on purple: fixed |
+| Shortcuts: Send Yo (asks To whom?), Yo Back | ok |
+| App Icon, Help & About, Status, About & Licenses, Send Feedback and a reply from the admin | ok |
+| Camera edge pan: a vertical scroll from the edge zone | `startRunning` at the touch; the Simulator's session stops itself at once (no camera), so a session left running cannot be seen here |
+
 ## Left
 
 - (Since fixed with the core's `YoContact.gone`: a friend whose account was deleted shows "Not on Yo" on the bar, and
