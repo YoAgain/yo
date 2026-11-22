@@ -293,10 +293,10 @@ struct FriendList: View {
             settingsAction = action
             settings = false
           }
-          .preferredColorScheme(SystemAppearance.scheme)
+          .systemAppearance()
           .appObjects()
         }
-        .sheet(isPresented: $newGroup) { NewGroupSheet().preferredColorScheme(SystemAppearance.scheme).appObjects() }
+        .sheet(isPresented: $newGroup) { NewGroupSheet().systemAppearance().appObjects() }
         .videoTrimming($videoTrim)
         .confirmDestructive(
           $blocking,
@@ -319,7 +319,7 @@ struct FriendList: View {
           Button("Cancel", role: .cancel) {}
         }
         .sheet(item: $membersOf) { bar in
-          GroupMembersSheet(bar: bar).preferredColorScheme(SystemAppearance.scheme).appObjects()
+          GroupMembersSheet(bar: bar).systemAppearance().appObjects()
         }
         .alert(
           problem?.title ?? "", isPresented: $problem.isPresent

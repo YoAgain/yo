@@ -248,7 +248,7 @@ characters). The core built with the new dependencies opened the state the older
 | Passcode sheet over Yo (Show Recovery Key) while Yos arrive | no error; the list caught up on return |
 | Camera button with camera access off in Settings | closed again without a word: now "Camera Access Is Off" with Open Settings; granted, camera mode opens; a "Don't Allow" just given is not answered with it |
 | Large list (40 bars), RTL and emoji group names, AX5, Increase Contrast, an Arabic system language (Yo stays English, left to right) | ok; long names end in "…" on requests and counted bars, Yo and the count stay whole |
-| Dark Mode switched with the Settings sheet open, Yo staying in front | the sheet keeps the old appearance until Yo leaves and returns (it then follows); left as it is |
+| Dark Mode switched with the Settings sheet open, Yo staying in front | the sheet kept the old appearance until Yo left and returned: each sheet read the iPhone's style once. SwiftUI puts the list's forced dark on the window scene, so only the screen has the iPhone's style and it reports no change; it is read again whenever Yo becomes active (`SystemAppearance`), and sheets over sheets take it too. Control Center or Settings switches it on a device and both take Yo out of active; `simctl ui appearance` does not (open and close Notification Center after it) |
 | A friend whose account was deleted | "Not on Yo" after the next Yo to them |
 
 ## Left

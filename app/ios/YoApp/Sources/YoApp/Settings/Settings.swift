@@ -3,11 +3,41 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// The iPhone's own appearance, whatever the app's window was set to (the list forces dark): read from the screen.
-@MainActor enum SystemAppearance {
-  static var scheme: ColorScheme {
-    let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen
-    return screen?.traitCollection.userInterfaceStyle == .dark ? .dark : .light
+/// The iPhone's own appearance, whatever the list forces. SwiftUI applies the list's `.preferredColorScheme(.dark)` as
+/// a trait override on the window scene, so the scene, its windows and every sheet see dark; only the screen carries
+/// the iPhone's style, and a screen reports no trait changes. It is read again whenever Yo becomes active (Control
+/// Center and Settings, where it is switched, both take Yo out of active). A value read once in a sheet's content was
+/// kept until the list happened to redraw, so a sheet open across a switch kept the old appearance.
+@MainActor @Observable final class SystemAppearance {
+  static let shared = SystemAppearance()
+  private(set) var scheme: ColorScheme = .light
+
+  private init() {
+    update()
+    NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) {
+      _ in MainActor.assumeIsolated { SystemAppearance.shared.update() }
+    }
+  }
+
+  func update() {
+    guard let screen = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.screen }).first
+    else { return }
+    let new: ColorScheme = screen.traitCollection.userInterfaceStyle == .dark ? .dark : .light
+    if new != scheme { scheme = new }
+  }
+}
+
+extension View {
+  /// The iPhone's own appearance for a sheet over the always dark list, following it while the sheet is open. Each
+  /// sheet over such a sheet needs it too: a sheet keeps the appearance it was presented with.
+  func systemAppearance() -> some View { modifier(SystemAppearanceModifier()) }
+}
+
+private struct SystemAppearanceModifier: ViewModifier {
+  func body(content: Content) -> some View {
+    content
+      .preferredColorScheme(SystemAppearance.shared.scheme)
+      .onAppear { SystemAppearance.shared.update() }
   }
 }
 
@@ -206,9 +236,9 @@ struct SettingsView: View {
       .scrollBounceBehavior(.basedOnSize)
       .presentationDetents([.large])
       .presentationBackground(Color(.systemGroupedBackground))
-      .appObjects()
+      .systemAppearance().appObjects()
     }
-    .sheet(isPresented: $showingFeedback) { MessagePage().appObjects() }
+    .sheet(isPresented: $showingFeedback) { MessagePage().systemAppearance().appObjects() }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
