@@ -149,8 +149,12 @@ struct SettingsView: View {
       // It fits at its height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      // No title and no bar on the root: the system's grabber pulls the sheet down and away.
-      .toolbar(.hidden, for: .navigationBar)
+      // No title and no close button: the system's grabber pulls the sheet down and away. The bar stays (empty,
+      // see-through), so a push or pop never changes its height and the pushed page's bar does not jump in (hidden
+      // on the root, the pushed page's back button and title dropped into place after the push).
+      .toolbar(.visible, for: .navigationBar)
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbarBackground(.hidden, for: .navigationBar)
       .scrollEdgeEffectHidden(!typeSize.isAccessibilitySize, for: .top)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
@@ -180,7 +184,7 @@ struct SettingsView: View {
     }
     // Every page scrolls only when it does not fit.
     .scrollBounceBehavior(.basedOnSize)
-    // Just the height of the groups of rows (no title bar above them), on any screen: a fraction of the screen would
+    // Just the height of the groups of rows (and the empty bar above them), on any screen: a fraction of the screen would
     // cut them off on a small iPhone and leave space under them on a large one. A full page opens as a sheet of its
     // own on top. With larger text the rows no longer fit: the full height, scrolling.
     .presentationDetents(typeSize > .large ? [.large] : [.custom(SettingsDetent.self)])
@@ -225,5 +229,5 @@ struct SettingsView: View {
 
 /// The height of the settings root's groups of rows, as far as the screen allows.
 private struct SettingsDetent: CustomPresentationDetent {
-  static func height(in context: Context) -> CGFloat? { min(context.maxDetentValue, 470) }
+  static func height(in context: Context) -> CGFloat? { min(context.maxDetentValue, 520) }
 }
