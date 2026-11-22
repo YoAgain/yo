@@ -415,7 +415,11 @@ struct ShareView: View {
           .accessibilityAddTraits(.isHeader)
         }
         ToolbarItem(placement: .confirmationAction) {
+          // White with a black label on the purple, as the app's buttons there (not purple glass on purple).
           Button("Done") { model.cancel() }
+            .buttonStyle(.glassProminent)
+            .tint(.white)
+            .foregroundStyle(.black)
         }
       }
       .animation(.smooth, value: model.feedback)
