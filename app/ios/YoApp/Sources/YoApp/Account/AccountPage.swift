@@ -150,47 +150,59 @@ struct AccountPage: View {
 
   private func deletePage(_ account: Account) -> some View {
     let confirmed = Username.skeleton(deleteTyped) == Username.skeleton(account.username)
-    return Form {
-      Section {
-        VStack(spacing: 16) {
-          Image(systemName: "exclamationmark.triangle.fill")
-            .font(.system(size: 56))
-            .foregroundStyle(Color.red)
-            .accessibilityHidden(true)
-          Text("Delete Your Account")
-            .font(.largeTitle.bold())
-            .multilineTextAlignment(.center)
+    // The button stays in sight above the keyboard while the name is typed, and Return deletes.
+    return ScrollViewReader { proxy in
+      Form {
+        Section {
+          VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+              .font(.system(size: 56))
+              .foregroundStyle(Color.red)
+              .accessibilityHidden(true)
+            Text("Delete Your Account")
+              .font(.largeTitle.bold())
+              .multilineTextAlignment(.center)
+          }
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 16)
+          .listRowBackground(Color.clear)
+          .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-      }
-      Section {
-        Label("Username “\(account.username)” is free again.", systemImage: "person.crop.circle.badge.xmark")
-        Label("Friends can’t reach you anymore.", systemImage: "person.2.slash")
-        Label("Can’t be undone.", systemImage: "exclamationmark.triangle")
-        if account.byPasskey {
-          Label("Delete the passkey yourself.", systemImage: "key")
-        }
-      }
-      Section {
-        TextField("Type \(account.username) to confirm.", text: $deleteTyped)
-          .textInputAutocapitalization(.never)
-          .autocorrectionDisabled()
-      }
-      Section {
-        Button(role: .destructive) {
-          Task { await deleteAccount() }
-        } label: {
-          if deletingAccount {
-            ProgressView().frame(maxWidth: .infinity)
-          } else {
-            Text("Delete Account").frame(maxWidth: .infinity)
+        Section {
+          Label("Username “\(account.username)” is free again.", systemImage: "person.crop.circle.badge.xmark")
+          Label("Friends can’t reach you anymore.", systemImage: "person.2.slash")
+          Label("Can’t be undone.", systemImage: "exclamationmark.triangle")
+          if account.byPasskey {
+            Label("Delete the passkey yourself.", systemImage: "key")
           }
         }
-        .tint(Color.red)
-        .disabled(!confirmed || deletingAccount)
+        Section {
+          TextField("Type \(account.username) to confirm.", text: $deleteTyped)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .submitLabel(.go)
+            .onSubmit {
+              if confirmed && !deletingAccount { Task { await deleteAccount() } }
+            }
+        }
+        Section {
+          Button(role: .destructive) {
+            Task { await deleteAccount() }
+          } label: {
+            if deletingAccount {
+              ProgressView().frame(maxWidth: .infinity)
+            } else {
+              Text("Delete Account").frame(maxWidth: .infinity)
+            }
+          }
+          .tint(Color.red)
+          .disabled(!confirmed || deletingAccount)
+          .id(Self.deleteButton)
+        }
+      }
+      // Once the keyboard is up (and the form's bottom inset with it), not on a timer.
+      .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+        withAnimation { proxy.scrollTo(Self.deleteButton, anchor: .bottom) }
       }
     }
     .navigationTitle("Delete Account")
@@ -198,6 +210,8 @@ struct AccountPage: View {
     .onDisappear { deleteTyped = "" }
     .problemAlert("Unable to Delete Account", $deleteProblem)
   }
+
+  private static let deleteButton = "account.deleteButton"
 
   private func deleteAccount() async {
     guard await authenticated("Delete your account.") else { return }
