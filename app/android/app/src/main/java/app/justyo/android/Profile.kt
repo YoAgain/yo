@@ -55,6 +55,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import android.view.HapticFeedbackConstants
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -397,9 +400,14 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
                         )
                         TextButton(onClick = { open("Delete Account") }, Modifier.padding(start = 4.dp, bottom = 12.dp)) {
-                            Text(stringResource(R.string.settings_leaving_yo), color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                style = MaterialTheme.typography.bodyMedium)
-                            Text(" " + stringResource(R.string.settings_delete_your_account), style = MaterialTheme.typography.bodyMedium)
+                            // One text, so with large type it wraps as a sentence (two side by side squeezed the link)
+                            val leaving = stringResource(R.string.settings_leaving_yo)
+                            val delete = stringResource(R.string.settings_delete_your_account)
+                            val muted = MaterialTheme.colorScheme.onSurfaceVariant
+                            Text(remember(leaving, delete, muted) { buildAnnotatedString {
+                                withStyle(SpanStyle(color = muted)) { append(leaving) }
+                                append(" "); append(delete)
+                            } }, style = MaterialTheme.typography.bodyMedium)
                         }
                     }
                     // iOS AccountSecurityPage: Yo's own backup, then the three ways back on a new phone.
