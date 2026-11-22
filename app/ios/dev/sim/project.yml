@@ -108,7 +108,9 @@ targets:
   YoControls:
     type: app-extension
     platform: iOS
-    sources: [../../YoApp/Sources/Extensions/YoControls]
+    sources:
+      - ../../YoApp/Sources/Extensions/YoControls
+      - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}  # the widgets' names (UIAppFonts)
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
