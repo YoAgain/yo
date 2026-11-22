@@ -51,6 +51,7 @@ import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import android.view.HapticFeedbackConstants
@@ -127,7 +128,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                 Icon(if (ok) Icons.Default.CheckCircle else Icons.Default.ErrorOutline, null, Modifier.size(18.dp),
                     tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
-            if (row.badge) Badge { Text("1") }
+            if (row.badge) AttentionBadge()
             if (row.dot) RedDot()
             row.action?.let { (icon, label) -> IconButton(onClick = { row.onAction?.invoke() }, enabled = row.enabled,
                 colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)) { Icon(icon, label) } }
@@ -149,6 +150,12 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         else -> SegmentedListItem(shapes = shapes, leadingContent = leading, trailingContent = trailing,
             supportingContent = supporting, colors = colors, content = content)
     }
+}
+
+/** The red "1" of something to do (iOS's badge); TalkBack says what it means rather than "1". */
+@Composable private fun AttentionBadge() {
+    val label = stringResource(R.string.needs_attention)
+    Badge(Modifier.clearAndSetSemantics { contentDescription = label }) { Text("1") }
 }
 
 /** The red dot of an unread support reply (and, on the Yo button, a missing backup): iOS's system red, opaque,
@@ -777,7 +784,7 @@ private val CompactCard = 48.dp + 32.dp + 12.dp
                     // beside the badge and the code button and was cut ("H3M").
                     autoSize = TextAutoSize.StepBased(minFontSize = with(LocalDensity.current) { 13.dp.toSp() }, maxFontSize = name),
                 )
-                if (s.recoveryNeedsAttention) Badge { Text("1") }
+                if (s.recoveryNeedsAttention) AttentionBadge()
             }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }

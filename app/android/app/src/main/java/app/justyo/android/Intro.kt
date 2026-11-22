@@ -128,7 +128,9 @@ internal val IntroHeight = PageHeight + 48.dp
 
 @Composable private fun Dots(count: Int, page: Int, modifier: Modifier = Modifier, go: (Int) -> Unit) {
     val res = LocalResources.current
-    Row(modifier.semantics { contentDescription = res.getString(R.string.intro_page_of, page + 1, count) }) {
+    // One element for TalkBack, "Page 2 of 4" (iOS's page control): the dots were four unlabeled buttons. The pager
+    // itself turns pages with TalkBack's scroll actions.
+    Row(modifier.clearAndSetSemantics { contentDescription = res.getString(R.string.intro_page_of, page + 1, count) }) {
         repeat(count) { index ->
             val alpha by animateFloatAsState(if (index == page) 1f else 0.4f, tween(200), label = "dot")
             Box(Modifier.size(24.dp, 44.dp).clickable(interactionSource = null, indication = null) { go(index) },

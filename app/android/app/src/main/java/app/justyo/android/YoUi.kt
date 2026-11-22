@@ -46,6 +46,8 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.focus.FocusRequester
@@ -1337,8 +1339,10 @@ internal class RowActions {
     val offline = text == "Offline"
     val dots by produceState(0, offline) { while (offline) { delay(450); value = (value + 1) % 4 } }
     Row(
+        // TalkBack says it when it comes or changes ("No Connection", "Waiting to Send"), as a sighted user sees it.
         Modifier.fillMaxWidth().height(36.dp).background(Amethyst)
-            .then(if (offline) Modifier else Modifier.clickable(onClick = onRetry)),
+            .then(if (offline) Modifier else Modifier.clickable(onClick = onRetry))
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1346,6 +1350,6 @@ internal class RowActions {
         val style = TextStyle(fontFamily = YoFont, fontSize = 16.sp, color = Color.White)
         Text(text, maxLines = 1, style = style)
         // The dots in a box of their own width: the word stays where it is while they come and go.
-        if (offline) Box(Modifier.padding(start = 0.dp).width(18.dp).offset(x = (-6).dp)) { Text(".".repeat(dots), maxLines = 1, style = style) }
+        if (offline) Box(Modifier.padding(start = 0.dp).width(18.dp).offset(x = (-6).dp).clearAndSetSemantics {}) { Text(".".repeat(dots), maxLines = 1, style = style) }
     }
 }
