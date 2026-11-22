@@ -35,7 +35,9 @@ struct MediaFile: Sendable {
       kCGImageSourceThumbnailMaxPixelSize: longestSide,
       kCGImageSourceShouldCacheImmediately: true,
     ]
-    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return failed() }
+    guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+      let image = onWhite(thumbnail)
+    else { return failed() }
     let out = NSMutableData()
     guard let destination = CGImageDestinationCreateWithData(out, UTType.heic.identifier as CFString, 1, nil)
     else { return failed() }
@@ -44,6 +46,26 @@ struct MediaFile: Sendable {
       destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
     guard CGImageDestinationFinalize(destination) else { return failed() }
     return MediaFile(kind: .photo, data: out as Data, width: image.width, height: image.height, durationMs: 0)
+  }
+
+  /// A photo goes without transparency: see-through pixels laid on white, as Android sends them (a HEIC's alpha is
+  /// shown black or dropped by other readers, a JPEG has none).
+  static func onWhite(_ image: CGImage) -> CGImage? {
+    switch image.alphaInfo {
+    case .none, .noneSkipFirst, .noneSkipLast: return image
+    default: break
+    }
+    let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(name: CGColorSpace.sRGB)!
+    guard
+      let context = CGContext(
+        data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+    else { return nil }
+    let all = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    context.setFillColor(CGColor(gray: 1, alpha: 1))
+    context.fill(all)
+    context.draw(image, in: all)
+    return context.makeImage()
   }
 
   static func length(of video: URL) async -> Double? {

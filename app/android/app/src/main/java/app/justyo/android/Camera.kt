@@ -289,6 +289,27 @@ internal val LargestVideo = uniffi.yo.productVideoLimitBytes().toLong()
 private val PhotoLongSide = uniffi.yo.productPhotoLongSide().toDouble()
 private val Encoding = uniffi.yo.productEncoding()
 
+/** A photo goes without transparency (the HEIC and JPEG it is sent as carry none): see-through pixels are laid on
+ *  white, as iOS sends them, never left to the encoder, which made them black. Row by row, in place. */
+internal fun flattenOnWhite(bitmap: Bitmap) {
+    if (!bitmap.hasAlpha()) return
+    val row = IntArray(bitmap.width)
+    for (y in 0 until bitmap.height) {
+        bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+        for (x in row.indices) row[x] = onWhite(row[x])
+        bitmap.setPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+    }
+    bitmap.setHasAlpha(false)
+}
+
+/** One unpremultiplied ARGB pixel over white, opaque. */
+internal fun onWhite(argb: Int): Int {
+    val a = argb ushr 24
+    if (a == 255) return argb
+    fun over(c: Int) = (c * a + 255 * (255 - a) + 127) / 255
+    return (0xFF shl 24) or (over(argb shr 16 and 0xFF) shl 16) or (over(argb shr 8 and 0xFF) shl 8) or over(argb and 0xFF)
+}
+
 data class PreparedMedia(val bytes: ByteArray,val width: Int,val height: Int,val video: Boolean=false,val duration: Int=0, val heic: Boolean=false)
 object MediaFiles {
     suspend fun photo(context: Context,uri: Uri): PreparedMedia = withContext(Dispatchers.IO) {
@@ -297,7 +318,8 @@ object MediaFiles {
             val ratio=minOf(1.0,PhotoLongSide/maxOf(info.size.width,info.size.height))
             decoder.setTargetSize((info.size.width*ratio).toInt().coerceAtLeast(1),(info.size.height*ratio).toInt().coerceAtLeast(1))
             decoder.allocator=ImageDecoder.ALLOCATOR_SOFTWARE
-        }
+            decoder.isMutableRequired=true
+        }.also(::flattenOnWhite)
         val file = File(context.cacheDir, "prepared-${UUID.randomUUID()}.heic")
         try {
             val heic = try {
