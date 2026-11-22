@@ -1113,6 +1113,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         fun component(value: String) = android.content.ComponentName(context.packageName, "app.justyo.android.${value}Icon")
         manager.setComponentEnabledSetting(component(selected), android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED, android.content.pm.PackageManager.DONT_KILL_APP)
         aliases.values.filter { it != selected }.forEach { value -> manager.setComponentEnabledSetting(component(value), android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED, android.content.pm.PackageManager.DONT_KILL_APP) }
+        // The share sheet's names belong to the launcher alias they were published under: disabling it removed them
+        // all (the share sheet showed no name until the friends changed). Published again under the new one.
+        runCatching { updateSharingShortcuts(context, state.value.friends) }
         client?.setAppIcon(name)
         mutable.update { it.copy(appIcon = name) }
         changes.withLock { persist() }

@@ -10,7 +10,9 @@ import android.graphics.drawable.Icon
 internal fun updateSharingShortcuts(context: Context,friends: List<Friend>) {
     val manager=context.getSystemService(ShortcutManager::class.java)
     val shortcuts=friends.filter { !it.blocked && !it.gone && !it.request }.take(manager.maxShortcutCountPerActivity.coerceAtMost(4)).map { friend ->
-        ShortcutInfo.Builder(context,friend.key).setShortLabel(friend.name.ifBlank { "Yo" })
+        // A group as its bar says it: "#HUNT" (it was "HUNT" in the share sheet).
+        val label=friend.name.ifBlank { "Yo" }.let { if(friend.group!=null) "#${it.removePrefix("#")}" else it }
+        ShortcutInfo.Builder(context,friend.key).setShortLabel(label)
             .setIcon(Icon.createWithResource(context,R.mipmap.launcher_standard))
             .setCategories(setOf("app.justyo.android.SHARE"))
             .setIntent(Intent(context,MainActivity::class.java).setAction(Intent.ACTION_MAIN))
