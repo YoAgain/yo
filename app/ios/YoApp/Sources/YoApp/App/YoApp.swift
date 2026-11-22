@@ -51,7 +51,7 @@ struct YoApp: App {
     PerfProbe.watchLaunchLag()
     PerfProbe.profileLaunch()
     let application = UIApplication.shared
-    let foreground = ForegroundTurns(state: application.applicationState)
+    let foreground = ForegroundTurns()
     StateStorage.access = StateAccessTime(application, front: { foreground.isFront })
     Launch.start()
     // Only once Yo is in front, never in a background launch (Action button, silent push).
@@ -532,13 +532,18 @@ private final class ForegroundTurns: @unchecked Sendable {
   private var seenActive = false
   private var observers: [NSObjectProtocol] = []
 
-  init(state: UIApplication.State) {
+  init() {
     // Active only from the first `didBecomeActive`: at `App.init` UIKit says `.active` in any launch, a background one
     // (a silent push) too, where no `willResignActive` ever comes to take a turn back. Such a turn (the push token's
     // request at launch) held its flock into the suspension: 0xdead10cc. Until then each turn has background time.
     active = false
-    front = state != .background
+    // Front likewise only once a scene comes to the screen: in a background launch nothing ever says it left, and a
+    // state access whose background time iOS refused went on as if in front, into the suspension.
+    front = false
     observers = [
+      NotificationCenter.default.addObserver(
+        forName: UIScene.willEnterForegroundNotification, object: nil, queue: nil
+      ) { [weak self] _ in self?.setFront(true) },
       NotificationCenter.default.addObserver(
         forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
       ) { [weak self] _ in self?.setFront(true) },
