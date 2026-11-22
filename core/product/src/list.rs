@@ -100,6 +100,12 @@ pub enum Input {
         id: String,
         kinds: Vec<Kind>,
     },
+    /// Who sent the photos and videos still waiting on a group's bar, as the platform kept them across a restart
+    /// (no `Received` told it this time): its line names them, not "Someone". A sender already known stays.
+    MediaSender {
+        id: String,
+        user: String,
+    },
     /// A group reply keeps its Yos on the bar for another solid period.
     KeepAlive(String),
     Delete(String),
@@ -264,6 +270,7 @@ impl List {
             | Input::Notice { id, .. }
             | Input::Press { id, .. }
             | Input::MediaChanged { id, .. }
+            | Input::MediaSender { id, .. }
             | Input::SendUndone(id)
             | Input::RequestAccepted(id)
             | Input::MediaSeen(id)
@@ -465,6 +472,12 @@ impl List {
                 state.media = kinds.into_iter().filter(|kind| *kind != Kind::Yo).collect();
                 if state.run.is_none() && state.media.is_empty() {
                     state.forget_senders();
+                }
+            }
+            Input::MediaSender { id, user } => {
+                let state = self.states.entry(id).or_default();
+                if state.last_sender.is_none() {
+                    state.last_sender = Some(user);
                 }
             }
             Input::KeepAlive(id) => {
@@ -1550,6 +1563,17 @@ mod tests {
         l.apply(0, Input::Received { id: "a".into(), kind: Kind::Photo, token: "q".into(), sender: None });
         l.apply(60_000, Input::Tick);
         assert_eq!(row(&l, "a").line, Line::Arrival { count: 2, name: "A".into() }, "photos waiting count as Yos");
+    }
+
+    #[test]
+    fn a_group_photo_kept_across_a_restart_names_its_sender() {
+        let mut l = group_model();
+        l.apply(0, Input::MediaChanged { id: "g".into(), kinds: vec![Kind::Photo] });
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 1, name: "Someone".into() });
+        l.apply(0, Input::MediaSender { id: "g".into(), user: "u1".into() });
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 1, name: "MIA".into() });
+        l.apply(0, Input::MediaSender { id: "g".into(), user: "u2".into() });
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 1, name: "MIA".into() }, "a known sender stays");
     }
 
     #[test]

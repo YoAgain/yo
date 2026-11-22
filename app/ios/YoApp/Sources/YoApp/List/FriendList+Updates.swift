@@ -156,10 +156,15 @@ extension FriendList {
   func syncListMedia() {
     for friend in friends.shown {
       let id = friend.key.uuidString
-      let videos = (inbox.media(for: friend) ?? []).map(\.isVideo)
+      let waiting = inbox.media(for: friend) ?? []
+      let videos = waiting.map(\.isVideo)
       guard (listMedia.each[id] ?? []) != videos else { continue }
       listMedia.each[id] = videos
       publish(listModel.mediaChanged(now: listNow, id: id, kinds: videos.map { $0 ? .video : .photo }))
+      // Kept from before a restart, no Yo told the model who sent it: the newest one's sender, from its id.
+      if friend.group != nil, let user = waiting.last.flatMap(Inbox.sender(of:)) {
+        publish(listModel.mediaSender(now: listNow, id: id, user: user))
+      }
     }
   }
 

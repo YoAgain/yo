@@ -196,6 +196,9 @@ impl YoList {
     pub fn media_changed(&self, now: u64, id: String, kinds: Vec<Kind>) -> Snapshot {
         self.apply(now, Input::MediaChanged { id, kinds })
     }
+    pub fn media_sender(&self, now: u64, id: String, user: String) -> Snapshot {
+        self.apply(now, Input::MediaSender { id, user })
+    }
     pub fn keep_alive(&self, now: u64, id: String) -> Snapshot {
         self.apply(now, Input::KeepAlive(id))
     }
