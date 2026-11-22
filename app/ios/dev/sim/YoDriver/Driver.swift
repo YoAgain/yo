@@ -250,13 +250,15 @@ import XCTest
     return nil
   }
 
-  /// What an element is now (gone after the tap: only that; asking a gone element fails the test).
+  /// What an element is now, from one snapshot: a tap that changes the screen (Sign In, Sign Out) may take the element
+  /// away between two questions, and asking a gone element fails the test (XCTest then ends the driver). `exists`
+  /// and then `frame` did that; a snapshot that cannot be had is an answer instead.
   private func describe(_ e: XCUIElement) -> [String: Any] {
-    guard e.exists else { return ["exists": false] }
-    let f = e.frame
+    guard let s = try? e.snapshot() else { return ["exists": false] }
+    let f = s.frame
     return [
-      "exists": e.exists, "label": e.label, "id": e.identifier, "value": "\(e.value ?? "")",
-      "frame": [f.minX, f.minY, f.width, f.height], "hittable": e.exists && e.isHittable, "enabled": e.isEnabled,
+      "exists": true, "label": s.label, "id": s.identifier, "value": "\(s.value ?? "")",
+      "frame": [f.minX, f.minY, f.width, f.height], "enabled": s.isEnabled,
     ]
   }
 

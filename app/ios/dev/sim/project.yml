@@ -1,5 +1,6 @@
 # The Simulator build of Yo Dev (dev/sim.sh, on a Mac): XcodeGen makes YoSim.xcodeproj (ignored) from this.
-# The app's own sources and resources, its notification service (YoNotify), the core built for the Simulator
+# The app's own sources and resources, its notification service (YoNotify), share extension (YoShare), controls and
+# widgets (YoControls), the core built for the Simulator
 # (YO_CORE_TARGET=aarch64-apple-ios-sim dev/core.sh), and YoDriver: a UI test that drives the app by commands from a
 # folder (drive.py).
 name: YoSim
@@ -48,6 +49,8 @@ targets:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
       - target: YoNotify
+      - target: YoShare
+      - target: YoControls
       - sdk: libsqlite3.tbd  # the core's state (StateDb), as Package.swift links it for YoCore
     settings:
       base:
@@ -80,6 +83,45 @@ targets:
         MARKETING_VERSION: "1.0.0"  # as the app
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: ../../YoApp/YoNotify-Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: YoNotify.entitlements
+  # The share sheet's "Yo" (photos from Photos to a friend) and the controls and widgets, as in xtool.yml.
+  YoShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ../../YoApp/Sources/Extensions/YoShare
+      - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
+    dependencies:
+      - target: YoCore
+      - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
+      - sdk: libsqlite3.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.share
+        PRODUCT_NAME: YoShare
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: ../../YoApp/YoShare-Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: YoNotify.entitlements  # the same App Group
+  YoControls:
+    type: app-extension
+    platform: iOS
+    sources: [../../YoApp/Sources/Extensions/YoControls]
+    dependencies:
+      - target: YoCore
+      - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
+      - sdk: libsqlite3.tbd
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.controls
+        PRODUCT_NAME: YoControls
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: ../../YoApp/YoControls-Info.plist
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: YoNotify.entitlements
   # YoNotify's code run by hand (YoNotifyProbe/main.swift): the Simulator starts no notification service itself.
