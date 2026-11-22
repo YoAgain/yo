@@ -116,7 +116,7 @@ extension FriendList {
       cheers += 1
       withAnimation(inbox.busy ? nil : .snappy(duration: 0.2)) {
         for arrival in batch {
-          guard let friend = friends.shownFriend(named: arrival.from) else { continue }
+          guard let friend = friends.shownBar(for: arrival) else { continue }
           publish(listModel.received(now: listNow, id: friend.key.uuidString,
             kind: arrival.video != nil ? .video : (arrival.photo != nil ? .photo : .yo), token: arrival.id,
             sender: groupSender(arrival, friend: friend)))

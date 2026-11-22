@@ -232,8 +232,9 @@ extension FriendList {
     case .unknown(let why): unreachable = why
     }
     let skeleton = Username.skeleton(spelled)
+    // A person only: a group may carry the same name ("Anna" the group, ANNA the user), and is no friend to add.
     if let known = friends.shown.first(where: {
-      !$0.gone && (Username.skeleton($0.name) == skeleton || (user != nil && $0.user == user))
+      !$0.gone && $0.group == nil && (Username.skeleton($0.name) == skeleton || (user != nil && $0.user == user))
     }) {
       return .known(known)
     }

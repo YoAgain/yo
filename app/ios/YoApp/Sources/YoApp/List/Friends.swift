@@ -451,6 +451,19 @@ final class Friends {
     all.first { $0.name == name && !$0.blocked }
   }
 
+  /// The bar a Yo arrived on: a group's by its id (a group Yo's id starts with it, a group photo comes by the bar's
+  /// `mediaKey`), a person's by name, so a group named as a friend never takes the friend's Yos, nor the friend the
+  /// group's.
+  func shownBar(for arrival: Arrival) -> Friend? {
+    let first = arrival.id.split(separator: "/").first.map(String.init)
+    if let bar = all.first(where: {
+      !$0.blocked && $0.group != nil && ($0.mediaKey == arrival.from || $0.group == first)
+    }) {
+      return bar
+    }
+    return all.first { $0.name == arrival.from && !$0.blocked && $0.group == nil } ?? shownFriend(named: arrival.from)
+  }
+
   /// Signed out (the account's storage keeps them).
   func reset() {
     quietly { all = [] }
