@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -1217,7 +1218,13 @@ private fun OnboardingButton(label: String, enabled: Boolean, onClick: () -> Uni
 
 @Composable
 private fun OnboardingNote(message: String?) {
-    if (message != null) Text(message, Modifier.padding(top = 8.dp), color = Color.White,
+    if (message == null) return
+    // Scrolled into view when it appears: in landscape with the keyboard up the sign-in card's note ("That doesn't
+    // match a recovery key") was below the visible part, and a tap on the arrow seemed to do nothing. TalkBack says it.
+    val requester = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    LaunchedEffect(message) { withFrameNanos {}; requester.bringIntoView() }
+    Text(message, Modifier.padding(top = 8.dp).bringIntoViewRequester(requester)
+        .semantics { liveRegion = LiveRegionMode.Polite }, color = Color.White,
         fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
 }
 
