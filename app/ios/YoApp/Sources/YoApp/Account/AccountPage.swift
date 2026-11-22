@@ -29,7 +29,7 @@ struct AccountPage: View {
         Button {
           openSheet(.contacts)
         } label: {
-          LabeledContent {
+          ChevronRow {
             HStack(spacing: 8) {
               ContactSecurityPage(summaryOnly: true)
               DisclosureChevron()
@@ -52,7 +52,7 @@ struct AccountPage: View {
         // With the red badge it opens the recovery key's screen itself.
         if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
           Button { showingRecoveryKey = true } label: {
-            LabeledContent {
+            ChevronRow {
               HStack(spacing: 8) {
                 RecoveryBadge()
                 DisclosureChevron()

@@ -21,6 +21,22 @@ struct DisclosureChevron: View {
   }
 }
 
+/// A button row that opens a page: its label, then what it shows and its chevron at the trailing edge, as a navigation
+/// link's row keeps them, at every text size (LabeledContent puts its content under the label at accessibility sizes,
+/// the chevron then at the row's leading edge).
+struct ChevronRow<Trailing: View, Label: View>: View {
+  @ViewBuilder var trailing: Trailing
+  @ViewBuilder var label: Label
+
+  var body: some View {
+    HStack(spacing: 8) {
+      label
+      Spacer(minLength: 0)
+      trailing
+    }
+  }
+}
+
 enum SettingKey {
   /// The bars' sides swapped: "Yo!!" at the left end, the photo sign and the undo ring at the right.
   static let leftHanded = "settings.leftHanded"
@@ -106,7 +122,7 @@ struct SettingsView: View {
             Button {
               sheet = .help
             } label: {
-              LabeledContent {
+              ChevronRow {
                 DisclosureChevron()
               } label: {
                 HStack {
@@ -119,7 +135,7 @@ struct SettingsView: View {
             Button {
               showingFeedback = true
             } label: {
-              LabeledContent {
+              ChevronRow {
                 DisclosureChevron()
               } label: {
                 HStack {
@@ -135,7 +151,7 @@ struct SettingsView: View {
             Button {
               listAction(.addContact)
             } label: {
-              LabeledContent {
+              ChevronRow {
                 DisclosureChevron()
               } label: {
                 Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(Tile(.green))
