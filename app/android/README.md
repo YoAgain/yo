@@ -18,11 +18,11 @@ app/android/dev/bootstrap.sh
 ```
 
 The script contains the exact installation steps and SHA-256 checks for the JDK and command-line tools. This run
-installed Temurin **21.0.13+9**, command-line tools **13114758**, SDK platform **android-37.0** revision 2,
-build-tools **37.0.0**, NDK **29.0.14206865**, platform-tools and the emulator. Rust **1.99.1** comes from the root
+installed Temurin **25.0.5.1+2**, command-line tools **16111833**, SDK platform **android-37.2**,
+build-tools **37.0.0**, NDK **30.0.16248370**, platform-tools and the emulator. Rust **1.100.0** comes from the root
 `rust-toolchain.toml`; targets are `aarch64-linux-android` and `x86_64-linux-android`, cargo-ndk **4.1.2**.
-All Android tools go under `~/Android`. Gradle **9.6.0** is downloaded by the checked-in wrapper, with a pinned
-checksum, into `~/.gradle`. AGP **9.5.1** and Kotlin Compose compiler **2.4.21** are pinned.
+All Android tools go under `~/Android`. Gradle **9.9.2** is downloaded by the checked-in wrapper, with a pinned
+checksum, into `~/.gradle`. AGP **9.5.2** and Kotlin Compose compiler **2.4.21** are pinned.
 
 `dev/env.sh` sets `JAVA_HOME`, `ANDROID_HOME`, `ANDROID_USER_HOME`, `ANDROID_AVD_HOME`, `GRADLE_USER_HOME` and PATH.
 The Android SDK’s default user directory may otherwise be outside a restricted workspace. No shell profile changes

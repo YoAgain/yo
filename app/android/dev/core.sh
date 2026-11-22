@@ -3,7 +3,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/env.sh"
 root=$(cd "$here/../../.." && pwd)
-export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 export CARGO_TARGET_DIR="$root/target/android"
 # Keep build concurrency bounded: libsignal and its post-quantum dependencies are large.
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}

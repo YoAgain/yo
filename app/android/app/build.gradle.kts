@@ -37,7 +37,8 @@ fun firebaseResources(applicationId: String): Map<String, String> {
 }
 android {
     namespace = "app.justyo.android"
-    compileSdk = 37
+    // 37.2: Compose 1.13 (BOM 2026.11.01) compiles only against 37.1 or later.
+    compileSdk { version = release(37) { minorApiLevel = 2 } }
     buildToolsVersion = "37.0.0"
     defaultConfig {
         applicationId = if (deviceSoak) "app.justyo.android.dev.soak" else "app.justyo.android.dev"
@@ -90,33 +91,34 @@ val buildCore = tasks.register<Exec>("buildCore") {
 }
 tasks.named("preBuild") { dependsOn(buildCore) }
 dependencies {
+    // Pinned to 1.1.0: heifwriter 1.2.0 needs minSdk 29, the app keeps 28 (Android 9).
     implementation("androidx.heifwriter:heifwriter:1.1.0")
-    implementation("androidx.glance:glance-appwidget:1.1.1")
-    implementation("androidx.work:work-runtime-ktx:2.10.5")
-    implementation("com.google.firebase:firebase-messaging:24.1.2")
-    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
-    implementation("androidx.activity:activity-compose:1.12.4")
-    implementation("androidx.compose.material3:material3:1.5.0-rc01")
+    implementation("androidx.glance:glance-appwidget:1.2.0")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
+    implementation("com.google.firebase:firebase-messaging:26.0.2")
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.compose.material3:material3:1.5.0")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("net.java.dev.jna:jna:5.18.1@aar")
-    implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("net.java.dev.jna:jna:5.19.1@aar")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("androidx.credentials:credentials:1.6.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
     implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
-    implementation("androidx.camera:camera-camera2:1.7.0-rc02")
-    implementation("androidx.camera:camera-lifecycle:1.7.0-rc02")
-    implementation("androidx.camera:camera-view:1.7.0-rc02")
-    implementation("androidx.camera:camera-video:1.7.0-rc02")
+    implementation("androidx.camera:camera-camera2:1.7.0")
+    implementation("androidx.camera:camera-lifecycle:1.7.0")
+    implementation("androidx.camera:camera-view:1.7.0")
+    implementation("androidx.camera:camera-video:1.7.0")
     implementation("com.google.zxing:core:3.5.4")
     implementation("androidx.exifinterface:exifinterface:1.4.2")
     implementation("androidx.media3:media3-transformer:1.11.1")
     implementation("androidx.media3:media3-effect:1.11.1")
-    testRuntimeOnly("net.java.dev.jna:jna:5.18.1@jar")
+    testRuntimeOnly("net.java.dev.jna:jna:5.19.1@jar")
     testImplementation("junit:junit:4.13.2")
 }
 androidComponents {
