@@ -131,8 +131,16 @@ import XCTest
         while element.exists && Date.now < end { Thread.sleep(forTimeInterval: 0.1) }
         return ["gone": !element.exists]
       }
-      let element = try find(target, c, timeout: timeout, required: op != "exists" && op != "wait")
-      guard let element else { return ["exists": false] }
+      guard var element = try find(target, c, timeout: timeout, required: op != "exists" && op != "wait")
+      else { return ["exists": false] }
+      // A touch on an element that cannot take it (a bar under a sheet with the same name) fails the test, and XCTest
+      // ends the driver: the first match that can take it instead, or an answer.
+      if ["tap", "press", "doubletap", "swipe"].contains(op), c["dx"] == nil, !element.isHittable {
+        guard c["index"] == nil,
+          let other = matches(target, c).allElementsBoundByIndex.first(where: { $0.exists && $0.isHittable })
+        else { throw Failure(description: "not hittable: \(c)") }
+        element = other
+      }
       switch op {
       case "tap":
         if let dx = c["dx"] as? Double, let dy = c["dy"] as? Double {
@@ -229,14 +237,17 @@ import XCTest
 
   /// Elements by label (exact or `contains`), identifier, type, and index among the matches.
   private func query(_ target: XCUIApplication, _ c: [String: Any]) -> XCUIElement {
+    matches(target, c).element(boundBy: c["index"] as? Int ?? 0)
+  }
+
+  private func matches(_ target: XCUIApplication, _ c: [String: Any]) -> XCUIElementQuery {
     let type = Self.types[c["type"] as? String ?? "any"] ?? .any
     var predicates: [NSPredicate] = []
     if let label = c["label"] as? String { predicates.append(NSPredicate(format: "label == %@", label)) }
     if let part = c["contains"] as? String { predicates.append(NSPredicate(format: "label CONTAINS %@", part)) }
     if let id = c["id"] as? String { predicates.append(NSPredicate(format: "identifier == %@", id)) }
     if let value = c["value"] as? String { predicates.append(NSPredicate(format: "value == %@", value)) }
-    let matches = target.descendants(matching: type).matching(NSCompoundPredicate(andPredicateWithSubpredicates: predicates))
-    return matches.element(boundBy: c["index"] as? Int ?? 0)
+    return target.descendants(matching: type).matching(NSCompoundPredicate(andPredicateWithSubpredicates: predicates))
   }
 
   private func find(_ target: XCUIApplication, _ c: [String: Any], timeout: Double, required: Bool) throws
