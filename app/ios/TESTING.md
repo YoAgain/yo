@@ -251,8 +251,34 @@ characters). The core built with the new dependencies opened the state the older
 | Dark Mode switched with the Settings sheet open, Yo staying in front | the sheet kept the old appearance until Yo left and returned: each sheet read the iPhone's style once. SwiftUI puts the list's forced dark on the window scene, so only the screen has the iPhone's style and it reports no change; it is read again whenever Yo becomes active (`SystemAppearance`), and sheets over sheets take it too. Control Center or Settings switches it on a device and both take Yo out of active; `simctl ui appearance` does not (open and close Notification Center after it) |
 | A friend whose account was deleted | "Not on Yo" after the next Yo to them |
 
+## Widgets, background launches, write failures, diagnostics (2026-11-22, night)
+
+Against the dev hub with a throwaway CLI account (deleted afterwards). Widgets are added through SpringBoard
+(`pressxy sb=true` on the Home Screen, Bearbeiten › Widget hinzufügen, the gallery scrolled to Yo); a widget's bar is
+tapped with `tapxy sb=true`.
+
+| Flow | Result |
+|---|---|
+| Medium widget added: the list's top four; a new friend accepted in Yo goes on top within the 2 s reload | ok |
+| Widget bar tapped with Yo in the background | the island "Sending", the bar "Sent Yo!" for a moment, the Yo arrives |
+| Widget bar tapped with Yo not running (a launch in the background) | iOS refused every state access its background time; after 30 s the app took the storage for gone, signed out and registered again, the widget's Yo lost with the state: fixed (unavailability counts only while a scene is on the screen) |
+| Widgets in the Simulator build | the system font: the font was missing from YoControls in `dev/sim/project.yml` (xtool.yml has it): fixed |
+| Badge after two Yos with Yo in the background | 2 |
+| State database made read-only (`chmod`) as a stand-in for a full disk | a Yo sent says "Something Went Wrong", the bar "Not Sent · Tap to Retry"; a Yo received is neither shown nor lost: it comes within seconds once writable; no sign-out on a launch with it read-only |
+| Dark Mode with sheets open | see the lock round above: fixed |
+| Diagnostics: a counted line written as an extension would, the app started | at the dev hub with this build (`ios/1`); one of an older build (`ios/0`) dropped by the hub as meant (be9fb62) |
+| "Not on Yo" from the list | counted as expected (the admin page listed it, and a hub 404 for a Yo to a deleted account, as problems): fixed |
+| Crash reports | MetricKit delivers none in the Simulator and the app has no crash trigger: device only |
+| Group named like a person, a group "#HUNT4" | separate bars; a Yo to each goes to the right one |
+| `sim.sh notify` after these runs | the probe read the inbox (200) and found nothing new while a Yo waited there (left at the hub, unacknowledged; the app showed it on opening): open, see Left |
+| Clock change, App Switcher | the Simulator takes the Mac's clock; App Switcher leaves Yo inactive (in front), as home and back above |
+
 ## Left
 
+- `sim.sh notify` late on 2026-11-22: the notification service (probe) read the inbox and returned nothing new while
+  a Yo waited there unacknowledged, for direct and group Yos alike. Consistent with a guest stopping at `GUEST_EVENTS`
+  (core receive.rs: events the app has not taken or acknowledged, 256), not confirmed; on a device it would be a bare
+  "Yo" for every push. Check on TestFlight first.
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
 - Sending a photo while signing out within its 1.5 s, and the shared state's deletion racing an extension's write:
   guarded since (outgoing media bound to its account, `Media.swift`; received media checked by generation; the old
