@@ -34,15 +34,7 @@ struct Arrival: Equatable, Identifiable {
   }
 
   /// How long ago, as stories say it: "now", "2m", "3h", "1d".
-  static func age(_ date: Date, now: Date = .now) -> String {
-    let minutes = Int(now.timeIntervalSince(date) / 60)
-    return switch minutes {
-    case ..<1: "now"
-    case ..<60: "\(minutes)m"
-    case ..<1440: "\(minutes / 60)h"
-    default: "\(minutes / 1440)d"
-    }
-  }
+  static func age(_ date: Date, now: Date = .now) -> String { ShareBridge.age(date, now: now) }
 }
 
 @MainActor @Observable

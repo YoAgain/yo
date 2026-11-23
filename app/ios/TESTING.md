@@ -270,6 +270,18 @@ tapped with `tapxy sb=true`.
 | Diagnostics: a counted line written as an extension would, the app started | at the dev hub with this build (`ios/1`); one of an older build (`ios/0`) dropped by the hub as meant (be9fb62) |
 | "Not on Yo" from the list | counted as expected (the admin page listed it, and a hub 404 for a Yo to a deleted account, as problems): fixed |
 | Crash reports | MetricKit delivers none in the Simulator and the app has no crash trigger: device only |
+
+## Lock Screen widgets (2026-11-23)
+
+On the booted Simulator signed in as a dev account: the Lock Screen held long (after a Face ID match), Anpassen ›
+Widgets hinzufügen › Yo, and the date tapped for the inline one. A failing driver command ends XCTest's test (and the
+driver restarts, 40 s): wait with `exists`, never `info`.
+
+| Flow | Result |
+|---|---|
+| Gallery: Yo a Friend (round "Yo" + name, wide "Yo NAME"), Yo Back (round, wide "Yo Back · NAME, 3h"), Open Yo, Yo Camera; inline "Y Yo from NAME · 3h" | ok |
+| Lock Screen F + D + B + A | ok (iOS 26 draws them without plates) |
+| Yo Back tapped on the Lock Screen | sent; YoGPT's answer became the last Yo: D and F turned to "YoGPT, 4m" without the app, then ticked by the minute |
 | Group named like a person, a group "#HUNT4" | separate bars; a Yo to each goes to the right one |
 | `sim.sh notify` after these runs | the probe read the inbox (200) and found nothing new while a Yo waited there (left at the hub, unacknowledged; the app showed it on opening): open, see Left |
 | Hunt 5: 300 Yos from a friend with Yo closed, then `sim.sh notify` and one more Yo | before: the notification service read 256 (`GUEST_EVENTS`) and stopped; its next push found nothing, a bare "Yo" (on an iPhone every push until the app is opened). Fixed: a guest holds at most 2048 for the app and drops the oldest past them, never stops reading; the newest shows ("Yo from …", badge 302 then 303). The widgets' list now follows: the service lifts the senders' bars in the shared list and reloads the widgets. The Simulator now runs YoNotify itself on a push (simctl log: "Received replacement content"), so a probe run after it finds nothing new: the service took it |

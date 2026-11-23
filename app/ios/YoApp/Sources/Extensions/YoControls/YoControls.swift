@@ -17,6 +17,8 @@ struct YoControls: WidgetBundle {
     YoFriendWidget()
     YoListWidget()
     YoBackWidget()
+    YoOpenWidget()
+    YoCameraWidget()
     YoSentLiveActivity()
   }
 }

@@ -2,6 +2,7 @@
 // not send itself, and Yo notifications. One writer per file.
 import Foundation
 import UserNotifications
+import WidgetKit
 import YoCore
 
 enum ShareBridge {
@@ -278,6 +279,19 @@ extension ShareBridge {
     let to: String
     let name: String
     let sentAtMs: UInt64
+
+    var date: Date { Date(timeIntervalSince1970: Double(sentAtMs) / 1000) }
+  }
+
+  /// How long ago, as stories say it: "now", "2m", "3h", "1d".
+  static func age(_ date: Date, now: Date = .now) -> String {
+    let minutes = Int(now.timeIntervalSince(date) / 60)
+    return switch minutes {
+    case ..<1: "now"
+    case ..<60: "\(minutes)m"
+    case ..<1440: "\(minutes / 60)h"
+    default: "\(minutes / 1440)d"
+    }
   }
 
   static var lastYoFile: URL? { container?.appending(path: "last-yo.json") }
@@ -297,6 +311,8 @@ extension ShareBridge {
     let last = LastYo(owner: owner, to: newest.user, name: name, sentAtMs: newest.sentAtMs)
     guard let data = try? JSONEncoder().encode(last) else { return }
     Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+    // The Lock Screen's Yo Back and "Yo from …" name the newest sender.
+    WidgetCenter.shared.reloadAllTimelines()
   }
 }
 

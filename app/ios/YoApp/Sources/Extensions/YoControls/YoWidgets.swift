@@ -1,5 +1,7 @@
-// Widgets: the list's bars on the Home Screen (one widget for every size, so the size can change in place), and "Yo"
-// to one friend and "Yo Back" on the Lock Screen. They read ShareBridge.List, which the app reloads them for.
+// Widgets: the list's bars on the Home Screen (one widget for every size, so the size can change in place), and on the
+// Lock Screen: Yo to one friend (round and wide), Yo Back (round and wide, "Yo back · Sora, 2m"), Open Yo (round, and
+// "Yo from Sora · 2m" above the clock) and Yo Camera. Only Yo opens Yo; a name sends. They read ShareBridge.List and
+// LastYo, which the app and the notification service reload them for.
 import AppIntents
 import Foundation
 import SwiftUI
@@ -11,6 +13,16 @@ struct YoEntry: TimelineEntry {
   let list: ShareBridge.List?
   let sent: WidgetSent?
   var picked: [FriendEntity?] = []
+  /// Who sent the last Yo to this account.
+  var last: ShareBridge.LastYo? = nil
+
+  /// "2m" in Yo Back, at this entry's time.
+  var lastAge: String? { last.map { ShareBridge.age($0.date, now: date) } }
+
+  /// The last sender as the list shows them now, as Yo Back names them (IntentYo.back).
+  var lastName: String? {
+    last.map { last in ShareBridge.Friend.title(friends.first { $0.to == last.to }?.name ?? last.name, to: last.to) }
+  }
 
   var friends: [ShareBridge.Friend] { list?.friends ?? [] }
 
@@ -33,12 +45,29 @@ struct YoEntry: TimelineEntry {
     justSent(friend) ? productSendWords(mark: productCounted(count: 1), sending: false, lang: .english) : friend.title
   }
 
-  static func timeline(picked: [FriendEntity?] = []) -> Timeline<YoEntry> {
+  /// `ageing`: an entry at each change of the last Yo's age ("2m", "3m", … "1h"), the next 60 of them, then a reload.
+  static func timeline(picked: [FriendEntity?] = [], ageing: Bool = false) -> Timeline<YoEntry> {
     let now = Date.now
     let list = ShareBridge.readList()
-    var entries = [YoEntry(date: now, list: list, sent: WidgetSent.read(now: now), picked: picked)]
-    if let sent = entries[0].sent { entries.append(YoEntry(date: sent.until, list: list, sent: nil, picked: picked)) }
-    return Timeline(entries: entries, policy: .never)
+    let sent = WidgetSent.read(now: now)
+    // Another account's last Yo is not this one's.
+    let last = ageing ? ShareBridge.readLastYo().flatMap { list == nil || $0.owner == list?.owner ? $0 : nil } : nil
+    var dates = [now]
+    if let sent { dates.append(sent.until) }
+    let steps = last.map { ageSteps(from: $0.date, after: now) } ?? []
+    dates += steps
+    let entries = Set(dates).sorted().map { date in
+      YoEntry(date: date, list: list, sent: sent.flatMap { date < $0.until ? $0 : nil }, picked: picked, last: last)
+    }
+    return Timeline(entries: entries, policy: steps.isEmpty ? .never : .atEnd)
+  }
+
+  /// When "now" turns "1m", each minute to "59m", each hour to "23h", then each day: the next 60 after `now`.
+  static func ageSteps(from start: Date, after now: Date) -> [Date] {
+    let minutes = (1..<60).map { start + Double($0) * 60 }
+    let hours = (1..<24).map { start + Double($0) * 3600 }
+    let days = (1...30).map { start + Double($0) * 86400 }
+    return Array((minutes + hours + days).filter { $0 > now }.prefix(60))
   }
 
   static let preview = YoEntry(
@@ -49,7 +78,8 @@ struct YoEntry: TimelineEntry {
         "Leo", "Mia", "Noah", "Emma", "Finn", "Lena", "Ben", "YoGPT", "Ida", "Paul", "Ella", "Max", "Lia", "Tom", "Zoe",
         "Jan",
       ].enumerated().map { ShareBridge.Friend(name: $1, color: $0, to: $1) }),
-    sent: nil)
+    sent: nil,
+    last: ShareBridge.LastYo(owner: "", to: "Sora", name: "Sora", sentAtMs: UInt64((Date.now.timeIntervalSince1970 - 120) * 1000)))
 }
 
 // MARK: - One friend (Lock Screen)
@@ -73,7 +103,7 @@ struct YoFriendWidget: Widget {
     }
     .configurationDisplayName(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetFriend, lang: .english))))
     .description(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetFriendDescription, lang: .english))))
-    .supportedFamilies([.accessoryCircular])
+    .supportedFamilies([.accessoryCircular, .accessoryRectangular])
   }
 
   struct Provider: AppIntentTimelineProvider {
@@ -92,18 +122,36 @@ struct YoFriendWidget: Widget {
 
 struct YoFriendView: View {
   let entry: YoEntry
+  @Environment(\.widgetFamily) private var family
 
   var body: some View {
-    if let friend = entry.friend {
-      Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
-        CircleLines(top: entry.justSent(friend) ? productText(text: .sent, lang: .english) : productText(text: .yo, lang: .english), bottom: entry.justSent(friend) ? productText(text: .yoBang, lang: .english) : friend.title)
+    Group {
+      if let friend = entry.friend {
+        Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
+          if entry.justSent(friend) {
+            SentLabel(wide: family == .accessoryRectangular)
+          } else if family == .accessoryRectangular {
+            // "Yo Sora": the wordmark, then the name in the brand's font.
+            HStack(spacing: 6) {
+              Wordmark(size: 30)
+              Text(verbatim: friend.title).font(.yo(22, relativeTo: .title2)).lineLimit(1).minimumScaleFactor(0.5)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+          } else {
+            VStack(spacing: 0) {
+              Wordmark(size: 24)
+              Text(verbatim: friend.title).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.6)
+            }
+            .padding(4)
+          }
+        }
+        .buttonStyle(.plain)
+      } else {
+        // Signed out or no friend yet: Yo only, so a tap opens Yo.
+        Wordmark(size: family == .accessoryRectangular ? 30 : 26)
       }
-      .buttonStyle(.plain)
-      .containerBackground(for: .widget) { AccessoryWidgetBackground() }
-    } else {
-      CircleLines(top: productText(text: .yo, lang: .english), bottom: "")
-        .containerBackground(for: .widget) { AccessoryWidgetBackground() }
     }
+    .containerBackground(for: .widget) { AccessoryWidgetBackground() }
   }
 }
 
@@ -226,38 +274,124 @@ struct YoBackWidget: Widget {
     StaticConfiguration(kind: "app.justyo.ios.widget.back", provider: Provider()) { YoBackView(entry: $0) }
       .configurationDisplayName(LocalizedStringResource(String.LocalizationValue(productText(text: .yoBack, lang: .english))))
       .description(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetBackDescription, lang: .english))))
-      .supportedFamilies([.accessoryCircular])
+      .supportedFamilies([.accessoryCircular, .accessoryRectangular])
   }
 
   struct Provider: TimelineProvider {
     func placeholder(in context: Context) -> YoEntry { .preview }
 
     func getSnapshot(in context: Context, completion: @escaping (YoEntry) -> Void) {
-      completion(YoEntry.timeline().entries[0])
+      let entry = YoEntry.timeline(ageing: true).entries[0]
+      completion(entry.last == nil && context.isPreview ? .preview : entry)
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<YoEntry>) -> Void) {
-      completion(YoEntry.timeline())
+      completion(YoEntry.timeline(ageing: true))
     }
   }
 }
 
 struct YoBackView: View {
   let entry: YoEntry
+  @Environment(\.widgetFamily) private var family
 
   var body: some View {
     Button(intent: YoBackNowIntent()) {
       if entry.sent?.back == true {
-        CircleLines(top: productText(text: .sent, lang: .english), bottom: productText(text: .yoBang, lang: .english))
+        SentLabel(wide: family == .accessoryRectangular)
+      } else if family == .accessoryRectangular {
+        // "Yo back · Sora, 2m": who Yo'd you last, and when.
+        HStack(spacing: 8) {
+          Image("yo.back").font(.system(size: 30, weight: .bold)).widgetAccentable()
+          VStack(alignment: .leading, spacing: 0) {
+            Text(verbatim: productText(text: .yoBack, lang: .english)).font(.yo(17, relativeTo: .headline))
+            Text(verbatim: entry.lastName.map { "\($0), \(entry.lastAge ?? "")" } ?? productText(text: .noAnswerYet, lang: .english))
+              .font(.system(size: 13, weight: .semibold))
+          }
+          .lineLimit(1)
+          .minimumScaleFactor(0.6)
+          Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         VStack(spacing: 1) {
-          Image(systemName: "arrowshape.turn.up.left.fill").font(.system(size: 13, weight: .bold))
+          Image("yo.back").font(.system(size: 18, weight: .bold)).widgetAccentable()
           Text(productText(text: .yoBack, lang: .english)).font(.yo(11, relativeTo: .caption)).lineLimit(1).minimumScaleFactor(0.6)
         }
         .padding(4)
       }
     }
     .buttonStyle(.plain)
+    .containerBackground(for: .widget) { AccessoryWidgetBackground() }
+  }
+}
+
+// MARK: - Open Yo (Lock Screen): Yo alone, and "Yo from Sora · 2m" above the clock
+
+struct YoOpenWidget: Widget {
+  var body: some WidgetConfiguration {
+    StaticConfiguration(kind: "app.justyo.ios.widget.open", provider: YoBackWidget.Provider()) { YoOpenView(entry: $0) }
+      .configurationDisplayName("Open Yo")
+      .description("Opens Yo. Above the clock: who sent you the last Yo.")
+      .supportedFamilies([.accessoryCircular, .accessoryInline])
+  }
+}
+
+struct YoOpenView: View {
+  let entry: YoEntry
+  @Environment(\.widgetFamily) private var family
+
+  var body: some View {
+    Group {
+      if family == .accessoryInline {
+        // One line beside the date: the system draws it (one symbol and the text, no background).
+        Label {
+          Text(verbatim: entry.lastName.map {
+            productNotificationLine(name: $0, kind: .yo, request: false, lang: .english) + " · " + (entry.lastAge ?? "")
+          } ?? productText(text: .yo, lang: .english))
+        } icon: {
+          Image("yo.letter")
+        }
+      } else {
+        Wordmark(size: 26)
+      }
+    }
+    .widgetURL(URL(string: "yo://open"))
+    .containerBackground(for: .widget) { AccessoryWidgetBackground() }
+  }
+}
+
+// MARK: - Yo Camera (Lock Screen)
+
+struct YoCameraWidget: Widget {
+  var body: some WidgetConfiguration {
+    StaticConfiguration(kind: "app.justyo.ios.widget.camera", provider: Provider()) { _ in YoCameraView() }
+      .configurationDisplayName("Yo Camera")
+      .description("Opens Yo in the camera.")
+      .supportedFamilies([.accessoryCircular])
+  }
+
+  struct Provider: TimelineProvider {
+    func placeholder(in context: Context) -> SimpleEntry { SimpleEntry(date: .now) }
+    func getSnapshot(in context: Context, completion: @escaping (SimpleEntry) -> Void) { completion(SimpleEntry(date: .now)) }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<SimpleEntry>) -> Void) {
+      completion(Timeline(entries: [SimpleEntry(date: .now)], policy: .never))
+    }
+  }
+
+  struct SimpleEntry: TimelineEntry { let date: Date }
+}
+
+struct YoCameraView: View {
+  var body: some View {
+    VStack(spacing: 1) {
+      Image(systemName: "camera.fill").font(.system(size: 20, weight: .semibold)).widgetAccentable()
+      Text(verbatim: productText(text: .yo, lang: .english)).font(.yo(11, relativeTo: .caption))
+    }
+    .padding(4)
+    // yo://camera: the app opens in the camera (YoApp's onOpenURL), as Yo Camera's control does.
+    .widgetURL(URL(string: "yo://camera"))
     .containerBackground(for: .widget) { AccessoryWidgetBackground() }
   }
 }
@@ -281,17 +415,37 @@ private struct BarLabel: View {
   }
 }
 
-private struct CircleLines: View {
-  let top: String
-  let bottom: String
+/// Yo's wordmark (the custom symbol yo.wordmark, as on the controls), the widget's accent on a tinted Lock Screen.
+private struct Wordmark: View {
+  let size: CGFloat
 
   var body: some View {
-    VStack(spacing: 0) {
-      Text(verbatim: top).font(.yo(16, relativeTo: .headline))
-      if !bottom.isEmpty {
-        Text(verbatim: bottom).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.6)
+    Image("yo.wordmark")
+      .font(.system(size: size, weight: .bold))
+      .widgetAccentable()
+      .accessibilityLabel(Text(verbatim: productText(text: .yo, lang: .english)))
+  }
+}
+
+/// "Sent Yo!" for a moment after a tap: stacked in a circle, one line in a rectangle.
+private struct SentLabel: View {
+  let wide: Bool
+
+  var body: some View {
+    let sent = productText(text: .sent, lang: .english)
+    let yo = productText(text: .yoBang, lang: .english)
+    Group {
+      if wide {
+        Text(verbatim: "\(sent) \(yo)").font(.yo(22, relativeTo: .title2))
+      } else {
+        VStack(spacing: 0) {
+          Text(verbatim: sent).font(.yo(16, relativeTo: .headline))
+          Text(verbatim: yo).font(.system(size: 11, weight: .semibold))
+        }
       }
     }
+    .lineLimit(1)
+    .minimumScaleFactor(0.6)
     .padding(4)
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
