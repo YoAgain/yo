@@ -2743,16 +2743,17 @@ if (document.body.classList.contains("login")) {
           const explanation = "Share of the phones seen in the 24 hours before each point that sent no error or crash in those 24 hours. The value is the latest point.";
           // Every point counts only the phones seen in the 24 hours before it, and of them those without a report in the same
           // 24 hours (the hub's hourly levels): 1D by the hour, the others by the day (the day's last level).
-          const efl = h.error_free_levels || {}, hourly = range === 1, days = hourly ? 24 : range || 90;
-          const slotsEF = Array.from({ length: days }, (_, i) => (hourly ? h1 - days + 1 + i : t0 - days + 1 + i));
-          const level = (x) => {
-            if (hourly) return efl[x];
-            for (let hh = Math.min(x * 24 + 24, h1); hh > x * 24; hh--) if (efl[hh]) return efl[hh];
-            return null;
-          };
+          const efl = h.error_free_levels || {}, hourly = range === 1;
           const share = (l) => (l && l[0] ? 100 * Math.max(0, l[0] - l[1]) / l[0] : null);
-          const values = slotsEF.map((x) => share(level(x)));
-          const tip = i => ({ head: hourly ? clock(slotsEF[i] * 3600000) : dayName(slotsEF[i]), rows: [{ label: "Error-free, 24 h before", value: values[i] == null ? "–" : pctText(values[i]) }] });
+          const upTo = (hi, lo) => { for (let hh = Math.min(hi, h1); hh > lo; hh--) if (efl[hh]) return efl[hh]; return null; };
+          // Before the hub's levels: the day's phones seen and installs with a report that day (an approximation of the 24 hours).
+          const backfill = (day) => {
+            const seen = day === t0 ? h.active_day : h.active_days?.[day];
+            return !seen || h.daily_problem_installs == null ? null : [seen, h.daily_problem_installs[day] || 0];
+          };
+          const values = weekly ? weekStarts().map((hs) => share(upTo(hs + 6, hs)))
+            : slots.map((x) => share(hourly ? efl[x] : upTo(x * 24 + 24, x * 24) || backfill(x)));
+          const tip = i => ({ head: names[i], rows: [{ label: "Error-free, 24 h before", value: values[i] == null ? "–" : pctText(values[i]) }] });
           const node = sparkBars(values, "", tip, null, null, 100);
           const latest = values.findLast((v) => v != null), head = latest == null ? "–" : pctText(latest);
           if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", node, value: head, title: { head: "Error-free", note: explanation, rows: [{ label: "On current builds", value: pt?.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" }] } };
