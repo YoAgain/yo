@@ -14,7 +14,10 @@ stub="$(xcrun --sdk iphoneos --show-sdk-platform-path)/Library/Application Suppo
 appex=$app/PlugIns/YoStickers.appex
 rm -rf "$appex"
 mkdir -p "$appex"
-lipo "$stub" -thin arm64 -output "$appex/YoStickers"
+# The stub says iOS 10 (LC_VERSION_MIN_IPHONEOS 10.0), so rcodesign seals it with SHA-1 first, which the App Store
+# check in ship.sh (asc.py, SHA-256 slots) does not read: "Info.plist matches its sealed hash" failed. The appex's own
+# minimum iOS instead, as LC_BUILD_VERSION, and it is sealed with SHA-256 as the app is.
+lipo "$stub" -thin arm64 -output "$appex/YoStickers.stub"
 partial=$(mktemp)
 trap 'rm -f "$partial"' EXIT
 python3 -I - "$app/Info.plist" "$yo/YoStickers-Info.plist" "$appex/Info.plist" <<'PY'
@@ -33,6 +36,9 @@ plistlib.dump(info, open(out, "wb"), fmt=plistlib.FMT_BINARY)
 PY
 bid=$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleIdentifier"])' "$appex/Info.plist")
 min=$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["MinimumOSVersion"])' "$appex/Info.plist")
+vtool=$(xcrun vtool -set-build-version ios "$min" "$(xcrun --sdk iphoneos --show-sdk-version)" -replace \
+  -output "$appex/YoStickers" "$appex/YoStickers.stub" 2>&1) || { echo "$vtool" >&2; exit 1; }
+rm "$appex/YoStickers.stub"
 "$actool" "$yo/Resources/Stickers.xcassets" --compile "$appex" --output-format human-readable-text --errors --warnings \
   --output-partial-info-plist "$partial" --app-icon "iMessage App Icon" --compress-pngs \
   --enable-on-demand-resources NO --include-sticker-content --stickers-icon-role extension \
