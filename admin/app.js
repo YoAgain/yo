@@ -1278,8 +1278,8 @@ if (document.body.classList.contains("login")) {
 
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
   let allSort = { key: "created", dir: -1 };  // newest sign-ups first
-  const allValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
-    : key === "update" ? (u.app ? (belowMin(u.app) ? 3 : appState(u.app, u.id) === "update" ? 2 : ["current", "fresh"].includes(appState(u.app, u.id)) ? 0 : 1) : -1)
+  const allValue = (u, key, releases) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
+    : key === "update" ? (releases.get(u.app)?.behind ?? -1)
     : key === "secured" || key === "push" ? Number(!!u[key]) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
     th.tabIndex = 0;
@@ -1297,8 +1297,9 @@ if (document.body.classList.contains("login")) {
       th.dataset.dir = th.dataset.sort === allSort.key ? (allSort.dir > 0 ? "▲" : "▼") : "";
     }
     const users = h?.users || [];
+    const releases = releaseBands(h || {});
     const list = [...users].sort((a, b) => {
-      const x = allValue(a, allSort.key), y = allValue(b, allSort.key);
+      const x = allValue(a, allSort.key, releases), y = allValue(b, allSort.key, releases);
       return (x < y ? -1 : x > y ? 1 : 0) * allSort.dir || b.created - a.created;
     });
     const body = $("all-users-body");
@@ -1314,8 +1315,10 @@ if (document.body.classList.contains("login")) {
       if (ICONS[platform] && platform !== "lock") app.append(icon(platform, st ? `app-${st}` : "", appTitle(u.app, u.id)));
       app.append(appTag(u.app, u.id));
       cell(tr, app);
-      // The device's software: current, an update out (or below the hub's minimum), or unknown.
-      const upd = u.app ? (belowMin(u.app) ? tag("must update", "bad") : st === "update" ? tag("update", "warn") : st === "current" ? tag("current", "ok") : st === "fresh" ? tag("fresh", "info") : tag("?", "muted")) : el("span", "muted", "–");
+      const band = releases.get(u.app);
+      const upd = tag(band ? (band.behind ? `−${band.behind}` : "current") : "?", band ? "release" : "muted");
+      if (band) upd.style.setProperty("--release-color", band.color);
+      upd.title = appTitle(u.app, u.id) || "Unknown build";
       cell(tr, upd);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : el("span", "muted", "–"));
@@ -2055,6 +2058,25 @@ if (document.body.classList.contains("login")) {
     const mon = new Date(Date.UTC(2000, +b.slice(4, 6) - 1, 1)).toLocaleDateString("en", { month: "short", timeZone: "UTC" });
     return `${word}${mon} ${+b.slice(6, 8)} ${b.slice(8, 10)}:${b.slice(10, 12)}`;
   };
+  const releaseBands = (h) => {
+    const apps = new Set((h.users || []).map(u => u.app));
+    for (const [app] of [...(h.apps || []), ...(h.apps_today || [])]) apps.add(app);
+    for (const history of [h.build_days, h.build_hours]) {
+      for (const row of Object.values(history || {})) {
+        for (const [app, count] of Object.entries(row || {})) if (count > 0) apps.add(app);
+      }
+    }
+    const bands = new Map();
+    for (const platform of ["ios", "android"]) {
+      const dated = [...apps].filter(app => app?.startsWith(platform + "/") && /^\d{12}$/.test(app.slice(platform.length + 1))).sort().reverse();
+      dated.forEach((app, behind) => {
+        const age = behind / Math.max(1, dated.length - 1);
+        const hue = belowMin(app) ? 12 * (1 - age) : 125 * (1 - age);
+        bands.set(app, { behind, color: `hsl(${hue} 68% ${52 - 8 * age}%)` });
+      });
+    }
+    return bands;
+  };
   const relData = (h, plat) => {
     const t = today0(), kept = { ...(h.build_days || {}) };
     if (Array.isArray(h.apps_today) && h.apps_today.length) kept[t] = Object.fromEntries(h.apps_today.filter(([a]) => !String(a).startsWith("cli/")));
@@ -2081,12 +2103,10 @@ if (document.body.classList.contains("login")) {
       .sort((a, b) => build(b).localeCompare(build(a)) || a.localeCompare(b));
     const datedSet = new Set(dated);
     const unknown = [...apps].filter(app => !datedSet.has(app)).sort();
-    const bands = [...dated, ...unknown].map((app, i) => {
-      const age = i / Math.max(1, dated.length - 1);
-      const hue = belowMin(app) ? 12 * (1 - age) : 125 * (1 - age);
-      const color = datedSet.has(app) ? `hsl(${hue} 68% ${52 - 8 * age}%)` : "var(--muted)";
-      return { app, name: buildLabel(app), color };
-    });
+    const releases = releaseBands(h);
+    const bands = [...dated, ...unknown].map(app => ({
+      app, name: buildLabel(app), color: releases.get(app)?.color || "var(--muted)"
+    }));
     const rows = slots.map(([, , row]) => {
       const counts = bands.map(b => row?.[b.app] || 0);
       return counts.some(v => v > 0) ? counts : null;

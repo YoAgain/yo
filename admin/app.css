@@ -87,6 +87,7 @@ input[type=search]:focus, .add input:focus, select:focus { outline: none; border
 .pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 999px; padding: 6px 12px; font-size: 12px; font-weight: 700; text-decoration: none; cursor: pointer; }
 .pill:hover { border-color: var(--amethyst); }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: rgba(255, 255, 255, .06); color: var(--muted); white-space: nowrap; }
+.tag.release { color: var(--release-color); background: color-mix(in srgb, var(--release-color) 12%, transparent); }
 .tag.ok { color: var(--ok); background: rgba(46, 204, 113, .12); }
 .tag.warn { color: var(--warn); background: rgba(241, 196, 15, .12); }
 .tag.bad { color: var(--bad); background: rgba(231, 76, 60, .14); }
