@@ -11,7 +11,6 @@ import android.media.AudioAttributes
 import android.provider.Settings
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import androidx.core.app.PendingIntentCompat
 import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.content.LocusIdCompat
@@ -130,7 +129,8 @@ internal class YoNotifications(private val context: Context) {
             val intent = Intent(context, YoBackReceiver::class.java).setAction(action)
                 .setData(android.net.Uri.fromParts("yo-notification", thread, null))
                 .putExtra("friend", friend).putExtra("account", account).putExtra("thread", thread)
-            return PendingIntentCompat.getBroadcast(context, thread.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT, mutable)
+            return PendingIntent.getBroadcast(context, thread.hashCode(), intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE)
         }
         val back = context.getString(R.string.yo_back_action)
         builder.addAction(NotificationCompat.Action.Builder(IconCompat.createWithResource(context, R.drawable.ic_notification_reply),

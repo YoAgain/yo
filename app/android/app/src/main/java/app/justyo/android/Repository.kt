@@ -575,7 +575,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     /** While Yo is in front, Wi-Fi stays out of power save: an idle phone's radio otherwise sleeps between beacons
      *  and a Yo's packets wait at the access point (measured up to 400 ms on the A34). Android ends it by itself
      *  when the screen goes off or Yo leaves the foreground. */
-    private val lowLatency = if (android.os.Build.VERSION.SDK_INT < 29) null else runCatching {
+    private val lowLatency = runCatching {
         context.getSystemService(android.net.wifi.WifiManager::class.java)
             .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "yo:foreground")
             .apply { setReferenceCounted(false) }

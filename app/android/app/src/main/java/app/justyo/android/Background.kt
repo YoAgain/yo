@@ -147,7 +147,7 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
                     urgent: Boolean = false, expedited: Boolean = false, latest: Boolean = false) {
             val builder = OneTimeWorkRequestBuilder<YoWork>()
                 .setInputData(workDataOf("action" to action, "friend" to friend, "account" to account, "urgent" to urgent, "latest" to latest))
-            if (expedited && Build.VERSION.SDK_INT >= 31) builder.setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            if (expedited) builder.setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             val manager = WorkManager.getInstance(context)
             when (action) {
                 "send" -> manager.enqueue(builder.build())

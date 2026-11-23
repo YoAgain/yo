@@ -238,15 +238,8 @@ class YoCameraTile : TileService() {
         if (isLocked) unlockAndRun { openCamera() } else openCamera()
     }
 
-    // Before Android 14 the Intent form is the only one there is.
-    @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
     private fun openCamera() {
         val intent = cameraIntent(this).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (Build.VERSION.SDK_INT >= 34) {
-            startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE))
-        } else {
-            @Suppress("DEPRECATION")
-            startActivityAndCollapse(intent)
-        }
+        startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE))
     }
 }

@@ -10,7 +10,6 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.core.content.IntentCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.app.Application
@@ -62,8 +61,8 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
         intent.data?.takeIf { it.scheme?.lowercase() == "yo" && it.host?.lowercase() == "camera" }?.let { openCamera.value = true }
         intent.data?.let { uri -> inviteName(uri)?.let { name -> repository.command { invite(name) } } }
         val streams = when (intent.action) {
-            Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
-            Intent.ACTION_SEND_MULTIPLE -> IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
             else -> return
         }
         val sources = buildList {
@@ -79,7 +78,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
         importingShares.value=true
         shares.value=emptyList()
         importShares?.cancel()
-        val target=if(android.os.Build.VERSION.SDK_INT>=29) intent.getStringExtra(Intent.EXTRA_SHORTCUT_ID) else null
+        val target=intent.getStringExtra(Intent.EXTRA_SHORTCUT_ID)
         importShares=viewModelScope.launch(Dispatchers.IO) {
             try {
                 repository.state.first { !it.loading }

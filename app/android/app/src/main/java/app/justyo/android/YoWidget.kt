@@ -108,7 +108,7 @@ internal fun Context.wordsBitmap(text: String, size: Float, width: Float, height
 
 internal fun widgetBackground(): GlanceModifier {
     val base = GlanceModifier.widgetFillMaxSize()
-    val rounded = if (Build.VERSION.SDK_INT >= 31) base.cornerRadius(android.R.dimen.system_app_widget_background_radius) else base
+    val rounded = base.cornerRadius(android.R.dimen.system_app_widget_background_radius)
     return rounded.background(Amethyst)
 }
 
@@ -275,7 +275,7 @@ class YoBackTile : TileService() {
         val snapshot = applicationContext.repository.state.value
         qsTile?.apply {
             state = if (snapshot.username == null) Tile.STATE_UNAVAILABLE else Tile.STATE_INACTIVE
-            if (Build.VERSION.SDK_INT >= 29) subtitle = snapshot.widgetSender()?.widgetName() ?: copy(ProductText.NO_YO_BACK)
+            subtitle = snapshot.widgetSender()?.widgetName() ?: copy(ProductText.NO_YO_BACK)
             updateTile()
         }
     }

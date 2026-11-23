@@ -324,7 +324,7 @@ import uniffi.yo.usernameValid
     ) {
         val window = (LocalView.current.parent as? DialogWindowProvider)?.window
         SideEffect {
-            if (Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false
+            window?.isNavigationBarContrastEnforced = false
         }
         SignInCard(model, s, code) { code = it }
     }
@@ -608,7 +608,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     val notificationPreferences = remember(context) { context.getSharedPreferences("notification-permission", Context.MODE_PRIVATE) }
     var notificationAsked by remember { mutableStateOf(notificationPreferences.getBoolean("asked", false)) }
     LaunchedEffect(notificationsEnabled) {
-        if (Build.VERSION.SDK_INT >= 33 && !notificationsEnabled && !notificationAsked && !model.deniedThisLaunch) {
+        if (!notificationsEnabled && !notificationAsked && !model.deniedThisLaunch) {
             notificationInFlight = true
             notificationAsked = true
             notificationPreferences.edit { putBoolean("asked", true) }
@@ -616,7 +616,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
     }
     val showNotificationBar = uniffi.yo.productShowNotificationRow(
-        denied = !notificationsEnabled && (Build.VERSION.SDK_INT < 33 || notificationAsked),
+        denied = !notificationsEnabled && notificationAsked,
         askedThisLaunch = notificationInFlight || model.deniedThisLaunch,
     )
 
@@ -785,7 +785,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             }
             return
         }
-        view.performHapticFeedback(if(android.os.Build.VERSION.SDK_INT>=30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
+        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
         hintEpoch++
         if (cameraOn) hintNeeded = false
         when (action) {
@@ -869,7 +869,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 if (!finger.pressed) {
                     if (dragging && (inward > size.width * .4f ||
                             velocity.calculateVelocity().x * direction >= 500.dp.toPx())) {
-                        view.performHapticFeedback(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.GESTURE_END else HapticFeedbackConstants.VIRTUAL_KEY)
+                        view.performHapticFeedback(HapticFeedbackConstants.GESTURE_END)
                         edgeCamera()
                     }
                     break
@@ -909,7 +909,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 repo.recording(null)
             }
         } else if(!held && recording==friend.key) {
-            view.performHapticFeedback(if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
+            view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
             camera.stopVideo()
         }
         if(!held) camera.recordZoomEnd()
@@ -1255,8 +1255,8 @@ private fun nameField(name: String, onChange: (String) -> Unit): Pair<TextFieldV
 internal fun latinName(typed: String): String {
     if (typed.none { it in '\u3040'..'\u30FF' || it in '\uFF01'..'\uFF9F' }) return typed
     val narrow = java.text.Normalizer.normalize(typed, java.text.Normalizer.Form.NFKC)
-    return if (Build.VERSION.SDK_INT >= 29) android.icu.text.Transliterator.getInstance("Hiragana-Latin; Katakana-Latin")
-        .transliterate(narrow) else narrow
+    if (narrow.none { it in '\u3040'..'\u30FF' }) return narrow
+    return android.icu.text.Transliterator.getInstance("Hiragana-Latin; Katakana-Latin").transliterate(narrow)
 }
 
 @Composable

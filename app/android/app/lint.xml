@@ -7,4 +7,8 @@
     <issue id="UnusedResources">
         <ignore regexp="R\.string\.project_id" />
     </issue>
+    <!-- UniFFI's generated bindings keep their own API 34 gate around Java's Cleaner. -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="build/generated/**" />
+    </issue>
 </lint>

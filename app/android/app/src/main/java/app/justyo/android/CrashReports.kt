@@ -106,7 +106,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
         }
     }
 
-    /** Covers uncaught managed crashes on API 28–29 too; always chain Android's original crash handler. */
+    /** Uncaught managed crashes; always chain Android's original crash handler. */
     fun install() {
         synchronized(CrashReports::class.java) { if(installed) return;installed=true }
         val previous=Thread.getDefaultUncaughtExceptionHandler()
@@ -122,18 +122,16 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
         return output.toByteArray()
     }
     @Synchronized fun flush() {
-        if(Build.VERSION.SDK_INT>=30) {
-            val through=preferences.getLong("through",0)
-            val exits=manager.getHistoricalProcessExitReasons(null,0,16).filter {
-                it.timestamp>through && it.reason in listOf(ApplicationExitInfo.REASON_CRASH_NATIVE,ApplicationExitInfo.REASON_ANR)
-            }.sortedBy { it.timestamp }
-            for(exit in exits) {
-                val frames=if(Build.VERSION.SDK_INT>=31 && exit.reason==ApplicationExitInfo.REASON_CRASH_NATIVE) runCatching {
-                    exit.traceInputStream?.use { CrashFrames.nativeFrames(readBounded(it)) }.orEmpty()
-                }.getOrDefault("") else ""
-                retain(payload("${exit.reason}/${exit.status}","OS exit",frames))
-                preferences.edit { putLong("through",exit.timestamp) }
-            }
+        val through=preferences.getLong("through",0)
+        val exits=manager.getHistoricalProcessExitReasons(null,0,16).filter {
+            it.timestamp>through && it.reason in listOf(ApplicationExitInfo.REASON_CRASH_NATIVE,ApplicationExitInfo.REASON_ANR)
+        }.sortedBy { it.timestamp }
+        for(exit in exits) {
+            val frames=if(exit.reason==ApplicationExitInfo.REASON_CRASH_NATIVE) runCatching {
+                exit.traceInputStream?.use { CrashFrames.nativeFrames(readBounded(it)) }.orEmpty()
+            }.getOrDefault("") else ""
+            retain(payload("${exit.reason}/${exit.status}","OS exit",frames))
+            preferences.edit { putLong("through",exit.timestamp) }
         }
         if(!enabled) return
         flushCountedErrors()

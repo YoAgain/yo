@@ -31,7 +31,7 @@ class CoreContractTest {
         assertEquals("Mia", rowTitle(null, mia))
     }
 
-    /** A Japanese keyboard's full-width letters keep the name (on the device kana too, through ICU from API 29). */
+    /** A Japanese keyboard's full-width letters keep the name (on the device kana too, through ICU). */
     @Test fun fullWidthLettersReadAsLatin() {
         assertEquals("ping", uniffi.yo.usernameCanonical(latinName("ｐｉｎｇ")))
         assertEquals("Mia", latinName("Mia"))

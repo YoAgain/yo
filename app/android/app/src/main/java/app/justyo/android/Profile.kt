@@ -190,7 +190,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     dragHandle = dragHandle, contentWindowInsets = { WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom) },
 ) {
     val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
-    SideEffect { if (android.os.Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false }
+    SideEffect { window?.isNavigationBarContrastEnforced = false }
     // Never under the status bar: the tallest sheet stops below it (its handle included) and scrolls.
     val density = androidx.compose.ui.platform.LocalDensity.current
     val screen = with(density) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() }
@@ -698,7 +698,7 @@ private fun shareCode(context: Context, name: String) {
                 load()
                 failed = !ok || unavailable || savedAt == null
                 justSaved = !failed && savedAt != before
-                if (android.os.Build.VERSION.SDK_INT >= 30) view.performHapticFeedback(if (failed) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.CONFIRM)
+                view.performHapticFeedback(if (failed) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.CONFIRM)
                 saving = false
             }
         })
@@ -1175,7 +1175,7 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     androidx.compose.ui.window.Dialog(onDismissRequest = { if (idle) onClose() }, properties = androidx.compose.ui.window.DialogProperties(
         usePlatformDefaultWidth = false, decorFitsSystemWindows = false, dismissOnClickOutside = false)) {
         val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
-        SideEffect { if (android.os.Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false }
+        SideEffect { window?.isNavigationBarContrastEnforced = false }
         Surface(Modifier.fillMaxSize(), color = Amethyst, contentColor = Color.White) {
             // Bars and cutout only, not the keyboard: the screen has no field, and the PIN pad of the screen lock just
             // before can still count as open when it appears, which pushed the button half up the screen.

@@ -43,7 +43,7 @@ android {
     defaultConfig {
         applicationId = if (deviceSoak) "app.justyo.android.dev.soak" else "app.justyo.android.dev"
         manifestPlaceholders["yoAppLabel"] = if (deviceSoak) "Yo Device QA" else "Yo Dev"
-        minSdk = 28
+        minSdk = 34
         targetSdk = 37
         versionCode = providers.gradleProperty("yoVersionCode").map(String::toInt).getOrElse(1)  // rising, from CI
         versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
@@ -92,8 +92,7 @@ val buildCore = tasks.register<Exec>("buildCore") {
 tasks.named("preBuild") { dependsOn(buildCore) }
 dependencies {
     implementation("androidx.core:core-ktx:1.19.0")
-    // Pinned to 1.1.0: heifwriter 1.2.0 needs minSdk 29, the app keeps 28 (Android 9).
-    implementation("androidx.heifwriter:heifwriter:1.1.0")
+    implementation("androidx.heifwriter:heifwriter:1.2.0")
     implementation("androidx.glance:glance-appwidget:1.2.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
     implementation("com.google.firebase:firebase-messaging:26.0.2")

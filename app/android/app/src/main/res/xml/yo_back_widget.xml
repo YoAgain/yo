@@ -1,5 +1,4 @@
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools" tools:targetApi="31"
     android:description="@string/yo_back_widget_description"
     android:minWidth="110dp"
     android:minHeight="48dp"

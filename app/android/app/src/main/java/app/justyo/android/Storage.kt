@@ -41,28 +41,14 @@ class Vault(private val context: Context) {
         return Cipher.getInstance("AES/GCM/NoPadding").run {
             init(Cipher.DECRYPT_MODE, wrappingKey(), GCMParameterSpec(128, data.copyOfRange(0, 12)))
             updateAAD(name.toByteArray())
-            pieces(data, 12)
+            doFinal(data, 12, data.size - 12)
         }
     }
     @Synchronized fun write(name: String, value: ByteArray) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, wrappingKey())
         cipher.updateAAD(name.toByteArray())
-        atomicWrite(File(directory, name), cipher.iv + cipher.pieces(value, 0))
-    }
-    /** The rest of `input` from `offset` through the keystore in pieces of 32 KiB, never in one call: Android 9's
-     *  keystore streams a call in 64 KiB chunks and drops the output of every chunk between the first and the last,
-     *  so one `doFinal` over more than 128 KiB (a photo) wrote a ciphertext that never opened again. */
-    private fun Cipher.pieces(input: ByteArray, offset: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream(input.size - offset + 16)
-        var at = offset
-        while (at < input.size) {
-            val size = minOf(32 * 1024, input.size - at)
-            update(input, at, size)?.let { out.write(it) }
-            at += size
-        }
-        out.write(doFinal())
-        return out.toByteArray()
+        atomicWrite(File(directory, name), cipher.iv + cipher.doFinal(value))
     }
     @Synchronized fun secret(name: String): ByteArray = read(name) ?: randomBytes(32).also { write(name, it) }
     @Synchronized fun delete(name: String) = AtomicFile(File(directory, name)).delete()

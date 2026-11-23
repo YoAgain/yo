@@ -1,7 +1,7 @@
 # Yo for Android
 
 Kotlin, Jetpack Compose and Material 3 over the existing Rust core. One activity, an Android ViewModel, StateFlow,
-coroutines and CameraX. API 28 minimum; compile/target API 37 (Android 17). Dynamic color is off. The list uses
+coroutines and CameraX. API 34 (Android 14) minimum; compile/target API 37 (Android 17). Dynamic color is off. The list uses
 Yo’s original Flat UI colors, 90 dp rows, 30 sp Montserrat Bold, Amethyst, and the bundled Yo sound.
 
 This is a development implementation, **not complete iOS parity**. [PARITY.md](PARITY.md) audits each iOS source file
@@ -53,7 +53,7 @@ checks are disabled because dependency versions are deliberately pinned. Runtime
 UniFFI 0.32.2 generates Kotlin names that collide with `AutoCloseable.close` and `Throwable.message` in this API.
 `dev/fix-bindings.py` checks the expected generator output and renames only Kotlin identifiers: the exported core
 method becomes `shutdown`, the three error payload fields become `detail`. Rust symbols, serialization and APIs
-are unchanged. Generation enables UniFFI’s JNA cleaner for API 28; Java’s Cleaner needs API 33.
+are unchanged. Generation uses Java’s Cleaner (API 33+).
 
 ## Device benchmarks
 
@@ -127,7 +127,7 @@ environment `play` and fails without it; on a dev machine copy it from the secre
 Firebase resources of each variant's own client. Without the file (pull-request CI, the device QA build) the app
 has no Firebase: it polls in the foreground only and Status says No Token.
 
-The app asks for notifications once (Android 13+) when the friend list first shows, then fetches the FCM token and
+The app asks for notifications once when the friend list first shows, then fetches the FCM token and
 registers it with the hub as `PUSH_FCM` after each sign-in and restore and on `onNewToken`; Settings › Status ›
 Renew Push Registration deletes the token and registers a new one. The hub (`YO_FCM_SERVICE_ACCOUNT_FILE`) sends
 data-only messages (`yo=1`, `urgent`, Android priority HIGH/NORMAL) that `YoMessagingService` turns into a sync.
@@ -166,7 +166,7 @@ Android drives its pending delivery queue rather than recursively sending anothe
 
 Welcome contains the intro carousel (iOS's cards) and name signup; sign-in is a native sheet. Help shows the same cards,
 Yo Team support chat and Status. Status uses the actual core round-trip probe and exposes
-anonymous crash reporting (default on, managed frames on API 28+, OS native-crash/ANR collection on Android 11+, sanitized native frames on Android 12+). Media send
+anonymous crash reporting (default on: managed frames, OS native-crash/ANR collection, sanitized native frames). Media send
 feedback follows confirmed sending, and swipe-down discards the unseen viewer queue.
 Material 3 1.5.0-rc01 enables expressive motion (see the
 [AndroidX release notes](https://developer.android.com/jetpack/androidx/releases/compose-material3)).

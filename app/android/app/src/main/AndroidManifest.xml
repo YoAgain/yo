@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
-    <application android:name=".YoApplication" tools:targetApi="33" android:label="${yoAppLabel}" android:theme="@style/Theme.Yo" android:icon="@mipmap/launcher_standard"
+    <application android:name=".YoApplication" android:label="${yoAppLabel}" android:theme="@style/Theme.Yo" android:icon="@mipmap/launcher_standard"
         android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules"
         android:usesCleartextTraffic="false" android:enableOnBackInvokedCallback="true">
         <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
