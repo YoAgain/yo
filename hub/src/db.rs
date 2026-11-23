@@ -1000,6 +1000,23 @@ impl Db {
                 put.execute(params![kind, hour, value])?;
             }
             if !problems_only {
+                // The phones (iOS, Android) seen within 24 hours, and of them the installs that sent an error or crash
+                // in those 24 hours (a row without `at`: its day's start): the error-free share of who is still here.
+                for (kind, sql) in [
+                    (
+                        "phones-24h",
+                        "SELECT count(*) FROM devices WHERE last_seen_at > ?1 - 86400000 AND (app LIKE 'ios/%' OR app LIKE 'android/%')",
+                    ),
+                    (
+                        "problem-installs-24h",
+                        "SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id \
+                         WHERE coalesce(i.at, i.day * 86400000) > ?1 - 86400000 AND d.os NOT LIKE 'mac%' \
+                         AND (d.app LIKE 'ios/%' OR d.app LIKE 'android/%')",
+                    ),
+                ] {
+                    let value: i64 = tx.prepare_cached(sql)?.query_row([now as i64], |r| r.get(0))?;
+                    put.execute(params![kind, hour, value])?;
+                }
                 // The devices per build (`build:ios/202611191626`, `build:unknown` for none named) seen within 24
                 // hours, of the apps' (bots and the CLI left out): the operator's releases over time. Counts only.
                 let mut builds = tx.prepare_cached(
@@ -1038,8 +1055,9 @@ impl Db {
             }
             if let Some(install) = install {
                 tx.execute(
-                    "INSERT OR IGNORE INTO diagnostic_installs(diagnostic_id, install, day) VALUES (?1, ?2, ?3)",
-                    params![id, install, now / DAY_MS],
+                    "INSERT INTO diagnostic_installs(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(diagnostic_id, install, day) DO UPDATE SET at = ?4",
+                    params![id, install, now / DAY_MS, now as i64],
                 )?;
             }
             Ok(())
@@ -2100,6 +2118,8 @@ mod tests {
                 row("build:unknown", h, 1),
                 row("open-crashes", h, 2),
                 row("open-errors", h, 3),
+                row("phones-24h", h, 0),
+                row("problem-installs-24h", h, 0),
                 row("queue-envelopes", h, 1),
                 row("queue-media-bytes", h, 700),
             ]
@@ -2110,7 +2130,7 @@ mod tests {
         assert_eq!(rows(&db)[5], row("open-errors", h, 3));
         db.sample_levels(now + 60_000, true).unwrap();
         assert_eq!(rows(&db)[5], row("open-errors", h, 0));
-        assert_eq!(rows(&db).len(), 8);
+        assert_eq!(rows(&db).len(), 10);
         let columns: Vec<String> = db
             .conn()
             .prepare("SELECT name FROM pragma_table_info('levels')")

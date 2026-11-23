@@ -49,6 +49,9 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     migrate_diagnostics(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
     conn.execute_batch(DIAGNOSTIC_INSTALLS)?;
+    if !has_column(conn, "diagnostic_installs", "at")? {
+        conn.execute_batch("ALTER TABLE diagnostic_installs ADD COLUMN at INTEGER")?;
+    }
     with_support(conn, legacy_max)?;
     with_support_done(conn)?;
     with_todos(conn)?;
@@ -180,7 +183,7 @@ CREATE TABLE IF NOT EXISTS events (
 -- marked done), a count of each kind and nothing else: `open-errors`/`open-crashes` the reports of the error and
 -- crash groups not done (their counts summed), `queue-envelopes` the envelopes waiting, `queue-media-bytes` the bytes
 -- of the blobs waiting, `active-24h`/`active-48h`/`active-30d` the users seen in the last 24 hours / 48 hours / 30 days, `build:<app>` the
--- devices per app build seen in the last 24 hours (bots and the CLI left out). Every hour for 30
+-- devices per app build seen in the last 24 hours (bots and the CLI left out), `phones-24h` the phones (iOS, Android) seen in the last 24 hours and `problem-installs-24h` the distinct phone installs with an error or crash report in them. Every hour for 30
 -- days, then the day's last (taken at the next midnight, UTC) kept for good, for the operator's page.
 CREATE TABLE IF NOT EXISTS levels (
     kind TEXT NOT NULL,
@@ -276,10 +279,10 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
 
 // Which install sent a crash or error group on which day (days since the epoch, UTC), so the operator counts
-// installs, not reports; none for the hub's own. Kept 90 days, and gone with its group (spec 6.4).
+// installs, not reports (`at` the last report of that day, ms; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 6.4).
 pub(super) const DIAGNOSTIC_INSTALLS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_installs (
     diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, install BLOB NOT NULL,
-    day INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;
+    day INTEGER NOT NULL, at INTEGER, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS diagnostic_installs_by_day ON diagnostic_installs(day);";
 
 // Daily counts start with schema 5: none are made up from schema 4's first/last aggregates.

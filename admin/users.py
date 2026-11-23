@@ -278,9 +278,9 @@ def problem_installs(db, now: int):
 
 
 def current_build_installs(db, now: int):
-    """Per range (as crash_free): [phones on current builds, of them with an error or crash]. Current: builds under 24 hours
+    """[phones on current builds, of them with an error or crash report in the last 24 hours]. Current: builds under 24 hours
     old by their id (`ios/YYYYMMDDHHMM`, UTC); the phones are the latest `build:<app>` levels of them, the problem phones the
-    distinct installs with a report from such a build since the range's first UTC day. Counts only; None on an older hub."""
+    distinct installs with a report from such a build in the last 24 hours. Counts only; None on an older hub."""
     if not (has_table(db, "diagnostic_installs") and has_table(db, "levels")):
         return None
     current = {}
@@ -293,16 +293,14 @@ def current_build_installs(db, now: int):
             continue
         if app.split("/", 1)[0] in ("ios", "android") and 0 <= now - stamp.timestamp() * 1000 < DAY_MS:
             current[app] = value
-    out = {}
-    for key, days in CRASH_FREE_DAYS.items():
-        first = now // DAY_MS - days + 1
-        hit = 0
-        if current:
-            marks = ",".join("?" * len(current))
-            hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
-                             f" WHERE i.day >= ? AND d.app IN ({marks}) AND d.os NOT LIKE 'mac%'", (first, *current)).fetchone()[0]
-        out[key] = [sum(current.values()), hit]
-    return out
+    hit = 0
+    if current:
+        marks = ",".join("?" * len(current))
+        stamp = ("coalesce(i.at, i.day * 86400000)" if "at" in {r[1] for r in db.execute("PRAGMA table_info(diagnostic_installs)")}
+                 else "i.day * 86400000")
+        hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                         f" WHERE {stamp} > ? AND d.app IN ({marks}) AND d.os NOT LIKE 'mac%'", (now - DAY_MS, *current)).fetchone()[0]
+    return [sum(current.values()), hit]
 
 
 def daily_problem_installs(db, now: int):
@@ -402,13 +400,16 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
     if isinstance(messages, int) and isinstance(blobs, (list, tuple)) and len(blobs) == 2:
         hours[str(hour_now)] = days[str(today)] = [messages, blobs[1] or 0]
     errors, crashes = rows.get("open-errors", {}), rows.get("open-crashes", {})
-    builds = {}
+    builds, error_free = {}, {}
     for kind, values in rows.items():
         if kind.startswith("build:"):
             for h, v in values.items():
                 # Older than a week every 4th hour alone (the 30-day view's step): the page's size kept small.
                 if v > 0 and (hour_now - h < 168 or h % 4 == 0 or hour_now - h > 30 * 24):
                     builds.setdefault(str(h), {})[kind[6:]] = v
+    for h, phones in rows.get("phones-24h", {}).items():
+        if phones > 0 and (hour_now - h < 168 or h % 4 == 0 or hour_now - h > 30 * 24):
+            error_free[str(h)] = [phones, rows.get("problem-installs-24h", {}).get(h, 0)]
     return {
         "active48": sorted(rows.get("active-48h", {}).items()),
         "active_days": {str(d): v for d, v in by_day("active-24h").items() if d < today},
@@ -420,6 +421,8 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
         # {hour: {build: devices seen within 24 hours}} (`build:…`, hourly for a week, every 4th hour to 30 days, then
         # the day's last, at midnight): the releases over time.
         "build_levels": builds,
+        # {hour: [phones seen within 24 hours, of them with an error or crash report in those 24 hours]}: the error-free share.
+        "error_free_levels": error_free,
     }
 
 

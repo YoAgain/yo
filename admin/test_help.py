@@ -83,9 +83,9 @@ class HelpTests(unittest.TestCase):
                 db.execute("CREATE TABLE levels(kind TEXT, hour INTEGER, value INTEGER, PRIMARY KEY(kind, hour))")
                 db.executemany("INSERT INTO levels VALUES(?,?,?)", [(f"build:ios/{stamp}", 1, 9), (f"build:ios/{stamp}", 2, 2), ("build:ios/202001010000", 2, 7)])
                 db.execute("INSERT INTO diagnostics VALUES(5,'error',1,1,2,?,'26','iPhone','{}',0)", (f"ios/{stamp}",))
-                db.execute("INSERT INTO diagnostic_installs VALUES(5,?,?)", (a, today))
+                db.execute("INSERT INTO diagnostic_installs VALUES(5,?,?)", (a, today))  # no at: the day's start
                 # Phones on builds under 24 h (latest level), and of them those with a report.
-                self.assertEqual(users.current_build_installs(db, now)["1"], [2, 1])
+                self.assertEqual(users.current_build_installs(db, now), [2, 1])
 
     def test_reports_by_install_without_a_name(self):
         users = load("users")

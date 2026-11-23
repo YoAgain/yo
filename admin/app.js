@@ -465,7 +465,7 @@ if (document.body.classList.contains("login")) {
     const cf = h.crash_free?.[String(range)] || null, crashInstalls = cf ? cf[0] : null, seen = cf ? cf[1] : 0;
     const pi = h.problem_installs?.[String(range)] || null, days = { 1: 2, 7: 7, 30: 30, 0: 90 }[range], from = today0() - days + 1;
     const reports = (kind) => (h.diagnostic_days || []).filter((r) => r.day >= from && (!kind || r.kind === kind)).reduce((n, r) => n + r.count, 0);
-    const cb = h.current_build_installs?.[String(range)] || null;
+    const cb = h.current_build_installs || null;
     problemTotals = { current: cb ? { phones: cb[0], hit: cb[1] } : null, reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3], pi[4]], ["Android", pi[5], pi[6], pi[7]]] : [] };
     healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
@@ -2740,24 +2740,30 @@ if (document.body.classList.contains("login")) {
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => {
           const pt = problemTotals, pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
-          const explanation = "Share of phones without an error or crash in the range. Bars show the share per day.";
-          const days = range === 1 ? 7 : range || 90;
-          const dates = Array.from({ length: days }, (_, i) => t0 - days + 1 + i);
-          const values = dates.map(day => {
-            const seen = day === t0 ? h.active_day : h.active_days?.[day];
-            if (!seen || h.daily_problem_installs == null) return null;
-            return 100 * Math.max(0, seen - (h.daily_problem_installs[day] || 0)) / seen;
-          });
-          const tip = i => ({ head: dayName(dates[i]), rows: [{ label: "Error-free per day", value: values[i] == null ? "–" : pctText(values[i]) }] });
+          const explanation = "Share of the phones seen in the 24 hours before each point that sent no error or crash in those 24 hours. The value is the latest point.";
+          // Every point counts only the phones seen in the 24 hours before it, and of them those without a report in the same
+          // 24 hours (the hub's hourly levels): 1D by the hour, the others by the day (the day's last level).
+          const efl = h.error_free_levels || {}, hourly = range === 1, days = hourly ? 24 : range || 90;
+          const slotsEF = Array.from({ length: days }, (_, i) => (hourly ? h1 - days + 1 + i : t0 - days + 1 + i));
+          const level = (x) => {
+            if (hourly) return efl[x];
+            for (let hh = Math.min(x * 24 + 24, h1); hh > x * 24; hh--) if (efl[hh]) return efl[hh];
+            return null;
+          };
+          const share = (l) => (l && l[0] ? 100 * Math.max(0, l[0] - l[1]) / l[0] : null);
+          const values = slotsEF.map((x) => share(level(x)));
+          const tip = i => ({ head: hourly ? clock(slotsEF[i] * 3600000) : dayName(slotsEF[i]), rows: [{ label: "Error-free, 24 h before", value: values[i] == null ? "–" : pctText(values[i]) }] });
           const node = sparkBars(values, "", tip, null, null, 100);
-          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", node, value: "–", title: { head: "Error-free", note: explanation } };
+          const latest = values.findLast((v) => v != null), head = latest == null ? "–" : pctText(latest);
+          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", node, value: head, title: { head: "Error-free", note: explanation, rows: [{ label: "On current builds", value: pt?.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" }] } };
           const mk = (seen, any, crash) => { const b = el("span", "hc-pbar error-free-split"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
           const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Error-free", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With a problem, without a crash", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
           const crash = pt.crashInstalls || 0;
-          return { ico: "ios", label: "Error-free", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node,
+          return { ico: "ios", label: "Error-free", value: head, node,
             title: { cap: 1, head: "Error-free", note: explanation, nodes: [mk(pt.seen, pt.installs, crash)],
-              rows: [...three(pt.seen, pt.installs, crash),
-                { label: "On current builds", value: pt.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" },
+              rows: [{ label: "Error-free, last 24 h", value: head },
+                { label: "On current builds, last 24 h", value: pt.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" },
+                { section: `In the range` }, ...three(pt.seen, pt.installs, crash),
                 ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
         })(),
       ];
