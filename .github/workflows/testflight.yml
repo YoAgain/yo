@@ -123,6 +123,34 @@ jobs:
           EOF
           python3 -I -m py_compile .oad/tools/appintentsmeta.py
 
+      # OAD's offline App Store check reads a signature's sealed Info.plist and CodeResources as SHA-256 only. Apple's
+      # MessagesApplicationExtensionStub (the sticker pack's executable, dev/stickers.sh) says iOS 10, so it is sealed
+      # SHA-1 first with SHA-256 beside, as Xcode's codesign does too, and the check failed ("appex YoStickers.appex:
+      # Info.plist matches its sealed hash"). The digest goes by the slot's length. Patched into this checkout only;
+      # fails if the tool changed.
+      - name: OAD, SHA-1 sealed stub in the App Store check
+        run: |
+          python3 -I - .oad/tools/asc.py <<'EOF'
+          import sys
+          path = sys.argv[1]
+          s = open(path).read()
+          pairs = [
+              ('r"(Info|Resources) \\(\\d\\): ([0-9a-f]{64})"', 'r"(Info|Resources) \\(\\d\\): ([0-9a-f]{64}|[0-9a-f]{40})"', 2),
+              ('check(slots.get("Info") == hashlib.sha256(', 'check(slots.get("Info") == _seal(slots.get("Info"), ', 1),
+              ('and slots.get("Resources") == hashlib.sha256(', 'and slots.get("Resources") == _seal(slots.get("Resources"), ', 1),
+              ('aslots.get("Info") == hashlib.sha256(', 'aslots.get("Info") == _seal(aslots.get("Info"), ', 1),
+              ('aslots.get("Resources") == hashlib.sha256(', 'aslots.get("Resources") == _seal(aslots.get("Resources"), ', 1),
+          ]
+          anchor = "def _check_signature_seals("
+          assert s.count(anchor) == 1 and all(s.count(o) == n for o, _, n in pairs), "asc.py changed: patch again"
+          for o, n, _ in pairs:
+              s = s.replace(o, n)
+          s = s.replace(anchor, "def _seal(slot, data):\n"
+              "    return hashlib.new('sha1' if len(slot or '') == 40 else 'sha256', data)\n\n\n" + anchor)
+          open(path, "w").write(s)
+          EOF
+          python3 -I -m py_compile .oad/tools/asc.py
+
       # Downloaded tools, kept between runs (the versions above are the key).
       - id: tools
         uses: actions/cache@v6
