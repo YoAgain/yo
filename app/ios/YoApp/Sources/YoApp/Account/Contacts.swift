@@ -1,5 +1,6 @@
 // Contacts in the profile: every friend and whether its encryption is as it should be (spec 3, 4).
 import SwiftUI
+import UIKit
 import YoCore
 
 typealias Check = ProductCheck
@@ -176,6 +177,10 @@ private struct ContactsList: View {
     }
     .task(id: Reload(accounts.client, friends.contacts)) {
       while !Task.isCancelled {
+        if UIApplication.shared.applicationState == .background {
+          do { try await Task.sleep(for: .seconds(1)) } catch { return }
+          continue
+        }
         if let loaded = await ContactState.loadAll(accounts, friends) {
           states = loaded
           unavailable = false

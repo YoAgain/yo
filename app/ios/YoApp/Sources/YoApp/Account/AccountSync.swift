@@ -52,7 +52,7 @@ struct AccountSyncRow: View {
     // A write from elsewhere (the inbox's sync) shows up.
     .task(id: client.map(ObjectIdentifier.init)) {
       while !Task.isCancelled {
-        await load()
+        if UIApplication.shared.applicationState != .background { await load() }
         do { try await Task.sleep(for: .seconds(5)) } catch { return }
       }
     }

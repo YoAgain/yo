@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UserNotifications
 import YoCore
 
@@ -334,6 +335,10 @@ struct StatusPage: View {
         lastAnswer = nil
       }
       while !Task.isCancelled {
+        if UIApplication.shared.applicationState == .background {
+          do { try await Task.sleep(for: .seconds(1)) } catch { return }
+          continue
+        }
         let client = accounts.client
         let start = ContinuousClock.now
         let code = try? await Hub.run {

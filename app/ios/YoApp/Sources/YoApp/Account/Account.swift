@@ -221,6 +221,10 @@ final class AccountStore {
   func watchState() async {
     var failures = 0
     while !Task.isCancelled {
+      if UIApplication.shared.applicationState == .background {
+        do { try await Task.sleep(for: .seconds(1)) } catch { return }
+        continue
+      }
       if let client {
         do {
           _ = try await Hub.run { try client.groups() }
@@ -228,8 +232,10 @@ final class AccountStore {
             failures = 0
             Availability.shared.local = false
           }
+        } catch YoError.Save(message: "Busy") {
+          // iOS gave no time for this access. Try on the next probe.
         } catch {
-          if client === self.client, !Task.isCancelled {
+          if client === self.client, !Task.isCancelled, UIApplication.shared.applicationState != .background {
             Availability.shared.local = true
             failures += 1
             if failures >= 3, !opening {
