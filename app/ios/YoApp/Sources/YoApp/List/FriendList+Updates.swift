@@ -79,6 +79,14 @@ extension FriendList {
       .onChange(of: AppRoute.shared.camera && !sheetUp, initial: true) { _, on in
         if on { AppRoute.shared.camera = false; if !cameraOn { cameraSwitched(true) } }
       }
+      // A friend opened from Spotlight: their bar in view.
+      .onChange(of: AppRoute.shared.friend, initial: true) { _, target in
+        guard let target else { return }
+        AppRoute.shared.friend = nil
+        if cameraOn { cameraSwitched(false) }
+        guard let friend = friends.shown.first(where: { $0.target == target }) else { return }
+        withAnimation(.snappy) { position.scrollTo(id: friend.key.uuidString, anchor: .center) }
+      }
       // A sheet coming up over the camera (none should): the list under it, not the camera.
       .onChange(of: sheetUp) { _, up in if up && cameraOn { cameraSwitched(false) } }
       // Back after more than 30 s away: the list again, not the camera (a quick app switch keeps the camera).

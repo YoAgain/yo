@@ -8,7 +8,9 @@ import Security
 import WidgetKit
 import YoCore
 
-struct FriendEntity: AppEntity {
+/// Indexed in Spotlight by the app (FriendSpotlight) under its title, nothing else: typing a name ("Sora", a group with
+/// or without "#") finds it; tapping opens Yo on its bar (OpenFriendIntent), and Send Yo takes it as its friend.
+struct FriendEntity: IndexedEntity {
   static let typeDisplayRepresentation: TypeDisplayRepresentation = "Friend or Group"
   static let defaultQuery = FriendQuery()
 
@@ -234,6 +236,8 @@ struct OpenYoIntent: AppIntent {
 @MainActor @Observable final class AppRoute {
   static let shared = AppRoute()
   var camera = false
+  /// A friend's bar to show (a Spotlight result opened): its target (ShareBridge.Friend.to).
+  var friend: String?
 }
 
 /// A Yo from outside the app, sent as a guest; Yos that came meanwhile are notified as the service would.

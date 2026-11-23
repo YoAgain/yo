@@ -8,6 +8,14 @@ import XCTest
   private let app = XCUIApplication(bundleIdentifier: "app.justyo.ios.dev")
   private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
 
+  /// `sb=true`: SpringBoard; `app=BUNDLE_ID`: another app (`com.apple.Spotlight`, whose search field and keyboard are
+  /// its own); else Yo.
+  private func chosen(_ c: [String: Any]) -> XCUIApplication {
+    if c["sb"] as? Bool == true { return springboard }
+    if let id = c["app"] as? String { return XCUIApplication(bundleIdentifier: id) }
+    return app
+  }
+
   func testDrive() throws {
     continueAfterFailure = true
     executionTimeAllowance = 24 * 3600
@@ -127,9 +135,9 @@ import XCTest
       XCUIDevice.shared.perform(NSSelectorFromString("pressLockButton"))
       return [:]
     case "tree":
-      return ["tree": try tree(c["sb"] as? Bool == true ? springboard : app)]
+      return ["tree": try tree(chosen(c))]
     case "tap", "press", "doubletap", "exists", "wait", "gone", "info", "swipe":
-      let target = c["sb"] as? Bool == true ? springboard : app
+      let target = chosen(c)
       let timeout = c["timeout"] as? Double ?? (op == "exists" ? 0 : 5)
       if op == "gone" {
         let element = query(target, c)
@@ -182,6 +190,7 @@ import XCTest
     case "type":
       let text = c["text"] as? String ?? ""
       // Typing with no keyboard up fails the test (and XCTest ends it): an answer instead.
+      let app = chosen(c)
       guard app.keyboards.count > 0 else { throw Failure(description: "no keyboard") }
       if let field = try find(app, c, timeout: 0, required: false) { field.typeText(text) } else { app.typeText(text) }
       return [:]

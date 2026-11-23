@@ -23,6 +23,7 @@ enum ShareInbox {
       YoShortcuts.updateAppShortcutParameters()
     }
     reloadWidgets()
+    FriendSpotlight.update(list)
   }
 
   /// Coalesced: a run of Yos reorders the list with each.
@@ -41,6 +42,7 @@ enum ShareInbox {
 
   static func clear() {
     generation += 1
+    FriendSpotlight.wipe()
     guard let container = ShareBridge.container else { return }
     try? FileManager.default.removeItem(at: container.appending(path: "Outbox"))
     let list = container.appending(path: "friends.json")
