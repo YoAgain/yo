@@ -37,7 +37,7 @@ struct SendYoControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     AppIntentControlConfiguration(kind: "app.justyo.ios.controls.send", provider: Provider()) { friend in
       ControlWidgetButton(action: friend.map(SendYoNowIntent.init(friend:)) ?? SendYoNowIntent()) {
-        Label(friend.map { "Yo \($0.name)" } ?? "Send Yo", image: "yo.wordmark")
+        Label(friend.map { "Yo \($0.title)" } ?? "Send Yo", image: "yo.wordmark")
       }
     }
     .displayName("Send Yo")

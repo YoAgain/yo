@@ -26,10 +26,10 @@ struct FriendEntity: AppEntity {
 }
 
 extension ShareBridge.Friend {
-  /// A group's with its "#" (usernames can't hold one).
+  /// A group's with one "#", as its bar shows it, whether the name brings its own or not (usernames can't hold one).
   var title: String { Self.title(name, to: to) }
 
-  static func title(_ name: String, to: String) -> String { to.hasPrefix("group:") ? "#" + name : name }
+  static func title(_ name: String, to: String) -> String { listBarTitle(name: name, group: to.hasPrefix("group:")) }
 }
 
 /// In the list's order; a group is found with or without its "#".
@@ -245,7 +245,7 @@ enum YoSend {
     to target: String, owner: String, shown: (name: String, color: Int?, back: Bool), timing: YoSentActivity.Timing,
     wait: Bool = false
   ) async -> YoIntentError? {
-    let name = target.hasPrefix("group:") && !shown.name.hasPrefix("#") ? "#" + shown.name : shown.name
+    let name = ShareBridge.Friend.title(shown.name, to: target)
     let activity = await YoSentActivity.start(name: name, color: shown.color, back: shown.back)
     timing.mark(activity == nil ? "activity none" : "activity requested")
     let lifetime = SharedAccess.Lifetime()
