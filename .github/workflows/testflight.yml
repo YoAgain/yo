@@ -322,12 +322,15 @@ jobs:
                   continue
               print(f"enabled {cap} on {identifier}")
               enabled = True
-          if enabled:
-              for prof in asc.call("GET", f"/v1/bundleIds/{bid}/profiles?limit=200")["data"]:
-                  attributes = prof["attributes"]
-                  if attributes.get("profileType") == "IOS_APP_STORE" and attributes["name"].startswith(f"omarchy-apple-dev {identifier} "):
-                      asc.call("DELETE", f"/v1/profiles/{prof['id']}")
-                      print(f"deleted profile {attributes['name']}: made anew with the capabilities")
+          # A capability changed here or in the portal invalidates the profile, which keeps its name: ship.sh's new one
+          # of that name is refused (409, "Multiple profiles found"). So the invalid ones go too.
+          for prof in asc.call("GET", f"/v1/bundleIds/{bid}/profiles?limit=200")["data"]:
+              attributes = prof["attributes"]
+              if (attributes.get("profileType") == "IOS_APP_STORE"
+                      and attributes["name"].startswith(f"omarchy-apple-dev {identifier} ")
+                      and (enabled or attributes.get("profileState") != "ACTIVE")):
+                  asc.call("DELETE", f"/v1/profiles/{prof['id']}")
+                  print(f"deleted profile {attributes['name']} ({attributes.get('profileState')}): made anew")
           EOF
 
       # Built, signed and validated here; uploaded after the checks below (ship.sh step 9, as a step of its own).
