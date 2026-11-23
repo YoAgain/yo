@@ -11,6 +11,10 @@ struct LicensesPage: View {
         LabeledContent("Version", value: HelpPage.shownVersion)
         Text("Operated by Christopher Eller").foregroundStyle(.secondary)
         Link(destination: URL(string: "https://justyo.co")!) { LabeledContent("Website", value: "justyo.co") }
+        Link("Privacy Policy", destination: URL(string: "https://justyo.co/p/privacy")!)
+          .accessibilityIdentifier("about.privacy")
+        Link("Terms", destination: URL(string: "https://justyo.co/p/terms")!)
+          .accessibilityIdentifier("about.terms")
       }
       Section {
         if let source = content?.source {

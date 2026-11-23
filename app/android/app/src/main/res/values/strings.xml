@@ -183,6 +183,10 @@
     <string name="about_version">Version</string>
     <string name="about_operated_by">Operated by Christopher Eller</string>
     <string name="about_website">Website</string>
+    <string name="privacy_policy">Privacy Policy</string>
+    <string name="terms_consent_prefix">"By continuing you agree to the "</string>
+    <string name="terms_of_use">Terms</string>
+    <string name="terms_consent_suffix">.</string>
     <string name="about_and_licenses">About &amp; Licenses</string>
     <string name="recovery_share">Share</string>
     <string name="tutorial_tap">Tap to Send Yo</string>

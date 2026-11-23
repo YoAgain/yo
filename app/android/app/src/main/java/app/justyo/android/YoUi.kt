@@ -67,6 +67,11 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
@@ -312,6 +317,21 @@ import uniffi.yo.usernameValid
                     )
                 }
             }
+            Text(
+                buildAnnotatedString {
+                    append(stringResource(R.string.terms_consent_prefix))
+                    withLink(LinkAnnotation.Url("https://justyo.co/p/terms", TextLinkStyles(
+                        SpanStyle(color = Color.White, textDecoration = TextDecoration.Underline)
+                    ))) {
+                        append(stringResource(R.string.terms_of_use))
+                    }
+                    append(stringResource(R.string.terms_consent_suffix))
+                },
+                modifier = Modifier.padding(top = 10.dp),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+            )
         }
     }
     if (step == 2) ModalBottomSheet(

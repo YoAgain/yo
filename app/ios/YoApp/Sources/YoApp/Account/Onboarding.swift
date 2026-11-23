@@ -49,6 +49,15 @@ struct Onboarding: View {
     .sheet(isPresented: $signingInCard) { signInCard.appObjects() }
   }
 
+  /// "By continuing you agree to the Terms.", Terms a white underlined link (no purple on purple).
+  private static let termsLine: AttributedString = {
+    var link = AttributedString("Terms")
+    link.link = URL(string: "https://justyo.co/p/terms")
+    link.underlineStyle = .single
+    link.foregroundColor = .white
+    return AttributedString("By continuing you agree to the ") + link + AttributedString(".")
+  }()
+
   // MARK: Welcome
 
   /// The logo and the 2014 tagline as the first intro page (Intro.swift), then Sign Up and Sign In.
@@ -143,6 +152,15 @@ struct Onboarding: View {
         }
         .accessibilityLabel("Got Yo? Sign In")
         .padding(.top, 14)
+
+        // Signing up agrees to the terms (App Review 1.2), said under the buttons; the link opens them in Safari.
+        Text(Self.termsLine)
+          .font(.footnote)
+          .foregroundStyle(.white.opacity(0.7))
+          .tint(.white)
+          .multilineTextAlignment(.center)
+          .padding(.top, 10)
+          .accessibilityIdentifier("onboarding.terms")
       }
       .padding(.horizontal, 28)
     }

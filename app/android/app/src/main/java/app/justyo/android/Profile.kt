@@ -1137,7 +1137,7 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     val context = LocalContext.current
     val chunks = rememberLicenseChunks(true)
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-        // iOS LicensesPage: who makes Yo, its version, who operates it, the website.
+        // iOS LicensesPage: who makes Yo, its version, who operates it, the website, the privacy policy and the terms.
         item {
             Section(null, null,
                 Setting(stringResource(R.string.about_yo_by), onClick = {
@@ -1147,6 +1147,12 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
                 Setting(stringResource(R.string.about_operated_by)),
                 Setting(stringResource(R.string.about_website), value = "justyo.co", onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co".toUri()))
+                }),
+                Setting(stringResource(R.string.privacy_policy), onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/privacy".toUri()))
+                }),
+                Setting(stringResource(R.string.terms_of_use), onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/terms".toUri()))
                 }),
             )
         }
