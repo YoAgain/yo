@@ -466,7 +466,7 @@ if (document.body.classList.contains("login")) {
     const pi = h.problem_installs?.[String(range)] || null, days = { 1: 2, 7: 7, 30: 30, 0: 90 }[range], from = today0() - days + 1;
     const reports = (kind) => (h.diagnostic_days || []).filter((r) => r.day >= from && (!kind || r.kind === kind)).reduce((n, r) => n + r.count, 0);
     const cb = h.current_build_installs || null;
-    problemTotals = { current: cb ? { phones: cb[0], hit: cb[1] } : null, reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3], pi[4]], ["Android", pi[5], pi[6], pi[7]]] : [] };
+    problemTotals = { current: cb ? [[cb[0], cb[1]], [cb[2], cb[3]], [cb[4], cb[5]]] : null, reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3], pi[4]], ["Android", pi[5], pi[6], pi[7]]] : [] };
     healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
@@ -932,6 +932,7 @@ if (document.body.classList.contains("login")) {
 
   // ---- overview: the newest users, a name with small icons (platform coloured by its build, a lock when secured) --
   const ICONS = {
+    apple: '<path d="M12 7.5c-1.3-1.2-4.2-1.4-5.600.8C5 10.600 6 15.500 8 18c1 1.300 2 1.500 4 .8 2 .7 3 .5 4-.8 1.200-1.500 2-3.200 2.200-4.200-2-.8-2.700-3.300-1-5-1.300-1.500-3.500-1.500-5.200-.3z"/><path d="M12 7.5c0-2 1-3.500 3-4.500"/>',
     ios: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
     android: '<path d="M5 17V11a7 7 0 0 1 14 0v6z"/><path d="M8 5 6.5 3M16 5l1.5-2"/><path d="M9.5 10v.5M14.5 10v.5"/>',
     yogpt: '<rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 7V4"/><path d="M9 12.5v1M15 12.5v1"/>',
@@ -2738,34 +2739,33 @@ if (document.body.classList.contains("login")) {
         { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
         { ico: "flag", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
-        (() => {
+        ...(() => {
           const pt = problemTotals, pc = (n, d) => (d ? pctText((100 * n) / d) : "–");
-          const explanation = "Share of the phones seen in the 24 hours before each point that sent no error or crash in those 24 hours. The value is the latest point.";
+          const explanation = "Share of the phones seen in the 24 hours before each point that sent no error or crash in those 24 hours (the network's own errors left out). The value is the latest point.";
           // Every point counts only the phones seen in the 24 hours before it, and of them those without a report in the same
-          // 24 hours (the hub's hourly levels): 1D by the hour, the others by the day (the day's last level).
+          // 24 hours (the hub's hourly levels, per platform): as many bars as the other graphs, an empty one where there is no level.
           const efl = h.error_free_levels || {}, hourly = range === 1;
           const share = (l) => (l && l[0] ? 100 * Math.max(0, l[0] - l[1]) / l[0] : null);
-          const upTo = (hi, lo) => { for (let hh = Math.min(hi, h1); hh > lo; hh--) if (efl[hh]) return efl[hh]; return null; };
-          // Before the hub's levels: the day's phones seen and installs with a report that day (an approximation of the 24 hours).
-          const backfill = (day) => {
-            const seen = day === t0 ? h.active_day : h.active_days?.[day];
-            return !seen || h.daily_problem_installs == null ? null : [seen, h.daily_problem_installs[day] || 0];
-          };
-          const values = weekly ? weekStarts().map((hs) => share(upTo(hs + 6, hs)))
-            : slots.map((x) => share(hourly ? efl[x] : upTo(x * 24 + 24, x * 24) || backfill(x)));
-          const tip = i => ({ head: names[i], rows: [{ label: "Error-free, 24 h before", value: values[i] == null ? "–" : pctText(values[i]) }] });
-          const node = sparkBars(values, "", tip, null, null, 100);
-          const latest = values.findLast((v) => v != null), head = latest == null ? "–" : pctText(latest);
-          if (pt?.installs == null || !pt.seen) return { ico: "ios", label: "Error-free", node, value: head, title: { head: "Error-free", note: explanation, rows: [{ label: "On current builds", value: pt?.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" }] } };
+          const upTo = (hi, lo, at) => { for (let hh = Math.min(hi, h1); hh > lo; hh--) if (efl[hh]?.[at] != null) return efl[hh].slice(at, at + 2); return null; };
           const mk = (seen, any, crash) => { const b = el("span", "hc-pbar error-free-split"); for (const [k, v] of [["current", Math.max(0, seen - any)], ["warm", Math.max(0, any - crash)], ["must", crash]]) if (v) { const x = el("span", k); x.style.flexGrow = v; b.append(x); } return b; };
           const three = (seen, any, crash) => [{ color: "var(--ok)", label: "Error-free", value: pc(Math.max(0, seen - any), seen) }, { color: "#e67e22", label: "With a problem, without a crash", value: pc(Math.max(0, any - crash), seen) }, { color: "var(--bad)", label: "With a crash", value: pc(crash, seen) }];
-          const crash = pt.crashInstalls || 0;
-          return { ico: "ios", label: "Error-free", value: head, node,
-            title: { cap: 1, head: "Error-free", note: explanation, nodes: [mk(pt.seen, pt.installs, crash)],
-              rows: [{ label: "Error-free, last 24 h", value: head },
-                { label: "On current builds, last 24 h", value: pt.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" },
-                { section: `In the range` }, ...three(pt.seen, pt.installs, crash),
-                ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
+          // at: where the platform's pair starts in a level (2 iOS, 4 Android; 0 all phones).
+          const row = (ico, label, at, plat) => {
+            const values = weekly ? weekStarts().map((hs) => share(upTo(hs + 6, hs, at)))
+              : slots.map((x) => share(hourly ? efl[x]?.[at] != null ? efl[x].slice(at, at + 2) : null : upTo(x * 24 + 24, x * 24, at)));
+            const tip = (i) => ({ head: names[i], rows: [{ label: "Error-free, 24 h before", value: values[i] == null ? "–" : pctText(values[i]) }] });
+            // A slot without data draws as an empty bar, so the graph keeps its full bar count.
+            const node = sparkBars(values.map((v) => v ?? 0), "", tip, null, null, 100);
+            const latest = values.findLast((v) => v != null), head = latest == null ? "–" : pctText(latest);
+            const current = pt?.current?.[at / 2], [, hit, n, c] = plat || [];
+            return { ico, label, node, value: head,
+              title: { cap: 1, head: label, note: explanation, nodes: n ? [mk(n, hit, c)] : [],
+                rows: [{ label: "Error-free, last 24 h", value: head },
+                  { label: "On current builds, last 24 h", value: current?.[0] ? pc(Math.max(0, current[0] - current[1]), current[0]) : "–" },
+                  ...(n ? [{ section: "In the range" }, ...three(n, hit, c)] : [])] } };
+          };
+          const [ios, android] = pt?.platforms?.length ? pt.platforms.map(([, hit, n, c]) => [null, hit, n, c]) : [null, null];
+          return [row("apple", "Error-free iOS", 2, ios), row("android", "Error-free Android", 4, android)];
         })(),
       ];
       return [sparkRows(userRows, true)];

@@ -236,6 +236,21 @@ CRASH_FREE_DAYS = {"1": 2, "7": 7, "30": 30, "0": 90}
 PHONE_APP = "(coalesce({0}, '') LIKE 'ios/%' OR coalesce({0}, '') LIKE 'android/%')"
 
 
+# The network's own errors (domain, code), not the app's: a lost, timed-out or refused connection, a busy or failing
+# server, a slow request. They never count against a phone in the Error-free stat. The hub keeps the same list for its
+# hourly levels (`NETWORK_ERRORS` in hub/src/db.rs): change both together.
+NETWORK_ERRORS = [("NSURLErrorDomain", code) for code in ("-1001", "-1004", "-1005", "-1009", "-1020")] \
+    + [("HTTP", code) for code in ("429", "502", "503", "504")] \
+    + [("NotificationFallback", "network"), ("SharedAccess", "a slow request")]
+
+
+def not_network(alias: str = "d") -> str:
+    """SQL on a diagnostics row (`alias`) that is none of NETWORK_ERRORS."""
+    each = " OR ".join(f"(coalesce(json_extract({alias}.payload, '$.domain'), '') = '{domain}'"
+                       f" AND coalesce(json_extract({alias}.payload, '$.code'), '') = '{code}')" for domain, code in NETWORK_ERRORS)
+    return f"NOT ({each})"
+
+
 def crash_free(db, now: int):
     """Per range: [installs that sent a crash, phone devices seen] since the range's first UTC day, both from the
     phone apps (iOS, Android; not macOS). The hub has no app start per install id, so the devices seen stand for the
@@ -264,12 +279,12 @@ def problem_installs(db, now: int):
         first = now // DAY_MS - days + 1
         row = db.execute("SELECT count(DISTINCT CASE WHEN d.kind = 'error' THEN i.install END), count(DISTINCT i.install)"
                          " FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
-                         f" WHERE i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%'", (first,)).fetchone()
+                         f" WHERE i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%' AND {not_network()}", (first,)).fetchone()
         out[key] = [row[0], row[1]]
         # Per platform: installs with an error or crash, phones seen (the same days, apps as in crash_free).
         for prefix in ("ios", "android"):
             hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
-                             " WHERE i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%'", (first, prefix + "/%")).fetchone()[0]
+                             f" WHERE i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%' AND {not_network()}", (first, prefix + "/%")).fetchone()[0]
             seen = db.execute("SELECT count(*) FROM devices WHERE last_seen_at >= ? AND app LIKE ?", (first * DAY_MS, prefix + "/%")).fetchone()[0]
             crash = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
                                " WHERE d.kind = 'crash' AND i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%'", (first, prefix + "/%")).fetchone()[0]
@@ -278,7 +293,7 @@ def problem_installs(db, now: int):
 
 
 def current_build_installs(db, now: int):
-    """[phones on current builds, of them with an error or crash report in the last 24 hours]. Current: builds under 24 hours
+    """[phones on current builds, of them with an error or crash report in the last 24 hours; then the same for iOS and Android]. Current: builds under 24 hours
     old by their id (`ios/YYYYMMDDHHMM`, UTC); the phones are the latest `build:<app>` levels of them, the problem phones the
     distinct installs with a report from such a build in the last 24 hours. Counts only; None on an older hub."""
     if not (has_table(db, "diagnostic_installs") and has_table(db, "levels")):
@@ -293,14 +308,19 @@ def current_build_installs(db, now: int):
             continue
         if app.split("/", 1)[0] in ("ios", "android") and 0 <= now - stamp.timestamp() * 1000 < DAY_MS:
             current[app] = value
-    hit = 0
-    if current:
-        marks = ",".join("?" * len(current))
-        stamp = ("coalesce(i.at, i.day * 86400000)" if "at" in {r[1] for r in db.execute("PRAGMA table_info(diagnostic_installs)")}
-                 else "i.day * 86400000")
-        hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
-                         f" WHERE {stamp} > ? AND d.app IN ({marks}) AND d.os NOT LIKE 'mac%'", (now - DAY_MS, *current)).fetchone()[0]
-    return [sum(current.values()), hit]
+    stamp = ("coalesce(i.at, i.day * 86400000)" if "at" in {r[1] for r in db.execute("PRAGMA table_info(diagnostic_installs)")}
+             else "i.day * 86400000")
+    out = []
+    for prefix in ("", "ios/", "android/"):
+        apps = [a for a in current if a.startswith(prefix)]
+        hit = 0
+        if apps:
+            marks = ",".join("?" * len(apps))
+            hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                             f" WHERE {stamp} > ? AND d.app IN ({marks}) AND d.os NOT LIKE 'mac%' AND {not_network()}",
+                             (now - DAY_MS, *apps)).fetchone()[0]
+        out += [sum(current[a] for a in apps), hit]
+    return out
 
 
 def daily_problem_installs(db, now: int):
@@ -311,7 +331,7 @@ def daily_problem_installs(db, now: int):
         "SELECT i.day, count(DISTINCT i.install) FROM diagnostic_installs i"
         " JOIN diagnostics d ON d.id = i.diagnostic_id"
         f" WHERE i.day BETWEEN ? AND ? AND {PHONE_APP.format('d.app')}"
-        " AND d.os NOT LIKE 'mac%' AND d.kind IN ('error', 'crash') GROUP BY i.day",
+        f" AND d.os NOT LIKE 'mac%' AND d.kind IN ('error', 'crash') AND {not_network()} GROUP BY i.day",
         (today - CRASH_FREE_DAYS["0"] + 1, today)))
 
 
@@ -407,9 +427,15 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
                 # Older than a week every 4th hour alone (the 30-day view's step): the page's size kept small.
                 if v > 0 and (hour_now - h < 168 or h % 4 == 0 or hour_now - h > 30 * 24):
                     builds.setdefault(str(h), {})[kind[6:]] = v
+    # [phones, with a report, iOS phones, iOS with a report, Android phones, Android with a report]; None where the hub
+    # had no per-platform level yet.
     for h, phones in rows.get("phones-24h", {}).items():
         if phones > 0 and (hour_now - h < 168 or h % 4 == 0 or hour_now - h > 30 * 24):
-            error_free[str(h)] = [phones, rows.get("problem-installs-24h", {}).get(h, 0)]
+            row = [phones, rows.get("problem-installs-24h", {}).get(h, 0)]
+            for p in ("ios", "android"):
+                n = rows.get(f"phones-24h:{p}", {}).get(h)
+                row += [n, rows.get(f"problem-installs-24h:{p}", {}).get(h, 0)] if n is not None else [None, None]
+            error_free[str(h)] = row
     return {
         "active48": sorted(rows.get("active-48h", {}).items()),
         "active_days": {str(d): v for d, v in by_day("active-24h").items() if d < today},
@@ -421,7 +447,7 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
         # {hour: {build: devices seen within 24 hours}} (`build:…`, hourly for a week, every 4th hour to 30 days, then
         # the day's last, at midnight): the releases over time.
         "build_levels": builds,
-        # {hour: [phones seen within 24 hours, of them with an error or crash report in those 24 hours]}: the error-free share.
+        # {hour: [phones seen within 24 hours, of them with an error or crash report in those 24 hours, then the same for iOS and Android]}: the error-free share.
         "error_free_levels": error_free,
     }
 

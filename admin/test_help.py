@@ -84,8 +84,11 @@ class HelpTests(unittest.TestCase):
                 db.executemany("INSERT INTO levels VALUES(?,?,?)", [(f"build:ios/{stamp}", 1, 9), (f"build:ios/{stamp}", 2, 2), ("build:ios/202001010000", 2, 7)])
                 db.execute("INSERT INTO diagnostics VALUES(5,'error',1,1,2,?,'26','iPhone','{}',0)", (f"ios/{stamp}",))
                 db.execute("INSERT INTO diagnostic_installs VALUES(5,?,?)", (a, today))  # no at: the day's start
+                # The network's own errors count against no phone.
+                db.execute("INSERT INTO diagnostics VALUES(6,'error',1,1,2,?,'26','iPhone','{\"domain\":\"NSURLErrorDomain\",\"code\":\"-1001\"}',0)", (f"ios/{stamp}",))
+                db.execute("INSERT INTO diagnostic_installs VALUES(6,?,?)", (c, today))
                 # Phones on builds under 24 h (latest level), and of them those with a report.
-                self.assertEqual(users.current_build_installs(db, now), [2, 1])
+                self.assertEqual(users.current_build_installs(db, now), [2, 1, 2, 1, 0, 0])
 
     def test_reports_by_install_without_a_name(self):
         users = load("users")

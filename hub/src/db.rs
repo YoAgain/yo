@@ -338,6 +338,36 @@ fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> 
     .exists([skeleton])
 }
 
+/// The network's own errors (domain, code), which are not the app's: a lost, timed-out or refused connection, a
+/// busy or failing server, a slow request. They never count against a phone in the error-free share (levels
+/// `problem-installs-24h`); the operator page keeps the same list (`NETWORK_ERRORS` in admin/users.py).
+const NETWORK_ERRORS: [(&str, &str); 11] = [
+    ("NSURLErrorDomain", "-1001"),
+    ("NSURLErrorDomain", "-1004"),
+    ("NSURLErrorDomain", "-1005"),
+    ("NSURLErrorDomain", "-1009"),
+    ("NSURLErrorDomain", "-1020"),
+    ("HTTP", "429"),
+    ("HTTP", "502"),
+    ("HTTP", "503"),
+    ("HTTP", "504"),
+    ("NotificationFallback", "network"),
+    ("SharedAccess", "a slow request"),
+];
+
+/// SQL (on `diagnostics d`) true for a report that is not one of `NETWORK_ERRORS`.
+fn network_errors_sql() -> String {
+    let each: Vec<String> = NETWORK_ERRORS
+        .iter()
+        .map(|(domain, code)| {
+            format!(
+                "(coalesce(json_extract(d.payload, '$.domain'), '') = '{domain}' AND coalesce(json_extract(d.payload, '$.code'), '') = '{code}')"
+            )
+        })
+        .collect();
+    format!("NOT ({})", each.join(" OR "))
+}
+
 fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, now: u64) -> rusqlite::Result<i64> {
     let field = |name| payload[name].as_str().unwrap_or("");
     let identity = if kind == "error" {
@@ -1001,21 +1031,21 @@ impl Db {
             }
             if !problems_only {
                 // The phones (iOS, Android) seen within 24 hours, and of them the installs that sent an error or crash
-                // in those 24 hours (a row without `at`: its day's start): the error-free share of who is still here.
-                for (kind, sql) in [
-                    (
-                        "phones-24h",
-                        "SELECT count(*) FROM devices WHERE last_seen_at > ?1 - 86400000 AND (app LIKE 'ios/%' OR app LIKE 'android/%')",
-                    ),
-                    (
-                        "problem-installs-24h",
+                // in those 24 hours (a row without `at`: its day's start; the network's errors left out,
+                // `NETWORK_ERRORS`): the error-free share of who is still here, in all and per platform.
+                let net = network_errors_sql();
+                for (suffix, like) in [("", "%"), (":ios", "ios/%"), (":android", "android/%")] {
+                    let phones = "SELECT count(*) FROM devices WHERE last_seen_at > ?1 - 86400000 AND app LIKE ?2 \
+                         AND (app LIKE 'ios/%' OR app LIKE 'android/%')";
+                    let hit = format!(
                         "SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id \
                          WHERE coalesce(i.at, i.day * 86400000) > ?1 - 86400000 AND d.os NOT LIKE 'mac%' \
-                         AND (d.app LIKE 'ios/%' OR d.app LIKE 'android/%')",
-                    ),
-                ] {
-                    let value: i64 = tx.prepare_cached(sql)?.query_row([now as i64], |r| r.get(0))?;
-                    put.execute(params![kind, hour, value])?;
+                         AND d.app LIKE ?2 AND (d.app LIKE 'ios/%' OR d.app LIKE 'android/%') AND {net}"
+                    );
+                    for (kind, sql) in [("phones-24h", phones.to_owned()), ("problem-installs-24h", hit)] {
+                        let value: i64 = tx.prepare_cached(&sql)?.query_row(params![now as i64, like], |r| r.get(0))?;
+                        put.execute(params![format!("{kind}{suffix}"), hour, value])?;
+                    }
                 }
                 // The devices per build (`build:ios/202611191626`, `build:unknown` for none named) seen within 24
                 // hours, of the apps' (bots and the CLI left out): the operator's releases over time. Counts only.
@@ -2119,7 +2149,11 @@ mod tests {
                 row("open-crashes", h, 2),
                 row("open-errors", h, 3),
                 row("phones-24h", h, 0),
+                row("phones-24h:android", h, 0),
+                row("phones-24h:ios", h, 0),
                 row("problem-installs-24h", h, 0),
+                row("problem-installs-24h:android", h, 0),
+                row("problem-installs-24h:ios", h, 0),
                 row("queue-envelopes", h, 1),
                 row("queue-media-bytes", h, 700),
             ]
@@ -2130,7 +2164,7 @@ mod tests {
         assert_eq!(rows(&db)[5], row("open-errors", h, 3));
         db.sample_levels(now + 60_000, true).unwrap();
         assert_eq!(rows(&db)[5], row("open-errors", h, 0));
-        assert_eq!(rows(&db).len(), 10);
+        assert_eq!(rows(&db).len(), 14);
         let columns: Vec<String> = db
             .conn()
             .prepare("SELECT name FROM pragma_table_info('levels')")
@@ -2162,6 +2196,36 @@ mod tests {
         db.conn().execute("UPDATE devices SET app = 'ios/202611191626', last_seen_at = ?1", [now as i64]).unwrap();
         db.sample_levels(now + 2 * hour, false).unwrap();
         assert_eq!(build(&db, h + 2), [("build:ios/202611191626".to_owned(), 2)]);
+        // The error-free share: an install with an error counts, one with only the network's (a timeout) does not.
+        let report = |id: i64, install: u8, payload: &str| {
+            db.conn()
+                .execute(
+                    "INSERT INTO diagnostics(id, kind, signature, count, first_seen, last_seen, app, os, model, payload, done) \
+                     VALUES (?1, 'error', ?1, 1, ?2, ?2, 'ios/202611191626', '26', 'iPhone', ?3, 0)",
+                    params![id, now as i64, payload],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO diagnostic_installs(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)",
+                    params![id, [install], (now / DAY_MS) as i64, now as i64],
+                )
+                .unwrap();
+        };
+        report(91, 1, r#"{"domain":"NSURLErrorDomain","code":"-1001"}"#);
+        report(92, 2, r#"{"domain":"YoCore.YoError","code":"bad"}"#);
+        report(93, 3, r#"{"domain":"SharedAccess","code":"a slow request"}"#);
+        db.sample_levels(now + 3 * hour, false).unwrap();
+        let level = |kind: &str| -> i64 {
+            db.conn()
+                .query_row("SELECT value FROM levels WHERE kind = ?1 AND hour = ?2", params![kind, h + 3], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            (level("phones-24h:ios"), level("problem-installs-24h"), level("problem-installs-24h:ios")),
+            (2, 1, 1)
+        );
+        assert_eq!((level("phones-24h:android"), level("problem-installs-24h:android")), (0, 0));
         // 30 days of hours, then the day's last (the one at the next midnight) alone, kept for good.
         db.conn().execute("DELETE FROM levels", []).unwrap();
         let day0 = 900 * 24i64;
