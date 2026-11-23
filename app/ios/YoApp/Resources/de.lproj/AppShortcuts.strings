@@ -1,17 +1,8 @@
 /* Siri and Shortcuts in German: Yo's App Shortcuts phrases (YoShortcuts.swift). Keys are the English phrase
-   templates as written there; every value names ${applicationName}, a friend is ${friend}. */
+   templates as written there; every value names ${applicationName}, a friend is ${friend}. As short as Yo:
+   "Yo Lina", "Yo zurück", "Yo Kamera", "Öffne Yo". */
 
-"Send a Yo with ${applicationName}" = "Schick ein Yo mit ${applicationName}";
-"Send a Yo to ${friend} with ${applicationName}" = "Schick ${friend} ein Yo mit ${applicationName}";
-"${applicationName} ${friend}" = "${applicationName} an ${friend}";
-"Send a ${applicationName} to ${friend}" = "Sende ein ${applicationName} an ${friend}";
-"Send ${friend} a ${applicationName}" = "Schick ${friend} ein ${applicationName}";
-"Send a ${applicationName}" = "Sende ein ${applicationName}";
-
+"${applicationName} ${friend}" = "${applicationName} ${friend}";
 "${applicationName} back" = "${applicationName} zurück";
-"Send a Yo back with ${applicationName}" = "Yo zurück mit ${applicationName}";
-
 "${applicationName} camera" = "${applicationName} Kamera";
-"Open the camera in ${applicationName}" = "Öffne die Kamera in ${applicationName}";
-
 "Open ${applicationName}" = "Öffne ${applicationName}";

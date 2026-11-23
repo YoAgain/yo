@@ -5,22 +5,15 @@ struct YoShortcuts: AppShortcutsProvider {
   static var appShortcuts: [AppShortcut] {
     AppShortcut(
       intent: SendYoIntent(),
-      phrases: [
-        "Send a Yo with \(.applicationName)",
-        "Send a Yo to \(\.$friend) with \(.applicationName)",
-        "\(.applicationName) \(\.$friend)",
-        "Send a \(.applicationName) to \(\.$friend)",
-        "Send \(\.$friend) a \(.applicationName)",
-        "Send a \(.applicationName)",
-      ],
+      phrases: ["\(.applicationName) \(\.$friend)"],
       shortTitle: "Send Yo", systemImageName: "hand.wave.fill")
     AppShortcut(
       intent: YoBackIntent(),
-      phrases: ["\(.applicationName) back", "Send a Yo back with \(.applicationName)"],
+      phrases: ["\(.applicationName) back"],
       shortTitle: "Yo Back", systemImageName: "arrowshape.turn.up.left.fill")
     AppShortcut(
       intent: YoCameraIntent(),
-      phrases: ["\(.applicationName) camera", "Open the camera in \(.applicationName)"],
+      phrases: ["\(.applicationName) camera"],
       shortTitle: "Yo Camera", systemImageName: "camera.fill")
     AppShortcut(
       intent: OpenYoIntent(),
