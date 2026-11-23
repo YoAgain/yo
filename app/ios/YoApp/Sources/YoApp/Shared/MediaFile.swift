@@ -55,7 +55,9 @@ struct MediaFile: Sendable {
     case .none, .noneSkipFirst, .noneSkipLast: return image
     default: break
     }
-    let space = image.colorSpace.flatMap { $0.model == .rgb ? $0 : nil } ?? CGColorSpace(name: CGColorSpace.sRGB)!
+    // An 8-bit context takes no extended range (an EXR's or a float TIFF's linear space): that drawn into sRGB.
+    let space = image.colorSpace.flatMap { $0.model == .rgb && !CGColorSpaceUsesExtendedRange($0) ? $0 : nil }
+      ?? CGColorSpace(name: CGColorSpace.sRGB)!
     guard
       let context = CGContext(
         data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
