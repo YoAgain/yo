@@ -16,7 +16,8 @@ if [ "${1:-}" = --support ]; then
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   mkdir "$stage/MessagesApplicationExtensionSupport"
-  cp "$stub" "$stage/MessagesApplicationExtensionSupport/"
+  # The same arm64 slice as YoStickers.appex's executable, before its signing (else 90614: "don't match").
+  lipo "$stub" -extract arm64 -output "$stage/MessagesApplicationExtensionSupport/MessagesApplicationExtensionStub"
   (cd "$stage" && zip -qry "$ipa" MessagesApplicationExtensionSupport)
   echo "stickers.sh: MessagesApplicationExtensionSupport in $(basename "$ipa")"
   exit 0
