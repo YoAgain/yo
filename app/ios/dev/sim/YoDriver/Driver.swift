@@ -120,6 +120,10 @@ import XCTest
     case "home":
       XCUIDevice.shared.press(.home)
       return [:]
+    case "lock":
+      // The side button: the screen off and locked (no API names it; XCUIDevice answers to it).
+      XCUIDevice.shared.perform(NSSelectorFromString("pressLockButton"))
+      return [:]
     case "tree":
       return ["tree": try tree(c["sb"] as? Bool == true ? springboard : app)]
     case "tap", "press", "doubletap", "exists", "wait", "gone", "info", "swipe":
