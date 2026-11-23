@@ -20,7 +20,7 @@ xcrun simctl io "Yo Chaos A" screenshot shot.png
 ```
 
 `drive.py` ops: `burst` (fast taps, see Speed), `touches` (finger paths in one go, see Deliberate taps), `launch` (`env=YO_HUB:https://127.0.0.1:9` takes the hub away: "offline"), `activate`, `terminate`,
-`home`, `lock` (the side button), `tap`/`press`/`doubletap`/`exists`/`wait`/`gone`/`swipe` by `label`, `contains`, `id`, `type`, `index` (`sb=true`
+`home`, `lock` (the side button), `rotate to=landscape|portrait` (an iPad), `tap`/`press`/`doubletap`/`exists`/`wait`/`gone`/`swipe` by `label`, `contains`, `id`, `type`, `index` (`sb=true`
 for the system's alerts and Notification Center; `app=com.apple.Spotlight` for Spotlight's search field, e.g. `type
 app=com.apple.Spotlight text=Sora` after pulling Spotlight down on the Home Screen), `tapxy`/`pressxy`/`drag` by points (`drag sb=true x=100 y=1 x2=100
 y2=700 velocity=600` pulls down Notification Center), `type`, `clear`, `tree`, `audit`, `shot`, `quit`.

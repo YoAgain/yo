@@ -28,13 +28,13 @@ struct RecoveryHelpSheet: View {
             "Your account key is saved in iCloud Keychain, so your other Apple devices can sign in to Yo.")
           item(
             "faceid", "Passkey",
-            "Optionally, back up your account key with a passkey. Face ID or your password manager unlocks it on a new phone.")
+            "Optionally, back up your account key with a passkey. Face ID or your password manager unlocks it on a new device.")
           item(
             "key.fill", "Recovery Key",
-            "Optionally, keep a recovery key. Enter it on any phone to get your account back.")
+            "Optionally, keep a recovery key. Enter it on another device to get your account back.")
           item(
             "arrow.triangle.2.circlepath.icloud.fill", "Account Backup",
-            "Your contacts, groups and settings are kept on Yo’s server, encrypted with a key made from your account key, so a new phone finds them again. Yos, photos and videos aren’t backed up.")
+            "Your contacts, groups and settings are kept on Yo’s server, encrypted with a key made from your account key, so a new device finds them again. Yos, photos and videos aren’t backed up.")
           Text(
             "Account Backup is end-to-end encrypted. Yo’s server stores it but can’t read it."
           )

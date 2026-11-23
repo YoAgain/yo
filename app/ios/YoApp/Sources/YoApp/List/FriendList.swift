@@ -54,6 +54,8 @@ struct FriendList: View {
     friends.shown.map { ListFriend(id: $0.key.uuidString, name: $0.name, request: $0.request, group: $0.group != nil) }
   }
 
+  @State private var listViewport = CGSize.zero
+  @State private var notificationsDenied = false
   @State var adding = false
   @State var newGroup = false
   @State var newName = ""
@@ -397,16 +399,28 @@ struct FriendList: View {
   }
 
   var listNavigation: some View {
-    NavigationStack {
+    let rows = shadedFriends
+    let scale = RowMetrics.scale(width: listViewport.width)
+    let base = RowMetrics.base.height * scale
+    // Each request has a choice bar. Before the first friend, Group and Invite always show below “+”.
+    let count = rows.reduce(1) { $0 + ($1.friend.request ? 2 : 1) }
+    // Measured below the status bar (the top safe area) down to the window's bottom edge.
+    let room = listViewport.height - (noFriendYet ? base : 0)
+    let height = max(base, (room - (notificationsDenied ? base : 0)) / CGFloat(count))
+    // A short list keeps its place as the camera replaces the notifications button.
+    let cameraSpace = cameraOn && notificationsDenied ? min(base, max(0, room - CGFloat(count) * height)) : 0
+    let rowMetrics = RowMetrics(height: height, font: RowMetrics.base.font * scale, smallFont: RowMetrics.base.smallFont * scale)
+    return NavigationStack {
       ScrollView {
         LazyVStack(spacing: 0) {
           // Always in the stack, empty in camera mode: taking the stack's first child out on the switch lost the
           // scroll view's anchor, and the first bar slid up out of sight.
-          NotificationsBar(hidden: cameraOn)
+          NotificationsBar(hidden: cameraOn, denied: $notificationsDenied)
+            .frame(minHeight: cameraSpace)
           // The shade in the data: `Friend`'s == is its key alone, so after a reorder the ForEach kept old shades.
-          ForEach(shadedFriends, id: \.friend.key) { shaded in
+          ForEach(rows, id: \.friend.key) { shaded in
             let friend = shaded.friend
-            row(friend, shade: shaded.shade)
+            row(friend, shade: shaded.shade, metrics: rowMetrics)
               .modifier(FlightRowLayer(bar: bars.of(friend)))
               .onGeometryChange(for: Bars.Place?.self) { proxy in
                 proxy.bounds(of: .scrollView).map { Bars.Place(frame: proxy.frame(in: .scrollView), viewport: $0.height) }
@@ -420,9 +434,21 @@ struct FriendList: View {
               }
               .transition(.opacity)
           }
-          addRow.id(Self.addBlockBottomID)
+          addRow(rowMetrics).id(Self.addBlockBottomID)
         }
         .scrollTargetLayout()
+        .modifier(ListColorClip())
+        .environment(\.rowMetrics, rowMetrics)
+      }
+      // At most 700 wide, centred; the colour behind goes on from edge to edge. The scroll view itself is capped:
+      // capping its content left the rows scrolled sideways by their margin after a turn to landscape.
+      .frame(maxWidth: 700)
+      .frame(maxWidth: .infinity)
+      // Measure down to the window edge, behind the floating toolbar and the keyboard.
+      .background {
+        Color.clear
+          .onGeometryChange(for: CGSize.self) { $0.size } action: { listViewport = $0 }
+          .ignoresSafeArea(.all, edges: [.horizontal, .bottom])
       }
       // In camera mode the last bar scrolls up out from under the controls (their row and its margin).
       .contentMargins(.bottom, cameraOn && hintShown ? 54 : 0, for: .scrollContent)
@@ -569,7 +595,7 @@ struct FriendList: View {
     }
   }
 
-  @ViewBuilder func row(_ friend: Friend, shade: Color) -> some View {
+  @ViewBuilder func row(_ friend: Friend, shade: Color, metrics rowMetrics: RowMetrics) -> some View {
     let waiting = inbox.media(for: friend) ?? []
     let bar = LiveBar(
       friend: friend,
@@ -628,8 +654,8 @@ struct FriendList: View {
             }
           }
         if friend.request {
-          requestChoices(friend, shade: shade)
-            .frame(height: Metrics.rowHeight)
+          requestChoices(friend, shade: shade, metrics: rowMetrics)
+            .frame(height: rowMetrics.height)
         }
       }
         .accessibilityActions {
@@ -641,20 +667,20 @@ struct FriendList: View {
     }
   }
 
-  func requestChoices(_ friend: Friend, shade: Color) -> some View {
+  func requestChoices(_ friend: Friend, shade: Color, metrics rowMetrics: RowMetrics) -> some View {
     GeometryReader { geometry in
       HStack(spacing: 0) {
-        if leftHanded { requestChoice(friend, shade: shade, yes: true, width: geometry.size.width * 2 / 3) }
-        requestChoice(friend, shade: shade, yes: false, width: geometry.size.width / 3)
-        if !leftHanded { requestChoice(friend, shade: shade, yes: true, width: geometry.size.width * 2 / 3) }
+        if leftHanded { requestChoice(friend, shade: shade, yes: true, width: geometry.size.width * 2 / 3, font: rowMetrics.font) }
+        requestChoice(friend, shade: shade, yes: false, width: geometry.size.width / 3, font: rowMetrics.font)
+        if !leftHanded { requestChoice(friend, shade: shade, yes: true, width: geometry.size.width * 2 / 3, font: rowMetrics.font) }
       }
     }
   }
 
-  func requestChoice(_ friend: Friend, shade: Color, yes: Bool, width: CGFloat) -> some View {
+  func requestChoice(_ friend: Friend, shade: Color, yes: Bool, width: CGFloat, font: CGFloat) -> some View {
     Button { chooseRequest(friend, yes: yes) } label: {
       Text(yes ? "Yo" : "No")
-        .font(.yo(Metrics.rowFont))
+        .font(.yo(font))
         .foregroundStyle(.white)
         .frame(width: width)
         .frame(maxHeight: .infinity)

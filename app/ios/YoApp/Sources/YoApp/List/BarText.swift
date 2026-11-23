@@ -19,32 +19,33 @@ struct TitleWords: View {
   let text: String
   var lead = BarRow.margin
   var trail = BarRow.margin
+  @Environment(\.rowMetrics) private var rowMetrics
   @Environment(\.dynamicTypeSize) private var typeSize
 
   var body: some View {
     GeometryReader { geometry in
       let room = max(0, geometry.size.width - lead - trail)
       // SteadyText's digits take a little more than their own width.
-      if textWidth(text, barFont(Metrics.rowFont, typeSize)) + 16 <= room {
-        BarRow(lead: lead, trail: trail) { SteadyText(text) }
+      if textWidth(text, barFont(rowMetrics.font, typeSize)) + 16 <= room {
+        BarRow(height: rowMetrics.height, lead: lead, trail: trail) { SteadyText(text) }
       } else {
         VStack(spacing: 2) {
           ForEach(Array(smallLines(room: room).enumerated()), id: \.offset) { _, line in Text(line) }
         }
-        .font(.yo(Metrics.rowSmallFont))
+        .font(.yo(rowMetrics.smallFont))
         .lineLimit(1)
         .minimumScaleFactor(0.5)  // a single word wider than the room: that line shrinks
         .frame(width: room, height: geometry.size.height)
         .offset(x: lead)
       }
     }
-    .frame(height: Metrics.rowHeight)
+    .frame(height: rowMetrics.height)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(text)
   }
 
   private func smallLines(room: CGFloat) -> [String] {
-    let font = barFont(Metrics.rowSmallFont, typeSize)
+    let font = barFont(rowMetrics.smallFont, typeSize)
     if textWidth(text, font) <= room { return [text] }
     let words = listTitleWords(text: text)
     return listWrapTwoLines(words: words, widths: words.map { Float(textWidth($0, font)) },
@@ -59,19 +60,20 @@ struct ArrivalWords: View {
   let name: String
   var lead = BarRow.margin
   var trail = BarRow.margin
+  @Environment(\.rowMetrics) private var rowMetrics
   @Environment(\.dynamicTypeSize) private var typeSize
 
   var body: some View {
     GeometryReader { geometry in
       let line = productArrivalLines(count: Int64(count), name: name, lang: .english)[0]
       // SteadyText's digits take a little more than their own width; its padding 3 on each side.
-      if textWidth(line, barFont(Metrics.rowFont, typeSize)) + 16 <= geometry.size.width - lead - trail {
-        BarRow(lead: lead, trail: trail) { SteadyText(line).padding(.horizontal, 3) }
+      if textWidth(line, barFont(rowMetrics.font, typeSize)) + 16 <= geometry.size.width - lead - trail {
+        BarRow(height: rowMetrics.height, lead: lead, trail: trail) { SteadyText(line).padding(.horizontal, 3) }
       } else {
         SenderFlow(senders: [ListSender(user: "", name: name, count: UInt32(clamping: count))], lead: lead, trail: trail)
       }
     }
-    .frame(height: Metrics.rowHeight)
+    .frame(height: rowMetrics.height)
   }
 }
 
@@ -81,6 +83,7 @@ struct SenderFlow: View {
   let senders: [ListSender]
   var lead = BarRow.margin
   var trail = BarRow.margin
+  @Environment(\.rowMetrics) private var rowMetrics
   @Environment(\.dynamicTypeSize) private var typeSize
 
   var body: some View {
@@ -91,21 +94,21 @@ struct SenderFlow: View {
         Text(lines[0])
         if lines.count > 1, !lines[1].isEmpty { Text(lines[1]) }
       }
-      .font(.yo(Metrics.rowSmallFont))
+      .font(.yo(rowMetrics.smallFont))
       .lineLimit(1)
       // Only a name wider than the room even alone (the core places it whole): that line shrinks to fit.
       .minimumScaleFactor(0.5)
       .frame(width: room, height: geometry.size.height)
       .offset(x: lead)
     }
-    .frame(height: Metrics.rowHeight)
+    .frame(height: rowMetrics.height)
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(senders.map { "\($0.count == 1 ? "Yo" : "\($0.count) Yos") from \($0.name)" }
       .joined(separator: ", "))
   }
 
   private func lines(room: CGFloat) -> [String] {
-    let font = barFont(Metrics.rowSmallFont, typeSize)
+    let font = barFont(rowMetrics.smallFont, typeSize)
     func width(_ text: String) -> Float { Float(textWidth(text, font)) }
     let flow = listSenderFlow(senders: senders, lang: .english)
     let widths = ListFlowWidths(prefix: width(flow.prefix), tokens: flow.tokens.map(width),
@@ -146,17 +149,16 @@ enum BarSendText {
 struct SteadyText: View {
   let text: String
   init(_ text: String) { self.text = text }
+  @Environment(\.rowMetrics) private var rowMetrics
   @Environment(\.dynamicTypeSize) private var typeSize
 
-  /// The widest digit at the bar's size, measured once per text size.
-  @MainActor private static var slots: [DynamicTypeSize: CGFloat] = [:]
-  @MainActor private static func slot(_ size: DynamicTypeSize) -> CGFloat {
-    if let width = slots[size] { return width }
-    let base = UIFont(name: "Montserrat-Bold", size: Metrics.rowFont) ?? .boldSystemFont(ofSize: Metrics.rowFont)
-    let font = UIFontMetrics(forTextStyle: .title1)
-      .scaledFont(for: base, compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(size)))
-    let width = (0...9).map { ceil(("\($0)" as NSString).size(withAttributes: [.font: font]).width) }.max() ?? 0
-    slots[size] = width
+  /// Keep the latest digit width for each text size as the window resizes.
+  @MainActor private static var slots: [DynamicTypeSize: (fontSize: CGFloat, width: CGFloat)] = [:]
+  @MainActor private static func slot(_ size: DynamicTypeSize, fontSize: CGFloat) -> CGFloat {
+    if let slot = slots[size], slot.fontSize == fontSize { return slot.width }
+    let font = barFont(fontSize, size)
+    let width = (0...9).map { textWidth("\($0)", font) }.max() ?? 0
+    slots[size] = (fontSize, width)
     return width
   }
 
@@ -179,7 +181,7 @@ struct SteadyText: View {
   }
 
   var body: some View {
-    let slot = Self.slot(typeSize)
+    let slot = Self.slot(typeSize, fontSize: rowMetrics.font)
     HStack(spacing: 0) {
       ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
         if part.digit {
@@ -198,11 +200,12 @@ struct SteadyText: View {
 /// else moved aside as little as it takes. Only the last is cut with "…". Never smaller, nothing overlaps.
 struct BarRow: Layout {
   static let margin = 20.0
+  var height: CGFloat
   var lead = margin
   var trail = margin
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-    CGSize(width: proposal.width ?? 393, height: Metrics.rowHeight)
+    CGSize(width: proposal.width ?? (lead + (subviews.first?.sizeThatFits(.unspecified).width ?? 0) + trail), height: height)
   }
 
   func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {

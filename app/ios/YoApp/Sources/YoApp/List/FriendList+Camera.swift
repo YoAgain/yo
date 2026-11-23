@@ -144,8 +144,9 @@ extension FriendList {
     if cameraOn, picked.count > 1 {
       GeometryReader { geometry in
         let columns = picked.count <= 4 ? 2 : 3
-        let side = (geometry.size.width - CGFloat(columns - 1)) / CGFloat(columns)
         let rows = (picked.count + columns - 1) / columns
+        let side = max(0, min((geometry.size.width - CGFloat(columns - 1)) / CGFloat(columns),
+          (geometry.size.height - CGFloat(rows - 1)) / CGFloat(rows)))
         VStack(spacing: 1) {
           ForEach(0..<rows, id: \.self) { row in
             HStack(spacing: 1) {

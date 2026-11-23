@@ -31,7 +31,8 @@ python3 -I - "$bundle/Info.plist" "$partial" <<'PY'
 import plistlib, sys
 built, partial = (plistlib.load(open(p, "rb")) for p in sys.argv[1:])
 for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
-    alternates = built.get(key, {}).get("CFBundleAlternateIcons")
+    # The loose PNG alternates are declared once (CFBundleIcons); the iPad's set takes the same files.
+    alternates = built.get(key, built.get("CFBundleIcons", {})).get("CFBundleAlternateIcons")
     if alternates and key in partial:
         compiled = partial[key].setdefault("CFBundleAlternateIcons", {})
         for name, entry in alternates.items():

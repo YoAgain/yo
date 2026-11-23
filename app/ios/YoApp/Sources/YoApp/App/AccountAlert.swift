@@ -25,13 +25,13 @@ import UIKit
           button: "Try Again")
         : Content(
           title: "Can’t Open Your Account",
-          message: "Yo can’t open your account on this iPhone. Sign in again to keep using it.\n\n(\(accounts.brokenWhy))",
+          message: "Yo can’t open your account on this device. Sign in again to keep using it.\n\n(\(accounts.brokenWhy))",
           button: "Sign In Again")
     }
     if accounts.updateStalled {
       return Content(
         title: "Update Not Finished",
-        message: "Yo couldn’t finish updating your account on this iPhone. Nothing is lost. Check your connection and try again.",
+        message: "Yo couldn’t finish updating your account on this device. Nothing is lost. Check your connection and try again.",
         button: "Try Again")
     }
     return nil

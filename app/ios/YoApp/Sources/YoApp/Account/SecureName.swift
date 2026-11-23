@@ -195,7 +195,7 @@ struct RecoveryKeySheet: View {
   private func ensureWords() async -> Bool {
     if words.count == 64 { return true }
     guard secured else {
-      problem = "Your recovery key isn’t on this iPhone."
+      problem = "Your recovery key isn’t on this device."
       return false
     }
     busy = true
@@ -350,10 +350,17 @@ private struct KeyCard: View {
     controller.completionWithItemsHandler = { _, completed, _, _ in
       Task { @MainActor in completion(completed) }
     }
-    let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-    var top = scene?.keyWindow?.rootViewController
-    while let presented = top?.presentedViewController { top = presented }
-    top?.present(controller, animated: true)
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive }
+      ?? scenes.first { $0.activationState == .foregroundInactive }
+    guard var top = scene?.keyWindow?.rootViewController else { return completion(false) }
+    while let presented = top.presentedViewController { top = presented }
+    if let popover = controller.popoverPresentationController {
+      popover.sourceView = top.view
+      popover.sourceRect = .null  // UIKit tracks the source view as its window resizes.
+      popover.permittedArrowDirections = []
+    }
+    top.present(controller, animated: true)
   }
 
   static func recoveryKey(name: String, key: String, completion: @escaping @MainActor (Bool) -> Void) {

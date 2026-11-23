@@ -1113,9 +1113,9 @@ enum AccountError: LocalizedError {
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     case .tooMany: "Too many tries. Try again later."
     case .busy: "Signing in already. Wait a moment."
-    case .keychain: "Yo can’t use the keychain right now. Unlock your iPhone and try again."
+    case .keychain: "Yo can’t use the keychain right now. Unlock your device and try again."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
-    case .hub(.Replaced): "Your account is in use on another iPhone."
+    case .hub(.Replaced): "Your account is in use on another device."
     case .hub(.Clock): productProblemText(problem: .wrongClock, lang: .english)
     // The raw error goes to the error log (Hub.run records it), never on screen.
     case .hub: "Something went wrong. Try again."

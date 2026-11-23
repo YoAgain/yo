@@ -314,7 +314,11 @@ final class Camera: NSObject, @unchecked Sendable {
     configured = true
     session.beginConfiguration()
     session.sessionPreset = .high  // photo and video from one session
-    if let device = Self.back(), let new = Diagnostics.attempt({ try AVCaptureDeviceInput(device: device) }), session.canAddInput(new)
+    if session.isMultitaskingCameraAccessSupported {
+      session.isMultitaskingCameraAccessEnabled = true
+    }
+    if let device = Self.back() ?? AVCaptureDevice.default(for: .video),
+      let new = Diagnostics.attempt({ try AVCaptureDeviceInput(device: device) }), session.canAddInput(new)
     {
       session.addInput(new)
       input = new

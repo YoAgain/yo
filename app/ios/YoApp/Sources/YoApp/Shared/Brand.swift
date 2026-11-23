@@ -48,3 +48,20 @@ enum Metrics {
   static let titleFont: CGFloat = 30
 }
 
+/// The bars' sizes on a wider screen (iPad, a Mac window): FriendList measures and hands them down.
+struct RowMetrics: Equatable {
+  var height: CGFloat
+  var font: CGFloat
+  var smallFont: CGFloat
+  static let base = RowMetrics(height: Metrics.rowHeight, font: Metrics.rowFont, smallFont: Metrics.rowSmallFont)
+
+  /// Phone widths keep the original sizes; wider windows grow up to 1.35×.
+  static func scale(width: CGFloat) -> CGFloat { min(1.35, 1 + max(0, width - 440) * 0.001) }
+
+  var fontScale: CGFloat { font / Self.base.font }
+  var baseHeight: CGFloat { Self.base.height * fontScale }
+}
+
+extension EnvironmentValues {
+  @Entry var rowMetrics: RowMetrics = .base
+}

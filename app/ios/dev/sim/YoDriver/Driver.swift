@@ -130,6 +130,10 @@ import XCTest
     case "home":
       XCUIDevice.shared.press(.home)
       return [:]
+    case "rotate":
+      // The device turned (an iPad: to=landscape or to=portrait).
+      XCUIDevice.shared.orientation = c["to"] as? String == "landscape" ? .landscapeLeft : .portrait
+      return [:]
     case "lock":
       // The side button: the screen off and locked (no API names it; XCUIDevice answers to it).
       XCUIDevice.shared.perform(NSSelectorFromString("pressLockButton"))

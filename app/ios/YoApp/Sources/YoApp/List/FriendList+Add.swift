@@ -24,12 +24,12 @@ extension FriendList {
     !friends.hasFriend && accounts.storageRead
   }
 
-  var addRow: some View {
+  func addRow(_ rowMetrics: RowMetrics) -> some View {
     let open = adding || noFriendYet
     return VStack(spacing: 0) {
       if adding {
         TextField(hint ?? "Name", text: $newName)
-          .font(.yo(Metrics.rowFont))
+          .font(.yo(rowMetrics.font))
           .foregroundStyle(.white)
           .multilineTextAlignment(.center)
           .textInputAutocapitalization(.words)
@@ -41,7 +41,7 @@ extension FriendList {
             let clean = Username.clean(value)
             if clean != value { newName = clean }
           }
-          .frame(height: Metrics.rowHeight)
+          .frame(height: rowMetrics.height)
           .background { addBackground(Color.row(friends.nextColor)) }
           .onAppear { typing = true }
       } else {
@@ -57,11 +57,11 @@ extension FriendList {
             adding = false
             newGroup = true
           } label: {
-            addAction("Group", icon: "person.2.badge.plus", color: Color(hex: 0x3498DB))
+            addAction("Group", icon: "person.2.badge.plus", color: Color(hex: 0x3498DB), metrics: rowMetrics)
           }
           if let account = accounts.account {
             InviteShareLink(name: account.username) {
-              addAction("Invite", icon: "square.and.arrow.up", color: .amethyst)
+              addAction("Invite", icon: "square.and.arrow.up", color: .amethyst, metrics: rowMetrics)
             }
           }
         }
@@ -70,7 +70,7 @@ extension FriendList {
     }
     .transaction { $0.animation = nil }
     .animation(reduceMotion ? nil : ListMotion.expansion) { content in
-      content.frame(height: Metrics.rowHeight * (open ? 2 : 1), alignment: .top).clipped()
+      content.frame(height: rowMetrics.height + (open ? rowMetrics.baseHeight : 0), alignment: .top).clipped()
         .modifier(ListColorClip())
     }
     .onChange(of: typing) { _, active in
@@ -81,15 +81,15 @@ extension FriendList {
     }
   }
 
-  func addAction(_ title: String, icon: String, color: Color) -> some View {
+  func addAction(_ title: String, icon: String, color: Color, metrics: RowMetrics) -> some View {
     Label(title, systemImage: icon)
-      .font(.yo(22))
+      .font(.yo(22 * metrics.fontScale))
       // Half a row each: with Dynamic Type's large sizes the words shrink instead of ending in "Gro…".
       .lineLimit(1)
       .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
       .frame(maxWidth: .infinity)
-      .frame(height: Metrics.rowHeight)
+      .frame(height: metrics.baseHeight)
       .background { addBackground(color) }
       .contentShape(Rectangle())
   }

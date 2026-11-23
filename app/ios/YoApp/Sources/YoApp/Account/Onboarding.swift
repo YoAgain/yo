@@ -524,7 +524,7 @@ struct RecoveryCard: View {
           }
         }
       }
-      Text("Use this recovery key to sign in to Yo on a new iPhone. Keep it safe and don’t share it.")
+      Text("Use this recovery key to sign in to Yo on a new device. Keep it safe and don’t share it.")
         .font(.system(size: 13, weight: .medium))
         .opacity(0.85)
       Text(Date.now.formatted(date: .long, time: .omitted)).font(.system(size: 12, weight: .medium)).opacity(0.6)

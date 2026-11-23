@@ -111,6 +111,7 @@ private struct OutgoingThumbnailSlot: View {
 
 /// A captured item flies once from the finger, then rests on top of the stack.
 private struct OutgoingThumbnail: View {
+  @Environment(\.rowMetrics) private var rowMetrics
   let image: UIImage
   var video = false
   let destination: CGPoint
@@ -128,7 +129,7 @@ private struct OutgoingThumbnail: View {
       .frame(width: side, height: side)
       .clipped()
       .overlay { VideoPlayGlyph(visible: video, side: side) }
-      .scaleEffect(resting ? 1 : Metrics.rowHeight * 0.6 / side)
+      .scaleEffect(resting ? 1 : rowMetrics.height * 0.6 / side)
       .position(resting ? destination : origin)
       .opacity(reduceMotion && !landed ? 0 : 1)
       .task {
@@ -143,6 +144,7 @@ private struct OutgoingThumbnail: View {
 /// One friend's bar: tap to send. With `hold`, holding is reported as well (true when held long enough, false when let
 /// go): camera mode records a video with it. A finger on the photos' thumbnail is reported through `view`.
 struct RowButton: View {
+  @Environment(\.rowMetrics) private var rowMetrics
   let title: String
   /// How many sends the words count ("Sent 3× Yo!").
   var count = 1
@@ -289,7 +291,7 @@ struct RowButton: View {
       if let outgoing {
         undoRing(since: outgoing)
           .padding(leftHanded ? .trailing : .leading, BarRow.margin)
-          .frame(height: Metrics.rowHeight)
+          .frame(height: rowMetrics.height)
       }
     }
   }
@@ -297,7 +299,7 @@ struct RowButton: View {
   /// The friend's colour from edge to edge, the name large in the middle, red while recording.
   private var label: some View {
     line(touchable: false)
-      .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+      .frame(maxWidth: .infinity, minHeight: rowMetrics.height)
       .background {
         ZStack(alignment: .leading) {
           // Pressed in camera mode: more see-through (the shutter's flash), also while recording.
@@ -313,7 +315,7 @@ struct RowButton: View {
     Group {
       if touchable { signLayer } else { words }
     }
-    .font(.yo(Metrics.rowFont))  // counts held still by SteadyText
+    .font(.yo(rowMetrics.font))  // counts held still by SteadyText
     .foregroundStyle(.white)
     .animation(nil, value: title)  // other words stand in their place at once
     // A new count ("10×" to "11×") swaps in one frame, no crossfade of the old digits under the new.
@@ -343,7 +345,7 @@ struct RowButton: View {
   /// Room kept at the bar's sides: the outgoing thumbnail on its side (every line), the photo sign on its.
   private func room(sign: Bool) -> (lead: CGFloat, trail: CGFloat) {
     let thumb = outgoing == nil ? BarRow.margin : BarRow.margin + Self.ring + 12
-    let end = sign ? BarRow.margin + Self.sign + 8 : BarRow.margin
+    let end = sign ? BarRow.margin + signSide + 8 : BarRow.margin
     return leftHanded ? (end, thumb) : (thumb, end)
   }
 
@@ -391,7 +393,7 @@ struct RowButton: View {
         if leftHanded { Spacer(minLength: 0) }
       }
       .padding(.horizontal, BarRow.margin)
-      .frame(height: Metrics.rowHeight)
+      .frame(height: rowMetrics.height)
       Spacer(minLength: 0)
     }
     .frame(maxHeight: .infinity, alignment: .top)
@@ -399,7 +401,7 @@ struct RowButton: View {
   }
 
   private static let ring = 56.0
-  private static let sign = 40.0  // the sign at the words' own size
+  private var signSide: CGFloat { 40 * rowMetrics.fontScale }  // the sign at the words' own size
 
   /// Nothing downloaded yet: the sign shows it loading, and a finger on it opens nothing (`FriendList.see`).
   private var loading: Bool { !media.isEmpty && media.allSatisfy { $0.pending != nil } }
@@ -408,10 +410,10 @@ struct RowButton: View {
   @ViewBuilder private var sign: some View {
     if !mediaSign.isEmpty {
       Text(mediaSign)
-        .font(.system(size: Metrics.rowFont))  // as tall as the words
+        .font(.system(size: rowMetrics.font))  // as tall as the words
         .opacity(loading ? 0.35 : 1)
         .overlay { if loading { ProgressView().controlSize(.small).tint(.white) } }
-        .frame(width: Self.sign, height: Self.sign)
+        .frame(width: signSide, height: signSide)
         .scaleEffect(viewing ? 0.88 : 1)
         .contentShape(.rect.inset(by: -10))  // easy to hit
         .onGeometryChange(for: Double.self) { $0.frame(in: .global).midY } action: { signMiddle = $0 }
@@ -423,7 +425,7 @@ struct RowButton: View {
                 touchedAt = .now
                 view(.down)
               } else {
-                view(.moved(drag.location, barBottom: signMiddle + Metrics.rowHeight / 2))
+                view(.moved(drag.location, barBottom: signMiddle + rowMetrics.height / 2))
               }
             }
             .onEnded { _ in

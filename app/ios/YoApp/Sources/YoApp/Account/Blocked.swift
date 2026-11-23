@@ -10,17 +10,11 @@ struct BlockedPage: View {
   @Environment(MediaOutbox.self) private var outbox
   @State private var requestsOpen: Bool?
 
-  @State private var unblocking: Friend?
-  @State private var blockingNew: Friend?
-
   /// Laid out like iOS Settings › Blocked.
   var body: some View {
     Form { sections }
       .navigationTitle("Blocked")
       .navigationBarTitleDisplayMode(.inline)
-      .confirmDestructive(
-        $unblocking, title: { "Unblock \($0.name)?" }, action: { _ in "Unblock" },
-        run: { unblock($0) })
       .task(id: accounts.client.map(ObjectIdentifier.init)) {
         guard let client = accounts.client else { return }
         requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
@@ -46,12 +40,7 @@ struct BlockedPage: View {
         Text("No Blocked Contacts").foregroundStyle(.secondary)
       } else {
         ForEach(friends.blocked) { friend in
-          Button {
-            unblocking = friend
-          } label: {
-            ContactRow(name: friend.name)
-          }
-          .tint(Color(.label))
+          ContactRow(friend: friend, action: "Unblock", run: unblock)
         }
       }
     }
@@ -78,21 +67,13 @@ struct BlockedPage: View {
           Text("No Contacts").foregroundStyle(.secondary)
         } else {
           ForEach(candidates) { friend in
-            Button {
-              blockingNew = friend
-            } label: {
-              ContactRow(name: friend.name)
-            }
-            .tint(Color(.label))
+            ContactRow(friend: friend, action: "Block", message: "You won’t get their Yos.", run: block)
           }
         }
       }
     }
     .navigationTitle("Block Contact")
     .navigationBarTitleDisplayMode(.inline)
-    .confirmDestructive(
-      $blockingNew, title: { "Block \($0.name)?" }, message: { _ in "You won’t get their Yos." },
-      action: { _ in "Block" }, run: { block($0) })
   }
 
   private func block(_ friend: Friend) {
@@ -120,12 +101,24 @@ struct BlockedPage: View {
 }
 
 private struct ContactRow: View {
-  let name: String
+  let friend: Friend
+  let action: String
+  var message: String? = nil
+  let run: (Friend) -> Void
+  @State private var confirming: Friend?
 
   var body: some View {
-    HStack(spacing: 12) {
-      Avatar(name: name, size: 36)
-      Text(name).lineLimit(1)
+    Button {
+      confirming = friend
+    } label: {
+      HStack(spacing: 12) {
+        Avatar(name: friend.name, size: 36)
+        Text(friend.name).lineLimit(1)
+      }
     }
+    .tint(Color(.label))
+    .confirmDestructive(
+      $confirming, title: { "\(action) \($0.name)?" }, message: { _ in message ?? "" },
+      action: { _ in action }, run: run)
   }
 }

@@ -8,7 +8,8 @@ struct NotificationsBar: View {
   /// Camera mode: no bar, the view itself stays (the list keeps its first child).
   var hidden = false
   @Environment(\.scenePhase) private var scenePhase
-  @State private var denied = false
+  @Environment(\.rowMetrics) private var rowMetrics
+  @Binding var denied: Bool
   /// Asked in this launch: a "Don't Allow" just given is respected, the bar waits for the next launch (no nudging).
   @MainActor private static var askedThisLaunch = false
 
@@ -21,13 +22,13 @@ struct NotificationsBar: View {
           }
         } label: {
           Text(productText(text: .turnOnNotifications, lang: .english))
-            .font(.yo(Metrics.rowFont))
+            .font(.yo(rowMetrics.font))
             .foregroundStyle(.white)
             .lineLimit(1)
             .minimumScaleFactor(0.5)
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity)
-            .frame(height: Metrics.rowHeight)
+            .frame(height: rowMetrics.baseHeight)
             .background(.alizarin)
             .contentShape(Rectangle())
         }
