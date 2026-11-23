@@ -8,9 +8,7 @@ import Security
 import WidgetKit
 import YoCore
 
-/// Indexed in Spotlight by the app (FriendSpotlight) under its title, nothing else: typing a name ("Sora", a group with
-/// or without "#") finds it; tapping opens Yo on its bar (OpenFriendIntent), and Send Yo takes it as its friend.
-struct FriendEntity: IndexedEntity {
+struct FriendEntity: AppEntity {
   static let typeDisplayRepresentation: TypeDisplayRepresentation = "Friend or Group"
   static let defaultQuery = FriendQuery()
 

@@ -1,9 +1,12 @@
-// Yo's friends and groups in Spotlight (FriendEntity, an IndexedEntity): the names the list shows, nothing else.
+// Yo's friends and groups in Spotlight: the names the list shows, nothing else, as Core Spotlight items by target
+// (ShareBridge.Friend.to). Tapping one opens Yo on that bar (YoApp's CSSearchableItemActionType). Plain items, not an
+// IndexedEntity: the App Intents metadata ship.sh makes (OAD's appintentsmeta.py) does not support IndexedEntity, and
+// associateAppEntity takes only one.
 // Kept in step with the list ShareInbox publishes: renamed, added, removed and blocked ones (blocked are not in the
 // list) change the index; signing out or deleting the account empties it. Core Spotlight's index stays on this
 // phone (it is not synced or backed up).
-import AppIntents
 import CoreSpotlight
+import UniformTypeIdentifiers
 
 @MainActor
 enum FriendSpotlight {
@@ -18,13 +21,20 @@ enum FriendSpotlight {
     let before = indexed
     guard before != next else { return }
     indexed = next
-    let changed = list.friends.filter { before?[$0.to] != $0.title }.map(FriendEntity.init)
+    let changed = next.filter { before?[$0.key] != $0.value }
     let gone = before.map { Array(Set($0.keys).subtracting(next.keys)) } ?? []
     run { index in
       if before == nil { try await index.deleteAllSearchableItems() }
-      if !gone.isEmpty { try await index.deleteAppEntities(identifiedBy: gone, ofType: FriendEntity.self) }
-      if !changed.isEmpty { try await index.indexAppEntities(changed) }
+      if !gone.isEmpty { try await index.deleteSearchableItems(withIdentifiers: gone) }
+      if !changed.isEmpty { try await index.indexSearchableItems(changed.map { item(target: $0.key, title: $0.value) }) }
     }
+  }
+
+  private nonisolated static func item(target: String, title: String) -> CSSearchableItem {
+    let attributes = CSSearchableItemAttributeSet(contentType: .content)
+    attributes.title = title
+    attributes.displayName = title
+    return CSSearchableItem(uniqueIdentifier: target, domainIdentifier: "friends", attributeSet: attributes)
   }
 
   /// Signed out, account deleted.

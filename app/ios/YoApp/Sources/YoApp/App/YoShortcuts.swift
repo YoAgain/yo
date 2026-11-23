@@ -21,24 +21,3 @@ struct YoShortcuts: AppShortcutsProvider {
       shortTitle: "Open Yo", systemImageName: "y.circle.fill")
   }
 }
-
-/// A friend opened from Spotlight: Yo opens on their bar; "Send Yo" beside the result sends without opening.
-struct OpenFriendIntent: OpenIntent {
-  static let title: LocalizedStringResource = "Open Friend"
-  static let description = IntentDescription("Opens Yo on a friend or group.")
-  static let isDiscoverable = false
-
-  @Parameter(title: "Friend")
-  var target: FriendEntity
-
-  init() {}
-
-  init(target: FriendEntity) {
-    self.target = target
-  }
-
-  @MainActor func perform() async throws -> some IntentResult {
-    AppRoute.shared.friend = target.id
-    return .result()
-  }
-}

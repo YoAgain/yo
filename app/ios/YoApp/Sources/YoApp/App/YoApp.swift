@@ -1,4 +1,5 @@
 // The app: one scene, the list of friends; a UIKit app delegate only for the push token and silent pushes.
+import CoreSpotlight
 import SwiftUI
 import Network
 import UserNotifications
@@ -218,6 +219,12 @@ struct YoApp: App {
       }
       .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
         if let url = activity.webpageURL { Invite.shared.open(url) }
+      }
+      // A friend or group tapped in Spotlight (FriendSpotlight): Yo opens on their bar.
+      .onContinueUserActivity(CSSearchableItemActionType) { activity in
+        if let target = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String {
+          AppRoute.shared.friend = target
+        }
       }
       // The extensions, widgets and Siri see the list as it is (ShareBridge); at launch a few seconds after the first frame.
       .onChange(of: accounts.shareList(friends)) { _, list in
