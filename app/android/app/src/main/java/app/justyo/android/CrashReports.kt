@@ -69,6 +69,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
         preferences.edit(commit=true) { putString("history",JSONArray((rows()+JSONObject().put("text",text).put("sent",false)).takeLast(16)).toString()) }
     }
     @Synchronized internal fun countNotificationFallback(reason: String) {
+        if (noise(reason)) return
         val day = System.currentTimeMillis() / 86_400_000L
         val key = "fallback:$day:$reason"
         val count = preferences.getLong(key, 0)
@@ -86,14 +87,16 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
             if (!enabled) return
             if ((!key.startsWith("fallback:") && !key.startsWith("state:")) || value !is Long) continue
             val (category, day, reason) = key.split(':', limit = 3)
+            if (category == "fallback" && noise(reason)) {
+                preferences.edit(commit = true) { remove(key) }
+                continue
+            }
             val body = JSONObject()
                 .put("app", BuildConfig.YO_APP).put("os", "Android ${Build.VERSION.SDK_INT}")
                 .put("model", "Android").put("domain", if (category == "state") "StateMigration" else "NotificationFallback")
                 .put("place", if (category == "state") "StateDb" else "ForegroundInbox").put("code", reason)
                 .put("details", "day=$day count=$value")
                 .put("count", value.coerceAtMost(100_000).toString())
-            // The phone's network after a minute of tries (no signal, a captive Wi-Fi): counted, never a problem (iOS's).
-            if (category == "fallback" && reason in EXPECTED_FALLBACKS) body.put("severity", "expected")
             fun upload() = helpDiagnostic(transport, InstallId.current(context), false, body.toString()).toInt()
             var status = upload()
             if (status == 400) {
@@ -115,7 +118,16 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
             finally { previous?.uncaughtException(thread,error) }
         }
     }
-    companion object { private var installed=false; internal val EXPECTED_FALLBACKS = setOf("network") }
+    companion object {
+        private var installed=false
+        /** The one place deciding which push fallbacks are never reported. After a minute of tries the phone may
+         * have no signal or captive Wi-Fi, or the hub may be restarting or rate limiting. The notification still
+         * shows, but its count is discarded. */
+        internal fun noise(code: String): Boolean = when (code) {
+            "network", "hubStatus/429", "hubStatus/502", "hubStatus/503", "hubStatus/504" -> true
+            else -> false
+        }
+    }
     private fun readBounded(input: java.io.InputStream): ByteArray {
         val output=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192)
         while(output.size()<=1024*1024) { val n=input.read(buffer,0,minOf(buffer.size,1024*1024+1-output.size()));if(n<0) break;output.write(buffer,0,n) }

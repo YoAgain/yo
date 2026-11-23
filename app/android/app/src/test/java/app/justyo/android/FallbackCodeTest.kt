@@ -13,7 +13,10 @@ class FallbackCodeTest {
         assertEquals("save", YoWork.fallbackCode(YoException.Save("disk full")))
         assertEquals("other/IllegalStateException", YoWork.fallbackCode(IllegalStateException("private text")))
     }
-    @Test fun onlyTheNetworkIsExpected() {
-        assertEquals(setOf("network"), CrashReports.EXPECTED_FALLBACKS)
+    @Test fun skipsNetworkAndTransientHubFailures() {
+        for (code in listOf("network","hubStatus/429","hubStatus/502","hubStatus/503","hubStatus/504"))
+            assertTrue(code, CrashReports.noise(code))
+        for (code in listOf("hubStatus/500","protocol","save"))
+            assertFalse(code, CrashReports.noise(code))
     }
 }
