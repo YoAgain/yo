@@ -1,6 +1,7 @@
 // Yos through the hub (Rust core): sent from the list, and received while the list is on screen (the inbox's long
 // wait). A plain Yo shows on its sender's bar for a moment; only photos and videos wait, until seen once.
 import AVFoundation
+import Intents
 import Observation
 import SwiftUI
 import UIKit
@@ -167,10 +168,26 @@ final class Inbox {
   nonisolated static let category = ShareBridge.yoCategory
   nonisolated static let yoBack = ShareBridge.yoBackAction
 
+  /// The profile grants Siri (the Simulator has none: its signature is all there is).
+  private static let siriEntitled: Bool = {
+    guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+      let raw = try? Data(contentsOf: url),
+      let start = raw.range(of: Data("<?xml".utf8)), let end = raw.range(of: Data("</plist>".utf8), in: start.lowerBound..<raw.endIndex),
+      let profile = try? PropertyListSerialization.propertyList(from: raw[start.lowerBound..<end.upperBound], format: nil) as? [String: Any]
+    else { return true }
+    return (profile["Entitlements"] as? [String: Any])?["com.apple.developer.siri"] as? Bool == true
+  }()
+
   func askForNotifications() async {
     let center = UNUserNotificationCenter.current()
     ShareBridge.registerCategories()
-    _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+    let granted = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+    // Siri (SiriKit messaging, CarPlay) right after: only when the signature carries it (Yo Dev may be signed without).
+    if granted == true, Self.siriEntitled, INPreferences.siriAuthorizationStatus() == .notDetermined {
+      await withCheckedContinuation { done in
+        INPreferences.requestSiriAuthorization { _ in done.resume() }
+      }
+    }
   }
 
   // MARK: The hub

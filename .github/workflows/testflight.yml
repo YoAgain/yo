@@ -151,6 +151,32 @@ jobs:
           EOF
           python3 -I -m py_compile .oad/tools/asc.py
 
+      # OAD signs only the capabilities it knows (push, Sign in with Apple, Associated Domains, App Group); the app also
+      # asks for Communication Notifications (a Yo shown as a message from its sender, Siri announce, CarPlay) and Siri
+      # (SiriKit messaging: send, read, mark read). Each is signed on the app as its profile grants it (enabled on the
+      # app id), and a request the profile does not grant fails, as push does. Patched into this checkout only; fails if
+      # the tool changed.
+      - name: OAD, Communication Notifications and Siri entitlements
+        run: |
+          python3 -I - .oad/tools/asc.py <<'EOF'
+          import sys
+          path = sys.argv[1]
+          s = open(path).read()
+          anchor = "            entitlements.update(capability_entitlements(requested_caps, granted, ident))\n"
+          assert s.count(anchor) == 1, "asc.py changed: patch again"
+          s = s.replace(anchor, anchor +
+              "        if path == Path(app_dir) and os.environ.get('ASC_ENTITLEMENTS_PATH'):\n"
+              "            with Path(os.environ['ASC_ENTITLEMENTS_PATH']).open('rb') as f:\n"
+              "                own = plistlib.load(f)\n"
+              "            for key in ('com.apple.developer.usernotifications.communication', 'com.apple.developer.siri'):\n"
+              "                if own.get(key) is True:\n"
+              "                    if granted.get(key) is not True:\n"
+              "                        die(f'profile for {ident} does not grant {key}; enable it for the bundle ID and recreate its profile')\n"
+              "                    entitlements[key] = True\n")
+          open(path, "w").write(s)
+          EOF
+          python3 -I -m py_compile .oad/tools/asc.py
+
       # Downloaded tools, kept between runs (the versions above are the key).
       - id: tools
         uses: actions/cache@v6
@@ -263,6 +289,44 @@ jobs:
           if [ -n "${BASH_REMATCH[2]}" ]; then
             plutil -replace YoReleaseName -string "${BASH_REMATCH[2]#-}" app/ios/YoApp/Info.plist
           fi
+
+      # Communication Notifications and Siri (SiriKit messaging, CarPlay) on the app id, through the API with the same key:
+      # once, the first time; the app's App Store profile is then deleted so ship.sh makes it anew with both granted.
+      # Fatal when the API refuses: the owner enables them in the developer portal (Identifiers > app.justyo.ios).
+      - name: Communication Notifications and Siri on the app id
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ~/pymobile3-venv/bin/python -I - .oad/tools <<'EOF'
+          import sys
+          sys.path.insert(0, sys.argv[1])
+          import asc
+          identifier = "app.justyo.ios"
+          bid = asc.bundle_id(identifier)
+          have = {c["attributes"]["capabilityType"]
+                  for c in asc.call("GET", f"/v1/bundleIds/{bid}/bundleIdCapabilities")["data"]}
+          print(f"{identifier}: {sorted(have)}")
+          enabled = False
+          for cap in ("USERNOTIFICATIONS_COMMUNICATION", "SIRIKIT"):
+              if cap in have:
+                  continue
+              try:
+                  asc.call("POST", "/v1/bundleIdCapabilities", {"data": {
+                      "type": "bundleIdCapabilities", "attributes": {"capabilityType": cap},
+                      "relationships": {"bundleId": asc.rel("bundleIds", bid)}}})
+              except SystemExit:
+                  print(f"::error::cannot enable {cap} on {identifier}: enable it in the developer portal")
+                  sys.exit(1)
+              print(f"enabled {cap} on {identifier}")
+              enabled = True
+          if enabled:
+              for prof in asc.call("GET", f"/v1/bundleIds/{bid}/profiles?limit=200")["data"]:
+                  attributes = prof["attributes"]
+                  if attributes.get("profileType") == "IOS_APP_STORE" and attributes["name"].startswith(f"omarchy-apple-dev {identifier} "):
+                      asc.call("DELETE", f"/v1/profiles/{prof['id']}")
+                      print(f"deleted profile {attributes['name']}: made anew with the capabilities")
+          EOF
 
       # Built, signed and validated here; uploaded after the checks below (ship.sh step 9, as a step of its own).
       - name: Build and sign

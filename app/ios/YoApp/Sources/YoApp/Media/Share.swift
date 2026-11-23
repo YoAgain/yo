@@ -21,6 +21,7 @@ enum ShareInbox {
       }
       // Siri and Shortcuts know friends by name ("Yo Mia").
       YoShortcuts.updateAppShortcutParameters()
+      SiriMessages.teachNames(list)
     }
     reloadWidgets()
     FriendSpotlight.update(list)
@@ -46,7 +47,10 @@ enum ShareInbox {
     guard let container = ShareBridge.container else { return }
     try? FileManager.default.removeItem(at: container.appending(path: "Outbox"))
     let list = container.appending(path: "friends.json")
-    writing.async { try? FileManager.default.removeItem(at: list) }  // after any list still being written
+    writing.async {  // after any list still being written
+      try? FileManager.default.removeItem(at: list)
+      SiriMessages.teachNames(nil)
+    }
   }
 
   /// The extension's outbox into the media outbox, oldest first; each leaves the group once the outbox has it.

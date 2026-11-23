@@ -83,6 +83,13 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Siri routes these messaging requests to the app delegate. -->
+	<key>INIntentsSupported</key>
+	<array>
+		<string>INSendMessageIntent</string>
+		<string>INSearchForMessagesIntent</string>
+		<string>INSetMessageAttributeIntent</string>
+	</array>
 	<!-- Export compliance, Apple's meaning: false = no encryption needing documentation. Yo encrypts with libsignal
 	     (standard algorithms only, mass market); for that Apple asks documentation only for the French store, and Yo
 	     is not sold in France. Should France come back: ANSSI declaration into App Store Connect, then true plus
@@ -97,9 +104,19 @@
 	<string>Yo uses Face ID to verify your identity before showing your recovery key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Yo saves your recovery key to Photos when you choose.</string>
+	<!-- Siri asks before handling Yos. -->
+	<key>NSSiriUsageDescription</key>
+	<string>Siri sends your Yos and reads who sent you one, also in CarPlay.</string>
 	<!-- "Sent Yo! to Mia" in the Dynamic Island after a Yo from outside the app (YoActivity.swift). -->
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<!-- Messaging activities the app can handle for Siri. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INSendMessageIntent</string>
+		<string>INSearchForMessagesIntent</string>
+		<string>INSetMessageAttributeIntent</string>
+	</array>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Montserrat-Bold.ttf</string>

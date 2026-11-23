@@ -265,6 +265,11 @@ pub fn product_notification_line(name: String, kind: Kind, request: bool, lang: 
 }
 
 #[uniffi::export]
+pub fn product_notification_body(sender: Option<String>, kind: Kind, request: bool, lang: Language) -> String {
+    product::notification_body(sender.as_deref(), kind, request, lang)
+}
+
+#[uniffi::export]
 pub fn product_notification_group_name(name: String, group: String, lang: Language) -> String {
     product::notification_group_name(&name, &group, lang)
 }

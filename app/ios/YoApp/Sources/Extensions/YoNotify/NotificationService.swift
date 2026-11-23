@@ -1,4 +1,4 @@
-// Turns the hub's bare "Yo" push into one notification per new Yo ("Yo from Mia in #Hey 📷"), threaded per sender,
+// Turns the hub's bare "Yo" push into one notification per new Yo, with its sender and avatar,
 // as a guest on the app's state (SharedState). Media is prefetched before delivery: afterwards iOS may end the
 // process mid-fetch, wasting the hub's fetch. A push with nothing new re-delivers the newest quietly in place of the
 // shown ones; one that cannot be read says "You may have received a Yo" (NotifyFallback) and records why.
@@ -18,7 +18,7 @@ final class NotificationService: UNNotificationServiceExtension {
     Perf.mark("nse.start")
     ShareBridge.registerCategories()  // "Yo Back" on it, also before the app has run since a restart
     let content = (request.content.mutableCopy() as? UNMutableNotificationContent) ?? UNMutableNotificationContent()
-    content.title = ""  // "Yo" once, not as title and text
+    content.title = ""  // The fallback only has a body.
     let pending = Pending()
     self.pending = pending
     pending.set(content: content, handler: contentHandler)
@@ -165,7 +165,7 @@ final class NotificationService: UNNotificationServiceExtension {
       if let content, let handler {
         lifetime.stop()
         if !replaced.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced) }
-        handler(content)
+        handler(CommunicationNotification.updated(content))
       }
     }
   }

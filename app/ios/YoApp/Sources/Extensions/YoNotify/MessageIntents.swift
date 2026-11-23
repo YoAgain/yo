@@ -1,0 +1,1 @@
+../../YoApp/Shared/MessageIntents.swift

@@ -271,6 +271,23 @@ pub fn notification_line(name: &str, kind: list::Kind, request: bool, lang: Lang
     line
 }
 
+/// The text of a Yo shown as a message from its sender (a communication notification), whose name is the title: "Yo",
+/// "Yo 📷"; a group's (titled with the group) names the sender, "Mia: Yo". A request keeps its line.
+pub fn notification_body(sender: Option<&str>, kind: list::Kind, request: bool, lang: Language) -> String {
+    if request {
+        return notification_line(sender.unwrap_or_default(), kind, request, lang);
+    }
+    let mut body = String::from(Text::Yo.get(lang));
+    if kind != list::Kind::Yo {
+        body.push(' ');
+        body.push_str(kind.sign());
+    }
+    match sender.filter(|sender| !sender.is_empty()) {
+        Some(sender) => format!("{sender}: {body}"),
+        None => body,
+    }
+}
+
 /// "Mia in #Hey", also for a group named "#Hey" (not "##Hey").
 pub fn notification_group_name(name: &str, group: &str, lang: Language) -> String {
     let group = group.strip_prefix('#').unwrap_or(group);
@@ -690,6 +707,11 @@ mod tests {
         assert_eq!(notification_group_name("Mia", "Hey", English), "Mia in #Hey");
         assert_eq!(notification_group_name("Mia", "#Hey", English), "Mia in #Hey");
         assert_eq!(notification_group_name("Mia", "", English), "Mia");
+        assert_eq!(notification_body(None, Yo, false, English), "Yo");
+        assert_eq!(notification_body(None, Photo, false, German), "Yo 📷");
+        assert_eq!(notification_body(Some("Mia"), Video, false, English), "Mia: Yo 🎥");
+        assert_eq!(notification_body(Some(""), Yo, false, English), "Yo");
+        assert_eq!(notification_body(Some("Mia"), Yo, true, English), "Yo Request from Mia");
         let user = notification_thread("user", None);
         let group = notification_thread("user", Some("id"));
         assert_eq!(user, "user");

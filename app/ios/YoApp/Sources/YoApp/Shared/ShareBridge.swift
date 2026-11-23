@@ -1,6 +1,7 @@
 // What the app and its extensions hand each other in the App Group: the friends list, shares the extension could
 // not send itself, and Yo notifications. One writer per file.
 import Foundation
+import Intents
 import UserNotifications
 import WidgetKit
 import YoCore
@@ -110,7 +111,9 @@ enum ShareBridge {
   static func registerCategories() {
     let yoBack = UNNotificationAction(identifier: yoBackAction, title: "Yo Back", options: [])
     UNUserNotificationCenter.current().setNotificationCategories([
-      UNNotificationCategory(identifier: yoCategory, actions: [yoBack], intentIdentifiers: [])
+      // Siri announces communication notifications automatically.
+      UNNotificationCategory(identifier: yoCategory, actions: [yoBack], intentIdentifiers: [INSendMessageIntentIdentifier],
+        options: [.allowInCarPlay])
     ])
   }
 
@@ -118,6 +121,8 @@ enum ShareBridge {
   struct Yos: Sendable {
     /// "Mia"; a group's "Mia in #Hey".
     let name: String
+    let senderName: String
+    let senderUser: String
     /// The sender's user id, or "group:" and the group's id: the notification's thread.
     let user: String
     let kind: MediaFile.Kind?
@@ -127,18 +132,17 @@ enum ShareBridge {
     var bar: String? = nil
     var request = false
 
-    var line: String {
-      productNotificationLine(name: name, kind: kind == .video ? .video : kind == .photo ? .photo : .yo,
+    var title: String { bar.map { listBarTitle(name: $0, group: true) } ?? senderName }
+
+    var body: String {
+      productNotificationBody(sender: bar != nil || request ? senderName : nil,
+        kind: kind == .video ? .video : kind == .photo ? .photo : .yo,
         request: request, lang: .english)
     }
 
     var notificationIdentifier: String { productNotificationId(eventId: id) }
 
     var sentAtMs: UInt64 { UInt64(id.split(separator: "/").last ?? "") ?? 0 }
-
-    init(name: String, user: String, kind: MediaFile.Kind?, id: String) {
-      (self.name, self.user, self.kind, self.id) = (name, user, kind, id)
-    }
   }
 
   /// The Yos among `events`, newest first. `requests`: senders and groups not accepted yet (`requests(of:)`).
@@ -151,13 +155,15 @@ enum ShareBridge {
       var yos: Yos
       switch event {
       case .message(let user, let at, let kind):
-        yos = Yos(name: name(user), user: productNotificationThread(user: user, group: nil), kind: kind.media?.kind, id: "\(user)/\(at)")
+        let from = name(user)
+        yos = Yos(name: from, senderName: from, senderUser: user, user: productNotificationThread(user: user, group: nil),
+          kind: kind.media?.kind, id: "\(user)/\(at)")
       case .groupMessage(let id, let user, let at, let kind):
         let groupName = group(id)
         let from = name(user)
         yos = Yos(
           name: productNotificationGroupName(name: from, group: groupName, lang: .english),
-          user: productNotificationThread(user: user, group: id), kind: kind.media?.kind,
+          senderName: from, senderUser: user, user: productNotificationThread(user: user, group: id), kind: kind.media?.kind,
           id: "\(id)/\(user)/\(at)")
         yos.bar = groupName.isEmpty ? productText(text: .group, lang: .english) : groupName  // as the list names the group's bar (Friends.takeGroups)
       default: continue
@@ -189,13 +195,15 @@ enum ShareBridge {
 
   /// One Yo notification, threaded by sender or group (iOS ignores a summary argument since iOS 15).
   static func yo(_ content: UNMutableNotificationContent, _ yo: Yos, sounds: Bool) {
-    (content.title, content.subtitle, content.body) = ("", "", yo.line)
+    (content.title, content.subtitle, content.body) = (yo.title, "", yo.body)
     content.sound = sounds ? UNNotificationSound(named: UNNotificationSoundName("yo.caf")) : nil
     content.interruptionLevel = sounds ? .active : .passive
     content.categoryIdentifier = yoCategory
     content.threadIdentifier = yo.user
     // `user` for Yo Back, also to someone not on the list yet; `id` so the app shows the Yo once.
-    content.userInfo = ["from": yo.bar ?? yo.name, "sender": yo.name, "user": yo.user, "id": yo.id]
+    content.userInfo = ["from": yo.bar ?? yo.name, "sender": yo.name, "user": yo.user, "id": yo.id,
+      "senderUser": yo.senderUser, "senderName": yo.senderName]
+    if yo.bar != nil { content.userInfo["group"] = yo.title }
   }
 
   /// The newest of `new` goes into `content`, each other one is added as its own. Returns the identifiers of the
@@ -219,7 +227,8 @@ enum ShareBridge {
       let own = UNMutableNotificationContent()
       yo(own, other, sounds: sound)
       UNUserNotificationCenter.current().add(
-        UNNotificationRequest(identifier: other.notificationIdentifier, content: own, trigger: nil))
+        UNNotificationRequest(identifier: other.notificationIdentifier,
+          content: CommunicationNotification.updated(own), trigger: nil))
     }
     yo(content, newest, sounds: sounds.last ?? false)
     badged(content, badge, set: unread != nil)
@@ -266,7 +275,8 @@ enum ShareBridge {
     guard let newest = new.first else { return }
     let content = UNMutableNotificationContent()
     _ = write(content, new, over: delivered, unread: unread)
-    try? await center.add(UNNotificationRequest(identifier: newest.notificationIdentifier, content: content, trigger: nil))
+    try? await center.add(UNNotificationRequest(identifier: newest.notificationIdentifier,
+      content: CommunicationNotification.updated(content), trigger: nil))
   }
 }
 

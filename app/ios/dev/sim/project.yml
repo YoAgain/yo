@@ -71,7 +71,9 @@ targets:
   YoNotify:
     type: app-extension
     platform: iOS
-    sources: [../../YoApp/Sources/Extensions/YoNotify]
+    sources:
+      - ../../YoApp/Sources/Extensions/YoNotify
+      - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
@@ -146,7 +148,10 @@ targets:
   YoNotifyProbe:
     type: application
     platform: iOS
-    sources: [YoNotifyProbe, ../../YoApp/Sources/Extensions/YoNotify]
+    sources:
+      - YoNotifyProbe
+      - ../../YoApp/Sources/Extensions/YoNotify
+      - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}

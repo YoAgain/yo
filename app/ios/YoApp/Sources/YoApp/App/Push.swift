@@ -1,5 +1,6 @@
 // Push (spec 6.3, /v1/push): the APNs device token to the hub. Yo Dev is signed for APNs' sandbox, TestFlight and the
 // App Store for production: the hub picks the APNs host by the platform the app names.
+import Intents
 import SwiftUI
 import UIKit
 import YoCore
@@ -115,6 +116,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
   func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
     Diagnostics.record(error)
     Push.shared.failed(error)
+  }
+
+  func application(_ application: UIApplication, handlerFor intent: INIntent) -> Any? {
+    switch intent {
+    case is INSendMessageIntent, is INSearchForMessagesIntent, is INSetMessageAttributeIntent: SiriMessages()
+    default: nil
+    }
   }
 
   static var silentSync: (@MainActor () async -> Bool?)?
