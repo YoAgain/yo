@@ -2765,7 +2765,7 @@ if (document.body.classList.contains("login")) {
                   ...(n ? [{ section: "In the range" }, ...three(n, hit, c)] : [])] } };
           };
           const [ios, android] = pt?.platforms?.length ? pt.platforms.map(([, hit, n, c]) => [null, hit, n, c]) : [null, null];
-          return [row("apple", "Error-free iOS", 2, ios), row("android", "Error-free Android", 4, android)];
+          return [row("apple", "Error-free", 2, ios), row("android", "Error-free", 4, android)];
         })(),
       ];
       return [sparkRows(userRows, true)];
