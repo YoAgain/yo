@@ -349,7 +349,7 @@ struct YoOpenView: View {
         // One line beside the date: the system draws it (one symbol and the text, no background).
         Label {
           Text(verbatim: entry.lastName.map {
-            productNotificationLine(name: $0, kind: .yo, request: false, lang: .english) + " · " + (entry.lastAge ?? "")
+            productNotificationLine(name: $0, kind: .yo, request: false, lang: .english)
           } ?? productText(text: .yo, lang: .english))
         } icon: {
           Image("yo.letter")
