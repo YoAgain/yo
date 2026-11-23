@@ -14,6 +14,31 @@ const supportList = ({ threads, filter = "open" }) => threads
 // older hub) or without phones.
 const crashFree = (installs, users) => (installs == null || !users ? null : Math.max(0, 100 - (100 * installs) / users));
 // </support-list>
+// <report-groups> The Reports view's grouping, pure (admin/test_reports.py runs it in node): one row per REPORTED user
+// (the hub's per-pair reports: who is reported, by how many installs, why), most reports first. Reporters are random
+// install ids and stay that: never matched to an account. "open" = a report of theirs is not ticked handled yet.
+const REASON_LABELS = { spam: "Spam", abuse: "Abuse", other: "Other" };
+const reasonLabel = (r) => REASON_LABELS[r] || `Reason ${r}`;
+const reportGroups = ({ reports, users = [], isDone = () => false }) => {
+  const byId = new Map(users.map((u) => [u.id, u])), groups = new Map();
+  for (const r of reports) {
+    let g = groups.get(r.reported);
+    if (!g) groups.set(r.reported, g = { id: r.reported, rows: [], reasons: new Map(), reporters: new Set(), first: r.at, last: r.at, open: false });
+    g.rows.push(r);
+    g.reasons.set(r.reason, (g.reasons.get(r.reason) || 0) + 1);
+    g.reporters.add(r.reporter);
+    g.first = Math.min(g.first, r.at); g.last = Math.max(g.last, r.at);
+    g.open ||= !isDone(r);
+  }
+  return [...groups.values()].map((g) => {
+    const u = byId.get(g.id), name = g.rows.find((r) => r.reported_name)?.reported_name || u?.name || null;
+    return { id: g.id, name: name || g.id.slice(0, 8), named: !!name, count: g.rows.length, reporters: g.reporters.size,
+      reasons: [...g.reasons].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]))),
+      first: g.first, last: g.last, open: g.open, rows: g.rows.slice().sort((a, b) => b.at - a.at),
+      user: u ? { created: u.created, last_seen: u.last_seen, devices: u.devices } : null };
+  }).sort((a, b) => b.count - a.count || b.last - a.last);
+};
+// </report-groups>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
 const diagPayload = (d) => {
   try { return JSON.parse(d.payload) ?? {}; } catch { return d.payload ?? {}; }
@@ -1379,7 +1404,7 @@ if (document.body.classList.contains("login")) {
     ["people", "Users", "user", "Accounts with their devices, app, push and backup, put together"],
     ["v-support", "Support", "chat", "The support chat: who wrote, open or answered, and the conversation"],
     ["v-errors", "Problems", "warn", "App problems grouped by cause, open first, with Done and Reopen"],
-    ["v-reports", "Reports", "flag", "Users reporting other users"],
+    ["v-reports", "Reports", "flag", "Reported users: how many reports, from how many installs, why; the raw table is under Database"],
     ["v-todos", "To-dos", "check", "The team's to-dos: add, tick, delete"],
   ];
   const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-todos": "todos" };
@@ -1551,7 +1576,52 @@ if (document.body.classList.contains("login")) {
     return list;
   };
   const openSupportCount = h => h?.support_unread_days?.at(-1) ?? 0;
-  const openReportCount = h => (h?.reports || []).filter(r => !lastDone.has(reportKey(r))).length;
+  const reportList = (h, previous) => {
+    const list = el("div", "diag-list"), done = el("details", "diag-done"), doneList = el("div", "diag-list");
+    const expanded = new Set([...previous.querySelectorAll("details[data-reported][open]")].map(d => d.dataset.reported));
+    done.open = !!previous.querySelector(".diag-done[open]");
+    const groups = reportGroups({ reports: h?.reports || [], users: h?.users || [], isDone: (r) => lastDone.has(reportKey(r)) });
+    for (const g of groups) {
+      const item = el("article", "diag-item"), details = el("details"), title = el("strong", "diag-title");
+      title.dataset.status = g.open ? "Open" : "Done";
+      title.append(g.named ? pii(g.name) : el("span", "mono", g.name));
+      const stats = el("div", "diag-stats");
+      stats.append(el("span", null, `${num(g.count)} report${g.count === 1 ? "" : "s"}`),
+        el("span", null, `${num(g.reporters)} reporter${g.reporters === 1 ? "" : "s"}`),
+        el("span", null, g.reasons.map(([r, n]) => `${reasonLabel(r)} ${num(n)}`).join(" · ")));
+      const lastSpan = el("span", null, rel(g.last) + (rel(g.last) === "just now" ? "" : " ago"));
+      stats.append(lastSpan);
+      hint(stats, { cap: 1, head: g.name, rows: [{ label: "Reports", value: num(g.count) }, { label: "Distinct reporters", value: num(g.reporters) },
+        ...g.reasons.map(([r, n]) => ({ label: reasonLabel(r), value: num(n) })),
+        { label: "First report", value: date(g.first) }, { label: "Last report", value: date(g.last) },
+        { label: "Signed up", value: g.user ? date(g.user.created) : "unknown" }, { label: "Last seen", value: g.user ? date(g.user.last_seen) : "unknown" },
+        { label: "Devices", value: g.user ? num(g.user.devices) : "unknown" }] });
+      details.dataset.reported = g.id; details.open = expanded.has(g.id);
+      const status = g.user ? `signed up ${date(g.user.created)} · last seen ${g.user.last_seen ? date(g.user.last_seen) : "never"} · ${g.user.devices} device${g.user.devices === 1 ? "" : "s"}` : "account not in the user list";
+      details.append(el("summary", null, `${status} · ${g.rows.length} individual report${g.rows.length === 1 ? "" : "s"}`));
+      for (const r of g.rows) {
+        const row = el("div", "drow"), line = el("span");
+        line.append(reasonTag(r.reason), document.createTextNode(" by "), el("span", "mono", installShort(r.reporter)));
+        line.title = `Reporter install ${r.reporter}`;
+        row.append(line, el("span", "muted", date(r.at)));
+        details.append(row);
+      }
+      const button = el("button", "pill", g.open ? "Mark handled" : "Reopen");
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try { for (const r of g.rows.filter((r) => lastDone.has(reportKey(r)) === g.open)) await reportDone(r, g.open); }
+        catch (error) { item.append(el("span", "error", error.message)); }
+        finally { await refresh(); button.disabled = false; }
+      });
+      item.append(title, stats, button, details);
+      (g.open ? list : doneList).append(item);
+    }
+    if (doneList.childElementCount) { done.append(el("summary", null, `Handled (${doneList.childElementCount})`), doneList); list.append(done); }
+    if (!groups.length) list.append(el("p", "empty", "No reports."));
+    return list;
+  };
+  const openReportCount = h => reportGroups({ reports: h?.reports || [], isDone: (r) => lastDone.has(reportKey(r)) }).filter(g => g.open).length;
   const openProblemGroups = h => (h?.diagnostics || []).filter(d => !d.done && !diagInfo(d).expected);
   const causeCount = groups => new Set(groups.map(diagCause)).size;
   $("tables").addEventListener("scroll", ({ target }) => {
@@ -1562,7 +1632,7 @@ if (document.body.classList.contains("login")) {
     const openGroups = openProblemGroups(last?.[which]), openCauses = causeCount(openGroups);
     const openSupport = openSupportCount(last?.[which]), openReports = openReportCount(last?.[which]);
     const occurrences = openGroups.reduce((n, d) => n + (d.count || 0), 0);
-    const drawn = JSON.stringify([which, tableOpen, openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
+    const drawn = JSON.stringify([which, tableOpen, openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
       (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
@@ -1624,6 +1694,7 @@ if (document.body.classList.contains("login")) {
       if (t.name === "reserved") pane.append(reservedBar());
       if (tableOpen === "v-todos") pane.append(todoBar());
       if (tableOpen === "v-errors") pane.append(diagnosticList(last?.[which]?.diagnostics || [], box));
+      else if (tableOpen === "v-reports") pane.append(reportList(last?.[which], box));
       else if (view === "list") {
       const wrap = el("div", "scroll grid"), table = el("table", "list data");
       table.dataset.name = t.name;
