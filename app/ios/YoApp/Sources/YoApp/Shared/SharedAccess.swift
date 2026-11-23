@@ -251,12 +251,12 @@ final class SharedAccess: @unchecked Sendable {
       // The step itself is the core's; what it asked the hub and the longest of it tell where the time went.
       Self.log("turn held long", 0, report: false)
       #if os(iOS)
-      CountedErrors.record(domain: "SharedAccess", place: "held over \(Int(Self.heldLong)) s",
-        code: requests == 0 ? "no request" : slowest.seconds > Self.heldLong / 2 ? "a slow request" : "many requests",
-        // A slow network request is the network's, counted to learn from; no request or many are ours to look at.
-        expected: requests > 0 && slowest.seconds > Self.heldLong / 2,
-        details: "held \(Int(held)) s on \(kind), \(requests) requests, slowest \(Int(slowest.seconds)) s "
-          + slowest.place)
+      if slowest.seconds <= Self.heldLong / 2 {
+        CountedErrors.record(domain: "SharedAccess", place: "held over \(Int(Self.heldLong)) s",
+          code: requests == 0 ? "no request" : "many requests", expected: false,
+          details: "held \(Int(held)) s on \(kind), \(requests) requests, slowest \(Int(slowest.seconds)) s "
+            + slowest.place)
+      }
       #endif
     }
     revoke()

@@ -2,13 +2,12 @@
 # Run the real diagnostic queue with a recording transport: opt-in, privacy, counts, retry and opt-out.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/../../.." && pwd)
-out="$root/target/diagnostics-swift"
-mkdir -p "$out"
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
 cat > "$out/YoCore.swift" <<'SWIFT'
 public enum YoError: Error {
   case Network(message: String), Refused(status: UInt16), NotOnYo, Blocked, GroupEmpty, Outdated, Unconfirmed, Replaced
-  case Protocol(message: String), State, Save(message: String)
+  case Clock, Protocol(message: String), State, Save(message: String)
 }
 SWIFT
 swiftc -module-cache-path "$out/modules" -swift-version 6 -emit-library -emit-module -module-name YoCore "$out/YoCore.swift" -o "$out/libYoCore.so"
@@ -18,7 +17,10 @@ import Synchronization
 import YoCore
 
 enum Keychain { struct Failure: Error {} }
-enum CountedErrors { static func record(domain: String, place: String, code: String, expected: Bool) {} }
+enum CountedErrors {
+  static let calls = Mutex(0)
+  static func record(domain: String, place: String, code: String, expected: Bool) { calls.withLock { $0 += 1 } }
+}
 enum AppUpdate { static let header = "ios/test" }
 enum Hub {
   static let transport = Transport()
@@ -48,9 +50,19 @@ func eventually(_ check: () -> Bool) {
   }
   preconditionFailure("queue did not reach expected state")
 }
+precondition(Noise.status(502, method: "GET", route: "/v1/inbox"))
+precondition(Noise.status(401, method: "GET", route: "/v1/inbox"))
+precondition(Noise.status(404, method: "POST", route: "/v1/lookup"))
+precondition(!Noise.status(404, method: "GET", route: "/v1/support"))
+precondition(!Noise.status(500, method: "GET", route: "/v1/inbox"))
+precondition(Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, badDates: false))
+precondition(!Noise.urlError(domain: "other", code: NSURLErrorTimedOut, badDates: true))
+precondition(Noise.fallback("network") && !Noise.fallback("decrypt"))
 let defaults = UserDefaults.standard
 Diagnostics.clear()
 defaults.set(false, forKey: "crashReports.on")
+Diagnostics.recordUnreported(YoError.Save(message: "Busy"))
+precondition(CountedErrors.calls.withLock { $0 } == 0)
 Diagnostics.record(NSError(domain: "test", code: 1))
 usleep(50_000)
 precondition(Transport.state.withLock { $0.calls } == 0)

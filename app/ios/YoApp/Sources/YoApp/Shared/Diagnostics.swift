@@ -7,6 +7,54 @@ import Glibc
 #endif
 import YoCore
 
+/// The one place that decides which network failures and hub answers are never reported: the phone's network or
+/// clock, the hub restarting or limiting requests, and answers the core takes as protocol outcomes.
+enum Noise {
+  static func status(_ status: UInt16, method: String, route: String) -> Bool {
+    // A 401: the core signs again. A 410: this device was replaced, which the app shows.
+    // A limit, the hub restarting behind its proxy, or no room now (inbox, blobs or disk): try later.
+    if [401, 410, 429, 502, 503, 504, 507].contains(status) { return true }
+    switch method {
+    case "GET":
+      // A username checked while typed, no storage yet, or no backup behind the chosen passkey or key.
+      if route.hasPrefix("/v1/username/") { return status == 400 || status == 409 }
+      if route == "/v1/storage" || route.hasPrefix("/v1/backup/") { return status == 404 }
+      fallthrough
+    case "DELETE":
+      // A photo or video no longer there: the core says unavailable.
+      return route.hasPrefix("/v1/blobs/") && status == 404
+    case "PUT":
+      // The core merges newer storage, or takes a blob stored by a try whose answer was lost as stored.
+      return (route == "/v1/storage" || route.hasPrefix("/v1/blobs/")) && status == 409
+    case "POST":
+      // No such name or no commitment told: invited instead.
+      if route == "/v1/lookup" || route == "/v1/group-credential" { return status == 404 }
+      // A name too short or taken at sign-up: the person picks another.
+      if route == "/v1/register" { return status == 400 || status == 409 }
+      // The account was deleted ("Not on Yo") or its device changed (send again to the one named).
+      if route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { return status == 404 || status == 409 }
+      // Removed from the group or it ended (403, 404), or another member changed it (apply to that revision).
+      return route.hasPrefix("/v1/groups/") && [403, 404, 409].contains(status)
+    default: return false
+    }
+  }
+
+  // A "bad URL" for the fixed hub address can come from a proxy or VPN, a broken TLS handshake from a captive portal.
+  private static let offline: Set<Int> = [
+    NSURLErrorBadURL, NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
+    NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet,
+    NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed, NSURLErrorSecureConnectionFailed,
+  ]
+
+  static func urlError(domain: String, code: Int, badDates: Bool) -> Bool {
+    domain == NSURLErrorDomain && (code == NSURLErrorCancelled || offline.contains(code) || badDates)
+  }
+
+  static func fallback(_ code: String) -> Bool {
+    ["network", "hubStatus/429", "hubStatus/502", "hubStatus/503", "hubStatus/504"].contains(code)
+  }
+}
+
 enum Diagnostics {
   private struct LegacyCrash: Codable { let id: UUID; let date: Date; let text: String }
 
@@ -17,7 +65,7 @@ enum Diagnostics {
   private static let storage = NSRecursiveLock()
   private static let generation = "diagnostics.generation"
 
-  // HTTP/network failures are recorded even when the core retries internally. Keychain records at creation.
+  // The transport handles HTTP and network diagnostics before the core retries. Keychain records at creation.
   static func recordUnreported(_ error: Error, file: String = #fileID, line: Int = #line, place: String = #function) {
     if error is Keychain.Failure { return }
     if let yo = error as? YoError {

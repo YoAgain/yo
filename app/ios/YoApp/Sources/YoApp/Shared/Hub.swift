@@ -220,41 +220,8 @@ final class HubTransport: HttpTransport {
     let diagnosticUpload = path == "/v1/help/error" || path == "/v1/help/crash"
     // Only static route components: never account, blob, group or username path values.
     let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
-    // Expected, never reported: our own cancels (too large is reported as 413), the long poll cut off, a username
-    // checked while typed, no storage yet.
-    let quietErrors: Set<Int> = longPoll
-      ? [NSURLErrorCancelled, NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost] : [NSURLErrorCancelled]
-    let quietStatus: Set<UInt16> =
-      method != "GET" ? [] : route.hasPrefix("/v1/username/") ? [400, 409] : route == "/v1/storage" ? [404] : []
-    // Answers the core takes as answers, counted as expected (not a problem): a 401 it signs again for (a time the
-    // hub saw already, a device still registering), a limit, the hub restarting behind its proxy, no such name or no
-    // commitment told (invited instead), a name too short at sign-up (the hub's 400, shown as such).
-    // A 410 on any route: this device was replaced (the account signed in on another phone), the core says so
-    // (Replaced) and the app shows it; every request until then answers the same.
-    // A 507: no room at the hub now (a recipient's inbox full, the blob budget or the database's disk): later again.
-    var expectedStatus: Set<UInt16> = [401, 410, 429, 502, 503, 504, 507]
-    if method == "POST", route == "/v1/lookup" || route == "/v1/group-credential" { expectedStatus.insert(404) }
-    // No backup behind the passkey or key chosen: shown as such (AccountError.noBackup).
-    if method == "GET", route.hasPrefix("/v1/backup/") { expectedStatus.insert(404) }
-    // A photo or video no longer there (its fetches used, or past its days): the core says unavailable, shown so.
-    if method == "GET" || method == "DELETE", route.hasPrefix("/v1/blobs/") { expectedStatus.insert(404) }
-    // A name too short (400) or taken (409) at sign-up: the person is told and picks another.
-    if method == "POST", route == "/v1/register" { expectedStatus.formUnion([400, 409]) }
-    // A conflict the core takes in and goes on from: the storage another write moved on (merged, written again), a
-    // contact's device changed (the delivery goes again to the one named).
-    if method == "PUT", route == "/v1/storage" { expectedStatus.insert(409) }
-    // A blob of this random id is there already: this one, stored by a try whose answer was lost (taken as stored).
-    if method == "PUT", route.hasPrefix("/v1/blobs/") { expectedStatus.insert(409) }
-    if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(409) }
-    // A Yo to an account deleted meanwhile: the core takes it as gone and the bar says "Not on Yo".
-    if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(404) }
-    // A group another member changed meanwhile: the hub answers with the group as it is and the core applies the
-    // change to that revision.
-    if method == "POST", route.hasPrefix("/v1/groups/") { expectedStatus.insert(409) }
-    // Removed from the group (or it ended) meanwhile: the core takes it as leaving the group (403 or 404).
-    if method == "POST", route.hasPrefix("/v1/groups/") { expectedStatus.formUnion([403, 404]) }
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
-    task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace, quiet: quietErrors) { data, response, error in
+    task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace) { data, response, error in
       answer.result =
         if let error {
           HttpResult(status: 0, body: Data(), error: error)
@@ -285,12 +252,9 @@ final class HubTransport: HttpTransport {
       // Not reported: the caller tries again in its next turn.
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
-    if !diagnosticUpload, answer.result.status >= 400, !quietStatus.contains(answer.result.status) {
-      if expectedStatus.contains(answer.result.status) {
-        CountedErrors.record(domain: "HTTP", place: codePlace, code: String(answer.result.status), expected: true)
-      } else {
-        Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
-      }
+    let status = answer.result.status
+    if !diagnosticUpload, status >= 400, !Noise.status(status, method: method, route: route) {
+      Diagnostics.record(NSError(domain: "HTTP", code: Int(status)), place: codePlace)
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500,
       clock: answer.result.error?.hasPrefix("clock: ") == true, started: started)
@@ -317,21 +281,11 @@ final class HubTransport: HttpTransport {
     private var response: URLResponse?
     private var tooLarge = false
     private let diagnosticPlace: String?
-    private let quiet: Set<Int>
     private let done: (Data, URLResponse?, String?) -> Void
-    /// No way through the phone's network: timed out, no host, no connection, lost, offline, roaming or cellular
-    /// data off, a TLS handshake broken on the way (a captive portal), a "bad URL" said of the fixed hub address (a
-    /// proxy or VPN on the way; a path that is no URL is caught before the request as HubTransport -1000).
-    static let offline: Set<Int> = [
-      NSURLErrorBadURL, NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
-      NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet, NSURLErrorInternationalRoamingOff,
-      NSURLErrorDataNotAllowed, NSURLErrorSecureConnectionFailed,
-    ]
 
-    init(diagnosticPlace: String?, quiet: Set<Int>, done: @escaping (Data, URLResponse?, String?) -> Void) {
+    init(diagnosticPlace: String?, done: @escaping (Data, URLResponse?, String?) -> Void) {
       self.done = done
       self.diagnosticPlace = diagnosticPlace
-      self.quiet = quiet
     }
 
     func urlSession(
@@ -357,25 +311,16 @@ final class HubTransport: HttpTransport {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-      if let error, let diagnosticPlace {
-        let error = error as NSError
-        if error.domain == NSURLErrorDomain, quiet.contains(error.code) {
-          // Not counted.
-        } else if error.domain == NSURLErrorDomain,
-          Self.offline.contains(error.code) || HubTransport.badDates(error)
-        {
-          // The phone's network or its clock, not Yo: counted as expected; the core tries again.
-          CountedErrors.record(domain: error.domain, place: diagnosticPlace, code: String(error.code), expected: true)
-        } else {
-          Diagnostics.record(error, place: diagnosticPlace)
-        }
+      let dates = (error as NSError?).map(HubTransport.badDates) ?? false
+      if let error = error as NSError?, let diagnosticPlace,
+        !Noise.urlError(domain: error.domain, code: error.code, badDates: dates) {
+        Diagnostics.record(error, place: diagnosticPlace)
       }
       if tooLarge {
         if let diagnosticPlace { Diagnostics.record(NSError(domain: "HubTransport", code: 413), place: diagnosticPlace) }
         done(Data(), nil, "answer too large")
       } else {
-        let dates = (error as NSError?).map(HubTransport.badDates)
-        done(data, response, error.map { (dates == true ? "clock: " : "") + $0.localizedDescription })
+        done(data, response, error.map { (dates ? "clock: " : "") + $0.localizedDescription })
       }
     }
   }
