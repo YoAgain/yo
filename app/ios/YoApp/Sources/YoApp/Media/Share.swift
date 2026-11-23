@@ -34,6 +34,8 @@ enum ShareInbox {
       try? await Task.sleep(for: .seconds(2))
       widgetReload = nil
       WidgetCenter.shared.reloadAllTimelines()
+      // A renamed friend: the Yo Back control names them as the list does.
+      ControlCenter.shared.reloadControls(ofKind: ShareBridge.yoBackControlKind)
     }
   }
 

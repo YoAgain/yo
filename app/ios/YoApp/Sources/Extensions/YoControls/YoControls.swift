@@ -55,15 +55,28 @@ struct SendYoControl: ControlWidget {
   }
 }
 
+/// Names whom it Yos ("Yo Sora", so iOS hints "Hold to Yo Sora"); "Yo Back" until someone Yo'd you. ShareBridge reloads
+/// it with the Lock Screen widgets on a new Yo.
 struct YoBackControl: ControlWidget {
+  static let kind = ShareBridge.yoBackControlKind
+
   var body: some ControlWidgetConfiguration {
-    StaticControlConfiguration(kind: "app.justyo.ios.controls.back") {
+    StaticControlConfiguration(kind: Self.kind, provider: Provider()) { name in
       ControlWidgetButton(action: YoBackNowIntent()) {
-        Label("Yo Back", image: "yo.back")
+        if let name {
+          Label("Yo \(name)", image: "yo.back")
+        } else {
+          Label("Yo Back", image: "yo.back")
+        }
       }
     }
     .displayName("Yo Back")
     .description("Sends a Yo back to whoever sent you the last one.")
+  }
+
+  struct Provider: ControlValueProvider {
+    var previewValue: String? { nil }
+    func currentValue() async throws -> String? { YoEntry.lastSender() }
   }
 }
 

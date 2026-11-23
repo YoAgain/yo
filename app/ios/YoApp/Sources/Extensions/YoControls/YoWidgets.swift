@@ -26,6 +26,13 @@ struct YoEntry: TimelineEntry {
 
   var friends: [ShareBridge.Friend] { list?.friends ?? [] }
 
+  /// The last sender's name now, for the Yo Back control; nil if none (or another account's).
+  static func lastSender() -> String? {
+    let list = ShareBridge.readList()
+    let last = ShareBridge.readLastYo().flatMap { list == nil || $0.owner == list?.owner ? $0 : nil }
+    return YoEntry(date: .now, list: list, sent: nil, last: last).lastName
+  }
+
   var friend: ShareBridge.Friend? { shown(1, else: 1).first }
 
   /// Picks match by target, else by name: a target turns from a name into a user id after the first Yo.
