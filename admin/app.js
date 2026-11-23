@@ -2110,7 +2110,7 @@ if (document.body.classList.contains("login")) {
     const unknown = [...apps].filter(app => !datedSet.has(app)).sort();
     const releases = releaseBands(h);
     const bands = [...dated, ...unknown].map(app => ({
-      app, name: buildLabel(app), color: releases.get(app)?.color || "var(--muted)"
+      app, name: buildLabel(app), color: releases.get(app)?.color || "var(--muted)", behind: releases.get(app)?.behind
     }));
     const rows = slots.map(([, , row]) => {
       const counts = bands.map(b => row?.[b.app] || 0);
@@ -2143,7 +2143,7 @@ if (document.body.classList.contains("login")) {
     axis.append(el("span", null, (f0 ? "since " : "") + d.slots[f0][1]), el("span", null, d.slots[n - 1][1]));
     const pick = d.rows[have[have.length - 1]], pickAll = pick.reduce((sum, count) => sum + count, 0);
     const current = d.bands.reduce((sum, b, i) =>
-      sum + (!belowMin(b.app) && releases.get(b.app)?.behind === 0 ? pick[i] : 0), 0);
+      sum + (!belowMin(b.app) && b.behind === 0 ? pick[i] : 0), 0);
     const share = `${Math.round(100 * current / pickAll)} % current`;
     if (f0) s.dataset.since = "true";
     hoverTip(s, n - f0, (k) => {
