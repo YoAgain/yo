@@ -206,8 +206,11 @@ final class HubTransport: HttpTransport {
     let anonymous = !signed && anonymousRequest(method: method, path: path)
     let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
     let longPoll = method == "GET" && path.hasPrefix("/v1/inbox?wait=")
+    let turn = SharedAccess.current
+    // A blob's fetch or ack under a turn (a media journal's lock) is not the turn's: neither cut short nor cancelled by
+    // it, but still counted in it (`note`), or a slow ack read as a turn held long without any request.
     let access = anonymous && route.hasPrefix("/v1/blobs/") && (method == "GET" || method == "DELETE")
-      ? nil : SharedAccess.current
+      ? nil : turn
     // Under the turn the other process waits for this one (SharedAccess.requestBudget); the inbox's wait never runs
     // in it.
     if let access, !longPoll || path == "/v1/inbox?wait=0" {
@@ -276,7 +279,7 @@ final class HubTransport: HttpTransport {
     }
     done.wait()
     let took = started.duration(to: .now).components
-    access?.note(codePlace, seconds: Double(took.seconds) + Double(took.attoseconds) / 1e18)
+    turn?.note(codePlace, seconds: Double(took.seconds) + Double(took.attoseconds) / 1e18)
     if longPoll { Self.polls.withLock { $0.removeAll { $0 === task } } }
     if access?.expired == true {
       // Not reported: the caller tries again in its next turn.

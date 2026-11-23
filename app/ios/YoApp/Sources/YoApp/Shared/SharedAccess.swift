@@ -86,6 +86,8 @@ final class SharedAccess: @unchecked Sendable {
   static let heldLong: TimeInterval = 5
 
   private let gate = NSLock()
+  /// Which lock, for `finish`'s count: never a blob's id (a media ack's lock is named by it).
+  private let kind: String
   private let lifetime = SharedAccess.lifetime
   private var began = ProcessInfo.processInfo.systemUptime
   private let valid: @Sendable () -> Bool
@@ -115,7 +117,16 @@ final class SharedAccess: @unchecked Sendable {
     return min(wanted, max(1, left))
   }
 
-  private init(fd: Int32, valid: @escaping @Sendable () -> Bool) { self.fd = fd; self.valid = valid }
+  private init(fd: Int32, kind: String, valid: @escaping @Sendable () -> Bool) {
+    (self.fd, self.kind, self.valid) = (fd, kind, valid)
+  }
+
+  /// The lock's file name without its generation or blob id: `yo-state.lock`, `.claims.lock`, `.acks.lock`, `acklock`.
+  private static func lockKind(_ url: URL) -> String {
+    let name = url.lastPathComponent
+    if name.hasSuffix(".acklock") { return "acklock" }
+    return name.components(separatedBy: ".lock").first.map { $0 + ".lock" } ?? ""
+  }
 
   static func take(_ url: URL, within seconds: Double = 10,
     valid: @escaping @Sendable () -> Bool = { true }, repair: (@Sendable () -> Void)? = nil
@@ -128,7 +139,7 @@ final class SharedAccess: @unchecked Sendable {
       if code != EWOULDBLOCK { repair?() }
       return nil
     }
-    let turn = SharedAccess(fd: fd, valid: valid)
+    let turn = SharedAccess(fd: fd, kind: lockKind(url), valid: valid)
     // Every turn must be revocable (`hold` or a `Lifetime`): an unrevocable lock would stay held when iOS suspends the
     // process (0xdead10cc).
     guard hold != nil || turn.lifetime != nil else { log("no revocable lock lifetime", ECANCELED); close(fd); return nil }
@@ -196,9 +207,8 @@ final class SharedAccess: @unchecked Sendable {
         // Taken back while waiting (ECANCELED): the background time ended, or the extension's request did. A single
         // try (`within` 0: the media journals' locks) finds another process at work: it goes later, nothing to report.
         // Which lock, without its generation: the account state's turn is not a media journal's.
-        let lock = url.lastPathComponent.components(separatedBy: ".lock").first.map { $0 + ".lock" } ?? ""
         log("lock acquisition failed or timed out", code, report: seconds > 0, expected: code == ECANCELED,
-          place: "take \(lock)")
+          place: "take \(turn.kind)")
         turn.finish()
         return nil
       }
@@ -245,7 +255,8 @@ final class SharedAccess: @unchecked Sendable {
         code: requests == 0 ? "no request" : slowest.seconds > Self.heldLong / 2 ? "a slow request" : "many requests",
         // A slow network request is the network's, counted to learn from; no request or many are ours to look at.
         expected: requests > 0 && slowest.seconds > Self.heldLong / 2,
-        details: "held \(Int(held)) s, \(requests) requests, slowest \(Int(slowest.seconds)) s \(slowest.place)")
+        details: "held \(Int(held)) s on \(kind), \(requests) requests, slowest \(Int(slowest.seconds)) s "
+          + slowest.place)
       #endif
     }
     revoke()
