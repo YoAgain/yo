@@ -6,30 +6,45 @@
 # the bundle's id (the app's + .stickers), versions and minimum iOS, and Resources/Stickers.xcassets compiled by
 # actool as Xcode does (the stickers, the Messages icon; the partial Info.plist merged in). Needs Xcode.
 #   usage: dev/stickers.sh APP        REAL_ACTOOL names actool (default: xcrun's)
+#          dev/stickers.sh --resign APP SIGN_DIR IPA     after ship.sh: the executable as Xcode leaves it (below)
 #          dev/stickers.sh --support IPA
 # --support: the stub beside Payload/ in the signed .ipa, at MessagesApplicationExtensionSupport/, as Xcode's export
 # puts it; without it App Store Connect rejects the build (90620, "Your iMessage app contains an invalid sticker pack").
 set -euo pipefail
 stub="$(xcrun --sdk iphoneos --show-sdk-platform-path)/Library/Application Support/MessagesApplicationExtensionStub/MessagesApplicationExtensionStub"
+if [ "${1:-}" = --resign ]; then
+  # rcodesign writes the signed YoStickers executable as a thin Mach-O; Xcode leaves it a universal file with the one
+  # arm64 slice, the same form as the stub beside Payload/ (--support), and App Store Connect compares the two (90614,
+  # "don't match"). The signed slice goes back into such a file (its signature stays the slice's), the app is signed
+  # again over it with ship.sh's identity (shallow: the extensions keep their signatures; else rcodesign re-signs
+  # the sticker pack and thins it again), and the .ipa is packed again as ship.sh packs it. Run asc.py validate after.
+  app=${2:?usage: stickers.sh --resign APP SIGN_DIR IPA} sign=${3:?} ipa=$(cd "$(dirname "${4:?}")" && pwd)/$(basename "$4")
+  exe=$app/PlugIns/YoStickers.appex/YoStickers
+  if lipo -info "$exe" | grep -q '^Non-fat file'; then
+    lipo -create "$exe" -output "$exe.universal"
+    mv "$exe.universal" "$exe"
+    team=$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["com.apple.developer.team-identifier"])' \
+      "$sign/entitlements.plist")
+    rcodesign sign --shallow --pem-file "$sign/key.pem" --certificate-der-file "$sign/cert.der" --team-name "$team" \
+      --entitlements-xml-file "$sign/entitlements.plist" "$app"
+  fi
+  lipo -info "$exe"
+  stage=$(mktemp -d)
+  trap 'rm -rf "$stage"' EXIT
+  mkdir "$stage/Payload"
+  cp -a "$app" "$stage/Payload/"
+  rm -f "$ipa"
+  (cd "$stage" && zip -qry "$ipa" Payload)
+  echo "stickers.sh: $(basename "$ipa") packed again"
+  exit 0
+fi
 if [ "${1:-}" = --support ]; then
   ipa=$(cd "$(dirname "${2:?usage: stickers.sh --support IPA}")" && pwd)/$(basename "$2")
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   mkdir "$stage/MessagesApplicationExtensionSupport"
-  # The same arm64 slice as YoStickers.appex's executable, before its signing (else 90614: "don't match").
+  # The arm64 slice as a universal file, as Xcode's archive keeps it and as YoStickers.appex holds it (--resign).
   lipo "$stub" -extract arm64 -output "$stage/MessagesApplicationExtensionSupport/MessagesApplicationExtensionStub"
-  # rcodesign writes the signed executable as a thin Mach-O; Xcode's stays a universal file with the one arm64 slice,
-  # as the stub beside it (App Store Connect compares the two: 90614). The signed slice goes back into such a file
-  # (the signature is the slice's, so the app's seal of the extension still holds), in the .ipa and the .app.
-  exe=Payload/YoApp.app/PlugIns/YoStickers.appex/YoStickers
-  (cd "$stage" && unzip -q "$ipa" "$exe")
-  if ! lipo -info "$stage/$exe" | grep -q '^Architectures in the fat file'; then
-    lipo -create "$stage/$exe" -output "$stage/fat" && mv "$stage/fat" "$stage/$exe"
-    (cd "$stage" && zip -q "$ipa" "$exe")
-    app=$(dirname "$ipa")/YoApp.app
-    [ -d "$app" ] && cp "$stage/$exe" "$app/PlugIns/YoStickers.appex/YoStickers"
-  fi
-  lipo -info "$stage/$exe"
   (cd "$stage" && zip -qry "$ipa" MessagesApplicationExtensionSupport)
   echo "stickers.sh: MessagesApplicationExtensionSupport in $(basename "$ipa")"
   exit 0
