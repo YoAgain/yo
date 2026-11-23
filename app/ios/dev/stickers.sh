@@ -18,6 +18,18 @@ if [ "${1:-}" = --support ]; then
   mkdir "$stage/MessagesApplicationExtensionSupport"
   # The same arm64 slice as YoStickers.appex's executable, before its signing (else 90614: "don't match").
   lipo "$stub" -extract arm64 -output "$stage/MessagesApplicationExtensionSupport/MessagesApplicationExtensionStub"
+  # rcodesign writes the signed executable as a thin Mach-O; Xcode's stays a universal file with the one arm64 slice,
+  # as the stub beside it (App Store Connect compares the two: 90614). The signed slice goes back into such a file
+  # (the signature is the slice's, so the app's seal of the extension still holds), in the .ipa and the .app.
+  exe=Payload/YoApp.app/PlugIns/YoStickers.appex/YoStickers
+  (cd "$stage" && unzip -q "$ipa" "$exe")
+  if ! lipo -info "$stage/$exe" | grep -q '^Architectures in the fat file'; then
+    lipo -create "$stage/$exe" -output "$stage/fat" && mv "$stage/fat" "$stage/$exe"
+    (cd "$stage" && zip -q "$ipa" "$exe")
+    app=$(dirname "$ipa")/YoApp.app
+    [ -d "$app" ] && cp "$stage/$exe" "$app/PlugIns/YoStickers.appex/YoStickers"
+  fi
+  lipo -info "$stage/$exe"
   (cd "$stage" && zip -qry "$ipa" MessagesApplicationExtensionSupport)
   echo "stickers.sh: MessagesApplicationExtensionSupport in $(basename "$ipa")"
   exit 0
