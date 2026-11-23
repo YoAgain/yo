@@ -91,6 +91,7 @@ val buildCore = tasks.register<Exec>("buildCore") {
 }
 tasks.named("preBuild") { dependsOn(buildCore) }
 dependencies {
+    implementation("androidx.core:core-ktx:1.19.0")
     // Pinned to 1.1.0: heifwriter 1.2.0 needs minSdk 29, the app keeps 28 (Android 9).
     implementation("androidx.heifwriter:heifwriter:1.1.0")
     implementation("androidx.glance:glance-appwidget:1.2.0")
@@ -129,6 +130,8 @@ androidComponents {
             variant.applicationId.set("app.justyo.android")
             variant.manifestPlaceholders.put("yoAppLabel", "Yo")
         }
+        variant.resValues.put(variant.makeResValueKey("string", "shortcut_target_package"),
+            variant.applicationId.map { com.android.build.api.variant.ResValue(it) })
         firebaseResources(if (store) "app.justyo.android" else android.defaultConfig.applicationId!!).forEach { (key, value) ->
             variant.resValues.put(variant.makeResValueKey("string", key), com.android.build.api.variant.ResValue(value))
         }

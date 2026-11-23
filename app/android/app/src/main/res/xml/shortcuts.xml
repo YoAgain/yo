@@ -1,0 +1,17 @@
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="yo_back" android:icon="@drawable/ic_shortcut_yo_back"
+        android:shortcutShortLabel="@string/yo_back_action" android:shortcutLongLabel="@string/yo_back_action">
+        <intent android:action="app.justyo.android.YO_BACK" android:targetPackage="@string/shortcut_target_package"
+            android:targetClass="app.justyo.android.ShortcutActivity" />
+    </shortcut>
+    <shortcut android:shortcutId="camera" android:icon="@drawable/ic_shortcut_camera"
+        android:shortcutShortLabel="@string/ui_camera" android:shortcutLongLabel="@string/ui_camera">
+        <intent android:action="android.intent.action.VIEW" android:data="yo://camera"
+            android:targetPackage="@string/shortcut_target_package" android:targetClass="app.justyo.android.MainActivity" />
+    </shortcut>
+    <share-target android:targetClass="app.justyo.android.MainActivity">
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <category android:name="app.justyo.android.SHARE" />
+    </share-target>
+</shortcuts>

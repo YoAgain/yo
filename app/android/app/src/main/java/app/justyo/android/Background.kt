@@ -26,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import uniffi.yo.YoException
@@ -50,11 +51,14 @@ class YoApplication : Application(), CameraXConfig.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        if (Build.VERSION.SDK_INT >= 35) appScope.launch { publishWidgetPreviews(this@YoApplication) }
         if (com.google.firebase.FirebaseOptions.fromResource(this) != null) FirebaseApp.initializeApp(this)
     }
 
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     val repository by lazy {
-        Repository(this, CoroutineScope(SupervisorJob() + Dispatchers.IO)).also { it.start() }
+        Repository(this, appScope).also { it.start() }
     }
 }
 

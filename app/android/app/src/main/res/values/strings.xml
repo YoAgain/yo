@@ -216,6 +216,17 @@
     <string name="mute_video">Mute video</string>
     <string name="unmute_video">Unmute video</string>
     <string name="share_confirmation">Yo %1$s · %2$s</string>
+    <string name="yo_camera">Yo Camera</string>
+    <string name="yo_from">Yo from</string>
+    <string name="yo_widget_description">Your friends and groups, as in Yo, in the order you pick. A tap on a bar sends a Yo.</string>
+    <string name="yo_back_widget_description">Sends a Yo back to whoever sent you the last one.</string>
+    <string name="yo_camera_widget_description">Opens Yo in the camera.</string>
+    <string name="yo_from_widget_description">Shows who sent the last Yo. Tap to open Yo.</string>
+    <string-array name="widget_sample_names" translatable="false">
+        <item>ALEX</item>
+        <item>SAM</item>
+        <item>#CREW</item>
+    </string-array>
     <string name="yo_widget">Yo</string>
     <string name="widget_choose">Choose friends and groups</string>
     <string name="yo_back_tile">Yo Back</string>
@@ -267,6 +278,8 @@
     <string name="has_a_new_key">%1$s Has a New Key</string>
     <string name="new_key_explanation">%1$s may have a new phone. If you didn’t expect this, compare safety numbers in Yodentity › Account › Contacts.</string>
     <string name="confirm_new_key">Confirm New Key</string>
+    <string name="notification_you">You</string>
+    <string name="notification_mark_read">Mark as read</string>
     <string name="yo_back_action">Yo Back</string>
     <string name="group_empty_delete">Nobody else is in %1$s any more. Delete it?</string>
     <string name="delete_group">Delete Group</string>

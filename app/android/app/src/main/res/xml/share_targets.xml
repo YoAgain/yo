@@ -1,7 +1,0 @@
-<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
-    <share-target android:targetClass="app.justyo.android.MainActivity">
-        <data android:mimeType="image/*" />
-        <data android:mimeType="video/*" />
-        <category android:name="app.justyo.android.SHARE" />
-    </share-target>
-</shortcuts>

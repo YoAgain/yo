@@ -12,6 +12,7 @@
         android:usesCleartextTraffic="false" android:enableOnBackInvokedCallback="true">
         <provider android:name="com.google.firebase.provider.FirebaseInitProvider" tools:node="remove" />
         <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
+        <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc" />
         <service android:name=".YoMessagingService" android:exported="false">
             <intent-filter><action android:name="com.google.firebase.MESSAGING_EVENT" /></intent-filter>
         </service>
@@ -20,12 +21,30 @@
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/yo_widget" />
         </receiver>
+        <receiver android:name=".YoBackWidgetReceiver" android:exported="false" android:label="@string/yo_back_tile">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/yo_back_widget" />
+        </receiver>
+        <receiver android:name=".YoCameraWidgetReceiver" android:exported="false" android:label="@string/yo_camera">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/yo_camera_widget" />
+        </receiver>
+        <receiver android:name=".YoFromWidgetReceiver" android:exported="false" android:label="@string/yo_from">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/yo_from_widget" />
+        </receiver>
         <activity android:name=".YoWidgetConfiguration" android:exported="true">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" /></intent-filter>
         </activity>
         <service android:name=".YoBackTile" android:label="@string/yo_back_tile" android:icon="@drawable/ic_yo_monochrome"
             android:exported="true" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.ACTIVE_TILE" android:value="true" />
+        </service>
+        <service android:name=".YoCameraTile" android:label="@string/yo_camera" android:icon="@drawable/ic_widget_camera"
+            android:exported="true" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter><action android:name="android.service.quicksettings.action.QS_TILE" /></intent-filter>
+            <meta-data android:name="android.service.quicksettings.ACTIVE_TILE" android:value="true" />
         </service>
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -50,25 +69,26 @@
                 <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
+        <activity-alias android:name=".ShortcutActivity" android:targetActivity=".MainActivity" android:exported="false" />
         <activity-alias android:name=".DefaultIcon" android:targetActivity=".MainActivity" android:enabled="true" android:exported="true" android:icon="@mipmap/launcher_standard">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/share_targets" />
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity-alias>
         <activity-alias android:name=".NegativeIcon" android:targetActivity=".MainActivity" android:enabled="false" android:exported="true" android:icon="@mipmap/launcher_negative">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/share_targets" />
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity-alias>
         <activity-alias android:name=".OriginalIcon" android:targetActivity=".MainActivity" android:enabled="false" android:exported="true" android:icon="@mipmap/launcher_original">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/share_targets" />
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity-alias>
         <activity-alias android:name=".OG2014Icon" android:targetActivity=".MainActivity" android:enabled="false" android:exported="true" android:icon="@mipmap/launcher_og2014">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/share_targets" />
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity-alias>
         <activity-alias android:name=".Lilac2015Icon" android:targetActivity=".MainActivity" android:enabled="false" android:exported="true" android:icon="@mipmap/launcher_lilac2015">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
-            <meta-data android:name="android.app.shortcuts" android:resource="@xml/share_targets" />
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity-alias>
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/share_paths" />

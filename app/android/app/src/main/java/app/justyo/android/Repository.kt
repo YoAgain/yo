@@ -7,6 +7,7 @@ import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.map
@@ -188,12 +189,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
     }
     fun start() = scope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.IO) { updateSenderWidgets(context, state) }
         // An action's problem in the banner, and gone from it again.
         scope.launch { Problems.text.collect { connection.show() } }
         scope.launch(Dispatchers.IO) {
-            state.map { it.username to it.friends }.distinctUntilChanged().collect { (_, friends) ->
-                // Shortcut publishing is advisory; launcher rejection must not break the account.
-                runCatching { updateSharingShortcuts(context,friends) }
+            state.filter { !it.loading }.map { it.username to it.friends }.distinctUntilChanged().collect { (_, friends) ->
+                syncShortcuts(context, friends)
                 runCatching { YoWidget().updateAll(context) }
             }
         }
@@ -685,7 +686,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (!inFront) {
             crashes.countNotificationFallback(code)
             try {
-                notifications.show(FALLBACK, "$FALLBACK:${java.util.UUID.randomUUID()}", null, null, MessageKind.Yo)
+                notifications.show(FALLBACK, "$FALLBACK:${java.util.UUID.randomUUID()}", MessageKind.Yo)
             } catch (_: SecurityException) { }
         }
     }
@@ -694,8 +695,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val c = client ?: return
         if (!latest && account != c.userId()) return
         val snapshot = state.value
-        val target = if (latest) snapshot.lastReceived.maxByOrNull { it.value }?.key else key
-        val friend = snapshot.friends.firstOrNull { it.key == target && productWidgetEligible(it.blocked, it.request, it.gone) } ?: return
+        val friend = if (latest) snapshot.widgetSender() else snapshot.friends.firstOrNull {
+            it.key == key && productWidgetEligible(it.blocked, it.request, it.gone)
+        }
+        friend ?: return
         sendNow(friend, c)
     }
 
@@ -788,6 +791,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                     present { notice(it, friend.key, copy(ProductText.WAITING_TO_SEND), false) }
                 } else showSent(friend)
                 Lat.mark("sent.shown"); Lat.frame("sent")
+                reportShortcutUsed(context, friend)
                 // Taken by the core, not by the hub yet (offline after sealing): "Waiting to Send" until it went.
                 if (c.waitingUnheld() > 0u) Problems.report(ProductProblem.WAITING, ::retryNow)
                 absorb(events, c)
@@ -964,7 +968,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private suspend fun arrive(event: YoEvent, profiles: Map<String, String>, contacts: Map<String, YoContact>) {
         val user = when (event) { is YoEvent.Message -> event.user; is YoEvent.GroupMessage -> event.user; else -> return }
         val group = (event as? YoEvent.GroupMessage)?.group
-        val friend = state.value.friends.firstOrNull { if (group != null) it.group == group else it.user == user } ?: return
+        val friends = state.value.friends
+        val friend = friends.firstOrNull { if (group != null) it.group == group else it.user == user } ?: return
         val at = when (event) { is YoEvent.Message -> event.sentAtMs; is YoEvent.GroupMessage -> event.sentAtMs; else -> return }
         val kind = when (event) { is YoEvent.Message -> event.kind; is YoEvent.GroupMessage -> event.kind; else -> return }
         if (friend.blocked) return
@@ -975,16 +980,17 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (seen.size > 2000) seen.remove(seen.first())
         arrival(friend, user, kind, id)
         val contact = contacts[user]
+        val sender = friends.firstOrNull { it.user == user }
         val name = profiles[user]?.takeIf { it.isNotBlank() }
             ?: contact?.name?.takeIf { it.isNotBlank() }
             ?: contact?.handles?.firstOrNull()
-            ?: state.value.friends.firstOrNull { it.user == user }?.name?.takeUnless { it == yoUser }
+            ?: sender?.name?.takeUnless { it == yoUser }
         if (name == null) {
             crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
         }
         try {
-            if (!inFront) notifications.show(friend.target, id, name, friend.name.takeIf { group != null }, kind,
-                friend.key, client?.userId())
+            if (!inFront) notifications.show(friend.target, id, kind, friend, name, user, sender?.color,
+                client?.userId(), friends.asSequence().filter { it.shortcutEligible }.indexOf(friend))
         } catch (_: SecurityException) {
             // Notification permission may be revoked between checking and posting.
         }
@@ -1115,7 +1121,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         aliases.values.filter { it != selected }.forEach { value -> manager.setComponentEnabledSetting(component(value), android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED, android.content.pm.PackageManager.DONT_KILL_APP) }
         // The share sheet's names belong to the launcher alias they were published under: disabling it removed them
         // all (the share sheet showed no name until the friends changed). Published again under the new one.
-        runCatching { updateSharingShortcuts(context, state.value.friends) }
+        syncShortcuts(context, state.value.friends)
         client?.setAppIcon(name)
         mutable.update { it.copy(appIcon = name) }
         changes.withLock { persist() }
@@ -1154,6 +1160,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 listJob?.cancel();orderSave?.cancel();displayedOrder=emptyList();list=YoList();mutable.value=AppState(loading=false, googleBackup=backupWanted())
             }
         }
+        syncShortcuts(context, emptyList())
         settleSynced()
     }
     private fun clearTemporaryMedia() {

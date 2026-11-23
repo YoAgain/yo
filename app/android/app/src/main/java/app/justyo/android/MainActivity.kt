@@ -50,6 +50,15 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
     /** yo://camera: the list opens in camera mode (as iOS's Yo Camera). */
     val openCamera = MutableStateFlow(false)
     fun intent(intent: Intent) {
+        if (intent.action == ACTION_SEND_YO || intent.action == YoBackReceiver.ACTION) {
+            if (intent.component?.className != SHORTCUT_ACTIVITY) return
+            repository.command {
+                val loaded = state.first { !it.loading }
+                if (intent.action == YoBackReceiver.ACTION) sendWidgetYo(null, null, latest = true)
+                else loaded.friends.firstOrNull { it.key == intent.getStringExtra("friend") && it.shortcutEligible }?.let { send(it) }
+            }
+            return
+        }
         intent.data?.takeIf { it.scheme?.lowercase() == "yo" && it.host?.lowercase() == "camera" }?.let { openCamera.value = true }
         intent.data?.let { uri -> inviteName(uri)?.let { name -> repository.command { invite(name) } } }
         val streams = when (intent.action) {
@@ -86,7 +95,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
                 if(version!=shareImportVersion) return@launch
                 shares.value=staged
                 importingShares.value=false
-                if(target!=null) repository.state.value.friends.firstOrNull { it.key==target && !it.blocked && !it.gone && !it.request }?.let { friend ->
+                if(target!=null) repository.state.value.friends.firstOrNull { it.key==target && it.shortcutEligible }?.let { friend ->
                     stage(friend,staged)
                 }
             } catch(e: CancellationException) { throw e }
@@ -134,6 +143,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
                         sessionId == session
                     } == true
                     if (sent && queued.isNotEmpty()) {
+                        reportShortcutUsed(context, friend)
                         val sign = if (sharedVideo) "🎥" else "📷"
                         val name = if (friend.group == null) friend.name else "#${friend.name.removePrefix("#")}"
                         kotlinx.coroutines.withContext(Dispatchers.Main) {

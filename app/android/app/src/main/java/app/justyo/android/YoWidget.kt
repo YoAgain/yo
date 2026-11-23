@@ -9,6 +9,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.os.Build
 import android.os.Bundle
+import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -60,7 +61,7 @@ import uniffi.yo.productWidgetEligible
 import uniffi.yo.productWidgetIdSelection
 
 private fun Context.widgetPreferences() = getSharedPreferences("yo-widget", Context.MODE_PRIVATE)
-private fun Friend.widgetName() = if (group == null) name else "#${name.removePrefix("#")}"
+internal fun Friend.widgetName() = if (group == null) name else "#${name.removePrefix("#")}"
 /** The core's rule for the eight combinations, asked once: the widget filtered every friend with a core call on each
  *  change of the app's state, on the main thread. */
 private val widgetEligible by lazy {
@@ -69,6 +70,13 @@ private val widgetEligible by lazy {
 private fun eligible(friend: Friend) =
     widgetEligible[(if (friend.blocked) 1 else 0) or (if (friend.request) 2 else 0) or (if (friend.gone) 4 else 0)]
 private fun AppState.widgetFriends() = friends.filter(::eligible)
+/** Match the latest-send worker even when the newest sender has since been blocked or removed. */
+internal fun AppState.widgetSender(): Friend? {
+    if (username == null) return null
+    val key = lastReceived.maxByOrNull { it.value }?.key ?: return null
+    return friends.firstOrNull { it.key == key && eligible(it) }
+}
+
 private const val WidgetSlots = 16
 
 private fun Context.widgetPicks(id: Int, account: String?): List<String> {
@@ -79,7 +87,7 @@ private fun Context.widgetPicks(id: Int, account: String?): List<String> {
 }
 
 /** Text as a bitmap in Montserrat Bold: RemoteViews cannot use the app's font. Scaled down to fit, never cut. */
-private fun Context.wordsBitmap(text: String, size: Float, width: Float, height: Float): Bitmap {
+internal fun Context.wordsBitmap(text: String, size: Float, width: Float, height: Float): Bitmap {
     val density = resources.displayMetrics.density
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
@@ -96,6 +104,12 @@ private fun Context.wordsBitmap(text: String, size: Float, width: Float, height:
         val metrics = paint.fontMetrics
         Canvas(bitmap).drawText(text, w / 2f, h / 2f - (metrics.ascent + metrics.descent) / 2, paint)
     }
+}
+
+internal fun widgetBackground(): GlanceModifier {
+    val base = GlanceModifier.widgetFillMaxSize()
+    val rounded = if (Build.VERSION.SDK_INT >= 31) base.cornerRadius(android.R.dimen.system_app_widget_background_radius) else base
+    return rounded.background(Amethyst)
 }
 
 /** The list widget (iOS YoWidgets): one friend on Amethyst, or rows in their colours sharing the height. A tap sends a Yo. */
@@ -118,13 +132,12 @@ class YoWidget : GlanceAppWidget() {
             val slots = (size.height / 44.dp).toInt().coerceIn(1, WidgetSlots)
             val selected = productWidgetIdSelection(friends.map { it.key }, context.widgetPicks(widgetId, account),
                 account != null, slots.toUInt(), slots.toUInt()).map { friends[it.toInt()] }
-            val shape = if (Build.VERSION.SDK_INT >= 31) GlanceModifier.cornerRadius(android.R.dimen.system_app_widget_background_radius) else GlanceModifier
-            WidgetColumn(GlanceModifier.widgetFillMaxSize().then(shape).background(Amethyst)) {
+            WidgetColumn(widgetBackground()) {
                 if (selected.isEmpty()) {
                     WidgetBox(GlanceModifier.widgetFillMaxSize(), contentAlignment = WidgetAlignment.Center) {
                         WidgetColumn(horizontalAlignment = WidgetAlignment.CenterHorizontally) {
-                            Words(context, "Yo", 34f, size.width, 48.dp)
-                            Words(context, copy(ProductText.WIDGET_EMPTY), 13f, size.width, 24.dp)
+                            WidgetWords(context, "Yo", 34f, size.width, 48.dp)
+                            WidgetWords(context, copy(ProductText.WIDGET_EMPTY), 13f, size.width, 24.dp)
                         }
                     }
                 }
@@ -140,7 +153,7 @@ class YoWidget : GlanceAppWidget() {
                                 .clickable(actionRunCallback<WidgetSend>(actionParametersOf(
                                     WidgetSend.friend to friend.key, WidgetSend.account to account.orEmpty()))),
                                 contentAlignment = WidgetAlignment.Center) {
-                                Words(context, if (friend.key in sent) copy(ProductText.SENT_YO) else friend.widgetName(),
+                                WidgetWords(context, if (friend.key in sent) copy(ProductText.SENT_YO) else friend.widgetName(),
                                     if (single) 28f else font, size.width, rowHeight)
                             }
                         }
@@ -150,17 +163,35 @@ class YoWidget : GlanceAppWidget() {
         }
     }
 
-    @androidx.compose.runtime.Composable
-    private fun Words(context: Context, text: String, size: Float, width: Dp, height: Dp) {
-        val bitmap = remember(text, size, width, height) { context.wordsBitmap(text, size, width.value, height.value) }
-        Image(ImageProvider(bitmap), text,
-            GlanceModifier.widgetFillMaxWidth().widgetHeight(height))
+    override val previewSizeMode = SizeMode.Single
+
+    override suspend fun providePreview(context: Context, widgetCategory: Int) {
+        provideContent {
+            val size = LocalSize.current
+            val names = context.resources.getStringArray(R.array.widget_sample_names)
+            // The picker scales the preview to its own frame: the rows share it by weight, not by a computed height.
+            WidgetColumn(widgetBackground()) {
+                names.forEachIndexed { index, name ->
+                    WidgetBox(GlanceModifier.widgetFillMaxWidth().defaultWeight().background(RowColors[index]),
+                        contentAlignment = WidgetAlignment.Center) {
+                        WidgetWords(context, name, 20f, size.width, 32.dp)
+                    }
+                }
+            }
+        }
     }
 
     override suspend fun onDelete(context: Context, glanceId: GlanceId) {
         val id = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
         context.widgetPreferences().edit { remove("friends:$id"); remove("account:$id") }
     }
+}
+
+@androidx.compose.runtime.Composable
+internal fun WidgetWords(context: Context, text: String, size: Float, width: Dp, height: Dp) {
+    val bitmap = remember(text, size, width, height) { context.wordsBitmap(text, size, width.value, height.value) }
+    Image(ImageProvider(bitmap), text,
+        GlanceModifier.widgetFillMaxWidth().widgetHeight(height))
 }
 
 class YoWidgetReceiver : GlanceAppWidgetReceiver() {
@@ -239,6 +270,16 @@ class YoWidgetConfiguration : ComponentActivity() {
 }
 
 class YoBackTile : TileService() {
+    override fun onStartListening() {
+        super.onStartListening()
+        val snapshot = applicationContext.repository.state.value
+        qsTile?.apply {
+            state = if (snapshot.username == null) Tile.STATE_UNAVAILABLE else Tile.STATE_INACTIVE
+            if (Build.VERSION.SDK_INT >= 29) subtitle = snapshot.widgetSender()?.widgetName() ?: copy(ProductText.NO_YO_BACK)
+            updateTile()
+        }
+    }
+
     override fun onClick() {
         val work: () -> Unit = { YoWork.enqueue(this, "send", latest = true) }
         if (isLocked) unlockAndRun { work() } else work()

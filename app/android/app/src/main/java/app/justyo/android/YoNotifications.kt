@@ -1,7 +1,6 @@
 package app.justyo.android
 
 import android.annotation.SuppressLint
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -12,7 +11,11 @@ import android.media.AudioAttributes
 import android.provider.Settings
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.app.PendingIntentCompat
 import androidx.core.app.Person
+import androidx.core.app.RemoteInput
+import androidx.core.content.LocusIdCompat
+import androidx.core.graphics.drawable.IconCompat
 import androidx.core.net.toUri
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
@@ -59,9 +62,10 @@ internal class YoNotifications(private val context: Context) {
         ))
     }
 
+    /** Each thread keeps its message history until it is opened or cleared. */
     @SuppressLint("MissingPermission")
-    /** [friend] and [account]: the bar the Yo landed on, for the notification's "Yo Back" (as iOS's action). */
-    fun show(thread: String, id: String, name: String?, group: String?, kind: MessageKind, friend: String? = null, account: String? = null) {
+    fun show(thread: String, id: String, kind: MessageKind, friend: Friend? = null, name: String? = null,
+             sender: String? = null, senderColor: Int? = null, account: String? = null, rank: Int = 0) {
         if (!manager.areNotificationsEnabled()) return
         if (manager.getNotificationChannel(alert)?.importance == NotificationManager.IMPORTANCE_NONE) return
         // One notification per conversation, updated in place with each Yo (MessagingStyle, as Android's messaging
@@ -78,20 +82,14 @@ internal class YoNotifications(private val context: Context) {
         val kinds = (shown?.extras?.getIntArray(KINDS) ?: IntArray(0)).map { ListKind.entries.getOrElse(it) { ListKind.YO } } + listKind
         // Nobody to name ("You may have received a Yo", the push's fallback among them): the line alone, not a
         // conversation with a made-up "Someone: Yo" in it.
+        val group = friend?.takeIf { it.group != null }?.name
         val anonymous = name == null && group == null
         val line = if (anonymous) productAndroidNotificationLine(null, null, listKind, Words)
             else productNotificationConversationLine(kinds, name ?: copy(ProductText.SOMEONE), group, false, Words)
-        val style = shown?.let { NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it) }
-            ?: NotificationCompat.MessagingStyle(Person.Builder().setName(copy(ProductText.YO)).build())
-        style.setConversationTitle(line).setGroupConversation(true)
-        val sign = when (listKind) { ListKind.PHOTO -> " 📷"; ListKind.VIDEO -> " 🎥"; else -> "" }
-        style.addMessage(copy(ProductText.YO) + sign, System.currentTimeMillis(),
-            Person.Builder().setName(name ?: copy(ProductText.SOMEONE)).build())
         val open = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = PendingIntent.getActivity(context, 0, open, PendingIntent.FLAG_IMMUTABLE)
         val notification = NotificationCompat.Builder(context, alert)
             .setSmallIcon(R.drawable.ic_yo_monochrome)
-            .setStyle(style.takeUnless { anonymous })
             .setContentTitle(line)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(pending)
@@ -106,14 +104,47 @@ internal class YoNotifications(private val context: Context) {
                 putIntArray(KINDS, kinds.map { it.ordinal }.toIntArray())
                 putString(LINE, line)
             })
-        if (friend != null && account != null) {
-            val back = Intent(context, YoBackReceiver::class.java).setAction(YoBackReceiver.ACTION)
-                .putExtra("friend", friend).putExtra("account", account).putExtra("thread", thread)
-            val action = PendingIntent.getBroadcast(context, thread.hashCode(), back, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            notification.addAction(NotificationCompat.Action.Builder(null, context.getString(R.string.yo_back_action), action).build())
+        if (!anonymous && friend != null) {
+            val me = Person.Builder().setKey(account).setName(context.getString(R.string.notification_you)).build()
+            val style = NotificationCompat.MessagingStyle(me).setGroupConversation(group != null)
+            if (group != null) style.setConversationTitle(friend.shortcutLabel)
+            shown?.let { NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(it) }
+                ?.messages?.forEach { style.addMessage(it) }
+            val senderName = name ?: copy(ProductText.SOMEONE)
+            val person = Person.Builder().setKey(sender).setName(senderName)
+                .setIcon(Avatars.icon(context, name.orEmpty(), senderColor)).build()
+            val sign = when (listKind) { ListKind.PHOTO -> " 📷"; ListKind.VIDEO -> " 🎥"; else -> "" }
+            notification.setStyle(style.addMessage(copy(ProductText.YO) + sign, System.currentTimeMillis(), person))
+            if (friend.shortcutEligible) {
+                pushConversation(context, friend, rank)
+                notification.setShortcutId(friend.key).setLocusId(LocusIdCompat(friend.key))
+            }
+            if (account != null) addActions(notification, thread, friend.key, account)
         }
         manager.notify(tag, 1, notification.build())
         summarize()
+    }
+
+    private fun addActions(builder: NotificationCompat.Builder, thread: String, friend: String, account: String) {
+        fun broadcast(action: String, mutable: Boolean): PendingIntent? {
+            val intent = Intent(context, YoBackReceiver::class.java).setAction(action)
+                .setData(android.net.Uri.fromParts("yo-notification", thread, null))
+                .putExtra("friend", friend).putExtra("account", account).putExtra("thread", thread)
+            return PendingIntentCompat.getBroadcast(context, thread.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT, mutable)
+        }
+        val back = context.getString(R.string.yo_back_action)
+        builder.addAction(NotificationCompat.Action.Builder(IconCompat.createWithResource(context, R.drawable.ic_notification_reply),
+            back, broadcast(YoBackReceiver.ACTION, true))
+            // A reply that is always a Yo: no text field on the phone (a tap sends it), while Android Auto and Wear still
+            // see a reply action they can offer by voice.
+            .addRemoteInput(RemoteInput.Builder("yo_reply").setLabel(back).setChoices(arrayOf(copy(ProductText.YO)))
+                .setAllowFreeFormInput(false).build())
+            .setAllowGeneratedReplies(false).setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
+            .setShowsUserInterface(false).build())
+        builder.addAction(NotificationCompat.Action.Builder(IconCompat.createWithResource(context, R.drawable.ic_notification_read),
+            context.getString(R.string.notification_mark_read), broadcast(YoBackReceiver.MARK_READ, false))
+            .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
+            .setShowsUserInterface(false).build())
     }
 
     /** With two conversations or more, their group's summary (Android bundles them under it). */
@@ -157,10 +188,18 @@ internal class YoNotifications(private val context: Context) {
 /** A notification's "Yo Back": a Yo to the bar it came from, sent in the background like the tile's. */
 class YoBackReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION) return
-        val friend = intent.getStringExtra("friend") ?: return
-        YoWork.enqueue(context, "send", friend = friend, account = intent.getStringExtra("account"), expedited = true)
+        when (intent.action) {
+            ACTION -> {
+                val friend = intent.getStringExtra("friend") ?: return
+                YoWork.enqueue(context, "send", friend = friend, account = intent.getStringExtra("account"), expedited = true)
+            }
+            MARK_READ -> Unit
+            else -> return
+        }
         intent.getStringExtra("thread")?.let { YoNotifications(context).clear(it) }
     }
-    companion object { const val ACTION = "app.justyo.android.YO_BACK" }
+    companion object {
+        const val ACTION = "app.justyo.android.YO_BACK"
+        const val MARK_READ = "app.justyo.android.MARK_READ"
+    }
 }

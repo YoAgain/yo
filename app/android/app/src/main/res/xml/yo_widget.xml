@@ -1,4 +1,5 @@
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/yo_widget_description"
     android:configure="app.justyo.android.YoWidgetConfiguration"
     android:minWidth="120dp"
     android:minHeight="100dp"
