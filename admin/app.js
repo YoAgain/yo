@@ -2058,6 +2058,10 @@ if (document.body.classList.contains("login")) {
     const mon = new Date(Date.UTC(2000, +b.slice(4, 6) - 1, 1)).toLocaleDateString("en", { month: "short", timeZone: "UTC" });
     return `${word}${mon} ${+b.slice(6, 8)} ${b.slice(8, 10)}:${b.slice(10, 12)}`;
   };
+  // @release-color
+  // By rank: 0 strongest green, 1-2 lighter greens, 3 yellow-green, 4-5 yellow, 6-9 orange, 10+ red.
+  const releaseColor = (r) => r <= 2 ? `hsl(135 ${62 - 6 * r}% ${36 + 11 * r}%)` : r === 3 ? "hsl(78 62% 50%)" : r <= 5 ? "hsl(48 90% 50%)" : r <= 9 ? "hsl(28 85% 52%)" : "hsl(4 75% 50%)";
+  // @end
   const releaseBands = (h) => {
     const apps = new Set((h.users || []).map(u => u.app));
     for (const [app] of [...(h.apps || []), ...(h.apps_today || [])]) apps.add(app);
@@ -2069,10 +2073,11 @@ if (document.body.classList.contains("login")) {
     const bands = new Map();
     for (const platform of ["ios", "android"]) {
       const dated = [...apps].filter(app => app?.startsWith(platform + "/") && /^\d{12}$/.test(app.slice(platform.length + 1))).sort().reverse();
-      dated.forEach((app, behind) => {
-        const age = behind / Math.max(1, dated.length - 1);
-        const hue = belowMin(app) ? 12 * (1 - age) : 125 * (1 - age);
-        bands.set(app, { behind, color: `hsl(${hue} 68% ${52 - 8 * age}%)` });
+      // A release = a build day (the hub keeps no RC-to-build map; builds of one day are one release); rank 0 is the newest.
+      const days = [...new Set(dated.map(app => app.slice(platform.length + 1, platform.length + 9)))];
+      dated.forEach((app) => {
+        const behind = days.indexOf(app.slice(platform.length + 1, platform.length + 9));
+        bands.set(app, { behind, color: belowMin(app) ? releaseColor(10) : releaseColor(behind) });
       });
     }
     return bands;
@@ -2138,7 +2143,7 @@ if (document.body.classList.contains("login")) {
     axis.append(el("span", null, (f0 ? "since " : "") + d.slots[f0][1]), el("span", null, d.slots[n - 1][1]));
     const pick = d.rows[have[have.length - 1]], pickAll = pick.reduce((sum, count) => sum + count, 0);
     const current = d.bands.reduce((sum, b, i) =>
-      sum + (!belowMin(b.app) && ["current", "fresh"].includes(appInfo(b.app)?.state) ? pick[i] : 0), 0);
+      sum + (!belowMin(b.app) && releases.get(b.app)?.behind === 0 ? pick[i] : 0), 0);
     const share = `${Math.round(100 * current / pickAll)} % current`;
     if (f0) s.dataset.since = "true";
     hoverTip(s, n - f0, (k) => {
