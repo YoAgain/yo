@@ -300,13 +300,14 @@ struct YoBackView: View {
       if entry.sent?.back == true {
         SentLabel(wide: family == .accessoryRectangular)
       } else if family == .accessoryRectangular {
-        // "Yo back · Sora, 2m": who Yo'd you last, and when.
+        // The Yo-back symbol says what it does; beside it who Yo'd you last, and when ("Sora", "2m").
         HStack(spacing: 8) {
           Image("yo.back").font(.system(size: 30, weight: .bold)).widgetAccentable()
           VStack(alignment: .leading, spacing: 0) {
-            Text(verbatim: productText(text: .yoBack, lang: .english)).font(.yo(17, relativeTo: .headline))
-            Text(verbatim: entry.lastName.map { "\($0), \(entry.lastAge ?? "")" } ?? productText(text: .noAnswerYet, lang: .english))
-              .font(.system(size: 13, weight: .semibold))
+            Text(verbatim: entry.lastName ?? productText(text: .noAnswerYet, lang: .english)).font(.yo(17, relativeTo: .headline))
+            if let age = entry.lastAge, entry.lastName != nil {
+              Text(verbatim: age).font(.system(size: 13, weight: .semibold))
+            }
           }
           .lineLimit(1)
           .minimumScaleFactor(0.6)
@@ -317,7 +318,10 @@ struct YoBackView: View {
       } else {
         VStack(spacing: 1) {
           Image("yo.back").font(.system(size: 18, weight: .bold)).widgetAccentable()
-          Text(productText(text: .yoBack, lang: .english)).font(.yo(11, relativeTo: .caption)).lineLimit(1).minimumScaleFactor(0.6)
+          // Who it would Yo back (the symbol says what), as the friend widget shows its friend.
+          if let name = entry.lastName {
+            Text(verbatim: name).font(.yo(11, relativeTo: .caption)).lineLimit(1).minimumScaleFactor(0.6)
+          }
         }
         .padding(4)
       }
