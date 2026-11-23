@@ -127,15 +127,10 @@ extension FriendList {
     let at = Date.now
     if !library.isEmpty {
       for item in library {
-        run(friend, item.video == nil ? BarSendText.sentPhoto : BarSendText.sentVideo, origin: origin) { thumbnail in
+        run(friend, item.isVideo ? BarSendText.sentVideo : BarSendText.sentPhoto, origin: origin) { thumbnail in
           if let image = item.thumbnail { thumbnail(image) }
-          let file: MediaFile?
-          if let video = item.video {
-            file = video
-          } else {
-            let data = item.data
-            file = await Task.detached { MediaFile.photo(data) }.value
-          }
+          // Made while it was shown: ready by now, or awaited here, under the undo ring.
+          let file = await item.file.value
           guard !Task.isCancelled, let file else { return nil }
           return await stage(file, to: friend, from: client, at: at)
         }

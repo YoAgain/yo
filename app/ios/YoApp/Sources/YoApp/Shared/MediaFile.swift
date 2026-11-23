@@ -28,16 +28,25 @@ struct MediaFile: Sendable {
 
   /// HEIC (every reader decodes it), upright, at most `longestSide`, pixels only (no place, camera or date).
   static func photo(_ data: Data) -> MediaFile? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return failed() }
+    guard let image = sized(data) else { return failed() }
+    return photo(image)
+  }
+
+  /// The picture decoded once, upright, at most `longestSide`: what a photo sends, and what it shows before.
+  static func sized(_ data: Data) -> CGImage? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
     let options: [CFString: Any] = [
       kCGImageSourceCreateThumbnailFromImageAlways: true,
       kCGImageSourceCreateThumbnailWithTransform: true,  // upright, as it was taken
       kCGImageSourceThumbnailMaxPixelSize: longestSide,
       kCGImageSourceShouldCacheImmediately: true,
     ]
-    guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-      let image = onWhite(thumbnail)
-    else { return failed() }
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+  }
+
+  /// A `sized` picture as it goes: on white where it has alpha, HEIC without metadata.
+  static func photo(_ sized: CGImage) -> MediaFile? {
+    guard let image = onWhite(sized) else { return failed() }
     let out = NSMutableData()
     guard let destination = CGImageDestinationCreateWithData(out, UTType.heic.identifier as CFString, 1, nil)
     else { return failed() }

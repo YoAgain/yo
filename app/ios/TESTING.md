@@ -311,6 +311,17 @@ On the standing "iPhone 17 Pro" Simulator as Hez, two throwaway CLI accounts (de
 | Settings rows, Help & About ("1.0.0"), Send Feedback, Status, Identity, Contacts card, Blocked, App Icon, Your Code, dark mode, largest Dynamic Type | ok; `account-layout` had stopped at the Passkey screen's X: fixed |
 | Share extension from Photos, widget gallery | not tried: the Simulator showed neither the share sheet nor the widget gallery's content |
 
+## Library pick speed (2026-11-23)
+
+"Loading selected media…" stayed for seconds. Release build in the standing Simulator, from Done in the picker to the
+selection on screen (`pick.start` to `pick.shown` with `YO_PERF`): a 48-megapixel HEIC 3.4 s before, 1.9–2.1 s after;
+a 4032×3024 PNG with alpha 1.9 s → 0.75 s; an 8-second 4K video 23.4 s → 0.5 s; all three 25.8 s → 2.1 s (taps
+allowed at 2.7 s). Before, each item was loaded in turn, transcoded by the picker (`.automatic`), decoded three
+times (screen, thumbnail, again at the send), and a video was exported to a Yo's limits before anything showed.
+Now the picker hands over the original (`.current`), up to three load side by side, one decode at the send size
+serves the screen, the thumbnail and the HEIC, and a video shows with its first frame while its export runs on (the
+tap awaits it under the undo ring). The rest of a 48 MP HEIC's time is its decode.
+
 ## Left
 
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).

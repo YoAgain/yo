@@ -8,31 +8,59 @@ import YoCore
 import _PhotosUI_SwiftUI
 
 extension FriendList {
-  /// A photo from the library, decoded and scaled once (a 48-megapixel photo decoded at each redraw stalled the list).
+  /// Media from the library, shown as soon as its picture is decoded (once, at the size it is sent); the bytes it
+  /// goes as are made meanwhile, off the main actor, and a tap awaits them only if they are not ready yet.
   struct Picked: Equatable {
-    let data: Data
-    var video: MediaFile? = nil
     let image: UIImage
     let thumbnail: UIImage?
+    let isVideo: Bool
+    let file: Task<MediaFile?, Never>
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-      lhs.data == rhs.data && lhs.video?.data == rhs.video?.data
-        && lhs.image === rhs.image && lhs.thumbnail === rhs.thumbnail
+      lhs.file == rhs.file && lhs.image === rhs.image && lhs.thumbnail === rhs.thumbnail
     }
 
-    static func make(_ data: Data) async -> Picked? {
-      await Task.detached(priority: .userInitiated) {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        let options: [CFString: Any] = [
-          kCGImageSourceCreateThumbnailFromImageAlways: true,
-          kCGImageSourceCreateThumbnailWithTransform: true,
-          kCGImageSourceThumbnailMaxPixelSize: 2868,
-          kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let pixels = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-        return Picked(data: data, image: UIImage(cgImage: pixels),
-                      thumbnail: FriendList.decodeOutgoingThumbnail(data))
+    /// A photo: one decode serves the screen, the bar's thumbnail and the HEIC that goes.
+    static func photo(_ data: Data) async -> Picked? {
+      await Task.detached(priority: .userInitiated) { () -> Picked? in
+        guard let sized = MediaFile.sized(data) else { return nil }
+        // The screen's own decoded copy: drawing never waits on the encoder reading `sized` (it held the main
+        // thread for the encode's length).
+        let shown = UIImage(cgImage: sized).preparingForDisplay() ?? UIImage(cgImage: sized)
+        let file = Task.detached(priority: .userInitiated) { MediaFile.photo(sized) }
+        return Picked(image: shown, thumbnail: FriendList.scaled(sized, to: 360), isVideo: false, file: file)
       }.value
+    }
+  }
+
+  /// A picked video as a file of its own (not its bytes in memory), copied out before the picker removes it.
+  struct PickedMovie: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+      FileRepresentation(contentType: .movie) { SentTransferredFile($0.url) } importing: { received in
+        let ending = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+        let copy = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).\(ending)")
+        try FileManager.default.copyItem(at: received.file, to: copy)
+        return Self(url: copy)
+      }
+    }
+  }
+
+  /// What a library item gave before its turn in the selection's order.
+  enum Fetched: Sendable {
+    case photo(Picked)
+    case movie(URL)
+  }
+
+  /// `image` at most `side` pixels long, for the bar's thumbnail.
+  nonisolated static func scaled(_ image: CGImage, to side: Int) -> UIImage? {
+    let scale = min(1, CGFloat(side) / CGFloat(max(image.width, image.height)))
+    let size = CGSize(width: max(1, (CGFloat(image.width) * scale).rounded()),
+                      height: max(1, (CGFloat(image.height) * scale).rounded()))
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+      UIImage(cgImage: image).draw(in: CGRect(origin: .zero, size: size))
     }
   }
 
@@ -149,8 +177,9 @@ extension FriendList {
     ZStack {
       settingsButton.opacity(cameraOn ? 0 : 1).allowsHitTesting(!cameraOn).accessibilityHidden(cameraOn)
       if cameraOn || cameraPrepared {
+        // `.current`: the item as it is stored, never transcoded first (`.automatic` took seconds for a large photo).
         PhotosPicker(selection: $libraryItems, maxSelectionCount: 10, selectionBehavior: .ordered,
-                   matching: .any(of: [.images, .videos])) {
+                     matching: .any(of: [.images, .videos]), preferredItemEncoding: .current) {
           Label("Photo Library", systemImage: "photo.on.rectangle")
         }
         .opacity(cameraOn ? 1 : 0).allowsHitTesting(cameraOn).accessibilityHidden(!cameraOn)
@@ -215,51 +244,94 @@ extension FriendList {
     zoom = 1
   }
 
-  /// Loads in selection order; a selection superseded by another pick or closed cannot land.
+  /// Fetches and decodes the items side by side (at most three at once), shows them in selection order as each is
+  /// ready; a video's export runs on after its first frame shows. A selection superseded by another pick or closed
+  /// cannot land.
   func load(_ items: [PhotosPickerItem]) {
     picked = []
     libraryLoading = !items.isEmpty
     guard !items.isEmpty else { return }
+    Perf.mark("pick.start \(items.count)")
     Task {
-      var made: [Picked] = []
-      for item in items {
-        guard libraryItems == items else { return }
-        guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-        if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
-          let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
-          do {
-            try await Task.detached { try data.write(to: url) }.value
-            var source = url
-            // Longer than a Yo's video: trimmed; closed, left out; where it cannot cut, refused.
-            if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
-              let result = await VideoTrim.run(url) { videoTrim = $0 }
-              Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
-              switch result {
-              case .cut(let cut): source = cut
-              case .cancelled: continue
-              case .failed:
-                problem = (productText(text: .videoTooLong, lang: .english) + " · " + productVideoLimitLabel(), "")
-                continue
-              }
+      await withTaskGroup(of: (Int, Fetched?).self) { group in
+        var next = 0
+        func add() {
+          guard next < items.count else { return }
+          let (index, item) = (next, items[next])
+          next += 1
+          group.addTask {
+            if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
+              return (index, (try? await item.loadTransferable(type: PickedMovie.self)).map { .movie($0.url) })
             }
-            let image = await Self.outgoingVideoThumbnail(source)
-            // Export applies the same limits as camera video and removes the temporary source.
-            let video = await MediaFile.video(source)
-            if let video, let image {
-              made.append(Picked(data: Data(), video: video, image: image, thumbnail: image))
-            }
-          } catch {
-            Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
+            guard let data = try? await item.loadTransferable(type: Data.self) else { return (index, nil) }
+            Perf.mark("pick.fetched \(index) \(data.count)")
+            return (index, await Picked.photo(data).map { .photo($0) })
           }
-        } else if let photo = await Picked.make(data) {
-          made.append(photo)
+        }
+        for _ in 0..<3 { add() }
+        var ready: [Int: Fetched?] = [:]
+        var shown = 0
+        var made: [Picked] = []
+        while let (index, fetched) = await group.next() {
+          add()
+          guard libraryItems == items else {
+            group.cancelAll()
+            if case .movie(let url) = fetched { Self.removeLater(url) }
+            continue
+          }
+          ready[index] = fetched
+          // In order: a later item waits for the earlier ones (and a long video's trimmer, one at a time).
+          while let one = ready.removeValue(forKey: shown) {
+            shown += 1
+            guard libraryItems == items else {
+              if case .movie(let url) = one { Self.removeLater(url) }
+              continue
+            }
+            switch one {
+            case .photo(let photo): made.append(photo)
+            case .movie(let url): if let video = await pickedVideo(url) { made.append(video) }
+            case nil: break
+            }
+            if libraryItems == items {
+              if picked.isEmpty && !made.isEmpty { Perf.mark("pick.shown \(made.count)") }
+              picked = made
+            }
+          }
         }
       }
       if libraryItems == items {
-        picked = made
         libraryLoading = false
+        Perf.mark("pick.ready \(picked.count)")
       }
     }
+  }
+
+  nonisolated static func removeLater(_ url: URL) {
+    Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
+  }
+
+  /// A picked video: trimmed first where it is longer than a Yo's (closed, left out; where it cannot cut, refused),
+  /// shown with its first frame, and exported to a Yo's limits in the background (which removes the source).
+  func pickedVideo(_ url: URL) async -> Picked? {
+    var source = url
+    if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
+      let result = await VideoTrim.run(url) { videoTrim = $0 }
+      Self.removeLater(url)
+      switch result {
+      case .cut(let cut): source = cut
+      case .cancelled: return nil
+      case .failed:
+        problem = (productText(text: .videoTooLong, lang: .english) + " · " + productVideoLimitLabel(), "")
+        return nil
+      }
+    }
+    guard let image = await Self.outgoingVideoThumbnail(source) else {
+      Self.removeLater(source)
+      return nil
+    }
+    let export = source
+    return Picked(image: image, thumbnail: image, isVideo: true,
+                  file: Task(priority: .userInitiated) { await MediaFile.video(export) })
   }
 
   func cameraSwitched(_ on: Bool) {
