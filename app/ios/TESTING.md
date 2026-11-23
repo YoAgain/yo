@@ -292,6 +292,25 @@ far off is stood in for by `launch env=YO_HUB:https://expired.badssl.com` (the s
 | State database corrupted, launch | 30 s "Offline", then the recovery's registration and every later Sign In failed in the unreadable file ("Something went wrong") until Yo was deleted: the reset removes it, the app signs in again by itself: fixed |
 | Identity key change of a contact | not reachable from a client: an account key stays one user's (spec 3.2); a reinstall without the backup is a new person (above). The alert's path pointed to "Profile": fixed |
 
+## Controls, groups, transparent photos, top bar (2026-11-23, hunt 8)
+
+On the standing "iPhone 17 Pro" Simulator as Hez, two throwaway CLI accounts (deleted). Real pushes arrive there now.
+`drive.py DIR lock` presses the side button; the Lock Screen's Control Center is pulled down as on the Home Screen.
+
+| Flow | Result |
+|---|---|
+| Send Yo control without a friend (configuration skipped), unlocked and from the Lock Screen, app running or not | did nothing: opens Yo (SendYoNowIntent continues in the foreground): fixed |
+| Send Yo control with a friend, Yo Back control, from the Lock Screen | sent; the island showed |
+| The control's friend picker with a group whose name brings its "#" | "##HUNT4": one "#": fixed |
+| Gallery of controls ("Add a Control") | Send Yo, Yo Back, Open Yo without their symbol in the Simulator: SpringBoard looked for them in an earlier install's bundle (log "No image named 'yo.wordmark'" with an old container path); in Control Center they show |
+| Push with the app in the background: friend, three in a row, group, request | "Yo from Hunt8Ann" (one each, stacked, badge 3), "Yo from Hunt8Ann in #Fam8", "Yo Request from Hunt8Ben"; opening Yo clears them |
+| Burst of 10 (`hold=0.6 away=…`), Trash and its Undo banner, Add Friend, request accept / decline / long press | ok; the first bar stays whole under the banner |
+| New group, Rename (also to a name with "#"), swipe Leave | ok; a renamed group's menu said "No Yo yet" (statistics by name): kept now; "Leave H8G" named it without its "#": fixed |
+| Transparent PNG, and a float TIFF with alpha, from the library | the PNG arrives on white; the TIFF was not sent at all (extended-range space refused by onWhite's 8-bit context): fixed |
+| Offline banner | first bar whole under it; VoiceOver had the dots as a second element: fixed |
+| Settings rows, Help & About ("1.0.0"), Send Feedback, Status, Identity, Contacts card, Blocked, App Icon, Your Code, dark mode, largest Dynamic Type | ok; `account-layout` had stopped at the Passkey screen's X: fixed |
+| Share extension from Photos, widget gallery | not tried: the Simulator showed neither the share sheet nor the widget gallery's content |
+
 ## Left
 
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
