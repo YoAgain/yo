@@ -17,6 +17,13 @@ const BUSY: Duration = Duration::from_secs(3);
 /// How long the checkpoint after a write waits for other connections (Signal's `maxBusyTimeoutMs`).
 const CHECKPOINT_BUSY: Duration = Duration::from_millis(50);
 
+/// A save whose turn was taken back meanwhile (iOS ended the background time, an extension's request ended): the
+/// step runs again in a later turn. Not a failure of the database, so never reported as one (`cipher::report_failure`).
+pub const TURN_ENDED: &str = "the turn on the state ended";
+/// A save over a state that is no longer the one in the database although the turn was held: another writer went
+/// without the turn. Reported ("Stale"): it would be a bug.
+pub const STALE: &str = "an older state";
+
 /// A database snapshot for a live client. Encrypted tables can be loaded without sealing them again.
 pub enum Loaded {
     Same,
@@ -174,8 +181,12 @@ impl StateDb {
             let clears = self.snapshot().1;
             let mut conn = cipher.connect(&self.path, false)?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(cipher::sqlite_error)?;
+            // The turn first: a turn taken back lets another process write, and its newer state is no stale save.
+            if held.is_some_and(|held| !held()) {
+                return Err(Error::Save(TURN_ENDED.into()));
+            }
             if cipher::Cipher::word(&tx)?.as_deref() != known {
-                return Err(Error::Save("an older state".into()));
+                return Err(Error::Save(STALE.into()));
             }
             // The rows of the state replaced, if they are the ones known here (checked against the word above).
             let baseline = self.snapshot().0.take().filter(|s| Some(s.word.as_str()) == known);
@@ -183,7 +194,7 @@ impl StateDb {
             let word = new_word();
             cipher::Cipher::set_word(&tx, Some(&word))?;
             if held.is_some_and(|held| !held()) {
-                return Err(Error::Save("the turn on the state ended".into()));
+                return Err(Error::Save(TURN_ENDED.into()));
             }
             tx.commit().map_err(cipher::sqlite_error)?;
             self.keep(clears, Snapshot { word: word.clone(), rows });
@@ -260,7 +271,7 @@ impl DbStore {
 impl DbStore {
     fn save_with(&self, write: impl FnOnce(Option<&str>) -> Result<String>) -> std::result::Result<(), String> {
         if self.held.as_ref().is_some_and(|held| !held()) {
-            return Err("the turn on the state ended".into());
+            return Err(TURN_ENDED.into());
         }
         let mut known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
         let word = write(known.as_deref()).map_err(|error| match error {
@@ -419,6 +430,27 @@ mod tests {
         state.next_seq += 1;
         assert!(store.save_state(&state, Default::default()).is_err());
         assert!(matches!(db.load(Some(&word), &KEY).unwrap(), Loaded::Same));
+    }
+
+    /// A turn taken back is no failure of the database (iOS ended the time; not counted), a stale save under a held
+    /// turn is ("Stale"); a turn taken back while another process wrote says the turn ended, not stale.
+    #[test]
+    fn a_turn_taken_back_is_not_reported_and_a_stale_save_is() {
+        let dir = Dir::new("report");
+        let kinds = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = kinds.clone();
+        let report: Report = Arc::new(move |kind| seen.lock().unwrap().push(kind));
+        let db = StateDb::open_fresh(dir.0.join("state.sqlite"), KEY, report).unwrap();
+        let mut state = initial();
+        let first = write(&db, None, &state).unwrap();
+        state.next_seq += 1;
+        write(&db, Some(&first), &state).unwrap();
+        let ended = db.write_tables(Some(&first), &state, &Default::default(), Some(&|| false));
+        assert!(matches!(ended, Err(Error::Save(kind)) if kind == TURN_ENDED));
+        assert!(kinds.lock().unwrap().is_empty());
+        let stale = db.write_tables(Some(&first), &state, &Default::default(), Some(&|| true));
+        assert!(matches!(stale, Err(Error::Save(kind)) if kind == STALE));
+        assert_eq!(*kinds.lock().unwrap(), ["Stale"]);
     }
 
     /// The snapshot read or written last is the baseline: a small save after opening (with full dedup lists) reads

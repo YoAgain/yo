@@ -49,9 +49,13 @@ fn io_error(_: std::io::Error) -> Error {
     Error::Save("Io".into())
 }
 
+/// What the database failed with, as a fixed kind for counted diagnostics. A turn taken back is not the database's
+/// failure (`TURN_ENDED`): not reported.
 pub(super) fn report_failure(report: &Report, error: &Error) {
     const KINDS: [&str; 7] = ["Busy", "Full", "Io", "InvalidDatabase", "Constraint", "UnsupportedVersion", "Sqlite"];
     let kind = match error {
+        Error::Save(kind) if kind == super::TURN_ENDED => return,
+        Error::Save(kind) if kind == super::STALE => "Stale",
         Error::Save(kind) if KINDS.contains(&kind.as_str()) => kind,
         Error::Save(_) => "Write",
         Error::State => "InvalidState",

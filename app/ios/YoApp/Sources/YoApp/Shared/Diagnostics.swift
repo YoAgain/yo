@@ -35,10 +35,8 @@ enum Diagnostics {
           code: name(yo), expected: true)
         return
       case .Save:
-        // The state's turn not had or ended (another process, background time over): the step runs again. A failure
-        // of the database itself is counted by the state (StateFailureCounts).
-        CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)", code: "Save",
-          expected: true)
+        // The database counts its own failures (StateFailureCounts). Otherwise iOS gave no background time
+        // ("Busy") or took the turn back. The step runs again.
         return
       default: break
       }
