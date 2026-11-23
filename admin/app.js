@@ -1254,6 +1254,8 @@ if (document.body.classList.contains("login")) {
   const todoChange = async (path, data) => {
     try { await postJSON(path, { hub: which, ...data }); await refresh(); } catch (e) { alert(e.message); }
   };
+  let showDone = false;
+  try { showDone = localStorage.getItem("todos-show-done") === "1"; } catch {}
   const todoBar = () => {
     const form = el("form", "add todoadd"), input = el("input");
     input.placeholder = "A new to-do (Enter)"; input.maxLength = 4000; input.setAttribute("aria-label", "New to-do");
@@ -1626,8 +1628,25 @@ if (document.body.classList.contains("login")) {
       if (t.name === "reserved") hr.append(el("th"));
       const body = table.createTBody();
       const todo = tableOpen === "v-todos", col = (n) => t.columns.indexOf(n);
-      if (todo) hr.append(el("th"));
-      for (const row of t.rows) {
+      let rows = t.rows;
+      if (todo) {
+        hr.append(el("th"));
+        const doneAt = col("done_at");
+        const openRows = rows.filter((row) => row[doneAt] == null);
+        const label = el("label", "todo-filter"), checkbox = el("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = showDone;
+        label.append(checkbox, `Show done (${num(rows.length - openRows.length)})`);
+        checkbox.addEventListener("change", () => {
+          showDone = checkbox.checked;
+          try { localStorage.setItem("todos-show-done", showDone ? "1" : "0"); } catch {}
+          tablesDrawn = "";
+          part(drawTables);
+        });
+        pane.append(label);
+        if (!showDone) rows = openRows;
+      }
+      for (const row of rows) {
         const tr = body.insertRow();
         // A to-do: its tick first (done or open again), a delete at the end.
         if (todo) {
@@ -1667,7 +1686,7 @@ if (document.body.classList.contains("login")) {
           cell(tr, x);
         }
       }
-      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : todo ? 2 : 0);
+      if (!rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : todo ? 2 : 0);
       wrap.append(table);
       pane.append(wrap);
       }
