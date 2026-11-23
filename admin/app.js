@@ -2351,7 +2351,20 @@ if (document.body.classList.contains("login")) {
     return box;
   };
   const sparkCard = (title, rows) => dcard(title, null, sparkRows(rows));
-  // The delivery rows (Speed, Queue, Push, Media queue): the first group of the Problems card.
+  const pushRow = (h) => {
+    const p = pushData, counts = healthData.ps, sum = (v) => v.reduce((x, y) => x + y, 0), at = (i) => ({ head: p.names[i], rows: [{ ico: "send", label: "Pushes sent", value: num(p.sent[i]) },
+      { label: "Taken", value: p.sent[i] ? pctText(100 * counts[i][0] / p.sent[i]) : "–" }, { label: "Failed", value: num(counts[i][1]) }, { label: "Folded, 1 s window", value: num(p.folded[i]) }, { label: "Folded, backlog", value: num(p.paced[i]) },
+      { label: "In backlog pacing now", value: h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices) }] });
+    const sent = sum(p.sent), [ok, failed] = healthData.psAll;
+    const taken = evSlots("push-ok"), failures = evSlots("push-fail");
+    const bars = taken.values.map((v, i) => (v || 0) + (failures.values[i] || 0));
+    let running = 0;
+    const line = [0, ...bars.map(v => (running += v))];
+    const chart = liveChart({ bars, line, ...axisOf(taken.names) }, "cool");
+    return { ico: "send", label: "Push", title: { head: "Push", nodes: bars.length >= 3 ? [chart] : [],
+      rows: [{ label: "Sent", value: num(sent) }, { label: "Taken", value: sent ? pctText(100 * ok / sent) : "–" },
+        { label: "Failed", value: num(failed) }] }, value: num(sent), values: p.sent, scls: "cool", tip: at };
+  };
   const perfRows = (h) => {
     const d = speedData, tot = (b) => b.reduce((a, v) => a + v, 0), { names, rows } = queueSlots(h);
     return ([
@@ -2370,18 +2383,6 @@ if (document.body.classList.contains("login")) {
           { ico: "send", label: "Yos", value: num(tot(d.lat[i])) }] : [{ ico: "send", label: "Yos", value: "none" }] }) },
       { ico: "clock", label: "Queue", value: num(h.messages), title: { head: "Yos waiting", rows: [{ label: "Queue", value: num(h.messages) }] }, values: rows.map((r) => r?.[0] ?? null), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ color: "#5dade2", label: "Yos waiting", value: rows[i] ? num(rows[i][0]) : "not kept" }] }) },
-      ...(pushData ? [(() => { const p = pushData, counts = healthData.ps, sum = (v) => v.reduce((x, y) => x + y, 0), at = (i) => ({ head: p.names[i], rows: [{ ico: "send", label: "Pushes sent", value: num(p.sent[i]) },
-          { label: "Taken", value: p.sent[i] ? pctText(100 * counts[i][0] / p.sent[i]) : "–" }, { label: "Failed", value: num(counts[i][1]) }, { label: "Folded, 1 s window", value: num(p.folded[i]) }, { label: "Folded, backlog", value: num(p.paced[i]) },
-          { label: "In backlog pacing now", value: h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices) }] });
-        const sent = sum(p.sent), [ok, failed] = healthData.psAll;
-        const taken = evSlots("push-ok"), failures = evSlots("push-fail");
-        const bars = taken.values.map((v, i) => (v || 0) + (failures.values[i] || 0));
-        let running = 0;
-        const line = [0, ...bars.map(v => (running += v))];
-        const chart = liveChart({ bars, line, ...axisOf(taken.names) }, "cool");
-        return { ico: "send", label: "Push", title: { head: "Push", nodes: bars.length >= 3 ? [chart] : [],
-          rows: [{ label: "Sent", value: num(sent) }, { label: "Taken", value: sent ? pctText(100 * ok / sent) : "–" },
-            { label: "Failed", value: num(failed) }] }, value: num(sent), values: p.sent, scls: "cool", tip: at }; })()] : []),
       { ico: "image", label: "Media queue", value: h.blobs ? bytes(h.blobs[1]) : "–", values: rows.map((r) => r?.[1] ?? null), scls: "cool",
         tip: (i) => ({ head: names[i], rows: [{ ico: "disk", label: "Media waiting", value: rows[i] ? bytes(rows[i][1]) : "not kept" }] }) },
     ]);
@@ -2663,7 +2664,7 @@ if (document.body.classList.contains("login")) {
       };
       const media = row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true);
       const groups = row("user", "Groups", "group-create", h.groups ?? 0, false);
-      $("uc-rows").replaceChildren(sparkRows([...statsRows(h), deviceRow(), groups], true));
+      $("uc-rows").replaceChildren(sparkRows([...statsRows(h), deviceRow(), groups, ...(pushData ? [pushRow(h)] : [])], true));
       $("delivery-rows").replaceChildren(sparkRows([...perfRows(h), media, ...botCards(h)], true));
     };
     // Secured: accounts with a backup, this week's new ones, and the share per sign-up day.
@@ -2765,7 +2766,7 @@ if (document.body.classList.contains("login")) {
     if (detailPending) { detailPending = false; drawDetail(); }
   });
   const openDetail = (key) => {
-    const target = { yc: "t-yc", uc: "t-uc", vr: "grp-vr", pr: "grp-pr", ps: "delivery-rows", dl: "delivery-rows" }[TOPIC(key)];
+    const target = { yc: "t-yc", uc: "t-uc", vr: "grp-vr", pr: "grp-pr", ps: "uc-rows", dl: "delivery-rows" }[TOPIC(key)];
     if (target) $(target).scrollIntoView({ behavior: "smooth", block: "start" });
   };
   serverHints();
