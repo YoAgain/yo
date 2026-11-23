@@ -42,7 +42,8 @@ if info["CFBundleIdentifier"].endswith(".dev"):
 
 own = plistlib.load(open(sys.argv[2], "rb"))
 for key, value in own.items():
-    if key in ("com.apple.developer.usernotifications.communication", "com.apple.developer.siri") and not entitlements.get(key):
+    if key in ("com.apple.developer.usernotifications.communication", "com.apple.developer.siri",
+               "com.apple.developer.carplay-communication") and not entitlements.get(key):
         print(f"sign.sh: {key} not on the app id, signed without it", file=sys.stderr)
         entitlements.pop(key, None)
         continue

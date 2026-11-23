@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- What the app claims on top of its provisioning profile (dev/sign.sh): the domain its passkeys belong to (it serves
      /.well-known/apple-app-site-association naming this app; the hub does, YO_APPLE_APP_IDS); the website's, whose
-     links justyo.co/NAME open the app (Invite.swift; its association file names Yo and Yo Dev); and push, communication notifications and
-     Siri messaging. The signing tools sign aps-environment as the profile grants it: development for Yo Dev,
+     links justyo.co/NAME open the app (Invite.swift; its association file names Yo and Yo Dev); and push, communication notifications,
+     Siri messaging and CarPlay as a communication app (Apple's managed capability: Yos read out and answered by Siri
+     in the car, no CarPlay screen of its own). The signing tools sign aps-environment as the profile grants it: development for Yo Dev,
      production for TestFlight and the App Store. -->
 <plist version="1.0">
 <dict>
@@ -12,6 +13,8 @@
 		<string>webcredentials:justyo.app</string>
 		<string>applinks:justyo.co</string>
 	</array>
+	<key>com.apple.developer.carplay-communication</key>
+	<true/>
 	<key>com.apple.developer.siri</key>
 	<true/>
 	<key>com.apple.developer.usernotifications.communication</key>

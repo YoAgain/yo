@@ -153,10 +153,11 @@ jobs:
 
       # OAD signs only the capabilities it knows (push, Sign in with Apple, Associated Domains, App Group); the app also
       # asks for Communication Notifications (a Yo shown as a message from its sender, Siri announce, CarPlay) and Siri
-      # (SiriKit messaging: send, read, mark read). Each is signed on the app as its profile grants it (enabled on the
+      # (SiriKit messaging: send, read, mark read) and CarPlay Communication (managed by Apple, granted for Yo and
+      # enabled in the developer portal: Yos announced and answered in CarPlay). Each is signed on the app as its profile grants it (enabled on the
       # app id); one the profile does not grant is left out with a warning (the notification then shows plainly, the
       # sender's name as title). Patched into this checkout only; fails if the tool changed.
-      - name: OAD, Communication Notifications and Siri entitlements
+      - name: OAD, Communication Notifications, Siri and CarPlay entitlements
         run: |
           python3 -I - .oad/tools/asc.py <<'EOF'
           import sys
@@ -168,7 +169,8 @@ jobs:
               "        if path == Path(app_dir) and os.environ.get('ASC_ENTITLEMENTS_PATH'):\n"
               "            with Path(os.environ['ASC_ENTITLEMENTS_PATH']).open('rb') as f:\n"
               "                own = plistlib.load(f)\n"
-              "            for key in ('com.apple.developer.usernotifications.communication', 'com.apple.developer.siri'):\n"
+              "            for key in ('com.apple.developer.usernotifications.communication', 'com.apple.developer.siri',\n"
+              "                        'com.apple.developer.carplay-communication'):\n"
               "                if own.get(key) is True:\n"
               "                    if granted.get(key) is True:\n"
               "                        entitlements[key] = True\n"
@@ -420,6 +422,25 @@ jobs:
           (. ./xtool.env && ~/pymobile3-venv/bin/python "$GITHUB_WORKSPACE/.oad/tools/asc.py" validate "$PWD/xtool/YoApp.ipa")
           ../dev/stickers.sh --support xtool/YoApp.ipa
           unzip -l xtool/YoApp.ipa | grep -q " MessagesApplicationExtensionSupport/MessagesApplicationExtensionStub$"
+
+      # Communication Notifications, Siri and CarPlay Communication as signed on the app that goes up: without them a
+      # Yo is no message from its sender, Siri cannot send or read Yos and CarPlay leaves Yo out. Fatal, before the
+      # upload, as the App Group.
+      - name: Messaging entitlements
+        working-directory: app/ios/YoApp
+        run: |
+          codesign -d --entitlements :- xtool/YoApp.app > "$RUNNER_TEMP/signed.plist"
+          ~/pymobile3-venv/bin/python -I - "$RUNNER_TEMP/signed.plist" <<'EOF'
+          import plistlib, sys
+          signed = plistlib.loads(open(sys.argv[1], "rb").read())
+          keys = ("com.apple.developer.usernotifications.communication", "com.apple.developer.siri",
+                  "com.apple.developer.carplay-communication")
+          missing = [k for k in keys if signed.get(k) is not True]
+          print("signed: " + ", ".join(f"{k}={signed.get(k)}" for k in keys))
+          if missing:
+              print(f"::error::YoApp.app: signed without {missing} (not on the app id or its profile)")
+              sys.exit(1)
+          EOF
 
       - name: Upload
         working-directory: app/ios/YoApp
