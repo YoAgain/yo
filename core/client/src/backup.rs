@@ -99,6 +99,10 @@ fn unwrap_k(wrapped: &[u8], door: &Door) -> Option<[u8; 32]> {
 /// A record for the hub: K under the recovery key and, as `passkey` says, the passkey; `plain` padded and sealed
 /// under K; the locator; the doors' auth keys.
 pub fn make(k: &[u8; 32], plain: &[u8], code: &AccountEntropyPool, passkey: PasskeyDoor) -> Result<Backup> {
+    // A PRF output is 32 bytes (WebAuthn's PRF extension): anything shorter, an empty one above all, is a door anyone opens.
+    if matches!(passkey, PasskeyDoor::New(prf) if prf.len() != 32) {
+        return Err(Error::Protocol("passkey prf"));
+    }
     let (by_passkey, auth_passkey) = match passkey {
         PasskeyDoor::None => (Vec::new(), None),
         PasskeyDoor::New(prf) => {
@@ -212,6 +216,9 @@ mod tests {
             assert_eq!((opened.k, opened.plain.as_slice()), (k, &b"{\"account\":1}"[..]));
         }
         assert!(open(record.clone(), &Door::Passkey(&[3; 32])).is_none());
+        for short in [&[][..], &[2; 16][..]] {
+            assert!(make(&k, b"{}", &code, PasskeyDoor::New(short)).is_err(), "no door from a PRF that is not one");
+        }
         assert!(open(record.clone(), &Door::Code(&new_recovery_key())).is_none());
         let without = make(&k, b"{}", &code, PasskeyDoor::None).unwrap();
         assert!(without.by_passkey.as_slice().is_empty() && without.auth_keys().0.is_none());
