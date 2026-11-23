@@ -112,6 +112,12 @@ pub struct Requests {
     buckets: Mutex<Buckets>,
 }
 
+/// A request bucket, its tokens now and ms per token.
+type Level = ((u8, Vec<u8>), f64, f64);
+
+/// The buckets a request took from (`Requests::reserve`).
+pub struct Reserved(Vec<(u8, Vec<u8>)>);
+
 impl Requests {
     pub fn new(pair: u64, recipients: u64, per_recipient: u64, hour_ms: u64) -> Self {
         Requests { pair, recipients, per_recipient, hour_ms: hour_ms.max(1), buckets: Mutex::default() }
@@ -138,27 +144,29 @@ impl Requests {
     }
 
     /// The buckets a request counts in, with tokens and ms per token; new recipients' only for one new to the sender.
-    fn levels(&self, buckets: &Buckets, sender: &[u8], recipient: &[u8], now: u64) -> Vec<((u8, Vec<u8>), f64, f64)> {
+    fn levels(&self, buckets: &Buckets, sender: &[u8], recipient: &[u8], now: u64) -> Vec<Level> {
         let keys = [(0, [sender, recipient].concat()), (1, sender.to_vec()), (2, recipient.to_vec())];
         let new = self.level(buckets, &keys[0], now).is_none_or(|(tokens, _)| tokens >= self.pair as f64);
         let counted = keys.into_iter().filter(|(kind, _)| *kind != 1 || new);
         counted.filter_map(|key| self.level(buckets, &key, now).map(|(tokens, every)| (key, tokens, every))).collect()
     }
 
-    /// `Err` with the empty bucket and the ms until a token (`Retry-After`); takes nothing (`take` does, once stored).
-    pub fn check(&self, sender: &[u8], recipient: &[u8], now: u64) -> Result<(), (&'static str, u64)> {
-        let buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+    /// The emptiest bucket of `levels` below one token, and the ms until it has one (`Retry-After`).
+    fn empty(levels: &[Level]) -> Option<(&'static str, u64)> {
         let mut longest: Option<(&'static str, u64)> = None;
-        for ((kind, _), tokens, every) in self.levels(&buckets, sender, recipient, now) {
+        for ((kind, _), tokens, every) in levels {
             let wait = ((1.0 - tokens) * every).ceil() as u64;
-            if tokens < 1.0 && longest.is_none_or(|(_, longest)| wait > longest) {
-                longest = Some((["pair", "new", "recipient"][kind as usize], wait));
+            if *tokens < 1.0 && longest.is_none_or(|(_, longest)| wait > longest) {
+                longest = Some((["pair", "new", "recipient"][*kind as usize], wait));
             }
         }
-        match longest {
-            None => Ok(()),
-            Some(empty) => Err(empty),
-        }
+        longest
+    }
+
+    /// `Err` with the empty bucket and the ms until a token (`Retry-After`); takes nothing.
+    pub fn check(&self, sender: &[u8], recipient: &[u8], now: u64) -> Result<(), (&'static str, u64)> {
+        let buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::empty(&self.levels(&buckets, sender, recipient, now)).map_or(Ok(()), Err)
     }
 
     /// A request stored: one token from each of its buckets.
@@ -166,6 +174,33 @@ impl Requests {
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
         for (key, tokens, _) in self.levels(&buckets, sender, recipient, now) {
             buckets.insert(key, ((tokens - 1.0).max(0.0), now));
+        }
+    }
+
+    /// `check` and `take` at once, before the request is stored: requests sent together cannot all pass one
+    /// token. The buckets taken from, for `give_back` when it is not stored.
+    pub fn reserve(&self, sender: &[u8], recipient: &[u8], now: u64) -> Result<Reserved, (&'static str, u64)> {
+        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        let levels = self.levels(&buckets, sender, recipient, now);
+        if let Some(empty) = Self::empty(&levels) {
+            return Err(empty);
+        }
+        let mut taken = Vec::with_capacity(levels.len());
+        for (key, tokens, _) in levels {
+            buckets.insert(key.clone(), ((tokens - 1.0).max(0.0), now));
+            taken.push(key);
+        }
+        Ok(Reserved(taken))
+    }
+
+    /// A reserved request not stored after all: its tokens back.
+    pub fn give_back(&self, reserved: Reserved, now: u64) {
+        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        for key in reserved.0 {
+            if let Some((tokens, _)) = self.level(&buckets, &key, now) {
+                let size = self.shape(key.0).map_or(tokens, |(size, _)| size);
+                buckets.insert(key, ((tokens + 1.0).min(size), now));
+            }
         }
     }
 
@@ -263,5 +298,15 @@ mod tests {
         assert!(cache.first_time([1; 64], 0, 100));
         assert!(!cache.first_time([1; 64], 50, 150));
         assert!(cache.first_time([1; 64], 101, 200));
+    }
+
+    #[test]
+    fn a_reservation_holds_its_token_until_given_back() {
+        let r = Requests::new(1, 20, 1000, 3_600_000);
+        let (a, b) = (&[1u8][..], &[2u8][..]);
+        let first = r.reserve(a, b, 0).expect("a token");
+        assert!(r.reserve(a, b, 0).is_err(), "requests sent together share the one token");
+        r.give_back(first, 0);
+        assert!(r.reserve(a, b, 0).is_ok(), "a request not stored gives its token back");
     }
 }

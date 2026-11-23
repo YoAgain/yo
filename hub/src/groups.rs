@@ -177,6 +177,10 @@ impl Hub {
 
     /// The group, or changed one revision on (`409` with the group as it is); the last member out ends it.
     pub(crate) fn group_request(&self, id: &[u8; api::GROUP_ID_LEN], request: &api::GroupRequest) -> Res<GroupAnswer> {
+        // No change needs more (every member out and others in, a title, a key): refused before any proof is checked.
+        if request.actions.len() > 2 * MAX_GROUP + 2 {
+            return Err(bad());
+        }
         let (params, mut state) = self.group(id)?;
         let me = self.presenter(&params, request.auth.as_slice())?;
         if !state.members.iter().any(|m| m.user.as_slice() == me) {
@@ -400,6 +404,11 @@ mod tests {
             actions: vec![GroupAction { kind: api::ACTION_ADD, data: yo_wire::encode(&invited(who, &secret)).into() }],
         };
         assert_eq!(hub.group_request(&id, &add(&cleo)).unwrap().state.members.len(), 3);
+        // More actions than any change needs: refused before a proof is checked (each costs the hub milliseconds).
+        let mut many = add(&[5; 16]);
+        many.revision = 3;
+        many.actions = vec![many.actions[0].clone(); 2 * MAX_GROUP + 3];
+        assert_eq!(hub.group_request(&id, &many).unwrap_err().0, StatusCode::BAD_REQUEST);
         let refused = hub.group_request(&id, &add(&[4; 16])).unwrap_err();
         assert_eq!(refused.0, StatusCode::CONFLICT);
         assert_eq!(yo_wire::decode::<GroupAnswer>(&refused.1).unwrap().state.revision, 2);

@@ -224,7 +224,7 @@ pub(crate) async fn put_access_key(State(hub): Hubs, Auth(device, body): Auth) -
         return Err(bad());
     }
     // `requests_open` is kept as told; the device drops strangers' requests itself.
-    hub.db.set_access_key(&device.user_id, &request.check, request.requests_open == 1, commitment)?;
+    hub.db.set_access_key(&device.device_id, &request.check, request.requests_open == 1, commitment)?.done()?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -19,7 +19,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Fill the disk without identity | 64 MiB/IP/hour of delivered bytes; `507` below 1 GiB free; 30-day TTL | many addresses: the floor holds, deliveries stop until cleanup |
 | Fill one user's inbox | 5000 per device, then `507` for that recipient only; strangers' deliveries 20/recipient/day, none with requests off (spec 4.10) | a contact's spam (block: the key rotates); scarce request tokens later (8) |
 | Tell contacts apart by the access key | One profile key per account (Signal's), its access key the same for every contact; the hub keeps a SHA-256 of the access key only, compared in constant time (4.10) | the hub learns a delivery is a contact's, and a key rotation after a block |
-| Spend another device's request budget | Counted only after the signature holds | – |
+| Spend another device's request budget | Counted only after the signature holds and is not a replay | – |
 | Hold every reading place with slow bodies | 64 of the 512 per address (`503` for it alone), 20 s per body | many addresses |
 | Hold memory with inbox waits | 4 inbox requests per device at once | – |
 | Use up a user's one-time prekeys | Lookups 50/device/day; last-resort Kyber prekey keeps sessions possible; replay of a last-resort message refused (4.1); refill below 16 | first messages then use the last resort (weaker forward secrecy for that message) |
@@ -40,7 +40,9 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 - Every signed route acts on the signer's own user, device or inbox; a blob needs its 128-bit id.
 - SQL: bound parameters only. Bodies: 65 KiB, blobs `Content-Length` ≤ 10 MiB, counted as they come.
 - Refusals carry a status and no text; logs carry no user text and no push token.
-- Growing tables: `feedback` (10/user/day), `gone` (a year).
+- Growing tables: `feedback` (10/user/day), `gone` (a year), `diagnostics` (8 MiB/IP/hour, `507` below the disk floor, 90 days).
+- In-memory buckets: a delivery to a user that does not exist is `404` before any is made for it; a request's
+  tokens are taken before it is stored and given back if it is not (requests sent at once share them).
 
 Open: `cargo audit` in CI.
 

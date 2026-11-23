@@ -99,6 +99,10 @@ fn diagnostic(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, body: &[u8
     if body.len() > MAX_DIAGNOSTIC {
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
+    // Each distinct report is a row of up to `MAX_DIAGNOSTIC` kept 90 days: bytes by address, and the disk's floor.
+    let per = hub.config.limits.diagnostic_bytes_per_ip_hour;
+    hub.limit_ip_bytes_as("diagnostic-bytes", peer.0, headers, body.len(), per)?;
+    hub.db_room()?;
     let payload: serde_json::Value = serde_json::from_slice(body).map_err(|_| bad())?;
     let fields = payload.as_object().ok_or_else(bad)?;
     const ALLOWED: [&str; 13] = [

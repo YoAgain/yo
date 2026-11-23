@@ -58,6 +58,8 @@ pub struct Limits {
     /// Crash and error reports by one install id, and from one address, an hour (spec 6.4).
     pub diagnostics_per_install_hour: u32,
     pub diagnostics_per_ip_hour: u32,
+    /// Their bytes from one address an hour: each distinct report is a row kept 90 days.
+    pub diagnostic_bytes_per_ip_hour: u64,
     /// The operator's to-dos from one address a day.
     pub todo_per_ip_day: u32,
     pub storage_per_user_hour: u32,
@@ -120,6 +122,7 @@ impl Default for Limits {
             help_per_ip_day: 200,
             diagnostics_per_install_hour: 300,
             diagnostics_per_ip_hour: 3000,
+            diagnostic_bytes_per_ip_hour: 8 * MIB,
             todo_per_ip_day: 5,
             storage_per_user_hour: 120,
             envelope_ttl_days: 30,
@@ -161,6 +164,7 @@ impl Limits {
             help_per_ip_day: u32::MAX,
             diagnostics_per_install_hour: u32::MAX,
             diagnostics_per_ip_hour: u32::MAX,
+            diagnostic_bytes_per_ip_hour: u64::MAX,
             todo_per_ip_day: u32::MAX,
             storage_per_user_hour: u32::MAX,
             blob_put_per_ip_minute: u32::MAX,

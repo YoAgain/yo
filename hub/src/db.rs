@@ -158,6 +158,8 @@ pub enum Admission {
     Request,
     /// No contact's (no key, or not the current one) and unsigned.
     Closed,
+    /// No such user: `404` before anything is counted for it.
+    Unknown,
 }
 
 /// What one user may store in blobs (spec 6.6).
@@ -689,14 +691,15 @@ impl Db {
     }
 
     /// A user's profile key check (spec 4.10), at once: the one before does no more.
+    /// Written as `device`, which must still be there (a replaced one is `410`).
     pub fn set_access_key(
         &self,
-        user: &UserId,
+        device: &DeviceId,
         check: &[u8; 32],
         requests_open: bool,
         commitment: &[u8],
-    ) -> rusqlite::Result<()> {
-        self.write(|tx| {
+    ) -> rusqlite::Result<Write<()>> {
+        self.as_device(device, |tx, user| {
             tx.prepare_cached(
                 "INSERT INTO contact_keys (user_id, current, requests_open) VALUES (?1, ?2, ?3)
                  ON CONFLICT(user_id) DO UPDATE SET current = ?2, requests_open = ?3",
@@ -707,7 +710,7 @@ impl Db {
                  ON CONFLICT(user_id) DO UPDATE SET commitment = ?2",
             )?
             .execute(params![user, commitment])?;
-            Ok(())
+            Ok(Write::Done(()))
         })
     }
 
@@ -736,7 +739,11 @@ impl Db {
     ) -> rusqlite::Result<Admission> {
         let current: Option<Vec<u8>> =
             row(&self.conn(), "SELECT current FROM contact_keys WHERE user_id = ?1", [user], |row| row.get(0))?;
-        let Some(current) = current else { return Ok(Admission::Contact) };
+        let Some(current) = current else {
+            // A made-up id must not leave a recipient's bucket behind (`inbound:<user>`, kept a day).
+            let known = self.conn().prepare_cached("SELECT 1 FROM users WHERE id = ?1")?.exists([user])?;
+            return Ok(if known { Admission::Contact } else { Admission::Unknown });
+        };
         // In constant time, as Signal compares an access key.
         if shown.is_some_and(|shown| bool::from(subtle::ConstantTimeEq::ct_eq(&current[..], &shown[..]))) {
             return Ok(Admission::Contact);
@@ -2931,11 +2938,24 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let users: Vec<UserId> = (1..=2u8).map(|i| user(register(&db, &[b'A' + i; 3], i, i, 0))).collect();
         let (spam, leo) = (&users[0], &users[1]);
-        db.set_access_key(leo, &[9; 32], true, &[1]).unwrap();
+        db.set_access_key(&[2; 16], &[9; 32], true, &[1]).unwrap().done().unwrap();
         assert_eq!(db.admit(leo, None, Some(spam)).unwrap(), Admission::Request);
         assert_eq!(db.admit(leo, None, None).unwrap(), Admission::Closed, "unsigned");
-        db.set_access_key(leo, &[9; 32], false, &[1]).unwrap();
+        db.set_access_key(&[2; 16], &[9; 32], false, &[1]).unwrap().done().unwrap();
         assert_eq!(db.admit(leo, None, Some(spam)).unwrap(), Admission::Request, "the switch is the device's");
+    }
+
+    /// A delivery to a user that does not exist is answered before anything is counted for it.
+    #[test]
+    fn a_delivery_to_no_user_is_unknown() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        assert_eq!(db.admit(&leo, None, None).unwrap(), Admission::Contact, "no key set: a contact's");
+        assert_eq!(db.admit(&[0xEE; 16], None, None).unwrap(), Admission::Unknown);
+        assert!(matches!(
+            db.set_access_key(&[0xEE; 16], &[9; 32], true, &[1]).unwrap(),
+            Write::Refused(Conflict::DeviceGone)
+        ));
     }
 
     /// An upload whose row went while it came (its account deleted meanwhile) is not marked done: its file is removed

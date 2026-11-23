@@ -338,6 +338,7 @@ pub(crate) async fn post_envelope(
             db::Admission::Contact => None,
             db::Admission::Request => sender,
             db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
+            db::Admission::Unknown => return Err(refuse(StatusCode::NOT_FOUND)),
         }
     };
     // A request past its buckets waits, for this recipient only (`429` with `Retry-After`); a bot account's never.
@@ -354,15 +355,30 @@ pub(crate) async fn post_envelope(
             .take_shaped(key, body.len() as u64, size, per, crate::request::HOUR)
             .map_err(|ms| error::limited("recipient", Some(ms.div_ceil(60_000).clamp(1, 60) * 60_000)))?;
     }
-    if let Some(sender) = &request {
-        hub.requests.check(sender, &user, hub.clock_ms()).map_err(|(scope, ms)| error::limited(scope, Some(ms)))?;
+    // Taken now, before the writer stores it (requests sent together must not pass one token), given back unless stored.
+    let reserved = match &request {
+        Some(sender) => Some(
+            hub.requests
+                .reserve(sender, &user, hub.clock_ms())
+                .map_err(|(scope, ms)| error::limited(scope, Some(ms)))?,
+        ),
+        None => None,
+    };
+    let give_back = |hub: &Hub, reserved: Option<crate::limiter::Reserved>| {
+        if let Some(reserved) = reserved {
+            hub.requests.give_back(reserved, hub.clock_ms());
+        }
+    };
+    if let Err(full) = hub.db_room() {
+        give_back(&hub, reserved);
+        return Err(full);
     }
-    hub.db_room()?;
 
     // To the writer; full (it is behind) or gone: "later", the envelope stays with its sender. Never waits here.
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
-    hub.deliveries
+    let sent = hub
+        .deliveries
         .try_send(Delivery {
             user,
             devices_hash,
@@ -373,13 +389,22 @@ pub(crate) async fn post_envelope(
             stored,
             runtime,
         })
-        .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
-    let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE));
+    let outcome = match &sent {
+        Ok(()) => outcome.await.ok().and_then(Result::ok),
+        Err(_) => None,
+    };
+    let Some(outcome) = outcome else {
+        give_back(&hub, reserved);
+        return Err(sent.err().unwrap_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR)));
+    };
+    if !matches!(outcome, Delivered::Stored(_)) {
+        give_back(&hub, reserved);
+    }
     match outcome {
         Delivered::Stored(_) => {
             if let Some(sender) = request {
                 let now = hub.clock_ms();
-                hub.requests.take(&sender, &user, now);
                 // Counted by its sender (the operator's "Requests 24h"); a contact's delivery never is.
                 if let Ok(Err(error)) = hub.blocking(move |hub| hub.db.count_request(&sender, now)).await {
                     eprintln!("yo-hub: count request: {error}");

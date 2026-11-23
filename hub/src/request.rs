@@ -161,13 +161,14 @@ impl Hub {
         let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
         yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
             .map_err(|_| unauthorized())?;
+        // A replay is refused before it is counted: whoever repeats a device's request must not spend its budget.
+        if !self.first_time(&signature, time, now) {
+            return Err(unauthorized());
+        }
         // Counted only once the signature holds: a stranger who knows a device id must not spend its requests.
         let signed = Signed { device_id, user_id: device.user_id };
         self.limit_signed(&signed, "signed", &device_id, self.config.limits.signed_per_device_minute, MINUTE)
             .map_err(|_| error::limited("device", None))?;
-        if !self.first_time(&signature, time, now) {
-            return Err(unauthorized());
-        }
         // Last seen counts only to the day (spec 6.4): one write a day; the app it names, when it changes.
         let app = named_app(headers);
         let new_app = app.is_some_and(|a| device.app.as_deref() != Some(a));
@@ -238,11 +239,23 @@ impl Hub {
 
     /// Bytes stored without identity, per address (deliveries stay up to `envelope_ttl_days`).
     pub(crate) fn limit_ip_bytes(&self, peer: SocketAddr, headers: &HeaderMap, bytes: usize) -> Res<()> {
+        self.limit_ip_bytes_as("bytes", peer, headers, bytes, self.config.limits.anonymous_bytes_per_ip_hour)
+    }
+
+    /// Bytes per address an hour in the bucket `kind`, `per` of them.
+    pub(crate) fn limit_ip_bytes_as(
+        &self,
+        kind: &str,
+        peer: SocketAddr,
+        headers: &HeaderMap,
+        bytes: usize,
+        per: u64,
+    ) -> Res<()> {
         if self.own_service(peer, headers) {
             return Ok(());
         }
-        let key = format!("bytes:ip:{}", self.ip(peer, headers));
-        match self.limiter.allow_n(key, bytes as u64, self.config.limits.anonymous_bytes_per_ip_hour, HOUR) {
+        let key = format!("{kind}:ip:{}", self.ip(peer, headers));
+        match self.limiter.allow_n(key, bytes as u64, per, HOUR) {
             true => Ok(()),
             false => Err(error::limited("bytes", None)),
         }
