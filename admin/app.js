@@ -465,7 +465,8 @@ if (document.body.classList.contains("login")) {
     const cf = h.crash_free?.[String(range)] || null, crashInstalls = cf ? cf[0] : null, seen = cf ? cf[1] : 0;
     const pi = h.problem_installs?.[String(range)] || null, days = { 1: 2, 7: 7, 30: 30, 0: 90 }[range], from = today0() - days + 1;
     const reports = (kind) => (h.diagnostic_days || []).filter((r) => r.day >= from && (!kind || r.kind === kind)).reduce((n, r) => n + r.count, 0);
-    problemTotals = { reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3], pi[4]], ["Android", pi[5], pi[6], pi[7]]] : [] };
+    const cb = h.current_build_installs?.[String(range)] || null;
+    problemTotals = { current: cb ? { phones: cb[0], hit: cb[1] } : null, reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3], pi[4]], ["Android", pi[5], pi[6], pi[7]]] : [] };
     healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
@@ -2756,6 +2757,7 @@ if (document.body.classList.contains("login")) {
           return { ico: "ios", label: "Error-free", value: pc(Math.max(0, pt.seen - pt.installs), pt.seen), node,
             title: { cap: 1, head: "Error-free", note: explanation, nodes: [mk(pt.seen, pt.installs, crash)],
               rows: [...three(pt.seen, pt.installs, crash),
+                { label: "On current builds", value: pt.current?.phones ? pc(Math.max(0, pt.current.phones - pt.current.hit), pt.current.phones) : "–" },
                 ...pt.platforms.filter(([, , n]) => n).flatMap(([l, hit, n, c]) => [{ section: l }, ...three(n, hit, c)])] } };
         })(),
       ];

@@ -277,6 +277,34 @@ def problem_installs(db, now: int):
     return out
 
 
+def current_build_installs(db, now: int):
+    """Per range (as crash_free): [phones on current builds, of them with an error or crash]. Current: builds under 24 hours
+    old by their id (`ios/YYYYMMDDHHMM`, UTC); the phones are the latest `build:<app>` levels of them, the problem phones the
+    distinct installs with a report from such a build since the range's first UTC day. Counts only; None on an older hub."""
+    if not (has_table(db, "diagnostic_installs") and has_table(db, "levels")):
+        return None
+    current = {}
+    for kind, value in db.execute("SELECT l.kind, l.value FROM levels l JOIN (SELECT kind, max(hour) AS hour FROM levels"
+                                  " WHERE kind LIKE 'build:%' GROUP BY kind) m ON m.kind = l.kind AND m.hour = l.hour"):
+        app = kind[6:]
+        try:
+            stamp = datetime.datetime.strptime(app.split("/", 1)[1], "%Y%m%d%H%M").replace(tzinfo=datetime.timezone.utc)
+        except (IndexError, ValueError):
+            continue
+        if app.split("/", 1)[0] in ("ios", "android") and 0 <= now - stamp.timestamp() * 1000 < DAY_MS:
+            current[app] = value
+    out = {}
+    for key, days in CRASH_FREE_DAYS.items():
+        first = now // DAY_MS - days + 1
+        hit = 0
+        if current:
+            marks = ",".join("?" * len(current))
+            hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                             f" WHERE i.day >= ? AND d.app IN ({marks}) AND d.os NOT LIKE 'mac%'", (first, *current)).fetchone()[0]
+        out[key] = [sum(current.values()), hit]
+    return out
+
+
 def daily_problem_installs(db, now: int):
     if not has_table(db, "diagnostic_installs"):
         return None
@@ -465,6 +493,7 @@ def hub(name: str, path: str) -> dict:
             "daily_problem_installs": part("daily_problem_installs", lambda: daily_problem_installs(db, now)),
             "problem_installs": part("problem_installs", lambda: problem_installs(db, now)),
             # Crash-free installs (estimated) per range: installs with a crash against the phones seen.
+            "current_build_installs": part("current_build_installs", lambda: current_build_installs(db, now)),
             "crash_free": part("crash_free", lambda: crash_free(db, now)),
             # Support chat: unread user messages at the end of each of the last 14 UTC days (today: now), oldest
             # first; and each thread's last line, by the install id's hex (lower case, as the hub's thread list has it).
