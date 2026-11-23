@@ -337,6 +337,16 @@ jobs:
               sys.exit(1)
           EOF
 
+      # The sticker pack's stub beside Payload/ (MessagesApplicationExtensionSupport/), as Xcode's export puts it: App
+      # Store Connect rejects an iMessage app without it (90620, "contains an invalid sticker pack"). After ship.sh, whose
+      # offline check wants every entry under Payload/.
+      - name: Sticker pack support
+        working-directory: app/ios/YoApp
+        run: |
+          [ -d xtool/YoApp.app/PlugIns/YoStickers.appex ] || { echo "::error::no YoStickers.appex in the build"; exit 1; }
+          ../dev/stickers.sh --support xtool/YoApp.ipa
+          unzip -l xtool/YoApp.ipa | grep -q " MessagesApplicationExtensionSupport/MessagesApplicationExtensionStub$"
+
       - name: Upload
         working-directory: app/ios/YoApp
         timeout-minutes: 20

@@ -6,11 +6,24 @@
 # the bundle's id (the app's + .stickers), versions and minimum iOS, and Resources/Stickers.xcassets compiled by
 # actool as Xcode does (the stickers, the Messages icon; the partial Info.plist merged in). Needs Xcode.
 #   usage: dev/stickers.sh APP        REAL_ACTOOL names actool (default: xcrun's)
+#          dev/stickers.sh --support IPA
+# --support: the stub beside Payload/ in the signed .ipa, at MessagesApplicationExtensionSupport/, as Xcode's export
+# puts it; without it App Store Connect rejects the build (90620, "Your iMessage app contains an invalid sticker pack").
 set -euo pipefail
+stub="$(xcrun --sdk iphoneos --show-sdk-platform-path)/Library/Application Support/MessagesApplicationExtensionStub/MessagesApplicationExtensionStub"
+if [ "${1:-}" = --support ]; then
+  ipa=$(cd "$(dirname "${2:?usage: stickers.sh --support IPA}")" && pwd)/$(basename "$2")
+  stage=$(mktemp -d)
+  trap 'rm -rf "$stage"' EXIT
+  mkdir "$stage/MessagesApplicationExtensionSupport"
+  cp "$stub" "$stage/MessagesApplicationExtensionSupport/"
+  (cd "$stage" && zip -qry "$ipa" MessagesApplicationExtensionSupport)
+  echo "stickers.sh: MessagesApplicationExtensionSupport in $(basename "$ipa")"
+  exit 0
+fi
 app=${1:?usage: stickers.sh APP}
 yo=$(cd "$(dirname "$0")/../YoApp" && pwd)
 actool=${REAL_ACTOOL:-$(xcrun -f actool)}
-stub="$(xcrun --sdk iphoneos --show-sdk-platform-path)/Library/Application Support/MessagesApplicationExtensionStub/MessagesApplicationExtensionStub"
 appex=$app/PlugIns/YoStickers.appex
 rm -rf "$appex"
 mkdir -p "$appex"
