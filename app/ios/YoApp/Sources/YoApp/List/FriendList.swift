@@ -200,7 +200,7 @@ struct FriendList: View {
   var asking: some View {
     navigation
       .alert(
-      "Leave \(leaving?.name ?? "")?",
+      "Leave \(leaving.map { listBarTitle(name: $0.name, group: true) } ?? "")?",
       isPresented: $leaving.isPresent, presenting: leaving
     ) { bar in
       Button("Leave", role: .destructive) { leave(bar) }
@@ -310,7 +310,7 @@ struct FriendList: View {
           cancel: blocking?.reported == true ? "Not Now" : "Cancel",
           run: { block($0.friend) })
         .alert(
-          "Rename \(renaming?.name ?? "")",
+          "Rename \(renaming.map { listBarTitle(name: $0.name, group: true) } ?? "")",
           isPresented: $renaming.isPresent, presenting: renaming
         ) { bar in
           TextField("Group Name", text: $newGroupName)
@@ -693,7 +693,7 @@ struct FriendList: View {
         newGroupName = friend.name
         renaming = friend
       }
-      Button("Leave \(friend.name)", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+      Button("Leave \(listBarTitle(name: friend.name, group: true))", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
         leaving = friend
       }
     } else {
