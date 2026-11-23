@@ -437,13 +437,8 @@ struct FriendList: View {
           addRow(rowMetrics).id(Self.addBlockBottomID)
         }
         .scrollTargetLayout()
-        .modifier(ListColorClip())
         .environment(\.rowMetrics, rowMetrics)
       }
-      // At most 700 wide, centred; the colour behind goes on from edge to edge. The scroll view itself is capped:
-      // capping its content left the rows scrolled sideways by their margin after a turn to landscape.
-      .frame(maxWidth: 700)
-      .frame(maxWidth: .infinity)
       // Measure down to the window edge, behind the floating toolbar and the keyboard.
       .background {
         Color.clear
