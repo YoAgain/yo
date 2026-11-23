@@ -300,14 +300,11 @@ struct YoBackView: View {
       if entry.sent?.back == true {
         SentLabel(wide: family == .accessoryRectangular)
       } else if family == .accessoryRectangular {
-        // The Yo-back symbol says what it does; beside it who Yo'd you last, and when ("Sora", "2m").
+        // The Yo-back symbol says what it does; beside it just who Yo'd you last ("Sora").
         HStack(spacing: 8) {
           Image("yo.back").font(.system(size: 30, weight: .bold)).widgetAccentable()
           VStack(alignment: .leading, spacing: 0) {
             Text(verbatim: entry.lastName ?? productText(text: .noAnswerYet, lang: .english)).font(.yo(17, relativeTo: .headline))
-            if let age = entry.lastAge, entry.lastName != nil {
-              Text(verbatim: age).font(.system(size: 13, weight: .semibold))
-            }
           }
           .lineLimit(1)
           .minimumScaleFactor(0.6)
