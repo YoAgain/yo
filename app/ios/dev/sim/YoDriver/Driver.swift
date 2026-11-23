@@ -61,15 +61,16 @@ import XCTest
       }
       let accountIds = ["account.contacts", "account.security", "account.signOut"]
       let securityIds = ["security.accountSync", "security.recoveryKey", "security.passkey"]
+      // The recovery screens close with Done (a sheet's toolbar) or Close (the step screens' X).
+      func closeScreen() {
+        app.buttons["Done"].exists ? app.buttons["Done"].tap() : app.buttons["Close"].tap()
+      }
       let account = try rowsInOrder(accountIds)
       account[1].tap()
       // With the red badge the row opens the recovery key's screen itself, and the page waits until it is saved.
       var checked = accountIds
-      if app.buttons["Done"].waitForExistence(timeout: 2) {
-        guard app.staticTexts["Keep it safe. It brings your account back."].exists else {
-          throw Failure(description: "Recovery Key screen did not open")
-        }
-        app.buttons["Done"].tap()
+      if app.staticTexts["Keep it safe. It brings your account back."].waitForExistence(timeout: 2) {
+        closeScreen()
       } else {
         let security = try rowsInOrder(securityIds)
         checked += securityIds
@@ -84,14 +85,15 @@ import XCTest
           guard app.staticTexts[line].waitForExistence(timeout: 5) else {
             throw Failure(description: "\(line) screen did not open")
           }
-          app.buttons["Done"].tap()
+          closeScreen()
         }
         app.navigationBars.buttons.element(boundBy: 0).tap()
       }
       account[0].tap()
-      guard app.navigationBars["Contacts"].waitForExistence(timeout: 5),
-        app.staticTexts["Blocked"].exists
-      else { throw Failure(description: "missing Contacts title or Blocked section") }
+      // Contacts lists the contacts only; Blocked is a page of its own.
+      guard app.navigationBars["Contacts"].waitForExistence(timeout: 5) else {
+        throw Failure(description: "missing Contacts title")
+      }
       app.navigationBars.buttons.element(boundBy: 0).tap()
       return ["rows": checked]
     case "camera-add":
