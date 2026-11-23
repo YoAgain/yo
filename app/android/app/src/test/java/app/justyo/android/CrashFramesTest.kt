@@ -23,4 +23,16 @@ class CrashFramesTest {
         error.stackTrace=arrayOf(StackTraceElement("app.justyo.android.Repository","send","/private/name.kt",42),StackTraceElement("private.account.Name","run","secret",1))
         assertEquals("app.justyo.android.Repository.send:42",CrashFrames.javaFrames(error))
     }
+    @Test fun anrKeepsOnlyMainThreadAppFrames() {
+        val trace="""
+            "main" prio=5 tid=1 Blocked
+              at app.justyo.android.Repository.syncPush(Repository.kt:670)
+              at android.os.Looper.loop(Looper.java:1)
+              - waiting to lock <0x0abc> (a java.lang.Object) held by thread 5
+
+            "worker" prio=5 tid=5 Runnable
+              at uniffi.yo.Worker.run(Worker.kt:12)
+        """.trimIndent()
+        assertEquals("app.justyo.android.Repository.syncPush:670",CrashFrames.anrFrames(trace))
+    }
 }

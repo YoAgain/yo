@@ -13,10 +13,19 @@ import java.util.UUID
 
 /** Whitelist code locations only. Never retain exception messages, thread names, paths or memory. */
 internal object CrashFrames {
+    private val unsafeMethod = Regex("[^A-Za-z0-9_$<>]")
+    private fun frame(owner: String,method: String,line: Int): String? =
+        if(owner.startsWith("app.justyo.android.") || owner.startsWith("uniffi.yo."))
+            "$owner.${method.replace(unsafeMethod,"").take(100)}:$line" else null
     fun javaFrames(error: Throwable): String = error.stackTrace.take(64).mapNotNull {
-        if(it.className.startsWith("app.justyo.android.") || it.className.startsWith("uniffi.yo."))
-            "${it.className}.${it.methodName.replace(Regex("[^A-Za-z0-9_$<>]"), "").take(100)}:${it.lineNumber}" else null
+        frame(it.className,it.methodName,it.lineNumber)
     }.joinToString("\n")
+    private val traceFrame = Regex("""at ([A-Za-z0-9_$.]+)\.([^\s.()/]+)\([^()]*:(-?\d+)\)""")
+    fun anrFrames(trace: String): String = trace.lineSequence().dropWhile { !it.startsWith("\"main\"") }.drop(1)
+        .takeWhile { it.isNotBlank() && !it.startsWith('"') }.mapNotNull {
+            val (owner,method,line)=traceFrame.matchEntire(it.trim())?.destructured ?: return@mapNotNull null
+            frame(owner,method,line.toIntOrNull() ?: return@mapNotNull null)
+        }.take(64).joinToString("\n")
     private data class Field(val id: Int,val number: Long=0,val bytes: ByteArray=byteArrayOf())
     // AOSP debuggerd/proto/tombstone.proto. Parse only bounded wire fields, no generated reflection or dump strings.
     private fun fields(data: ByteArray): List<Field> {
@@ -139,9 +148,13 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
             it.timestamp>through && it.reason in listOf(ApplicationExitInfo.REASON_CRASH_NATIVE,ApplicationExitInfo.REASON_ANR)
         }.sortedBy { it.timestamp }
         for(exit in exits) {
-            val frames=if(exit.reason==ApplicationExitInfo.REASON_CRASH_NATIVE) runCatching {
-                exit.traceInputStream?.use { CrashFrames.nativeFrames(readBounded(it)) }.orEmpty()
-            }.getOrDefault("") else ""
+            val frames=runCatching {
+                exit.traceInputStream?.use {
+                    val data=readBounded(it)
+                    if(exit.reason==ApplicationExitInfo.REASON_ANR) CrashFrames.anrFrames(data.toString(Charsets.UTF_8))
+                    else CrashFrames.nativeFrames(data)
+                }.orEmpty()
+            }.getOrDefault("")
             retain(payload("${exit.reason}/${exit.status}","OS exit",frames))
             preferences.edit { putLong("through",exit.timestamp) }
         }
