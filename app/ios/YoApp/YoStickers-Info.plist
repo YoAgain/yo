@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The iMessage sticker pack (Resources/Stickers.xcassets), an extension without code: Apple's stub
+     (MessagesApplicationExtensionStub) runs StickerBrowserViewController. The keys Xcode's sticker pack target adds
+     (product type messages-sticker-pack) are written here; dev/stickers.sh adds the bundle's id, versions and
+     executable, and actool its icon and IMStickerPackPath. NSStickerSharingLevel OS: the stickers are offered
+     everywhere stickers are (the emoji keyboard), not only in Messages. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Yo</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>LSApplicationIsStickerProvider</key>
+	<true/>
+	<key>NSStickerSharingLevel</key>
+	<string>OS</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.message-payload-provider</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>StickerBrowserViewController</string>
+	</dict>
+</dict>
+</plist>

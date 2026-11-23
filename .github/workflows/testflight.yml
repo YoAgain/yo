@@ -254,7 +254,8 @@ jobs:
           ls -d "$SSU_RESOURCES"
           # Xcode in place of the Linux SDK and its stand-ins.
           # dev/actool.sh: Xcode's actool, keeping Info.plist's alternate icons through the merge of its partial plist,
-          # and compiling the controls' Yo symbols (Resources/Symbols.xcassets) into YoControls.
+          # compiling the controls' Yo symbols (Resources/Symbols.xcassets) into YoControls, and assembling the iMessage
+          # sticker pack YoStickers.appex (dev/stickers.sh; ship.sh registers app.justyo.ios.stickers and its profile).
           export REAL_ACTOOL=$(xcrun -f actool) ACTOOL=$PWD/../dev/actool.sh DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
           "$GITHUB_WORKSPACE/.oad/ship.sh"
@@ -262,6 +263,7 @@ jobs:
       # The app and its extensions share the account's state through the App Group (SharedState.swift); without it in
       # their profiles (the group not attached to their app ids in the developer portal) the notification service
       # names nobody and every push says only "Yo". Fatal, before the upload: such a build does not go to testers.
+      # The sticker pack (YoStickers, dev/stickers.sh) has no code and reads no state: it needs no group.
       - name: App Group
         working-directory: app/ios/YoApp
         run: |
@@ -270,6 +272,8 @@ jobs:
           app = pathlib.Path(sys.argv[1])
           missing = False
           for bundle in [app, *sorted(app.glob("PlugIns/*.appex"))]:
+              if bundle.name == "YoStickers.appex":
+                  continue
               raw = (bundle / "embedded.mobileprovision").read_bytes()
               profile = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])
               groups = profile["Entitlements"].get("com.apple.security.application-groups", [])

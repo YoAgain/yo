@@ -1,6 +1,6 @@
 # The Simulator build of Yo Dev (dev/sim.sh, on a Mac): XcodeGen makes YoSim.xcodeproj (ignored) from this.
 # The app's own sources and resources, its notification service (YoNotify), share extension (YoShare), controls and
-# widgets (YoControls), the core built for the Simulator
+# widgets (YoControls), the iMessage stickers (YoStickers), the core built for the Simulator
 # (YO_CORE_TARGET=aarch64-apple-ios-sim dev/core.sh), and YoDriver: a UI test that drives the app by commands from a
 # folder (drive.py).
 name: YoSim
@@ -51,6 +51,7 @@ targets:
       - target: YoNotify
       - target: YoShare
       - target: YoControls
+      - target: YoStickers
       - sdk: libsqlite3.tbd  # the core's state (StateDb), as Package.swift links it for YoCore
     settings:
       base:
@@ -127,6 +128,20 @@ targets:
         INFOPLIST_FILE: ../../YoApp/YoControls-Info.plist
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: YoNotify.entitlements
+  # The iMessage sticker pack, Xcode's own target for it (dev/stickers.sh assembles the same for TestFlight).
+  YoStickers:
+    type: app-extension.messages-sticker-pack
+    platform: iOS
+    sources: [../../YoApp/Resources/Stickers.xcassets]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev.stickers
+        PRODUCT_NAME: YoStickers
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: ../../YoApp/YoStickers-Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: iMessage App Icon
   # YoNotify's code run by hand (YoNotifyProbe/main.swift): the Simulator starts no notification service itself.
   YoNotifyProbe:
     type: application

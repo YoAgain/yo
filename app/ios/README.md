@@ -22,6 +22,9 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   recipients, then tap Done. Without network (or with the hub's "not now") shares wait in the App Group
   `group.app.justyo.ios` and go when Yo opens (`ShareBridge.swift`, `Share.swift`). Shared, library and camera videos
   have a 10 s limit. Longer shared or library videos open Yo's trimmer full-screen (`VideoTrimmer.swift`).
+- iMessage stickers (the same builds): twelve Yo stickers in Messages and the emoji keyboard's stickers
+  (`Resources/Stickers.xcassets`, 408 px, the "Regular" size). A sticker pack has no code, so xtool builds none: `dev/stickers.sh` assembles YoStickers.appex (Apple's stub, actool) for TestFlight,
+  `dev/sim/project.yml` has Xcode's own target for it.
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/Extensions/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob

@@ -64,3 +64,6 @@ extensions:
     resources:
       - Resources/Montserrat-Bold.ttf
       - Resources/Privacy/YoControls/PrivacyInfo.xcprivacy
+# Not listed here: the iMessage sticker pack YoStickers (app.justyo.ios.stickers; Resources/Stickers.xcassets,
+# YoStickers-Info.plist). It has no code, Apple's stub runs it, so xtool has nothing to build; dev/stickers.sh puts it
+# into the TestFlight build (testflight.yml) and dev/sim/project.yml into the Simulator's.

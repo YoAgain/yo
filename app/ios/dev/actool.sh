@@ -22,6 +22,9 @@ if [ -n "$appex" ] && [ -d "$appex" ]; then
   "$REAL_ACTOOL" "$(dirname "$0")/../YoApp/Resources/Symbols.xcassets" --compile "$appex" --platform iphoneos \
     --minimum-deployment-target 26.0 --output-format human-readable-text --errors --warnings
   [ -f "$appex/Assets.car" ] || { echo "actool.sh: no Assets.car in $appex" >&2; exit 1; }
+  # The iMessage sticker pack (no code, so not an xtool extension): YoStickers.appex assembled next to the others,
+  # here, before ship.sh stamps, provisions and signs every PlugIns/*.appex.
+  "$(dirname "$0")/stickers.sh" "$bundle"
 fi
 [ -n "$bundle" ] && [ -n "$partial" ] && [ -f "$partial" ] || exit 0
 python3 -I - "$bundle/Info.plist" "$partial" <<'PY'

@@ -1,0 +1,20 @@
+{
+  "info" : { "author" : "xcode", "version" : 1 },
+  "properties" : {
+    "grid-size" : "regular"
+  },
+  "stickers" : [
+    { "filename" : "01-wordmark.sticker" },
+    { "filename" : "02-yo.sticker" },
+    { "filename" : "03-yo-bar.sticker" },
+    { "filename" : "04-bar-stack.sticker" },
+    { "filename" : "05-loud-yo.sticker" },
+    { "filename" : "06-yo-back.sticker" },
+    { "filename" : "07-yo-yo.sticker" },
+    { "filename" : "08-yooo.sticker" },
+    { "filename" : "09-sent-yo-island.sticker" },
+    { "filename" : "10-tiny-phone.sticker" },
+    { "filename" : "11-just-yo.sticker" },
+    { "filename" : "12-yo-tile.sticker" }
+  ]
+}
