@@ -1,6 +1,7 @@
 //! The end-to-end tests, one module per file: a real hub and real clients over HTTP (README.md).
 
 mod app_version;
+mod audit_groups;
 mod backup_auth;
 mod bindings;
 mod blobs;

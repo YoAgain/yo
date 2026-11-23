@@ -2190,6 +2190,11 @@ impl Client {
         self.state.groups.values().any(|g| g.accepted && !g.left && g.members.iter().any(|m| m == user))
     }
 
+    /// Neither an accepted contact nor a member of a group joined: whom a request comes from (spec 4.10).
+    pub(crate) fn stranger(&self, user: &str) -> bool {
+        !self.in_joined_group(user) && self.state.contacts.get(user).is_none_or(|c| !c.accepted)
+    }
+
     /// The current key is to go to every accepted contact written with and every member of a group joined.
     fn key_due_to_all(&mut self) {
         for (user, contact) in self.state.contacts.iter_mut() {

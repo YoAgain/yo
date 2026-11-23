@@ -5,7 +5,7 @@
 
 use crate::state::{hex, unhex, Group};
 use crate::{expect, refused, retryable, shown, user_bytes, Client, Content, Error, Event, Result};
-use libsignal_protocol::{Aci, Pni, ServiceId};
+use libsignal_protocol::{Aci, Pni};
 use yo_wire::api::{self, status, GroupAction, GroupAnswer, NewMember};
 use yo_wire::content::{GroupKey, GroupTag, MAX_GROUP, MAX_NAME_LEN};
 use yo_wire::limits::MAX_BLOB_FETCHES;
@@ -108,12 +108,13 @@ impl Client {
         self.zk.clone().ok_or(Error::Protocol("no group params pinned for this hub"))
     }
 
-    /// The groups this account is or was in (fetched at least once).
+    /// The groups this account is or was in (fetched at least once); with requests off (spec 4.10) none a stranger
+    /// added it to and it said no yes to.
     pub fn groups(&self) -> Vec<GroupView> {
         self.state
             .groups
             .iter()
-            .filter(|(_, g)| g.revision > 0)
+            .filter(|(_, g)| g.revision > 0 && (g.accepted || self.state.requests_open))
             .map(|(id, g)| GroupView {
                 id: id.clone(),
                 name: g.name.clone(),
@@ -437,26 +438,42 @@ impl Client {
             .ok()
             .and_then(|t| String::from_utf8(t).ok())
             .unwrap_or_default();
+        // Endorsements (spec 4.9): for the members with their key in, as Signal's full members; a hub of before
+        // endorsed every member. Each is checked against the entries it is for, and kept by their user.
         let mut endorsements = std::collections::BTreeMap::new();
         let mut endorsed_until = 0;
         if !answer.endorsements.as_slice().is_empty() {
+            let entries: Vec<(String, UuidCiphertext, bool)> = answer
+                .state
+                .members
+                .iter()
+                .zip(&members)
+                .filter_map(|(member, user)| {
+                    let ciphertext = zkgroup::deserialize(member.user.as_slice()).ok()?;
+                    Some((user.clone(), ciphertext, !member.profile_key.as_slice().is_empty()))
+                })
+                .collect();
+            let now = Timestamp::from_epoch_seconds(self.now_s());
             let received = zkgroup::deserialize::<GroupSendEndorsementsResponse>(answer.endorsements.as_slice())
                 .ok()
                 .and_then(|response| {
                     let until = response.expiration().epoch_seconds();
-                    let services: Vec<ServiceId> =
-                        members.iter().filter_map(|m| aci(m).ok()).map(ServiceId::from).collect();
-                    let now = Timestamp::from_epoch_seconds(self.now_s());
-                    response
-                        .receive_with_service_ids_single_threaded(services, now, &secret, &zk)
-                        .ok()
-                        .map(|r| (until, r))
+                    let receive = |keyed_only: bool| {
+                        let users: Vec<&(String, UuidCiphertext, bool)> =
+                            entries.iter().filter(|(_, _, keyed)| *keyed || !keyed_only).collect();
+                        let received = response
+                            .clone()
+                            .receive_with_ciphertexts(users.iter().map(|(_, c, _)| *c), now, &zk)
+                            .ok()?;
+                        Some(users.into_iter().map(|(user, _, _)| user.clone()).zip(received).collect::<Vec<_>>())
+                    };
+                    receive(true).or_else(|| receive(false)).map(|r| (until, r))
                 });
             match received {
                 Some((until, received)) => {
                     endorsed_until = until;
-                    for (member, endorsement) in members.iter().zip(received) {
-                        endorsements.insert(member.clone(), hex(&zkgroup::serialize(&endorsement.decompressed)));
+                    for (member, endorsement) in received {
+                        endorsements.insert(member, hex(&zkgroup::serialize(&endorsement.decompressed)));
                     }
                 }
                 None => self.note("group send endorsements that do not verify".into()),
@@ -490,14 +507,16 @@ impl Client {
         if joined {
             self.profile_key_due(&members);
         }
-        if changed {
+        // A group request with requests off is not shown (`groups`): nothing to tell the app of either.
+        if changed && (accepted || self.state.requests_open) {
             self.push_event(Event::GroupChanged { group: id.to_owned() });
         }
         self.release_held(id);
         self.persist()
     }
 
-    /// Yos held for this group: shown if the fetched group has their sender in it, else dropped; never a blocked one's.
+    /// Yos held for this group: shown if the fetched group has their sender in it, else dropped; never a blocked one's,
+    /// nor with requests off a stranger's in a group not joined (spec 4.10).
     fn release_held(&mut self, id: &str) {
         let (theirs, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| g == id);
@@ -506,7 +525,11 @@ impl Client {
         for (_, event) in theirs {
             let shown = !group.left
                 && match &event {
-                    Event::GroupMessage { user, .. } => group.members.contains(user) && !self.blocked(user),
+                    Event::GroupMessage { user, .. } => {
+                        group.members.contains(user)
+                            && !self.blocked(user)
+                            && (group.accepted || self.state.requests_open || !self.stranger(user))
+                    }
                     _ => false,
                 };
             if shown {

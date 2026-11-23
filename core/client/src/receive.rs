@@ -551,10 +551,25 @@ impl Client {
         if self.blocked(user) && !matches!(message.content, Content::Group(_) | Content::ProfileKey(_)) {
             return Ok(());
         }
-        // Requests off (spec 4.10): a stranger's content is dropped unseen and unanswered.
-        let stranger = !self.in_joined_group(user) && self.state.contacts.get(user).is_none_or(|c| !c.accepted);
-        if !self.state.requests_open && stranger && message.group.is_none() && shown(&message.content) {
-            return Ok(());
+        // Requests off (spec 4.10): a stranger's content is dropped unseen and unanswered; so is what a stranger sends
+        // to a group not joined (a group a stranger made with this account in it is a request too), a Yo or a change.
+        // A group known and not fetched yet holds its Yos until it is (`release_held` decides).
+        if !self.state.requests_open && self.stranger(user) {
+            let tag = match &message.content {
+                Content::Group(tag) => Some(tag),
+                _ => message.group.as_ref(),
+            };
+            let unseen = match tag {
+                None => shown(&message.content),
+                Some(tag) => self
+                    .state
+                    .groups
+                    .get(&groups::group_id_of(&tag.key))
+                    .is_none_or(|g| g.revision > 0 && (!g.accepted || g.left)),
+            };
+            if unseen {
+                return Ok(());
+            }
         }
         // A copy resent for a decryption error and seen already (4.6): messages differ at least in their time.
         if !self.first_time(user, plaintext) {

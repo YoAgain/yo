@@ -37,8 +37,9 @@ fn ids(cs: &[&Client]) -> Vec<String> {
 }
 
 /// Ann makes a group with Ben and Cleo, who do not know each other: everyone fetches the same group from the hub,
-/// each Yo reaches the other two, and nobody becomes a 1:1 chat of anyone through it. Ben has no profile key of
-/// Cleo's: his Yo to her goes sealed on the group's send endorsement.
+/// each Yo reaches the other two, and nobody becomes a 1:1 chat of anyone through it. Both say yes (their keys into
+/// their entries, spec 4.9); Ben has no profile key of Cleo's yet: his Yo to her goes sealed on the group's send
+/// endorsement, which the hub issues for members with their key only.
 #[test]
 fn a_group_yo_reaches_every_member_also_without_their_profile_key() {
     let hub = TestHub::start();
@@ -57,6 +58,9 @@ fn a_group_yo_reaches_every_member_also_without_their_profile_key() {
     a.send_group(&id, Content::Yo).unwrap();
     assert_eq!(group_yos(&take(b)), [(id.clone(), a.user_id().to_owned())]);
     assert_eq!(group_yos(&take(c)), [(id.clone(), a.user_id().to_owned())]);
+    // Cleo says yes first, then Ben: his answer has her keyed, so endorsed.
+    c.accept_group(&id).unwrap();
+    b.accept_group(&id).unwrap();
     let endorsed = b.endorsed_deliveries();
     b.send_group(&id, Content::Yo).unwrap();
     let to_c = take(c);
@@ -302,6 +306,9 @@ fn contacts_and_a_bot(hub: &TestHub) -> ([Client; 3], [std::sync::Arc<Http>; 3],
     take(&mut b);
     take(&mut c);
     c.accept_group(&id).unwrap();
+    // Her yes is told to every member (type 8): they fetch the group, now endorsing her (spec 4.9), and get her key.
+    take(&mut a);
+    take(&mut b);
     ([a, b, c], https, id)
 }
 

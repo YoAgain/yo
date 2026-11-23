@@ -133,13 +133,18 @@ impl Hub {
         Ok(GroupMember { user: user.into(), profile_key: profile_key.into(), added_by: by.to_vec().into() })
     }
 
-    /// The group and endorsements for its members, today's, if `to` is one of them.
+    /// The group, and endorsements for its members with their profile key, today's, if `to` is one of them with its
+    /// own (Signal's full members, spec 4.9). An invited member (no key in its entry: no yes yet) is endorsed for no
+    /// one and to no one: a delivery to it is a request (4.10), so whoever adds anyone to a group reaches them no
+    /// further than by writing to them.
     fn answer(&self, state: GroupState, to: &[u8]) -> Res<GroupAnswer> {
-        let endorsements = match state.members.iter().any(|m| m.user.as_slice() == to) {
+        let keyed = |m: &&GroupMember| !m.profile_key.as_slice().is_empty();
+        let endorsements = match state.members.iter().filter(keyed).any(|m| m.user.as_slice() == to) {
             true => {
                 let users = state
                     .members
                     .iter()
+                    .filter(keyed)
                     .map(|m| zkgroup::deserialize::<UuidCiphertext>(m.user.as_slice()))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
@@ -382,38 +387,55 @@ mod tests {
         // A stranger's presentation is no member's.
         let fetch = |who: &UserId| api::GroupRequest { auth: auth(&hub, who, &secret), revision: 0, actions: vec![] };
         assert_eq!(hub.group_request(&id, &fetch(&cleo)).unwrap_err().0, StatusCode::FORBIDDEN);
-        // Endorsements for Ann and Ben: a token for Ben holds for Ben only.
+        // Endorsements for Ann alone, who has her key in: Ben is only invited (spec 4.9), and none is for him.
         let response: GroupSendEndorsementsResponse = zkgroup::deserialize(made.endorsements.as_slice()).unwrap();
-        let expiration = response.expiration();
+        let both = [aci(&ann).into(), aci(&ben).into()];
+        assert!(response
+            .clone()
+            .receive_with_service_ids_single_threaded(both, hub.zk_now(), &secret, test_public())
+            .is_err());
         let received = response
-            .receive_with_service_ids_single_threaded(
-                [aci(&ann).into(), aci(&ben).into()],
-                hub.zk_now(),
-                &secret,
-                test_public(),
-            )
+            .receive_with_service_ids_single_threaded([aci(&ann).into()], hub.zk_now(), &secret, test_public())
             .unwrap();
+        assert_eq!(received.len(), 1);
+        // Invited, Ben gets the group (to say yes or no) and no endorsement.
+        let invited_answer = hub.group_request(&id, &fetch(&ben)).unwrap();
+        assert!(invited_answer.endorsements.as_slice().is_empty(), "nothing for one not keyed");
+        // His yes (his key into his entry): from then on both are endorsed, and a token for Ben holds for Ben only.
+        let yes = api::GroupRequest {
+            auth: auth(&hub, &ben, &secret),
+            revision: 2,
+            actions: vec![GroupAction {
+                kind: api::ACTION_PROFILE_KEY,
+                data: keyed(&hub, &ben, [8; 32], &secret).presentation,
+            }],
+        };
+        let joined = hub.group_request(&id, &yes).unwrap();
+        let response: GroupSendEndorsementsResponse = zkgroup::deserialize(joined.endorsements.as_slice()).unwrap();
+        let expiration = response.expiration();
+        let received =
+            response.receive_with_service_ids_single_threaded(both, hub.zk_now(), &secret, test_public()).unwrap();
         let token = received[1].decompressed.to_token(secret).into_full_token(expiration);
         let token = yo_wire::b64(&zkgroup::serialize(&token));
         assert!(hub.endorsed(&ben, &token));
         assert!(!hub.endorsed(&cleo, &token));
-        // Two changes at revision 2: the first stands, the second is answered the group as it is.
+        // Two changes at revision 3: the first stands, the second is answered the group as it is.
         let add = |who: &UserId| api::GroupRequest {
             auth: auth(&hub, &ann, &secret),
-            revision: 2,
+            revision: 3,
             actions: vec![GroupAction { kind: api::ACTION_ADD, data: yo_wire::encode(&invited(who, &secret)).into() }],
         };
         assert_eq!(hub.group_request(&id, &add(&cleo)).unwrap().state.members.len(), 3);
         // More actions than any change needs: refused before a proof is checked (each costs the hub milliseconds).
         let mut many = add(&[5; 16]);
-        many.revision = 3;
+        many.revision = 4;
         many.actions = vec![many.actions[0].clone(); 2 * MAX_GROUP + 3];
         assert_eq!(hub.group_request(&id, &many).unwrap_err().0, StatusCode::BAD_REQUEST);
         let refused = hub.group_request(&id, &add(&[4; 16])).unwrap_err();
         assert_eq!(refused.0, StatusCode::CONFLICT);
-        assert_eq!(yo_wire::decode::<GroupAnswer>(&refused.1).unwrap().state.revision, 2);
+        assert_eq!(yo_wire::decode::<GroupAnswer>(&refused.1).unwrap().state.revision, 3);
         // Ben leaves: answered without endorsements; the others go too, and the group ends.
-        for (who, revision) in [(ben, 3), (cleo, 4), (ann, 5)] {
+        for (who, revision) in [(ben, 4), (cleo, 5), (ann, 6)] {
             let me = secret.encrypt_service_id(aci(&who).into());
             let leave = api::GroupRequest {
                 auth: auth(&hub, &who, &secret),
@@ -423,6 +445,85 @@ mod tests {
             assert!(hub.group_request(&id, &leave).unwrap().endorsements.as_slice().is_empty());
         }
         assert_eq!(hub.group_request(&id, &fetch(&ann)).unwrap_err().0, StatusCode::NOT_FOUND, "ended");
+    }
+
+    /// Audit G1: a stranger names any user as an invited member (no profile key, no consent): the hub endorses no one
+    /// for it, so no token admits a sealed delivery to that user; what the stranger sends there is a request (4.10).
+    #[test]
+    fn a_stranger_gets_no_send_token_for_anyone_it_invites() {
+        let hub = hub();
+        let (mallory, victim) = ([0x4d; 16], [0x56; 16]);
+        let secret = GroupSecretParams::derive_from_master_key(GroupMasterKey::new([0x33; 32]));
+        let id = secret.get_group_identifier();
+        let new = NewGroup {
+            public_params: zkgroup::serialize(&secret.get_public_params()).into(),
+            auth: auth(&hub, &mallory, &secret),
+            title: secret.encrypt_blob_with_padding(random(), b"X", 31).into(),
+            members: vec![keyed(&hub, &mallory, [9; 32], &secret), invited(&victim, &secret)],
+        };
+        let made = hub.create_group(&id, &new).unwrap();
+        let response: GroupSendEndorsementsResponse = zkgroup::deserialize(made.endorsements.as_slice()).unwrap();
+        let with_victim = [aci(&mallory).into(), aci(&victim).into()];
+        let now = hub.zk_now();
+        assert!(response
+            .clone()
+            .receive_with_service_ids_single_threaded(with_victim, now, &secret, test_public())
+            .is_err());
+        let received = response
+            .receive_with_service_ids_single_threaded([aci(&mallory).into()], now, &secret, test_public())
+            .unwrap();
+        assert_eq!(received.len(), 1, "Mallory's own, no other");
+        // Her own endorsement made into a token for the victim holds for no one but her.
+        let expiration = GroupSendEndorsementsResponse::default_expiration(now);
+        let token = received[0].decompressed.to_token(secret).into_full_token(expiration);
+        assert!(!hub.endorsed(&victim, &yo_wire::b64(&zkgroup::serialize(&token))));
+        // A group of invited members only but its maker: the same with more of them, and with a change.
+        let more = api::GroupRequest {
+            auth: auth(&hub, &mallory, &secret),
+            revision: 2,
+            actions: vec![GroupAction {
+                kind: api::ACTION_ADD,
+                data: yo_wire::encode(&invited(&[0x57; 16], &secret)).into(),
+            }],
+        };
+        let changed = hub.group_request(&id, &more).unwrap();
+        let response: GroupSendEndorsementsResponse = zkgroup::deserialize(changed.endorsements.as_slice()).unwrap();
+        assert!(response
+            .receive_with_service_ids_single_threaded([aci(&mallory).into()], now, &secret, test_public())
+            .is_ok());
+    }
+
+    /// Audit G3: a member adds a `UuidCiphertext` that is no member of this group (one of another group's). The hub
+    /// cannot tell (it never decrypts), keeps it, and endorses it as no one's; any member removes it by its bytes.
+    #[test]
+    fn an_entry_no_client_can_open_is_removed_by_its_bytes() {
+        let hub = hub();
+        let (ann, ben) = ([1u8; 16], [2u8; 16]);
+        let secret = GroupSecretParams::derive_from_master_key(GroupMasterKey::new([7; 32]));
+        let other = GroupSecretParams::derive_from_master_key(GroupMasterKey::new([8; 32]));
+        let id = secret.get_group_identifier();
+        let new = NewGroup {
+            public_params: zkgroup::serialize(&secret.get_public_params()).into(),
+            auth: auth(&hub, &ann, &secret),
+            title: secret.encrypt_blob_with_padding(random(), b"T", 31).into(),
+            members: vec![keyed(&hub, &ann, [9; 32], &secret), invited(&ben, &secret)],
+        };
+        hub.create_group(&id, &new).unwrap();
+        let foreign = invited(&ben, &other).user;
+        let add = api::GroupRequest {
+            auth: auth(&hub, &ann, &secret),
+            revision: 2,
+            actions: vec![GroupAction { kind: api::ACTION_ADD, data: yo_wire::encode(&invited(&ben, &other)).into() }],
+        };
+        let answer = hub.group_request(&id, &add).expect("the hub keeps it");
+        let unreadable: UuidCiphertext = zkgroup::deserialize(answer.state.members[2].user.as_slice()).unwrap();
+        assert!(secret.decrypt_service_id(unreadable).is_err(), "no member's client can open it");
+        let remove = api::GroupRequest {
+            auth: auth(&hub, &ann, &secret),
+            revision: 3,
+            actions: vec![GroupAction { kind: api::ACTION_REMOVE, data: foreign }],
+        };
+        assert_eq!(hub.group_request(&id, &remove).unwrap().state.members.len(), 2, "gone again");
     }
 
     #[test]

@@ -19,6 +19,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Fill the disk without identity | 64 MiB/IP/hour of delivered bytes; `507` below 1 GiB free; 30-day TTL | many addresses: the floor holds, deliveries stop until cleanup |
 | Fill one user's inbox | 5000 per device, then `507` for that recipient only; strangers' deliveries 20/recipient/day, none with requests off (spec 4.10) | a contact's spam (block: the key rotates); scarce request tokens later (8) |
 | Tell contacts apart by the access key | One profile key per account (Signal's), its access key the same for every contact; the hub keeps a SHA-256 of the access key only, compared in constant time (4.10) | the hub learns a delivery is a contact's, and a key rotation after a block |
+| Reach anyone through a group of one's own making | An invited member (no key in its entry) gets no endorsement and is endorsed for no one (4.9): deliveries to them are requests, signed and counted (4.10); with requests off a stranger's group and its Yos are dropped unseen | tokens issued before 2026-11-24, for their 2–3 days |
 | Spend another device's request budget | Counted only after the signature holds and is not a replay | – |
 | Hold every reading place with slow bodies | 64 of the 512 per address (`503` for it alone), 20 s per body | many addresses |
 | Hold memory with inbox waits | 4 inbox requests per device at once | – |
