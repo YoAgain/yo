@@ -168,6 +168,7 @@ final class Friends {
           if group.left {
             list.remove(at: index)
           } else if list[index].name != name {
+            Stats.renamed(from: list[index].name, to: name)
             list[index].name = name
           }
         } else if !group.left {

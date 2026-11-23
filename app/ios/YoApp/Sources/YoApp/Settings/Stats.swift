@@ -26,6 +26,25 @@ enum Stats {
   static func lastSent(to friend: String) -> Date? { last("stats.lastSent", friend) }
   static func lastReceived(from friend: String) -> Date? { last("stats.lastReceived", friend) }
 
+  /// A group renamed (here or by a member): its counts and last Yos go with it, keyed by name as they are.
+  static func renamed(from old: String, to new: String) {
+    guard old != new else { return }
+    writes.async {
+      let defaults = UserDefaults.standard
+      var friends = defaults.dictionary(forKey: "stats.friends") as? [String: Int] ?? [:]
+      if let n = friends.removeValue(forKey: old) {
+        friends[new, default: 0] += n
+        defaults.set(friends, forKey: "stats.friends")
+      }
+      for key in ["stats.lastSent", "stats.lastReceived"] {
+        var times = defaults.dictionary(forKey: key) as? [String: Double] ?? [:]
+        guard let time = times.removeValue(forKey: old) else { continue }
+        times[new] = max(time, times[new] ?? 0)
+        defaults.set(times, forKey: key)
+      }
+    }
+  }
+
   static func reset() {
     writes.async {
       for key in ["stats.sent", "stats.received", "stats.friends", "stats.lastSent", "stats.lastReceived"] {
