@@ -139,16 +139,21 @@ struct YoApp: App {
                 .lineLimit(1).minimumScaleFactor(0.5)
               Button("Undo") { DeleteNotice.shared.undo?() }.font(.system(size: 16, weight: .bold))
             } else {
-              Circle().fill(.red).frame(width: 7, height: 7)
-              Text(DeleteNotice.shared.banner ?? "").font(.custom("Montserrat-Bold", size: 16))
-              if DeleteNotice.shared.banner == "Offline" {
-                TimelineView(.periodic(from: .now, by: 0.45)) { context in
-                  let n = Int(context.date.timeIntervalSinceReferenceDate / 0.45) % 4
-                  Text(String(repeating: ".", count: n) + String(repeating: " ", count: 3 - n))
-                    .font(.custom("Montserrat-Bold", size: 16)).monospaced()
+              HStack(spacing: 8) {
+                Circle().fill(.red).frame(width: 7, height: 7)
+                Text(DeleteNotice.shared.banner ?? "").font(.custom("Montserrat-Bold", size: 16))
+                if DeleteNotice.shared.banner == "Offline" {
+                  TimelineView(.periodic(from: .now, by: 0.45)) { context in
+                    let n = Int(context.date.timeIntervalSinceReferenceDate / 0.45) % 4
+                    Text(String(repeating: ".", count: n) + String(repeating: " ", count: 3 - n))
+                      .font(.custom("Montserrat-Bold", size: 16)).monospaced()
+                  }
+                  .padding(.leading, -6)
                 }
-                .padding(.leading, -6)
               }
+              // One element, the words alone: VoiceOver read the moving dots as an element of their own.
+              .accessibilityElement(children: .ignore)
+              .accessibilityLabel(DeleteNotice.shared.banner ?? "")
             }
           }
           .foregroundStyle(.white)
