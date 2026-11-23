@@ -154,8 +154,8 @@ jobs:
       # OAD signs only the capabilities it knows (push, Sign in with Apple, Associated Domains, App Group); the app also
       # asks for Communication Notifications (a Yo shown as a message from its sender, Siri announce, CarPlay) and Siri
       # (SiriKit messaging: send, read, mark read). Each is signed on the app as its profile grants it (enabled on the
-      # app id), and a request the profile does not grant fails, as push does. Patched into this checkout only; fails if
-      # the tool changed.
+      # app id); one the profile does not grant is left out with a warning (the notification then shows plainly, the
+      # sender's name as title). Patched into this checkout only; fails if the tool changed.
       - name: OAD, Communication Notifications and Siri entitlements
         run: |
           python3 -I - .oad/tools/asc.py <<'EOF'
@@ -170,9 +170,10 @@ jobs:
               "                own = plistlib.load(f)\n"
               "            for key in ('com.apple.developer.usernotifications.communication', 'com.apple.developer.siri'):\n"
               "                if own.get(key) is True:\n"
-              "                    if granted.get(key) is not True:\n"
-              "                        die(f'profile for {ident} does not grant {key}; enable it for the bundle ID and recreate its profile')\n"
-              "                    entitlements[key] = True\n")
+              "                    if granted.get(key) is True:\n"
+              "                        entitlements[key] = True\n"
+              "                    else:\n"
+              "                        print(f'::warning::profile for {ident} does not grant {key}: signed without it')\n")
           open(path, "w").write(s)
           EOF
           python3 -I -m py_compile .oad/tools/asc.py
@@ -292,7 +293,8 @@ jobs:
 
       # Communication Notifications and Siri (SiriKit messaging, CarPlay) on the app id, through the API with the same key:
       # once, the first time; the app's App Store profile is then deleted so ship.sh makes it anew with both granted.
-      # Fatal when the API refuses: the owner enables them in the developer portal (Identifiers > app.justyo.ios).
+      # When the API refuses one, a warning: the owner enables it in the developer portal (Identifiers > app.justyo.ios)
+      # and the build is signed without it meanwhile (the asc.py patch above).
       - name: Communication Notifications and Siri on the app id
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -315,9 +317,9 @@ jobs:
                   asc.call("POST", "/v1/bundleIdCapabilities", {"data": {
                       "type": "bundleIdCapabilities", "attributes": {"capabilityType": cap},
                       "relationships": {"bundleId": asc.rel("bundleIds", bid)}}})
-              except SystemExit:
-                  print(f"::error::cannot enable {cap} on {identifier}: enable it in the developer portal")
-                  sys.exit(1)
+              except SystemExit as refused:
+                  print(f"::warning::cannot enable {cap} on {identifier} ({refused}); enable it in the developer portal")
+                  continue
               print(f"enabled {cap} on {identifier}")
               enabled = True
           if enabled:
