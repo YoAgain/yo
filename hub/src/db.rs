@@ -999,6 +999,20 @@ impl Db {
                 }?;
                 put.execute(params![kind, hour, value])?;
             }
+            if !problems_only {
+                // The devices per build (`build:ios/202611191626`, `build:unknown` for none named) seen within 24
+                // hours, of the apps' (bots and the CLI left out): the operator's releases over time. Counts only.
+                let mut builds = tx.prepare_cached(
+                    "SELECT 'build:' || coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at > ?1 - 86400000 \
+                     AND (app IS NULL OR app LIKE 'ios/%' OR app LIKE 'android/%') GROUP BY 1",
+                )?;
+                let rows = builds
+                    .query_map([now as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for (kind, value) in rows {
+                    put.execute(params![kind, hour, value])?;
+                }
+            }
             Ok(())
         })
     }
@@ -2083,6 +2097,7 @@ mod tests {
                 row("active-24h", h, 1),
                 row("active-30d", h, 2),
                 row("active-48h", h, 1),
+                row("build:unknown", h, 1),
                 row("open-crashes", h, 2),
                 row("open-errors", h, 3),
                 row("queue-envelopes", h, 1),
@@ -2092,10 +2107,10 @@ mod tests {
         // The hourly sample keeps the hour's first; a problem marked done replaces the open problems of the hour.
         db.diagnostic_done(1, true).unwrap();
         db.sample_levels(now + 60_000, false).unwrap();
-        assert_eq!(rows(&db)[4], row("open-errors", h, 3));
+        assert_eq!(rows(&db)[5], row("open-errors", h, 3));
         db.sample_levels(now + 60_000, true).unwrap();
-        assert_eq!(rows(&db)[4], row("open-errors", h, 0));
-        assert_eq!(rows(&db).len(), 7);
+        assert_eq!(rows(&db)[5], row("open-errors", h, 0));
+        assert_eq!(rows(&db).len(), 8);
         let columns: Vec<String> = db
             .conn()
             .prepare("SELECT name FROM pragma_table_info('levels')")
@@ -2113,6 +2128,20 @@ mod tests {
             .query_row("SELECT value FROM levels WHERE kind = 'active-48h' AND hour = ?1", [h + 1], |r| r.get(0))
             .unwrap();
         assert_eq!(bots, 0);
+        // Devices per build seen within 24 hours, the apps' alone: bob on the CLI is no build, an iOS device is.
+        let build = |db: &Db, hour: i64| -> Vec<(String, i64)> {
+            db.conn()
+                .prepare("SELECT kind, value FROM levels WHERE kind LIKE 'build:%' AND hour = ?1 ORDER BY kind")
+                .unwrap()
+                .query_map([hour], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(build(&db, h + 1), []);
+        db.conn().execute("UPDATE devices SET app = 'ios/202611191626', last_seen_at = ?1", [now as i64]).unwrap();
+        db.sample_levels(now + 2 * hour, false).unwrap();
+        assert_eq!(build(&db, h + 2), [("build:ios/202611191626".to_owned(), 2)]);
         // 30 days of hours, then the day's last (the one at the next midnight) alone, kept for good.
         db.conn().execute("DELETE FROM levels", []).unwrap();
         let day0 = 900 * 24i64;

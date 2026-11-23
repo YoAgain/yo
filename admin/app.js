@@ -2067,7 +2067,7 @@ if (document.body.classList.contains("login")) {
   const releaseBands = (h) => {
     const apps = new Set((h.users || []).map(u => u.app));
     for (const [app] of [...(h.apps || []), ...(h.apps_today || [])]) apps.add(app);
-    for (const history of [h.build_days, h.build_hours]) {
+    for (const history of [h.build_days, h.build_hours, h.build_levels]) {
       for (const row of Object.values(history || {})) {
         for (const [app, count] of Object.entries(row || {})) if (count > 0) apps.add(app);
       }
@@ -2084,22 +2084,36 @@ if (document.body.classList.contains("login")) {
     return bands;
   };
   const relData = (h, plat) => {
-    const t = today0(), kept = { ...(h.build_days || {}) };
-    if (Array.isArray(h.apps_today) && h.apps_today.length) kept[t] = Object.fromEntries(h.apps_today.filter(([a]) => !String(a).startsWith("cli/")));
-    let slots;
-    if (range === 1) {
-      const hrs = h.build_hours || {}, h1 = Math.floor(Date.now() / 3600000);
-      const hourName = (x) => { const d = new Date(x * 3600000); return `${d.toDateString() === new Date().toDateString() ? "" : "yesterday "}${d.toLocaleTimeString(undefined, { timeStyle: "short" })}`; };
-      slots = Array.from({ length: 24 }, (_, i) => h1 - 23 + i).map((x) => [x, x === h1 ? "now" : hourName(x), hrs[x] || null]);
+    // Points by the hour: the hub's hourly `build:` levels first (devices seen within 24 hours; 30 days by the hour,
+    // then the day's last), else the admin's own hours (48) and days (the day's at its next midnight, today's now).
+    const t = today0(), h1 = Math.floor(Date.now() / 3600000), at = new Map();
+    const days = { ...(h.build_days || {}) };
+    if (Array.isArray(h.apps_today) && h.apps_today.length) days[t] = Object.fromEntries(h.apps_today.filter(([a]) => !String(a).startsWith("cli/")));
+    for (const [d, row] of Object.entries(days)) if (+d <= t) at.set(Math.min((+d + 1) * 24, h1), row);
+    for (const [x, row] of Object.entries(h.build_hours || {})) at.set(+x, row);
+    for (const [x, row] of Object.entries(h.build_levels || {})) at.set(+x, row);
+    // Each slot ends at its hour and takes the latest point within it: 1D and 7D by the hour, 30D every 4 hours,
+    // Total by the day (at most 60 slots).
+    const time = (x) => new Date(x * 3600000).toLocaleTimeString(undefined, { timeStyle: "short" });
+    let stepH, n, ends, name;
+    if (range === 0) {
+      const first = Math.min(h1, ...at.keys()), span = Math.max(7, t - Math.floor((first - 1) / 24) + 1), step = Math.max(1, Math.ceil(span / 60));
+      stepH = 24 * step; n = Math.ceil(span / step);
+      ends = (i) => Math.min(h1, (t + 1) * 24 - (n - 1 - i) * stepH);
+      name = (x) => { const d = Math.floor((x - 1) / 24); return x === h1 ? "today" : dayName(d); };
     } else {
-      const first = Object.keys(kept).map(Number).filter((d) => d <= t).sort((a, b) => a - b)[0] ?? t;
-      const span = range || Math.max(7, t - first + 1), step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
-      slots = Array.from({ length: n }, (_, i) => t - (n - 1 - i) * step).map((e) => {
-        let row = null;
-        for (let d = e; d > e - step && !row; d--) row = kept[d] || null;
-        return [e, e === t ? "today" : dayName(e), row];
-      });
+      stepH = range === 30 ? 4 : 1; n = (range === 1 ? 24 : range * 24) / stepH;
+      ends = (i) => h1 - (n - 1 - i) * stepH;
+      name = range === 1
+        ? (x) => `${new Date(x * 3600000).toDateString() === new Date().toDateString() ? "" : "yesterday "}${time(x)}`
+        : (x) => `${dayName(Math.floor(x / 24))} ${time(x)}`;
     }
+    const slots = Array.from({ length: n }, (_, i) => ends(i)).map((e) => {
+      let row = null;
+      for (let x = e; x > e - stepH && !row; x--) row = at.get(x) || null;
+      return [e, e === h1 ? "now" : name(e), row];
+    });
+    if (range === 0) slots[n - 1][1] = "today";
     const mine = (a) => plat === "all" ? a === "unknown" || /^(ios|android)\//.test(a) : a.startsWith(`${plat}/`);
     const apps = new Set();
     for (const [, , row] of slots) {

@@ -26,7 +26,9 @@ class MarksTests(unittest.TestCase):
         db.executemany("INSERT INTO levels VALUES (?, ?, ?)", [
             ("active-24h", h0 - 24, 4), ("active-24h", h0, 5), ("active-24h", h0 + 3, 9),
             ("queue-envelopes", h0, 2), ("queue-media-bytes", h0, 70), ("queue-envelopes", h0 + 3, 1),
-            ("open-errors", h0, 8), ("open-crashes", h0, 2), ("open-errors", h0 + 3, 3)])
+            ("open-errors", h0, 8), ("open-crashes", h0, 2), ("open-errors", h0 + 3, 3),
+            ("build:ios/202611191626", h0, 4), ("build:unknown", h0, 1), ("build:ios/202611191626", h0 + 3, 6),
+            ("build:android/202611180900", h0 + 3, 0)])
         now = (h0 + 3) * hour + 600_000
         out = users.levels(db, now, 6, (1, 900))
         self.assertEqual(out["active_days"], {str(day - 2): 4, str(day - 1): 5}, "today's from active_day")
@@ -36,6 +38,8 @@ class MarksTests(unittest.TestCase):
             {"t": h0 * hour - 1, "errors_open": 8, "crashes_open": 2},
             {"t": (h0 + 3) * hour - 1, "errors_open": 3, "crashes_open": 0}])
         self.assertEqual(users.levels(db, now + 48 * hour)["queue_hours"], {})
+        self.assertEqual(out["build_levels"], {str(h0): {"ios/202611191626": 4, "unknown": 1},
+                                               str(h0 + 3): {"ios/202611191626": 6}}, "devices per build, none at 0")
 
     def test_version_days_keep_the_latest_per_day_for_good(self):
         admin, day = self.admin, 20400

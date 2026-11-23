@@ -172,7 +172,9 @@ unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green whe
 update is out, plain when unknown, with the builds in its tooltip. Builds below `YO_MIN_APP` count as update. The App
 versions card counts current, update and unknown per platform. App Store releases will be added the same way later.
 admin.py keeps, beside the state counts in `version-days.json`, the devices per build seen today (`apps_today`, the CLI
-left out; counts only): per UTC day for good and per hour for the last 48 hours. The Versions detail draws them as
+left out; counts only): per UTC day for good and per hour for the last 48 hours. The hub itself samples the devices
+per build seen within 24 hours each hour (its `build:` levels: by the hour for 30 days, then the day's last); the page
+takes those first, so 1D and 7D are drawn by the hour, 30D every 4 hours and Total by the day. The Versions detail draws them as
 "Releases over time", each build's share 100 % stacked, the newest on top (green when current), older builds greyer,
 builds below `YO_MIN_APP` reddish; a click names that slot's shares.
 Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`.

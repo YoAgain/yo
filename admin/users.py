@@ -374,6 +374,13 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
     if isinstance(messages, int) and isinstance(blobs, (list, tuple)) and len(blobs) == 2:
         hours[str(hour_now)] = days[str(today)] = [messages, blobs[1] or 0]
     errors, crashes = rows.get("open-errors", {}), rows.get("open-crashes", {})
+    builds = {}
+    for kind, values in rows.items():
+        if kind.startswith("build:"):
+            for h, v in values.items():
+                # Older than a week every 4th hour alone (the 30-day view's step): the page's size kept small.
+                if v > 0 and (hour_now - h < 168 or h % 4 == 0 or hour_now - h > 30 * 24):
+                    builds.setdefault(str(h), {})[kind[6:]] = v
     return {
         "active48": sorted(rows.get("active-48h", {}).items()),
         "active_days": {str(d): v for d, v in by_day("active-24h").items() if d < today},
@@ -382,6 +389,9 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
         "queue_days": days,
         "open_report_history": [{"t": h * 3600000 - 1, "errors_open": errors.get(h, 0), "crashes_open": crashes.get(h, 0)}
                                 for h in sorted(set(errors) | set(crashes))],
+        # {hour: {build: devices seen within 24 hours}} (`build:…`, hourly for a week, every 4th hour to 30 days, then
+        # the day's last, at midnight): the releases over time.
+        "build_levels": builds,
     }
 
 
