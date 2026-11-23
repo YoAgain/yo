@@ -77,7 +77,15 @@ enum YoIntentError: Error, CustomLocalizedStringResourceConvertible {
 /// Siri and Shortcuts `wait` for the outcome and say it; the Action button, controls and widgets return once the
 /// island stands (YoSend.dispatch).
 enum IntentYo {
-  static func send(_ friend: FriendEntity, wait: Bool) async throws -> some IntentResult & ProvidesDialog {
+  /// No friend (a control left unconfigured): `choose` opens Yo.
+  static func send(
+    _ friend: FriendEntity?, wait: Bool, choose: () async throws -> Void = {}
+  ) async throws -> some IntentResult & ProvidesDialog {
+    guard let friend else {
+      YoSend.count("noFriend", expected: true)
+      try await choose()
+      return .result(dialog: "Choose a friend in Yo.")
+    }
     let timing = YoSentActivity.Timing()
     guard let list = ShareBridge.readList() else {
       YoSend.count("signedOut")
@@ -131,16 +139,18 @@ struct SendYoIntent: LiveActivityIntent {
   func perform() async throws -> some IntentResult & ProvidesDialog { try await IntentYo.send(friend, wait: true) }
 }
 
-/// Send Yo's non-waiting twin for controls and widgets; not offered in Shortcuts.
+/// Send Yo's non-waiting twin for controls and widgets; not offered in Shortcuts. A control with no friend chosen
+/// can't be asked "To whom?" (Control Center, the Lock Screen, the Action button): it opens Yo instead, unlocking
+/// first, where a tap on a name sends the Yo.
 struct SendYoNowIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Send Yo"
   static let description = IntentDescription("Sends one Yo to a friend or group, without opening Yo.")
-  static let supportedModes: IntentModes = .background
+  static let supportedModes: IntentModes = [.background, .foreground(.dynamic)]
   static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
   static let isDiscoverable = false
 
-  @Parameter(title: "Friend", requestValueDialog: "To whom?")
-  var friend: FriendEntity
+  @Parameter(title: "Friend")
+  var friend: FriendEntity?
 
   static var parameterSummary: some ParameterSummary { Summary("Send Yo to \(\.$friend)") }
 
@@ -150,7 +160,9 @@ struct SendYoNowIntent: LiveActivityIntent {
     self.friend = friend
   }
 
-  func perform() async throws -> some IntentResult & ProvidesDialog { try await IntentYo.send(friend, wait: false) }
+  func perform() async throws -> some IntentResult & ProvidesDialog {
+    try await IntentYo.send(friend, wait: false) { try await continueInForeground(alwaysConfirm: false) }
+  }
 }
 
 /// Back to ShareBridge.LastYo.

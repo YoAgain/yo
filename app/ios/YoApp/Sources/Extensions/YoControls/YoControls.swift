@@ -36,8 +36,10 @@ struct SendYoConfiguration: ControlConfigurationIntent {
 struct SendYoControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     AppIntentControlConfiguration(kind: "app.justyo.ios.controls.send", provider: Provider()) { friend in
+      // Without a friend (its configuration skipped) the intent opens Yo, where a tap on a name sends the Yo.
       ControlWidgetButton(action: friend.map(SendYoNowIntent.init(friend:)) ?? SendYoNowIntent()) {
         Label(friend.map { "Yo \($0.title)" } ?? "Send Yo", image: "yo.wordmark")
+          .controlWidgetActionHint(friend.map { "Yo \($0.title)" } ?? "Open Yo")
       }
     }
     .displayName("Send Yo")
