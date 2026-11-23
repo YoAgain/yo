@@ -1314,7 +1314,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .overview-grid .srow { min-height: 46px; }
 .overview-grid .srow { grid-template-columns: 18px minmax(max-content, 1fr) max-content minmax(0, var(--graph-share)); gap: 8px; }
 .overview-grid .srow :is(.spark, .hc-pbar) { width: 100%; max-width: none; }
-.overview-grid .srow .spark { height: 38px; }
+.overview-grid .srow .spark { height: 34px; }
 .overview-grid .srow .hc-pbar { height: 18px; }
 .overview-grid .srow .sv { white-space: nowrap; text-align: right; }
 .overview-grid .srow :is(.sl, .sv), #t-system .crow :is(.cl, .cn) { font-size: 15px; }
