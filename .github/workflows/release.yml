@@ -15,6 +15,10 @@ on:
         description: Version without the v, e.g. 1.0.0-RC37 or 1.0.0
         required: true
         type: string
+      notes:
+        description: Release text, required (a headline, then bullets as "- …"; \n starts a new line)
+        required: true
+        type: string
 
 permissions:
   contents: write  # the version commit, made with GITHUB_TOKEN
@@ -30,6 +34,7 @@ jobs:
       - name: Bump version.properties on main and publish the release
         env:
           VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TOKEN: ${{ secrets.YO_RELEASE_TOKEN }}
           REPO: ${{ github.repository }}
@@ -38,6 +43,8 @@ jobs:
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-RC[0-9]+)?$ ]] \
             || { echo "::error::version '$VERSION' is not x.y.z or x.y.z-RCn"; exit 1; }
           [ -n "$RELEASE_TOKEN" ] || { echo "::error::secret YO_RELEASE_TOKEN is missing (see the top of release.yml)"; exit 1; }
+          [ -n "${NOTES// /}" ] || { echo "::error::the release text is required"; exit 1; }
+          printf '%b\n' "$NOTES" > notes.md
           tag="v$VERSION"
           if gh api "repos/$REPO/git/ref/tags/$tag" --silent 2>/dev/null; then
             echo "::error::$tag exists already"; exit 1
@@ -50,6 +57,13 @@ jobs:
           code=$((code + 1))
           grep -v '^version\(Code\|Name\)=' old.properties > new.properties || true
           printf 'versionCode=%s\nversionName=%s\n' "$code" "$VERSION" >> new.properties
+          # F-Droid's changelog for this versionCode (as dev/release.sh writes it), committed first.
+          changelog=fastlane/metadata/android/en-US/changelogs/$code.txt
+          sed -e '/Full Changelog/d' -e 's/\*\*//g' -e 's/`//g' -e 's/\[\([^]]*\)\]([^)]*)/\1/g' -e 's/^- /• /' notes.md \
+            | cat -s | head -c 500 > changelog.txt
+          jq -n --arg m "Release $VERSION: F-Droid changelog" --arg c "$(base64 -w0 changelog.txt)" \
+              '{message: $m, content: $c, branch: "main"}' \
+            | gh api -X PUT "repos/$REPO/contents/$changelog" --input - --silent
           # The blob's sha makes the update fail if main's file changed in between; the commit lands on main's head.
           sha=$(jq -n --arg m "Release $VERSION: version.properties versionCode $code, versionName $VERSION" \
               --arg c "$(base64 -w0 new.properties)" --arg s "$(jq -r .sha current.json)" \
@@ -59,5 +73,5 @@ jobs:
           prerelease=()
           [[ "$VERSION" == *-RC* ]] && prerelease=(--prerelease)
           GH_TOKEN=$RELEASE_TOKEN gh release create "$tag" --repo "$REPO" --target "$sha" --title "$tag" \
-            --generate-notes "${prerelease[@]}"
+            --notes-file notes.md --generate-notes "${prerelease[@]}"
           echo "::notice::released $tag (versionCode $code) on $sha"
