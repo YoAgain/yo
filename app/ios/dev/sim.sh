@@ -7,6 +7,9 @@
 #                                 (started again when XCTest ends it)
 #   dev/sim.sh notify NAME        a push as the hub sends it, through the notification service's code (YoNotifyProbe:
 #                                 the Simulator runs no notification service itself), shown as it made it
+#   dev/sim.sh watch-build        the watch app and widgets for Yo Dev
+#   dev/sim.sh watch-device IPHONE WATCH   create and boot WATCH, paired with the named iPhone
+#   dev/sim.sh watch-install IPHONE WATCH  embed the last watch build in Yo Dev and install both apps
 #   dev/sim.sh delete NAME        the Simulator gone again
 # XCODEGEN names XcodeGen when it is not on the PATH; dev/local.env (ignored) may set it, and RUSTUP_TOOLCHAIN when
 # the Mac's rustup has another toolchain than rust-toolchain.toml's. Yo Dev talks to the dev hub. Passkeys do not work
@@ -29,6 +32,61 @@ case ${1:-} in
     (cd "$here/sim" && "${XCODEGEN:-xcodegen}" generate --quiet)
     xcodebuild build-for-testing -quiet -project "$here/sim/YoSim.xcodeproj" -scheme YoSim -configuration "$config" \
       -destination 'generic/platform=iOS Simulator' -derivedDataPath "$derived"
+    ;;
+  watch-build)
+    project=$here/../YoWatch
+    (cd "$project" && "${XCODEGEN:-xcodegen}" generate)
+    xcodebuild -project "$project/YoWatch.xcodeproj" -scheme YoWatch -configuration Debug -sdk watchsimulator \
+      -destination 'generic/platform=watchOS Simulator' -derivedDataPath "$derived-watch" \
+      YO_COMPANION_BUNDLE=app.justyo.ios.dev YO_WATCH_BUNDLE=app.justyo.ios.dev.watchkitapp CODE_SIGN_IDENTITY=- build
+    ;;
+  watch-device)
+    phone=$(udid "${2:?usage: sim.sh watch-device IPHONE WATCH}")
+    [ -n "$phone" ] || { echo "No iPhone Simulator named $2" >&2; exit 1; }
+    watch=$(udid "${3:?usage: sim.sh watch-device IPHONE WATCH}")
+    if [ -z "$watch" ]; then
+      model=$(xcrun simctl list -j | python3 -c '
+import json, sys
+listing = json.load(sys.stdin)
+runtimes = [r for r in listing["runtimes"] if r["identifier"].split(".")[-1].startswith("watchOS-") and r["isAvailable"]]
+if not runtimes:
+    sys.exit("No available watchOS Simulator runtime")
+runtime = max(runtimes, key=lambda r: tuple(map(int, r["version"].split("."))))
+supported = {d["identifier"] for d in runtime.get("supportedDeviceTypes", [])}
+types = [d for d in listing["devicetypes"] if d["name"].startswith("Apple Watch") and
+         (not supported or d["identifier"] in supported)]
+if not types:
+    sys.exit("No Apple Watch device type for " + runtime["name"])
+device = max(types, key=lambda d: (d["name"] == "Apple Watch Series 11 (46mm)", d.get("minRuntimeVersion", 0)))
+print(device["identifier"], runtime["identifier"])')
+      read -r device runtime <<< "$model"
+      watch=$(xcrun simctl create "$3" "$device" "$runtime")
+    fi
+    pair=$(xcrun simctl list pairs -j | python3 -c '
+import json, sys
+print(next((key for key, pair in json.load(sys.stdin)["pairs"].items()
+            if pair["watch"]["udid"] == sys.argv[1] and pair["phone"]["udid"] == sys.argv[2]), ""))' "$watch" "$phone")
+    if [ -z "$pair" ]; then pair=$(xcrun simctl pair "$watch" "$phone"); fi
+    xcrun simctl bootstatus "$phone" -b >/dev/null
+    xcrun simctl bootstatus "$watch" -b >/dev/null
+    echo "Watch $watch, pair $pair"
+    ;;
+  watch-install)
+    phone=$(udid "${2:?usage: sim.sh watch-install IPHONE WATCH}")
+    watch=$(udid "${3:?usage: sim.sh watch-install IPHONE WATCH}")
+    [ -n "$phone" ] || { echo "No iPhone Simulator named $2" >&2; exit 1; }
+    [ -n "$watch" ] || { echo "No watch Simulator named $3" >&2; exit 1; }
+    app=$derived/Build/Products/$config-iphonesimulator/YoApp.app
+    watch_app=$derived-watch/Build/Products/Debug-watchsimulator/YoWatch.app
+    [ -d "$app" ] || { echo "Build Yo Dev with sim.sh build first" >&2; exit 1; }
+    [ -d "$watch_app" ] || { echo "Build YoWatch with sim.sh watch-build first" >&2; exit 1; }
+    mkdir -p "$app/Watch"
+    rm -rf "$app/Watch/YoWatch.app"
+    ditto "$watch_app" "$app/Watch/YoWatch.app"
+    codesign -f -s - --preserve-metadata=entitlements "$app"
+    xcrun simctl install "$phone" "$app"
+    xcrun simctl bootstatus "$watch" -b
+    xcrun simctl install "$watch" "$watch_app"
     ;;
   device)
     u=$(udid "$2")
@@ -73,7 +131,7 @@ case ${1:-} in
     xcrun simctl delete "$(udid "$2")"
     ;;
   *)
-    sed -n '2,12p' "$0" >&2
+    sed -n '/^# Yo Dev/,/^# XCODEGEN/{ /^# XCODEGEN/!p; }' "$0" >&2
     exit 2
     ;;
 esac

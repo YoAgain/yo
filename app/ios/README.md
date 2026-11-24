@@ -110,6 +110,32 @@ says it supports PRF, else after a line that says why). What a provider reports 
 on iOS says "not supported" and gives the output when asked.
 `TESTING.md` lists what was gone through that way, and how.
 
+## Apple Watch
+
+Turn the Digital Crown to scroll the friend bars. Tap a bar to send a Yo through the iPhone. WatchConnectivity
+gets the list and last sender from the iPhone’s application context. A tap uses `sendMessage` when reachable.
+If the phone is unreachable or the message fails, `transferUserInfo` queues the same Yo for later.
+
+On a Yo notification on the watch, **Yo Back** is the only action, so double tap does it: the watch app opens,
+sends it through the iPhone and says "Sent Yo!" on the sender's bar. A Yo queued by `transferUserInfo` that
+reaches the iPhone more than five minutes late is dropped.
+Complications and the Smart Stack show just the symbol and name. The watch’s App Shortcut lets Siri send “Yo Lina”.
+
+xtool builds iOS only. On the macOS CI runner, `dev/watch.sh build` uses XcodeGen and Xcode for watchOS.
+After `ship.sh`, `dev/watch.sh embed` gets distribution profiles through the App Store Connect API, signs the
+widgets and watch app, and embeds them in the signed iPhone build.
+
+With Yo Dev installed on the iPhone Simulator (above), run on the Mac:
+
+```sh
+app/ios/dev/sim.sh watch-build
+app/ios/dev/sim.sh watch-device "Yo Sim" "Yo Watch"
+app/ios/dev/sim.sh watch-install "Yo Sim" "Yo Watch"
+app/ios/dev/sim.sh delete "Yo Watch"       # remove the watch Simulator when finished
+```
+
+In paired Simulators, only `sendMessage` delivers Yos. The Simulator does not deliver queued `transferUserInfo`.
+
 ## The Rust core
 
 `core/bindings` (UniFFI) comes in as the module `YoCore`: `import YoCore`, then `YoClient`, `openBackup`,

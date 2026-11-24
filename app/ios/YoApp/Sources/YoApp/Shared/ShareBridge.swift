@@ -304,6 +304,8 @@ extension ShareBridge {
     }
   }
 
+  static var lastYoChanged: String { group + ".lastYoChanged" }
+
   static var lastYoFile: URL? { container?.appending(path: "last-yo.json") }
 
   static func readLastYo() -> LastYo? {
@@ -321,6 +323,8 @@ extension ShareBridge {
     let last = LastYo(owner: owner, to: newest.user, name: name, sentAtMs: newest.sentAtMs)
     guard let data = try? JSONEncoder().encode(last) else { return }
     Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+    CFNotificationCenterPostNotification(
+      CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(lastYoChanged as CFString), nil, nil, true)
     // The Lock Screen's Yo Back and "Yo from …" name the newest sender, and so does the Yo Back control.
     WidgetCenter.shared.reloadAllTimelines()
     ControlCenter.shared.reloadControls(ofKind: yoBackControlKind)

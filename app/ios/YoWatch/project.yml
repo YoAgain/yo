@@ -1,0 +1,56 @@
+name: YoWatch
+options:
+  deploymentTarget: {watchOS: "26.0"}
+settings:
+  base:
+    YO_COMPANION_BUNDLE: app.justyo.ios
+    YO_WATCH_BUNDLE: app.justyo.ios.watchkitapp
+    SWIFT_VERSION: "6.0"
+    TARGETED_DEVICE_FAMILY: "4"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    GENERATE_INFOPLIST_FILE: YES
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+targets:
+  YoWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - Sources/App
+      - Sources/Shared
+      - {path: Resources/Assets.xcassets, buildPhase: resources}
+      - {path: ../YoApp/Resources/Symbols.xcassets, buildPhase: resources}
+      - {path: ../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
+    dependencies:
+      - {target: YoWatchWidgets, embed: true}
+    settings:
+      base:
+        PRODUCT_NAME: YoWatch
+        PRODUCT_BUNDLE_IDENTIFIER: $(YO_WATCH_BUNDLE)
+        INFOPLIST_FILE: Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Yo
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_ENTITLEMENTS: YoWatch.entitlements
+  YoWatchWidgets:
+    type: app-extension
+    platform: watchOS
+    sources:
+      - Sources/Widgets
+      - Sources/Shared
+      - {path: ../YoApp/Resources/Symbols.xcassets, buildPhase: resources}
+      - {path: ../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(YO_WATCH_BUNDLE).widgets
+        INFOPLIST_FILE: YoWatchWidgets-Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Yo
+        CODE_SIGN_ENTITLEMENTS: YoWatchWidgets.entitlements
+        SKIP_INSTALL: YES
+schemes:
+  YoWatch:
+    build:
+      targets:
+        YoWatch: all

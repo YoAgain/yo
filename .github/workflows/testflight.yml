@@ -197,6 +197,8 @@ jobs:
       - name: Tools
         run: |
           xcodebuild -version
+          xcodebuild -showsdks
+          brew install -q xcodegen
           brew install -q bash   # ship.sh wants bash 4 or later
           # xtool's command line; xtool.app/Contents/MacOS/xtool is the app and waits for its window.
           echo ~/ci-tools/xtool.app/Contents/Resources/bin >> "$GITHUB_PATH"
@@ -335,6 +337,13 @@ jobs:
                   print(f"deleted profile {attributes['name']} ({attributes.get('profileState')}): made anew")
           EOF
 
+      - name: Watch app
+        run: |
+          if ! xcodebuild -showsdks | grep -E -- '-sdk watchos[0-9]' >/dev/null; then
+            xcodebuild -downloadPlatform watchOS
+          fi
+          app/ios/dev/watch.sh build
+
       # Built, signed and validated here; uploaded after the checks below (ship.sh step 9, as a step of its own).
       - name: Build and sign
         working-directory: app/ios/YoApp
@@ -412,11 +421,20 @@ jobs:
       # and the same stub beside Payload/ (MessagesApplicationExtensionSupport/): App Store Connect rejects an iMessage
       # app without it (90620) or with the two in different forms (90614). After ship.sh, whose offline check wants
       # every entry under Payload/.
-      - name: Sticker pack support
+      # dev/watch.sh embed provisions the watch app through the App Store Connect API, signs it inside out,
+      # and seals the app again over it.
+      - name: Sticker pack and watch app
         working-directory: app/ios/YoApp
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_PATH: ${{ runner.temp }}/asc/AuthKey.p8
+          ASC_IDENTITY_DIR: ${{ runner.temp }}/asc/distribution
+          OAD_TOOLS: ${{ github.workspace }}/.oad/tools
         run: |
           [ -d xtool/YoApp.app/PlugIns/YoStickers.appex ] || { echo "::error::no YoStickers.appex in the build"; exit 1; }
           ../dev/stickers.sh --resign xtool/YoApp.app xtool/ship-signing xtool/YoApp.ipa
+          ../dev/watch.sh embed xtool/YoApp.app xtool/ship-signing xtool/YoApp.ipa
           # The app signed again over the sticker pack's universal executable: ship.sh's offline check once more, with
           # what ship.sh reads from xtool.env (the app's requested entitlements).
           (. ./xtool.env && ~/pymobile3-venv/bin/python "$GITHUB_WORKSPACE/.oad/tools/asc.py" validate "$PWD/xtool/YoApp.ipa")
@@ -442,6 +460,26 @@ jobs:
               sys.exit(1)
           EOF
 
+      # Check the embedded watch profiles and the app signature before upload.
+      - name: Watch app signature
+        working-directory: app/ios/YoApp
+        run: |
+          python3 -I - xtool/YoApp.ipa <<'PY'
+          import plistlib, sys, zipfile
+          watch = "Payload/YoApp.app/Watch/YoWatch.app"
+          with zipfile.ZipFile(sys.argv[1]) as ipa:
+              for bundle in (watch, watch + "/PlugIns/YoWatchWidgets.appex"):
+                  info = plistlib.loads(ipa.read(bundle + "/Info.plist"))
+                  ipa.getinfo(bundle + "/" + info["CFBundleExecutable"])
+                  raw = ipa.read(bundle + "/embedded.mobileprovision")
+                  profile = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])
+                  ident = info["CFBundleIdentifier"]
+                  if not profile["Entitlements"]["application-identifier"].endswith("." + ident):
+                      sys.exit(f"::error::{bundle}: profile does not cover {ident}")
+                  print(f"{bundle}: {ident}, {profile['UUID']}")
+          PY
+          codesign --verify --deep --strict xtool/YoApp.app
+
       - name: Upload
         working-directory: app/ios/YoApp
         timeout-minutes: 20
@@ -458,7 +496,8 @@ jobs:
         working-directory: app/ios/YoApp
         run: |
           mkdir -p "$RUNNER_TEMP/dsym"
-          for bin in xtool/YoApp.app/YoApp xtool/YoApp.app/PlugIns/*.appex/*; do
+          for bin in xtool/YoApp.app/YoApp xtool/YoApp.app/PlugIns/*.appex/* \
+            xtool/YoApp.app/Watch/*.app/* xtool/YoApp.app/Watch/*.app/PlugIns/*.appex/*; do
             [ -f "$bin" ] && file "$bin" | grep -q Mach-O || continue
             name=$(basename "$bin")
             dsymutil "$bin" -o "$RUNNER_TEMP/dsym/$name.dSYM" || true

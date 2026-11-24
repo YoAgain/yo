@@ -98,6 +98,7 @@ struct YoApp: App {
     HubTransport.answered = { Problems.hubAnswered() }
     Reconnect.watchPath()
     UNUserNotificationCenter.current().delegate = notifications
+    WatchLink.shared.start()
     // Not in a launch for an intent, nor before the list.
     Launch.later { CrashReports.shared.start() }
     Perf.mark("launch.init.end")
@@ -269,6 +270,7 @@ struct YoApp: App {
           // First, so what goes out on the return goes on fresh connections.
           Reconnect.phase(active: phase == .active, background: phase == .background)
           guard phase == .active else { return }
+          WatchLink.shared.refresh()
           Perf.mark("app.active")
           accounts.openNow()  // also resumes an unfinished old-install update
           AccountAlert.shared.update(accounts)  // one raised before the window was there
@@ -347,7 +349,7 @@ private final class StateAccessTime: StateAccess, @unchecked Sendable {
   }
 }
 
-private final class Ended: @unchecked Sendable {
+final class Ended: @unchecked Sendable {
   private let application: UIApplication
 
   init(_ application: UIApplication) { self.application = application }

@@ -68,3 +68,4 @@ extensions:
 # Not listed here: the iMessage sticker pack YoStickers (app.justyo.ios.stickers; Resources/Stickers.xcassets,
 # YoStickers-Info.plist). It has no code, Apple's stub runs it, so xtool has nothing to build; dev/stickers.sh puts it
 # into the TestFlight build (testflight.yml) and dev/sim/project.yml into the Simulator's.
+# YoWatch is built separately with Xcode because xtool builds iOS only. dev/watch.sh embeds it after ship.sh.
