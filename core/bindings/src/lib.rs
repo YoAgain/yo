@@ -1084,7 +1084,8 @@ impl YoClient {
             };
             (delivered, wait.send())
         };
-        let end = |c: &mut Client| if unsaved { c.sync_end_unsaved(&wait, response) } else { c.sync_end(&wait, response) };
+        let end =
+            |c: &mut Client| if unsaved { c.sync_end_unsaved(&wait, response) } else { c.sync_end(&wait, response) };
         match self.with(end).and_then(|received| Ok(received?)) {
             Ok(received) => {
                 delivered.extend(received);
