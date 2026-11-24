@@ -25,6 +25,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Hold memory with inbox waits | 4 inbox requests per device at once | – |
 | Use up a user's one-time prekeys | Lookups 50/device/day; last-resort Kyber prekey keeps sessions possible; replay of a last-resort message refused (4.1); refill below 16 | first messages then use the last resort (weaker forward secrecy for that message) |
 | Read a backup record | Fetch signed by a door's auth key, else `404` as for none; sealed part padded | – |
+| Hand back an older backup record (a proxy kept it: its recovery key since replaced) | The fetch's `200` signed by the hub key the app pins, bound to its nonce (spec 6.10, 7); a new recovery key or passkey door comes with a new K, so an old door and its wrap open nothing sealed since | the hub itself serving an older record; builds without a pinned key |
 | Push to another path on Apple's host | Non-hex APNs tokens cleared | – |
 | Use the admin token from the internet | Behind Cloudflare the admin routes answer loopback without `CF-Connecting-IP` only (the admin page); else `404` | a process on the server |
 | Spoof `CF-Connecting-IP` | Only with `YO_TRUST_CLOUDFLARE`; warning when not listening on loopback | operator: check the published port |

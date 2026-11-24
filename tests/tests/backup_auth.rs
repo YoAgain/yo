@@ -196,3 +196,35 @@ fn a_signature_written_another_way_is_still_a_replay() {
     assert_eq!(get_as(&hub, &user, Some(first)).0, 200);
     assert_eq!(get_as(&hub, &user, Some(other)), (404, Vec::new()), "the same signature, its scalar not reduced");
 }
+
+/// B2 at the hub: a fetch asked with `Yo-Nonce` is answered with the record and the hub's signature over the nonce,
+/// the path and the record (spec 6.10); without the header, the record alone, as before.
+#[test]
+fn the_hub_signs_a_fetch_asked_with_a_nonce() {
+    let hub = TestHub::start();
+    let mut t = register(&hub);
+    let user = yo_tests::user_id(t.user_id());
+    let code = words(13);
+    let record = yo_wire::encode(&backup::make(&[5; 32], b"{}", &code, PasskeyDoor::None).unwrap());
+    t.put_backup(&yo_wire::decode(&record).unwrap()).unwrap();
+    let path = api::backup_path(&user);
+    let fetch = |nonce: Option<[u8; 16]>, time: u64| {
+        let signature = sign(&Door::Code(&code).auth_key(), &to_be_signed("GET", &path, time, b""));
+        let mut request = reqwest::blocking::Client::new()
+            .get(format!("{}{path}", hub.url()))
+            .header(HEADER_TIME, time.to_string())
+            .header(HEADER_SIGNATURE, yo_wire::b64(&signature));
+        if let Some(nonce) = nonce {
+            request = request.header(yo_wire::hubsig::NONCE_HEADER, yo_wire::b64(&nonce));
+        }
+        let response = request.send().unwrap();
+        (response.status().as_u16(), response.bytes().unwrap().to_vec())
+    };
+    let now = yo_hub::now_ms();
+    assert_eq!(fetch(None, now), (200, record.clone()), "no nonce: as before");
+    let (status, signed) = fetch(Some([7; 16]), now + 1);
+    assert_eq!(status, 200);
+    let key = yo_tests::hub_key();
+    assert_eq!(yo_wire::hubsig::open(&key, &[7; 16], &path, b"", &signed), Ok(record.as_slice()));
+    assert!(yo_wire::hubsig::open(&key, &[8; 16], &path, b"", &signed).is_err(), "for its nonce only");
+}
