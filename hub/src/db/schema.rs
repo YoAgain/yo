@@ -285,7 +285,7 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
 
 // Which install sent a crash or error group on which day (days since the epoch, UTC), so the operator counts
-// installs, not reports (`at` the last report of that day, ms; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 6.4).
+// installs, not reports (`at` the last report of that day, to the hour; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 6.4).
 pub(super) const DIAGNOSTIC_INSTALLS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_installs (
     diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, install BLOB NOT NULL,
     day INTEGER NOT NULL, at INTEGER, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;

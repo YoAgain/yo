@@ -16,6 +16,13 @@ use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER, KIND_USERNAME};
 use yo_wire::{DeviceId, UserId, KEY_LEN};
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
+const HOUR_MS: u64 = 3600 * 1000;
+
+/// A time as the hub keeps when a device or an install was last heard from (spec 1): the start of its hour (UTC),
+/// fine enough for the hourly levels' 24-hour windows (`phones-24h`, `build:`), no finer.
+pub fn to_the_hour(ms: u64) -> u64 {
+    ms - ms % HOUR_MS
+}
 /// How long a crash or error group is kept after it was last seen, and an install's occurrence of one (spec 6.4).
 const DIAGNOSTICS_KEPT_DAYS: u64 = 90;
 /// Levels (`levels`) are kept by the hour this long, then one a day for good.
@@ -553,11 +560,11 @@ impl Db {
         self.conn().prepare_cached("SELECT 1 FROM gone WHERE id = ?1")?.exists([device])
     }
 
-    /// Seen at `now`, with the app it names (none: the one it had stays).
+    /// Seen at `now` (kept to the hour), with the app it names (none: the one it had stays).
     pub fn touch(&self, device: &DeviceId, now: u64, app: Option<&str>) -> rusqlite::Result<()> {
         self.run(
             "UPDATE devices SET last_seen_at = ?2, app = coalesce(?3, app) WHERE id = ?1",
-            params![device, now, app],
+            params![device, to_the_hour(now), app],
         )
     }
 
@@ -639,7 +646,7 @@ impl Db {
                 "INSERT INTO devices
                      (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app,
                       registration_id, number)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?11, ?8, ?9, ?10)",
                 params![
                     device.device_id,
                     user,
@@ -650,7 +657,8 @@ impl Db {
                     now,
                     device.app,
                     device.registration_id,
-                    number
+                    number,
+                    to_the_hour(now)
                 ],
             )?;
             release_push_token(tx, &device.device_id, device.push_platform, &device.push_token)?;
@@ -1101,7 +1109,7 @@ impl Db {
                 tx.execute(
                     "INSERT INTO diagnostic_installs(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(diagnostic_id, install, day) DO UPDATE SET at = ?4",
-                    params![id, install, now / DAY_MS, now as i64],
+                    params![id, install, now / DAY_MS, to_the_hour(now) as i64],
                 )?;
             }
             Ok(())
@@ -2118,6 +2126,42 @@ mod tests {
         assert_eq!(rows(&db).len(), 3, "kept for good: counts of no one");
     }
 
+    /// When a device or an install was last heard from is kept to the hour (spec 1), never to the millisecond; the
+    /// hourly levels' 24-hour windows still count a phone seen 23 hours ago, and one seen 25 hours ago no more.
+    #[test]
+    fn last_seen_is_kept_to_the_hour_and_the_daily_windows_still_count() {
+        let db = Db::open(":memory:").unwrap();
+        let hour = HOUR_MS;
+        let now = 1000 * DAY + 5 * hour + 1_234_567;
+        let seen = |n: u8| db.device(&[n; 16]).unwrap().unwrap().last_seen_at;
+        assert!(matches!(register(&db, b"alice", 1, 1, now - 23 * hour), Write::Done(_)));
+        assert!(matches!(register(&db, b"bob", 2, 2, now - 25 * hour), Write::Done(_)));
+        assert_eq!(seen(1), to_the_hour(now - 23 * hour));
+        assert_eq!(seen(1) % hour, 0, "registered: to the hour");
+        db.touch(&[2; 16], now - 25 * hour + 59_999, Some("ios/1")).unwrap();
+        assert_eq!(seen(2), to_the_hour(now - 25 * hour), "touched: to the hour");
+        db.touch(&[1; 16], now - 23 * hour + 1, Some("ios/1")).unwrap();
+        let install = [7u8; 16];
+        let payload =
+            serde_json::json!({"app": "ios/1", "os": "26", "model": "x", "domain": "d", "code": "1", "place": "p"});
+        db.diagnostic("error", &payload, Some(&install), now - 23 * hour).unwrap();
+        let at: i64 = db.conn().query_row("SELECT at FROM diagnostic_installs", [], |r| r.get(0)).unwrap();
+        assert_eq!(at as u64, to_the_hour(now - 23 * hour), "an install's report: to the hour");
+        db.sample_levels(now, false).unwrap();
+        let level = |kind: &str| -> i64 {
+            db.conn()
+                .query_row(
+                    "SELECT value FROM levels WHERE kind = ?1 AND hour = ?2",
+                    params![kind, (now / hour) as i64],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!((level("phones-24h"), level("phones-24h:ios"), level("build:ios/1")), (1, 1, 1));
+        assert_eq!((level("active-24h"), level("active-48h")), (1, 2));
+        assert_eq!(level("problem-installs-24h"), 1);
+    }
+
     #[test]
     fn levels_are_counts_per_hour_then_per_day_for_good() {
         let db = Db::open(":memory:").unwrap();
@@ -2189,7 +2233,9 @@ mod tests {
             .unwrap();
         assert_eq!(columns, ["kind", "hour", "value"], "no identifier of anyone or anything");
         // A bot's device (the CLI, YoGPT) is no active account: bob on the CLI leaves no one seen within 48 hours.
-        db.conn().execute("UPDATE devices SET app = 'cli/1' WHERE last_seen_at = ?1", [(now - hour) as i64]).unwrap();
+        db.conn()
+            .execute("UPDATE devices SET app = 'cli/1' WHERE last_seen_at = ?1", [to_the_hour(now - hour) as i64])
+            .unwrap();
         db.sample_levels(now + hour, false).unwrap();
         let bots: i64 = db
             .conn()

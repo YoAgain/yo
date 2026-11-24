@@ -169,7 +169,7 @@ impl Hub {
         let signed = Signed { device_id, user_id: device.user_id };
         self.limit_signed(&signed, "signed", &device_id, self.config.limits.signed_per_device_minute, MINUTE)
             .map_err(|_| error::limited("device", None))?;
-        // Last seen counts only to the day (spec 6.4): one write a day; the app it names, when it changes.
+        // Last seen is kept to the hour (spec 1) and written once a day; the app it names, when it changes.
         let app = named_app(headers);
         let new_app = app.is_some_and(|a| device.app.as_deref() != Some(a));
         if new_app || now.saturating_sub(device.last_seen_at) >= DAY_MS {
