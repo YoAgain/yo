@@ -1036,11 +1036,23 @@ impl YoClient {
         // The outbox goes as `deliver` does, without the turn: under it, a slow network kept the notification service
         // and every other step waiting as long as the envelopes took (past their 10 s, the push showed unread), and a
         // long turn is one iOS may suspend the app in (0xdead10cc). What does not go now waits for the next sync.
-        let mut delivered = match deliveries {
-            Some(deliveries) => shared::deliver(self, deliveries).unwrap_or_default(),
-            None => Vec::new(),
+        // A fetch that does not wait (a push's pass) sends it beside the inbox's request, not before: the receipt for the
+        // last Yo no longer holds up the new one (a round trip, ~150 ms on a phone). A long poll sends it first, so what
+        // it delivered is not held for the poll's seconds.
+        let (mut delivered, response) = if wait_s == 0 {
+            std::thread::scope(|scope| {
+                let delivering = deliveries.map(|deliveries| scope.spawn(|| shared::deliver(self, deliveries)));
+                let response = wait.send();
+                let delivered = delivering.and_then(|delivering| delivering.join().ok()?.ok()).unwrap_or_default();
+                (delivered, response)
+            })
+        } else {
+            let delivered = match deliveries {
+                Some(deliveries) => shared::deliver(self, deliveries).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            (delivered, wait.send())
         };
-        let response = wait.send();
         match self.with(|c| c.sync_end(&wait, response)).and_then(|received| Ok(received?)) {
             Ok(received) => {
                 delivered.extend(received);

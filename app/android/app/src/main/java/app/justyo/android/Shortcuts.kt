@@ -32,6 +32,7 @@ private fun shortcut(context: Context, friend: Friend, rank: Int): ShortcutInfoC
 
 /** Keep eligible conversations cached even when they fall out of the launcher's ranked list. */
 internal fun syncShortcuts(context: Context, friends: List<Friend>) {
+    pushed.clear()
     runCatching {
         val flags = ShortcutManagerCompat.FLAG_MATCH_DYNAMIC or ShortcutManagerCompat.FLAG_MATCH_CACHED
         val previous = ShortcutManagerCompat.getShortcuts(context, flags).map { it.id }
@@ -53,8 +54,17 @@ internal fun syncShortcuts(context: Context, friends: List<Friend>) {
     }
 }
 
+/** The conversation shortcuts this process pushed in the last minute, as pushed: Yos from the same friend in a row push
+ *  it once (as Signal pushes only if needed). A push is a call to the system with an icon, ~20 ms of a notification;
+ *  after a minute it goes again, in case the system dropped it for others meanwhile. */
+private val pushed = java.util.concurrent.ConcurrentHashMap<String, Pair<Triple<String, Int, Int>, Long>>()
+
 internal fun pushConversation(context: Context, friend: Friend, rank: Int) {
+    val shortcut = Triple(friend.shortcutLabel, friend.color, rank)
+    val now = android.os.SystemClock.elapsedRealtime()
+    if (pushed[friend.key]?.let { (pushedAs, at) -> pushedAs == shortcut && now - at < 60_000 } == true) return
     runCatching { ShortcutManagerCompat.pushDynamicShortcut(context, shortcut(context, friend, rank)) }
+        .onSuccess { pushed[friend.key] = shortcut to now }
 }
 
 internal fun reportShortcutUsed(context: Context, friend: Friend) {

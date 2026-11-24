@@ -699,6 +699,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
         // As Signal's "you may have new messages": gone once the inbox came through.
         notifications.clear(FALLBACK)
+        // What the pass leaves (the hub's ack, receipts) goes now, after the notification: left for the next push, the
+        // next Yo's fetch waited for it (an ack and a receipt, ~350 ms on the A34).
+        try {
+            syncing.withLock {
+                val c = client ?: return@withLock
+                absorb(c.sync(0u), c)
+            }
+        } catch (e: CancellationException) { throw e } catch (_: Exception) { /* The next pass sends it. */ }
         // Keep the process eligible to complete downloads started by the inbox pass.
         withTimeoutOrNull(15_000) {
             state.first { snapshot -> snapshot.media.none { !it.ready } }
