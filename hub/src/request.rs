@@ -162,7 +162,7 @@ impl Hub {
         yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
             .map_err(|_| unauthorized())?;
         // A replay is refused before it is counted: whoever repeats a device's request must not spend its budget.
-        if !self.first_time(&signature, time, now) {
+        if !self.first_time(&device_id, &signature, time, now) {
             return Err(unauthorized());
         }
         // Counted only once the signature holds: a stranger who knows a device id must not spend its requests.
@@ -178,9 +178,9 @@ impl Hub {
         Ok(signed)
     }
 
-    /// Each signature once (the replay cache), for as long as its time is within the window.
-    pub(crate) fn first_time(&self, signature: &[u8; 64], time: u64, now: u64) -> bool {
-        self.replay.first_time(*signature, now, time + limits::MAX_SKEW_MS + 1)
+    /// Each signature once (the replay cache, per signer: a device, a backup's id), while its time is in the window.
+    pub(crate) fn first_time(&self, signer: &[u8; 16], signature: &[u8; 64], time: u64, now: u64) -> bool {
+        self.replay.first_time(*signer, *signature, now, time + limits::MAX_SKEW_MS + 1)
     }
 
     /// An answer that hands out keys, signed with the hub's key when the request asks with a nonce (spec 6.10).

@@ -17,7 +17,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Swap a contact's keys | Session identity = pinned account key (4.1); the hub delivers no key a client trusts by itself | a lying hub's device list (3.2); key transparency later |
 | Hand out other keys between app and hub (TLS broken, a proxy) | Lookups and `409` rosters signed by the hub key the app pins, bound to the client's nonce and question (spec 6.10) | the hub itself (or its key) lying: key transparency later; builds without a pinned key |
 | Fill the disk without identity | 64 MiB/IP/hour of delivered bytes; `507` below 1 GiB free; 30-day TTL | many addresses: the floor holds, deliveries stop until cleanup |
-| Fill one user's inbox | 5000 per device, then `507` for that recipient only; strangers' deliveries 20/recipient/day, none with requests off (spec 4.10) | a contact's spam (block: the key rotates); scarce request tokens later (8) |
+| Fill one user's inbox | 5000 per device, then `507` for that recipient only; strangers' deliveries are signed requests in buckets (spec 4.10, 6.6): 10 at once per sender and recipient, one more an hour; 20 new recipients per sender at once, one more an hour; 1000 to one recipient from all at once, as many again a day. "Requests from Strangers" off drops them on the device, unseen; the hub takes them all the same | a contact's spam (block: the key rotates); scarce request tokens later (8) |
 | Tell contacts apart by the access key | One profile key per account (Signal's), its access key the same for every contact; the hub keeps a SHA-256 of the access key only, compared in constant time (4.10) | the hub learns a delivery is a contact's, and a key rotation after a block |
 | Reach anyone through a group of one's own making | An invited member (no key in its entry) gets no endorsement and is endorsed for no one (4.9): deliveries to them are requests, signed and counted (4.10); with requests off a stranger's group and its Yos are dropped unseen | tokens issued before 2026-11-24, for their 2–3 days |
 | Spend another device's request budget | Counted only after the signature holds and is not a replay | – |
@@ -31,7 +31,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Lose recent commits to an OS crash or power cut | SQLite WAL `synchronous = NORMAL`; process crashes preserve commits | Recent acknowledged deliveries and other state changes can roll back; see durability below |
 | Log out a device with an old registration (a proxy's log) | The proof has no time, so replaced device ids are kept for good (`gone`): the old body is `409` however late | – |
 | Act as a replaced device | Every write checks the device in its own transaction (`410`) | – |
-| Replay a signed request | 5-minute window, cache keyed by signature; a signature has one encoding (its scalar reduced, `yo_wire::xeddsa_verify`) | the cache is in memory: a restart within 5 min |
+| Replay a signed request | 5-minute window, cache keyed by signer and signature, at most 32768 live ones per signer (past that `401` until the oldest expire); a signature has one encoding (its scalar reduced, `yo_wire::xeddsa_verify`) | the cache is in memory: a restart within 5 min |
 | Probe without an account | username taken (by design), device replaced (`410` vs `401`) | device ids are random and unpublished |
 | A delivery's `409` names a user's account and device keys | Needed for sealed delivery (4.4); public keys, user ids come from lookups anyway | – |
 | Panics on input | 6 fuzz targets (`dev/fuzz`), nightly in CI | – |
@@ -40,6 +40,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 
 - Signatures cover method, path with query as received, time, body hash; paths with `..`, `//`, `/`, `%` find no other route.
 - Every signed route acts on the signer's own user, device or inbox; a blob needs its 128-bit id.
+- An ack naming an id past SQLite's `i64` is `400`, not an error.
 - SQL: bound parameters only. Bodies: 65 KiB, blobs `Content-Length` ≤ 10 MiB, counted as they come.
 - Refusals carry a status and no text; logs carry no user text and no push token.
 - Growing tables: `feedback` (10/user/day), `gone` (for good, about 40 bytes per replaced device: an old registration played back stays refused), `diagnostics` (8 MiB/IP/hour, `507` below the disk floor, 90 days),

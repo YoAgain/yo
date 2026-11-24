@@ -588,6 +588,19 @@ fn a_copied_registration_registers_no_one() {
     assert_eq!(replay.status().as_u16(), api::status::BAD_REQUEST);
 }
 
+/// I2: an ack naming an id past SQLite's `i64` names no envelope: a malformed request, `400` (not a `500` and a log
+/// line); the largest id there can be is taken as any.
+#[test]
+fn an_ack_past_the_largest_id_is_a_bad_request() {
+    let hub = TestHub::start();
+    let mut t = by_name(&hub, &format!("ACK{}", random_u64() % 100_000), None).unwrap();
+    let ack = |ids: Vec<u64>| yo_wire::encode(&api::Ack { ids });
+    for ids in [vec![u64::MAX], vec![1, i64::MAX as u64 + 1]] {
+        assert_eq!(t.signed_for_tests("POST", api::INBOX_ACK, &ack(ids)).unwrap().status, api::status::BAD_REQUEST);
+    }
+    assert_eq!(t.signed_for_tests("POST", api::INBOX_ACK, &ack(vec![i64::MAX as u64])).unwrap().status, 204);
+}
+
 fn yos_from_user(events: &[Event], from: &str) -> usize {
     events.iter().filter(|e| matches!(e, Event::Message { user, content: Content::Yo, .. } if user == from)).count()
 }

@@ -214,28 +214,55 @@ impl Requests {
     }
 }
 
-/// Signatures seen within the time window: each signed request is accepted once.
+/// Signatures seen within the time window: each signed request is accepted once. Kept per signer (a device, a
+/// backup's id), each with at most `REPLAY_PER_SIGNER` live ones: a signer past that (far past any device's budget
+/// within the window) is refused until its oldest expire, so no one key fills the hub's memory.
 #[derive(Default)]
 pub struct ReplayCache {
-    seen: Mutex<HashMap<[u8; 64], u64>>,
+    seen: Mutex<HashMap<[u8; 16], Expiries>>,
 }
+
+/// A signer's signatures, each with when it expires (ms).
+type Expiries = HashMap<[u8; 64], u64>;
+
+/// Live signatures one signer may have: 10 minutes of the window at over 3000 requests a minute (a device's budget is
+/// 1200, `signed_per_device_minute`; the operator's bots have none).
+pub const REPLAY_PER_SIGNER: usize = 32_768;
 
 impl ReplayCache {
     /// Drops expired signatures: run periodically.
     pub fn forget_expired(&self, now_ms: u64) {
-        self.seen.lock().unwrap_or_else(PoisonError::into_inner).retain(|_, expiry| *expiry > now_ms);
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.retain(|_, mine| {
+            mine.retain(|_, expiry| *expiry > now_ms);
+            !mine.is_empty()
+        });
     }
 
-    /// Records a signature valid until `expires_ms`; false when it was seen before.
-    pub fn first_time(&self, signature: [u8; 64], now_ms: u64, expires_ms: u64) -> bool {
+    /// Records a signer's signature valid until `expires_ms`; false when it was seen before, or the signer has
+    /// `REPLAY_PER_SIGNER` live ones.
+    pub fn first_time(&self, signer: [u8; 16], signature: [u8; 64], now_ms: u64, expires_ms: u64) -> bool {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        match seen.get(&signature) {
+        let mine = seen.entry(signer).or_default();
+        match mine.get(&signature) {
             Some(expiry) if *expiry > now_ms => false,
             _ => {
-                seen.insert(signature, expires_ms);
+                if mine.len() >= REPLAY_PER_SIGNER {
+                    mine.retain(|_, expiry| *expiry > now_ms);
+                    if mine.len() >= REPLAY_PER_SIGNER {
+                        return false;
+                    }
+                }
+                mine.insert(signature, expires_ms);
                 true
             }
         }
+    }
+
+    /// How many signatures are held, of all signers.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner).values().map(HashMap::len).sum()
     }
 }
 
@@ -295,9 +322,34 @@ mod tests {
     #[test]
     fn replay_once() {
         let cache = ReplayCache::default();
-        assert!(cache.first_time([1; 64], 0, 100));
-        assert!(!cache.first_time([1; 64], 50, 150));
-        assert!(cache.first_time([1; 64], 101, 200));
+        assert!(cache.first_time([7; 16], [1; 64], 0, 100));
+        assert!(!cache.first_time([7; 16], [1; 64], 50, 150));
+        assert!(cache.first_time([7; 16], [1; 64], 101, 200));
+    }
+
+    /// I4: one signer's live signatures are bounded; another signer is not held back by it, and expired ones make
+    /// room again. Each signature once per signer stays.
+    #[test]
+    fn a_signers_replay_cache_is_bounded() {
+        let cache = ReplayCache::default();
+        let signature = |n: usize| {
+            let mut s = [0u8; 64];
+            s[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            s
+        };
+        for n in 0..REPLAY_PER_SIGNER {
+            assert!(cache.first_time([1; 16], signature(n), 0, 1000 + n as u64));
+        }
+        assert!(!cache.first_time([1; 16], signature(REPLAY_PER_SIGNER), 0, 5000), "full: refused, not grown");
+        assert_eq!(cache.len(), REPLAY_PER_SIGNER);
+        assert!(cache.first_time([2; 16], signature(0), 0, 1000), "another signer");
+        // The oldest expire: room again, without the periodic sweep; a replay is still one.
+        assert!(cache.first_time([1; 16], signature(REPLAY_PER_SIGNER), 1010, 5000));
+        assert!(!cache.first_time([1; 16], signature(REPLAY_PER_SIGNER), 1011, 5000));
+        assert!(cache.len() <= REPLAY_PER_SIGNER + 1);
+        cache.forget_expired(1_000_000);
+        assert_eq!(cache.len(), 0);
+        assert!(cache.seen.lock().unwrap().is_empty(), "no empty signer left behind");
     }
 
     #[test]

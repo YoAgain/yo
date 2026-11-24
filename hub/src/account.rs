@@ -320,7 +320,7 @@ pub(crate) async fn get_backup(
     let by_passkey = signed_by(auth.passkey);
     let by_code = signed_by(auth.code);
     match found {
-        Some((record, _)) if (by_passkey || by_code) && hub.first_time(&signature, time, now) => Ok(record),
+        Some((record, _)) if (by_passkey || by_code) && hub.first_time(&id, &signature, time, now) => Ok(record),
         _ => Err(not_found()),
     }
 }

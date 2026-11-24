@@ -292,6 +292,10 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     if request.ids.len() > limits::MAX_ACK {
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
+    // An envelope id is a database row id (SQLite's i64): one past it is no envelope, and a malformed request.
+    if request.ids.iter().any(|&id| i64::try_from(id).is_err()) {
+        return Err(refuse(StatusCode::BAD_REQUEST));
+    }
     let (acked, bot) = hub.db.ack(&device.device_id, &request.ids)?;
     hub.count_acked(&acked, hub.clock_ms(), bot);
     Ok(StatusCode::NO_CONTENT)
