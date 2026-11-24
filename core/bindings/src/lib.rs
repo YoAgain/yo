@@ -610,12 +610,16 @@ pub enum YoPasskeyDoor {
 }
 
 /// Fetches and opens the backup record a door opens, by user id when given, else by the recovery key's locator.
+/// `hub_keys`: the hub's pinned keys (as `YoClient::set_hub_keys`); with any, only an answer the hub signed for this
+/// request is taken (spec 6.10), none: as before.
 #[uniffi::export]
 pub fn open_backup(
     transport: Arc<dyn HttpTransport>,
     user_id: Option<Vec<u8>>,
     door: YoDoor,
+    hub_keys: Vec<Vec<u8>>,
 ) -> Result<Option<YoOpenedBackup>, YoError> {
+    let hub_keys = keys_of(hub_keys)?;
     let code;
     let door = match &door {
         YoDoor::Passkey { prf } => Door::Passkey(prf),
@@ -624,7 +628,7 @@ pub fn open_backup(
             Door::Code(&code)
         }
     };
-    let opened = Client::open_backup(&Http(transport), user_id.as_deref(), &door)?;
+    let opened = Client::open_backup(&Http(transport), user_id.as_deref(), &door, &hub_keys)?;
     Ok(opened.map(|o| YoOpenedBackup { k: o.k.to_vec(), sealed: o.plain, record: o.record.into() }))
 }
 

@@ -318,7 +318,7 @@ fn backup(locator: Vec<u8>) -> api::Backup {
 }
 
 fn fetch(http: &Http, id: &[u8]) -> Result<Option<api::Backup>, Error> {
-    Client::fetch_backup(http, id, &Door::Code(&yo_tests::backup::pool(&words())))
+    Client::fetch_backup(http, id, &Door::Code(&yo_tests::backup::pool(&words())), &[])
 }
 
 #[test]
@@ -557,7 +557,7 @@ fn only_failed_backup_fetches_spend_the_address_limit() {
     // Missing records, wrong door keys and missing signatures all spend the same bucket.
     assert_eq!(fetch(&http, &[5; 16]), Ok(None));
     let wrong = yo_tests::backup::pool(&yo_tests::backup::recovery_key([2; 16]));
-    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Code(&wrong)), Ok(None));
+    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Code(&wrong), &[]), Ok(None));
     let raw = reqwest::blocking::Client::new();
     let url = format!("{}{}", hub.url(), api::backup_path(&user));
     assert_eq!(raw.get(&url).send().unwrap().status().as_u16(), api::status::NOT_FOUND);

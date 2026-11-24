@@ -4,6 +4,7 @@
 
 use crate::aead;
 use crate::error::{Error, Result};
+use crate::identity::Key;
 use crate::storage::{hkdf, open_padded, seal_padded};
 use crate::{Client, Transport};
 pub use libsignal_account_keys::AccountEntropyPool;
@@ -11,7 +12,7 @@ use libsignal_account_keys::BackupKey;
 use libsignal_protocol::PrivateKey;
 use std::sync::atomic::{AtomicU64, Ordering};
 use yo_wire::api::{self, status, Backup, LOCATOR_LEN};
-use yo_wire::KEY_LEN;
+use yo_wire::{hubsig, KEY_LEN};
 use zeroize::Zeroizing;
 
 /// A new recovery key: 64 characters, a–z and 0–9 (libsignal's `AccountEntropyPool::generate`).
@@ -170,8 +171,10 @@ static SIGNED_AT: AtomicU64 = AtomicU64::new(0);
 
 impl Client {
     /// Fetches a backup record by user id or locator (spec 7) before there is an account, signed with the door's auth
-    /// key; `None` when there is none this door may fetch.
-    pub fn fetch_backup(transport: &dyn Transport, id: &[u8], door: &Door) -> Result<Option<Backup>> {
+    /// key; `None` when there is none this door may fetch. With the hub's keys pinned (`hub_keys`, spec 6.10) the
+    /// answer must be the hub's, signed for this request's nonce: no party between (a TLS proxy) can hand back an
+    /// older record it kept.
+    pub fn fetch_backup(transport: &dyn Transport, id: &[u8], door: &Door, hub_keys: &[Key]) -> Result<Option<Backup>> {
         if id.len() != LOCATOR_LEN {
             return Err(Error::Protocol("backup id"));
         }
@@ -185,11 +188,16 @@ impl Client {
             let signature = key.calculate_signature(message, &mut rand::rng()).expect("a Curve25519 key signs");
             (*signature).try_into().expect("an XEdDSA signature is 64 bytes")
         };
-        let headers = crate::signature_headers(sign, "GET", &path, time, &yo_wire::sha256(&[]));
+        let mut headers = crate::signature_headers(sign, "GET", &path, time, &yo_wire::sha256(&[]));
+        let nonce = (!hub_keys.is_empty()).then(crate::identity::random::<{ hubsig::NONCE_LEN }>);
+        if let Some(nonce) = &nonce {
+            headers.push((hubsig::NONCE_HEADER.to_owned(), yo_wire::b64(nonce)));
+        }
         let response = transport.request("GET", &path, &headers, &[]).map_err(Error::Network)?;
         match response.status {
             status::OK => {
-                let backup: Backup = yo_wire::decode(&response.body)?;
+                let body = crate::hub_signed(hub_keys, nonce.as_ref(), &path, &[], &response.body)?;
+                let backup: Backup = yo_wire::decode(body)?;
                 backup.check()?;
                 Ok(Some(backup))
             }
@@ -198,14 +206,20 @@ impl Client {
         }
     }
 
-    /// Fetches and opens the record a door opens, by user id when given, else by the recovery key's locator.
-    pub fn open_backup(transport: &dyn Transport, user_id: Option<&[u8]>, door: &Door) -> Result<Option<Opened>> {
+    /// Fetches and opens the record a door opens, by user id when given, else by the recovery key's locator; the
+    /// answer checked against `hub_keys` when pinned (`fetch_backup`).
+    pub fn open_backup(
+        transport: &dyn Transport,
+        user_id: Option<&[u8]>,
+        door: &Door,
+        hub_keys: &[Key],
+    ) -> Result<Option<Opened>> {
         let id = match (user_id, door) {
             (Some(id), _) => id.to_vec(),
             (None, Door::Code(code)) => locator(code).to_vec(),
             (None, Door::Passkey(_)) => return Err(Error::Protocol("backup id")),
         };
-        Ok(Self::fetch_backup(transport, &id, door)?.and_then(|record| open(record, door)))
+        Ok(Self::fetch_backup(transport, &id, door, hub_keys)?.and_then(|record| open(record, door)))
     }
 }
 

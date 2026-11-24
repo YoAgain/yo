@@ -69,10 +69,16 @@ enum Hub {
     } else {
       print("Yo: no group params pinned for \(host): no groups (Hub.zkParams)")
     }
-    guard let texts = keys[host] else { return }
-    let pinned = texts.compactMap { Data(base64URL: $0) }.filter { $0.count == 32 }
+    let pinned = hubKeys
     guard !pinned.isEmpty else { return }
     Diagnostics.attempt({ try client.setHubKeys(keys: pinned) })
+  }
+
+  /// This hub's keys the app pins (spec 6.10): its signed answers (lookups, rosters, the backup's fetch) are taken
+  /// only when one of them signed; none for a hub not listed.
+  static var hubKeys: [Data] {
+    guard let host = url.host(), let texts = keys[host] else { return [] }
+    return texts.compactMap { Data(base64URL: $0) }.filter { $0.count == 32 }
   }
 
   /// A blocking core call on threads of its own: blocked on Swift's few shared threads, a burst of calls would stall

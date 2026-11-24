@@ -407,7 +407,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         try {
             val code = recoveryKeyParse(codeText) ?: recoveryKeyParse(codeText.lowercase().filter { it in 'a'..'z' || it in '0'..'9' }.takeLast(64))
                 ?: error(context.getString(R.string.ui_that_doesn_t_match_a_recovery_key_check_it_and_try_again))
-            val opened = openBackup(transport, null, YoDoor.RecoveryKey(code)) ?: error(context.getString(R.string.ui_we_couldn_t_find_your_account_check_your_recovery_key))
+            val opened = openBackup(transport, null, YoDoor.RecoveryKey(code), hubKeys()) ?: error(context.getString(R.string.ui_we_couldn_t_find_your_account_check_your_recovery_key))
             restoreBackup(opened, code)
         } finally { mutable.update { it.copy(busy = false) } }
     }
@@ -416,7 +416,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         check(client == null)
         mutable.update { it.copy(busy = true) }
         try {
-            val opened = openBackup(transport, answer.user, YoDoor.Passkey(answer.prf))
+            val opened = openBackup(transport, answer.user, YoDoor.Passkey(answer.prf), hubKeys())
                 ?: error(context.getString(R.string.no_passkey))
             restoreBackup(opened, null)
         } finally { mutable.update { it.copy(busy = false) } }
@@ -430,6 +430,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         signIn(item)
         vault.delete("left")
     }
+
+    /** The hub's keys this build pins (spec 6.10): a backup's fetch takes only the hub's signed answer. */
+    private fun hubKeys(): List<ByteArray> = Hub.hubKeys.map(::decodeUrl)
 
     private fun registerCore(name: String, account: ByteArray): YoClient {
         val key = vault.secret("state-key")
@@ -526,7 +529,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     internal suspend fun turnOffRecovery(askPasskey: suspend () -> Passkeys.Answer) = accountTurn.withLock {
         val c = client ?: return@withLock
         val (backup, _) = listOfNotNull(vault.read("recovery"), vault.read("recovery-pending")).map { it.decodeToString() }
-            .firstNotNullOfOrNull { key -> openBackup(transport, null, YoDoor.RecoveryKey(key))?.let { it to key } }
+            .firstNotNullOfOrNull { key -> openBackup(transport, null, YoDoor.RecoveryKey(key), hubKeys())?.let { it to key } }
             ?: error(context.getString(R.string.ui_recovery_key_missing))
         check(c === client)
         val door = if (backup.record.byPasskey.isEmpty()) YoPasskeyDoor.None else {
@@ -553,7 +556,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     internal suspend fun hasRecoveryPasskey(): Boolean = accountTurn.withLock {
         val code = vault.read("recovery")?.decodeToString() ?: return@withLock false
-        val record = openBackup(transport, null, YoDoor.RecoveryKey(code))?.record ?: return@withLock false
+        val record = openBackup(transport, null, YoDoor.RecoveryKey(code), hubKeys())?.record ?: return@withLock false
         record.byPasskey.isNotEmpty() && record.authPasskey.isNotEmpty()
     }
 
@@ -565,7 +568,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val old = vault.read("recovery")?.decodeToString()
         val code = if (removePasskey) checkNotNull(old) else state.value.recovery ?: if (answer != null) newRecoveryKey()
             else error(context.getString(R.string.ui_recovery_key_missing))
-        val backup = old?.let { openBackup(transport, null, YoDoor.RecoveryKey(it)) }
+        val backup = old?.let { openBackup(transport, null, YoDoor.RecoveryKey(it), hubKeys()) }
         if (removePasskey) checkNotNull(backup)
         // The passkey's door kept only under the same recovery key (the same K); any other door change a new K (the core's).
         val passkey = if (removePasskey) YoPasskeyDoor.None else answer?.let { YoPasskeyDoor.New(it.prf) }

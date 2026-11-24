@@ -83,11 +83,11 @@ fn only_a_door_fetches_a_record() {
     assert_eq!(wrong_path.status().as_u16(), 404, "signed for the locator, sent for the user id");
     // The core signs: by the recovery key, by the passkey; a door the record lacks finds nothing.
     let http = Http::new(hub.url());
-    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf)), Ok(Some(record.clone())));
+    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf), &[]), Ok(Some(record.clone())));
     let without = backup::make(&k, b"{}", &code, PasskeyDoor::None).unwrap();
     t.put_backup(&without).unwrap();
-    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf)), Ok(None));
-    assert_eq!(*Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap().k, k);
+    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf), &[]), Ok(None));
+    assert_eq!(*Client::open_backup(&*http, None, &Door::Code(&code), &[]).unwrap().unwrap().k, k);
     // A record whose auth key is no canonical Curve25519 key is refused.
     let bad = Backup { auth_code: vec![0xff; 32].into(), ..without };
     assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &yo_wire::encode(&bad)).unwrap().status, 400);
@@ -115,23 +115,23 @@ fn a_record_without_auth_keys_is_never_served_and_the_app_makes_a_new_one() {
     // To no one: unsigned, or signed by either door.
     let http = Http::new(hub.url());
     assert_eq!(get(&hub, &user, None).0, 404);
-    assert_eq!(Client::open_backup(&*http, None, &Door::Code(&code)), Ok(None));
-    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None));
+    assert_eq!(Client::open_backup(&*http, None, &Door::Code(&code), &[]), Ok(None));
+    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf), &[]), Ok(None));
     // The app makes a new one from the recovery key on the phone: a new K, the recovery key's door only.
     t.put_backup(&backup::make(&k, b"{\"new\":1}", &code, PasskeyDoor::None).unwrap()).unwrap();
-    let opened = Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap();
+    let opened = Client::open_backup(&*http, None, &Door::Code(&code), &[]).unwrap().unwrap();
     assert_eq!((*opened.k, opened.plain.as_slice()), (k, &b"{\"new\":1}"[..]));
-    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None), "no passkey yet");
+    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf), &[]), Ok(None), "no passkey yet");
     // Confirmed: the passkey asked once, its door added to the record as it is (the same K).
     let record = backup::make(&opened.k, &opened.plain, &code, PasskeyDoor::New(&prf)).unwrap();
     t.put_backup(&record).unwrap();
     // A new phone, by the passkey: the record, K, and the account registered again with its key.
-    let by_passkey = Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)).unwrap().unwrap();
+    let by_passkey = Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf), &[]).unwrap().unwrap();
     assert_eq!(*by_passkey.k, k);
     let name = t.username().unwrap().to_owned();
     let new = Client::register_username(Http::new(hub.url()), &name, Some(secret), None, Push::none()).unwrap();
     assert_eq!(new.user_id(), t.user_id());
-    assert!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().is_some(), "and by the recovery key");
+    assert!(Client::open_backup(&*http, None, &Door::Code(&code), &[]).unwrap().is_some(), "and by the recovery key");
 }
 
 #[test]
@@ -195,6 +195,84 @@ fn a_signature_written_another_way_is_still_a_replay() {
         .unwrap();
     assert_eq!(get_as(&hub, &user, Some(first)).0, 200);
     assert_eq!(get_as(&hub, &user, Some(other)), (404, Vec::new()), "the same signature, its scalar not reduced");
+}
+
+/// What a party between the app and the hub (a TLS proxy) would do: keep an answer and hand it back later.
+struct Replaying {
+    http: std::sync::Arc<Http>,
+    kept: std::sync::Mutex<Option<Vec<u8>>>,
+    replay: std::sync::atomic::AtomicBool,
+}
+
+impl yo_core::Transport for Replaying {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<yo_core::Response, String> {
+        let mut response = self.http.request(method, path, headers, body)?;
+        let mut kept = self.kept.lock().unwrap();
+        if self.replay.load(std::sync::atomic::Ordering::Relaxed) {
+            response.body = kept.clone().expect("an answer kept");
+        } else if response.status == 200 {
+            *kept = Some(response.body.clone());
+        }
+        Ok(response)
+    }
+}
+
+/// B2 (rollback): with the hub's key pinned, a backup's fetch asks with a nonce and takes only the hub's answer to
+/// it (spec 6.10): an older record kept by a party between (made with a recovery key since replaced) is refused,
+/// though it would open with that old key. An app without pinned keys, or an older hub's unsigned answer, as before.
+#[test]
+fn a_pinned_fetch_takes_only_the_hubs_answer_to_it() {
+    let hub = TestHub::start();
+    let mut t = register(&hub);
+    let user = yo_tests::user_id(t.user_id());
+    let (k, prf, old_code) = ([1; 32], [2; 32], words(11));
+    t.put_backup(&backup::make(&k, b"{\"old\":1}", &old_code, PasskeyDoor::New(&prf)).unwrap()).unwrap();
+    let pinned = [yo_tests::hub_key()];
+    let between = Replaying { http: Http::new(hub.url()), kept: Default::default(), replay: Default::default() };
+    // Signed and fresh: taken, by either door.
+    let old = Client::open_backup(&between, None, &Door::Code(&old_code), &pinned).unwrap().unwrap();
+    assert_eq!(old.plain, b"{\"old\":1}");
+    assert!(Client::open_backup(&between, Some(&user), &Door::Passkey(&prf), &pinned).unwrap().is_some());
+    // A new recovery key and a new K: the record the hub has now.
+    let new_code = words(12);
+    t.put_backup(&backup::make(&[3; 32], b"{\"new\":1}", &new_code, PasskeyDoor::New(&prf)).unwrap()).unwrap();
+    between.replay.store(true, std::sync::atomic::Ordering::Relaxed);
+    // The old answer handed back for a new request: its signature is for another nonce.
+    for door in [Door::Passkey(&prf), Door::Code(&new_code)] {
+        assert_eq!(
+            Client::open_backup(&between, Some(&user), &door, &pinned).map(|o| o.map(|o| o.plain)),
+            Err(yo_core::Error::Protocol("answer not signed by the hub")),
+        );
+    }
+    // Its signature cut off, unpinned (a hub not listed), it would have been taken: what the pin is for.
+    let signed = between.kept.lock().unwrap().clone().unwrap();
+    *between.kept.lock().unwrap() = Some(signed[..signed.len() - 64].to_vec());
+    let taken = Client::open_backup(&between, Some(&user), &Door::Passkey(&prf), &[]).unwrap().unwrap();
+    assert_eq!(taken.plain, b"{\"old\":1}", "the old record, opened by the passkey's door it kept");
+    // The answer stripped of its signature, or signed by another key: refused.
+    let plain = yo_wire::encode(&backup::make(&[3; 32], b"{}", &new_code, PasskeyDoor::None).unwrap());
+    *between.kept.lock().unwrap() = Some(plain);
+    assert!(Client::fetch_backup(&between, &user, &Door::Code(&new_code), &pinned).is_err(), "unsigned");
+    let stranger = libsignal_protocol::KeyPair::generate(&mut rand::rng());
+    let other: [u8; 32] = stranger.public_key.public_key_bytes().try_into().unwrap();
+    between.replay.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(Client::fetch_backup(&between, &user, &Door::Code(&new_code), &[other]).is_err(), "another hub's key");
+    // The hub's key among several pinned (the spare, 6.10): taken, the new record.
+    let fresh = Client::open_backup(&between, None, &Door::Code(&new_code), &[other, pinned[0]]).unwrap().unwrap();
+    assert_eq!((*fresh.k, fresh.plain.as_slice()), ([3; 32], &b"{\"new\":1}"[..]));
+    // Without a nonce the hub answers unsigned, as before (an app from before; the tools).
+    let plain = Client::fetch_backup(&*Http::new(hub.url()), &user, &Door::Code(&new_code), &[]).unwrap().unwrap();
+    assert_eq!(open_plain(plain, &new_code), b"{\"new\":1}");
+}
+
+fn open_plain(record: Backup, code: &AccountEntropyPool) -> Vec<u8> {
+    backup::open(record, &Door::Code(code)).unwrap().plain
 }
 
 /// B2 at the hub: a fetch asked with `Yo-Nonce` is answered with the record and the hub's signature over the nonce,

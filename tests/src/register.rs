@@ -32,7 +32,7 @@ fn door() -> String {
 }
 
 fn fetch_backup(http: &Http, id: &[u8]) -> Result<Option<Backup>, Error> {
-    Client::fetch_backup(http, id, &yo_core::backup::Door::Code(&yo_tests::backup::pool(&door())))
+    Client::fetch_backup(http, id, &yo_core::backup::Door::Code(&yo_tests::backup::pool(&door())), &[])
 }
 
 fn args() -> Args {

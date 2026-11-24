@@ -453,7 +453,8 @@ fn a_new_phone_from_the_words_gets_its_friends_back_and_sessions_form_again() {
     a.put_backup(json.clone().into_bytes(), words.clone(), yo::YoPasskeyDoor::None).unwrap();
     // The new phone: nothing but the words.
     let app = App::new(Http::new(hub.url()));
-    let opened = yo::open_backup(app, None, yo::YoDoor::RecoveryKey { key: words }).unwrap().expect("the record");
+    let opened =
+        yo::open_backup(app, None, yo::YoDoor::RecoveryKey { key: words }, vec![]).unwrap().expect("the record");
     assert_eq!((opened.k.len(), String::from_utf8(opened.sealed).unwrap()), (32, json));
     let a2 = Phone::register(&hub, &a.name, None, Some(a.account_secret()));
     assert_eq!(a2.user(), a.user());

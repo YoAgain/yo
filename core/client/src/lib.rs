@@ -571,7 +571,6 @@ fn with_nonce(mut headers: Vec<(String, String)>, nonce: Option<[u8; hubsig::NON
     headers
 }
 
-/// An answer that hands out keys, checked against the pinned hub keys and its signature cut off (spec 6.10).
 /// One device per account (spec 4.4): a roster naming more is refused before anything is pinned or changed.
 fn one_device(devices: &[api::Device]) -> Result<()> {
     match devices.len() {
@@ -580,7 +579,8 @@ fn one_device(devices: &[api::Device]) -> Result<()> {
     }
 }
 
-fn hub_signed<'a>(
+/// An answer that hands out keys, checked against the pinned hub keys and its signature cut off (spec 6.10).
+pub(crate) fn hub_signed<'a>(
     keys: &[Key],
     nonce: Option<&[u8; hubsig::NONCE_LEN]>,
     path: &str,

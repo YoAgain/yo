@@ -771,7 +771,12 @@ final class AccountStore {
   private func fetchBackup(by door: YoDoor, userID: Data?) async throws -> YoOpenedBackup {
     let transport = Hub.transport
     do {
-      guard let opened = try await Hub.run({ try openBackup(transport: transport, userId: userID, door: door) }) else {
+      let pinned = Hub.hubKeys
+      guard
+        let opened = try await Hub.run({
+          try openBackup(transport: transport, userId: userID, door: door, hubKeys: pinned)
+        })
+      else {
         throw Diagnostics.expected(AccountError.noBackup)
       }
       return opened

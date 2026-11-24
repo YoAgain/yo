@@ -44,18 +44,21 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     old.put_backup(b"{\"account\":1}".to_vec(), words.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() }).unwrap();
     // A new phone: the record by the words alone, or by the passkey's user handle and PRF output; either opens it.
     let user = hex(&old.user_id());
-    let found = yo::open_backup(app(), None, by_words()).unwrap().unwrap();
+    let found = yo::open_backup(app(), None, by_words(), vec![]).unwrap().unwrap();
     let k = found.k.clone();
     assert_eq!((k.len(), found.sealed.clone()), (32, b"{\"account\":1}".to_vec()), "K is the core's");
     assert!(found.record.sealed.len() == 1024 && found.record.auth_passkey.len() == 32, "padded, both keys");
-    let by_passkey = yo::open_backup(app(), Some(user.clone()), passkey).unwrap().unwrap();
+    let by_passkey = yo::open_backup(app(), Some(user.clone()), passkey, vec![]).unwrap().unwrap();
     assert_eq!((by_passkey.k, by_passkey.sealed), (k.clone(), found.sealed.clone()));
     // Another passkey or other words fetch nothing: the hub answers as if there were no record.
     let other = yo::YoDoor::Passkey { prf: vec![9; 32] };
-    assert!(yo::open_backup(app(), Some(user.clone()), other).unwrap().is_none());
+    assert!(yo::open_backup(app(), Some(user.clone()), other, vec![]).unwrap().is_none());
     let other = yo::YoDoor::RecoveryKey { key: yo_tests::backup::recovery_key([4; 16]) };
-    assert!(yo::open_backup(app(), None, other).unwrap().is_none());
-    assert!(yo::open_backup(app(), None, yo::YoDoor::Passkey { prf: prf.clone() }).is_err(), "a passkey needs the id");
+    assert!(yo::open_backup(app(), None, other, vec![]).unwrap().is_none());
+    assert!(
+        yo::open_backup(app(), None, yo::YoDoor::Passkey { prf: prf.clone() }, vec![]).is_err(),
+        "a passkey needs the id"
+    );
     // The name registered again with the account key it holds.
     assert!(matches!(register(None), Err(yo::YoError::Refused { status: 409 })));
     let new = register(Some(secret)).unwrap();
@@ -64,23 +67,31 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     // The same words, the passkey kept: the same K (a content change), the passkey still opens it.
     let keep = yo::YoPasskeyDoor::Keep { record: found.record.clone() };
     new.put_backup(b"{\"same\":1}".to_vec(), words.clone(), keep).unwrap();
-    let same = yo::open_backup(app(), None, by_words()).unwrap().unwrap();
+    let same = yo::open_backup(app(), None, by_words(), vec![]).unwrap().unwrap();
     assert_eq!((same.k.clone(), same.sealed.clone()), (k.clone(), b"{\"same\":1}".to_vec()));
     // New words cannot keep the passkey's door (B1): the passkey is asked again, and K is new.
     let renewed = yo_tests::backup::recovery_key([5; 16]);
     let keep = yo::YoPasskeyDoor::Keep { record: same.record };
     assert!(matches!(new.put_backup(b"{}".to_vec(), renewed.clone(), keep), Err(yo::YoError::State)));
     new.put_backup(b"{}".to_vec(), renewed.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() }).unwrap();
-    assert!(yo::open_backup(app(), None, by_words()).unwrap().is_none());
-    let found = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed.clone() }).unwrap().unwrap();
+    assert!(yo::open_backup(app(), None, by_words(), vec![]).unwrap().is_none());
+    let found =
+        yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed.clone() }, vec![]).unwrap().unwrap();
     let passkey = yo::YoDoor::Passkey { prf: prf.clone() };
-    assert_eq!(yo::open_backup(app(), Some(user.clone()), passkey).unwrap().unwrap().sealed, b"{}");
+    assert_eq!(yo::open_backup(app(), Some(user.clone()), passkey, vec![]).unwrap().unwrap().sealed, b"{}");
     assert_ne!(found.k, k, "a new K with the new words");
     // The passkey removed: a new K again, the words alone open it.
     new.put_backup(b"{}".to_vec(), renewed.clone(), yo::YoPasskeyDoor::None).unwrap();
-    let alone = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed }).unwrap().unwrap();
+    let alone = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed }, vec![]).unwrap().unwrap();
     assert!(alone.record.by_passkey.is_empty() && alone.k != found.k);
-    assert!(yo::open_backup(app(), Some(user.clone()), yo::YoDoor::Passkey { prf }).unwrap().is_none());
+    assert!(yo::open_backup(app(), Some(user.clone()), yo::YoDoor::Passkey { prf }, vec![]).unwrap().is_none());
+    // Pinned to the test hub's key, the fetch takes the hub's signed answer (spec 6.10); another key's: refused.
+    let pinned = vec![yo_tests::hub_key().to_vec()];
+    assert!(yo::open_backup(app(), None, by_words(), pinned.clone()).unwrap().is_none(), "the old words: none");
+    let renewed = yo_tests::backup::recovery_key([5; 16]);
+    let door = || yo::YoDoor::RecoveryKey { key: renewed.clone() };
+    assert!(yo::open_backup(app(), None, door(), pinned).unwrap().is_some());
+    assert!(yo::open_backup(app(), None, door(), vec![vec![9; 32]]).is_err(), "not the hub's key");
 }
 
 fn hex(text: &str) -> Vec<u8> {
