@@ -33,8 +33,8 @@ jobs:
           unset JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT
           export PATH="$HOME/.cargo/bin:$PATH"
           nice -n 10 app/android/dev/bootstrap.sh
-      # Two flavors (app/android/README.md): play, the Google Play build, and floss, the F-Droid build (unsigned:
-      # F-Droid signs its own build). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep build.gradle.kts's.
+      # Two flavors (app/android/README.md): play, the Google Play build, and floss, the F-Droid build (unsigned here:
+      # F-Droid signs its own build; a release signs a copy with Yo's own floss key for direct installs). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep build.gradle.kts's.
       - name: Build, unit tests and lint
         env:
           TAG: ${{ github.event.release.tag_name }}
@@ -51,7 +51,8 @@ jobs:
           export YO_BUILD=$(date -u +%Y%m%d%H%M)  # the Yo-App build: the UTC minute, as iOS and the CLI
           cd app/android
           nice -n 10 ./gradlew --max-workers=4 assemblePlayDebug assemblePlayRelease assembleFlossDebug assembleFlossRelease \
-            testPlayDebugUnitTest testFlossDebugUnitTest lint "${version[@]}"
+            testPlayDebugUnitTest testFlossDebugUnitTest lint "${version[@]}" \
+            "-PyoVersionCode=$(( $(date +%s) / 60 ))"  # rising, as play.yml: a directly installed floss APK updates
       # F-Droid takes no Google or other proprietary library: the floss runtime classpath must have none.
       - name: floss has no Google dependency
         run: |
@@ -61,15 +62,28 @@ jobs:
           if grep -iE 'com\.google\.(firebase|android\.gms|android\.play|android\.libraries)|googleid' "$RUNNER_TEMP/floss-deps.txt"; then
             echo "::error::the floss build pulls in a Google library"; exit 1
           fi
+      # Signed with the floss release key (never the Play upload key) for a direct install; F-Droid's own build is
+      # signed by F-Droid with its key, so the two do not update each other.
       - name: floss APK for the release
         if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
+          FLOSS_KEYSTORE_B64: ${{ secrets.FLOSS_KEYSTORE_B64 }}
+          FLOSS_KEYSTORE_PASSWORD: ${{ secrets.FLOSS_KEYSTORE_PASSWORD }}
+          FLOSS_KEY_ALIAS: ${{ secrets.FLOSS_KEY_ALIAS }}
         run: |
-          mkdir -p "$RUNNER_TEMP/floss"
-          cd "$RUNNER_TEMP/floss"
-          cp "$GITHUB_WORKSPACE/app/android/app/build/outputs/apk/floss/release/app-floss-release-unsigned.apk" "yo-floss-$TAG-unsigned.apk"
-          sha256sum "yo-floss-$TAG-unsigned.apk" > "yo-floss-$TAG-unsigned.apk.sha256"
+          [ -n "$FLOSS_KEYSTORE_B64" ] || { echo "::error::secret FLOSS_KEYSTORE_B64 is missing"; exit 1; }
+          umask 077
+          export PATH="$HOME/Android/jdk/bin:$PATH"  # apksigner runs on the pinned JDK
+          mkdir -p "$RUNNER_TEMP/floss" "$RUNNER_TEMP/floss-key"
+          printf '%s' "$FLOSS_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/floss-key/floss.p12"
+          apk="$RUNNER_TEMP/floss/yo-floss-$TAG.apk"
+          "$HOME/Android/sdk/build-tools/37.0.0/apksigner" sign --ks "$RUNNER_TEMP/floss-key/floss.p12" \
+            --ks-key-alias "$FLOSS_KEY_ALIAS" --ks-pass env:FLOSS_KEYSTORE_PASSWORD --key-pass env:FLOSS_KEYSTORE_PASSWORD \
+            --out "$apk" app/android/app/build/outputs/apk/floss/release/app-floss-release-unsigned.apk
+          rm -rf "$RUNNER_TEMP/floss-key" "$apk.idsig"
+          "$HOME/Android/sdk/build-tools/37.0.0/apksigner" verify "$apk"
+          cd "$RUNNER_TEMP/floss" && sha256sum "yo-floss-$TAG.apk" > "yo-floss-$TAG.apk.sha256"
       - uses: actions/upload-artifact@v7
         if: github.event_name == 'release'
         with:
@@ -83,7 +97,7 @@ jobs:
             app/android/app/build/reports/
             app/android/app/build/outputs/apk/
 
-  # A published release gets the F-Droid (floss) APK, unsigned as F-Droid builds it, and its checksum.
+  # A published release gets the F-Droid (floss) APK, signed with the floss release key, and its checksum.
   release:
     if: github.event_name == 'release'
     needs: android

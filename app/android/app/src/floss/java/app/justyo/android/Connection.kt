@@ -54,14 +54,19 @@ class YoConnectionService : Service() {
             .setContentTitle(getString(R.string.connection_channel))
             .setContentText(getString(R.string.connection_notification))
             .setContentIntent(open).setOngoing(true).build()
-        startForeground(2, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        scope.launch {
-            val state = repository.state.first { !it.loading }
-            if (state.username == null || state.broken) stopSelf() else repository.keepConnection(true)
-        }
+        // A restart Android refuses to promote (battery restricted): no crash, the next foreground starts it again.
+        try { startForeground(2, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) }
+        catch (_: ForegroundServiceStartNotAllowedException) { stopSelf() }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
+    /** Each start looks again: a start at boot before the sign-in stops, a later one after it keeps the connection. */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        scope.launch {
+            val state = repository.state.first { !it.loading }
+            if (state.username == null || state.broken) stopSelf(startId) else repository.keepConnection(true)
+        }
+        return START_STICKY
+    }
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
         scope.cancel()
