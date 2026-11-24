@@ -116,6 +116,6 @@ impl Client {
     /// One sealed envelope's payload processed as if it came from the inbox.
     pub fn receive_for_fuzzing(&mut self, payload: &[u8]) -> Result<()> {
         let opened = [&[0u8; 16][..], payload].concat();
-        self.receive(&opened, &mut BTreeSet::new())
+        self.receive(&opened, &mut BTreeSet::new(), &mut false)
     }
 }

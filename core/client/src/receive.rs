@@ -61,6 +61,9 @@ impl Client {
         let mut stopped = None;
         // Parked payloads go first; after one is parked again, its sender's next ones are too, keeping their order.
         // They stay out of the state while the batch is received: each envelope's transaction copies the state.
+        // A sender is parked by its account key only once one of its messages opened (or a key no contact here has,
+        // whose first message waits for its lookup): a payload names any account it likes, and a forgery naming a
+        // contact must never hold back the contact's own messages (spec 4.6).
         let sender_of = |opened: &[u8]| opened.get(16..).and_then(|p| decode::<Payload>(p).ok()).map(|p| p.account_key);
         let mut kept: BTreeSet<Key> = BTreeSet::new();
         let mut refreshed = BTreeSet::new();
@@ -71,10 +74,11 @@ impl Client {
                 parked.push_back(payload);
                 continue;
             }
-            match self.receive(&payload, &mut refreshed) {
+            let mut verified = false;
+            match self.receive(&payload, &mut refreshed, &mut verified) {
                 Ok(()) => {}
                 Err(error) if retryable(&error) => {
-                    kept.extend(sender);
+                    kept.extend(sender.filter(|s| self.parks_by(s, verified)));
                     parked.push_back(payload)
                 }
                 Err(error) => self.drop_one(error.to_string()),
@@ -97,12 +101,13 @@ impl Client {
                 done.push(item.id);
                 continue;
             }
-            match self.receive(&payload, &mut refreshed) {
+            let mut verified = false;
+            match self.receive(&payload, &mut refreshed, &mut verified) {
                 Ok(()) => {}
                 // A lookup limit for this sender: its envelopes are parked here and acknowledged, so what comes after
                 // them is read and received (no envelope holds up the inbox).
                 Err(Error::Refused(status::RATE_LIMITED)) => {
-                    kept.extend(sender);
+                    kept.extend(sender.filter(|s| self.parks_by(s, verified)));
                     self.park(&mut parked, payload);
                 }
                 // Not this envelope's fault: it stays at the hub and is read again next time.
@@ -143,6 +148,12 @@ impl Client {
             self.dropped += over as u64;
             self.note(format!("{over} events held for the app, too many waiting"));
         }
+    }
+
+    /// Whether a sender's next payloads are parked behind one of theirs: its message opened, or no contact here has
+    /// the key it names (its first message waits for a lookup, and so do the ones after it).
+    fn parks_by(&self, account_key: &Key, verified: bool) -> bool {
+        verified || !self.state.contacts.values().any(|c| c.account_key == *account_key && !c.gone)
     }
 
     /// Parks a payload for a later sync (`State::deferred`); past `DEFERRED` the oldest parked one is dropped, so
@@ -294,12 +305,49 @@ impl Client {
     }
 
     /// Processes one opened envelope: the copy for this device, decrypted in the session with its sender's device.
-    pub(super) fn receive(&mut self, opened: &[u8], refreshed: &mut BTreeSet<Key>) -> Result<()> {
+    /// `verified`: its message opened in a session with the account it names (the sender is who it says).
+    pub(super) fn receive(&mut self, opened: &[u8], refreshed: &mut BTreeSet<Key>, verified: &mut bool) -> Result<()> {
         let mut checked = None;
-        self.atomic(|c| c.receive_opened(opened, refreshed, &mut checked))?;
-        // Share a roster only after the envelope committed the state updates that came with it.
+        let result = self.atomic(|c| c.receive_opened(opened, refreshed, &mut checked, verified));
+        // A roster asked is shared, whether or not the envelope committed: the lookup was made.
         refreshed.extend(checked);
-        Ok(())
+        result
+    }
+
+    /// Whether a copy opens in the session at `address` with the account key it names, tried and undone: a message
+    /// only that account's device can have made (its sessions' keys, or its identity key for a first message).
+    fn opens(&mut self, address: &ProtocolAddress, account_key: &Key, kind: u8, bytes: &[u8]) -> bool {
+        let Ok(message) = session_message(kind, bytes) else { return false };
+        let mut opened = false;
+        let _ = self.atomic(|c| {
+            opened = c.decrypt(address, account_key, &message).is_ok_and(|r| r.is_ok());
+            Err::<(), _>(Error::Internal("only tried"))
+        });
+        opened
+    }
+
+    /// A session message decrypted at `address`, its peer's identity the account key named (the inner result:
+    /// libsignal's).
+    fn decrypt(
+        &mut self,
+        address: &ProtocolAddress,
+        account_key: &Key,
+        message: &CiphertextMessage,
+    ) -> Result<std::result::Result<Vec<u8>, SignalProtocolError>> {
+        self.records.trust(address, signal::identity_of(account_key)?);
+        let local = self.local_address()?;
+        let records = &mut self.records;
+        Ok(signal::now(message_decrypt(
+            message,
+            address,
+            &local,
+            &mut records.sessions,
+            &mut records.identities,
+            &mut records.prekeys,
+            &records.signed,
+            &mut records.kyber,
+            &mut rand::rng(),
+        )))
     }
 
     pub(super) fn receive_opened(
@@ -307,6 +355,7 @@ impl Client {
         opened: &[u8],
         refreshed: &BTreeSet<Key>,
         checked: &mut Option<Key>,
+        verified: &mut bool,
     ) -> Result<()> {
         let (certified, payload) = opened.split_at_checked(16).ok_or(Error::Protocol("opened"))?;
         let certified = (certified != [0; 16]).then(|| hex(certified));
@@ -332,9 +381,13 @@ impl Client {
         }
         // Another device of the user under this number: one was replaced, and only the hub knows which (a replaced
         // device can still deliver). Nothing the payload claims is taken in before its message opens: anyone can seal
-        // one.
+        // one. So it is opened first (and undone): only a message of that account's asks the hub, or waits for it; one
+        // that does not open is no one's to ask about, and goes the way of any that does not (a decryption error).
         let other = self.device_of(&user).is_some_and(|d| d.slot == payload.device_id && d.key != payload.device_key);
-        if other {
+        let address = self.address(&user, payload.device_id)?;
+        let bytes = copy.message.as_slice();
+        if other && copy.kind != KIND_PLAINTEXT && self.opens(&address, &payload.account_key, copy.kind, bytes) {
+            *verified = true;
             // Every envelope in this batch arrived before the lookup: no second lookup for it.
             if refreshed.contains(&payload.account_key) {
                 self.note("a message from a replaced device".into());
@@ -357,8 +410,6 @@ impl Client {
                 return Ok(());
             }
         }
-        let address = self.address(&user, payload.device_id)?;
-        let bytes = copy.message.as_slice();
         if copy.kind == KIND_PLAINTEXT {
             // A contact's device at its number, as this device knows it: nothing else is answered (4.6).
             let known = unpinned.is_none() && self.knows_device(&user, &payload.device_key, payload.device_id);
@@ -369,26 +420,8 @@ impl Client {
             self.remember(bytes);
             return self.decryption_error(&user, &address, bytes);
         }
-        let message = match copy.kind {
-            KIND_PREKEY => PreKeySignalMessage::try_from(bytes).map(CiphertextMessage::PreKeySignalMessage),
-            KIND_MESSAGE => SignalMessage::try_from(bytes).map(CiphertextMessage::SignalMessage),
-            _ => return Err(Error::Protocol("message type")),
-        }
-        .map_err(signal::signal)?;
-        self.records.trust(&address, signal::identity_of(&payload.account_key)?);
-        let local = self.local_address()?;
-        let records = &mut self.records;
-        let decrypted = signal::now(message_decrypt(
-            &message,
-            &address,
-            &local,
-            &mut records.sessions,
-            &mut records.identities,
-            &mut records.prekeys,
-            &records.signed,
-            &mut records.kyber,
-            &mut rand::rng(),
-        ));
+        let message = session_message(copy.kind, bytes)?;
+        let decrypted = self.decrypt(&address, &payload.account_key, &message)?;
         let plaintext = match decrypted {
             Ok(plaintext) => plaintext,
             Err(error) => {
@@ -398,8 +431,14 @@ impl Client {
                 // at most `KEPT_FOR_RESEND` per contact; someone not pinned here is pinned for it only when the hub
                 // names that device.
                 let known = unpinned.is_none() && self.knows_device(&user, &payload.device_key, payload.device_id);
-                let rostered =
-                    known || (self.may_ask_roster(&user) && self.hub_lists(&user, &payload, unpinned.as_ref())?);
+                // A lookup limit at the hub drops only the answer: the message did not open, so its sender is not who
+                // it says and nothing is parked by it.
+                let rostered = known
+                    || (self.may_ask_roster(&user)
+                        && match self.hub_lists(&user, &payload, unpinned.as_ref()) {
+                            Err(Error::Refused(status::RATE_LIMITED)) => false,
+                            listed => listed?,
+                        });
                 let kind = if copy.kind == KIND_PREKEY {
                     CiphertextMessageType::PreKey
                 } else {
@@ -423,6 +462,7 @@ impl Client {
         };
         // It opened, so it is the account's. A device key unknown here is taken in only once the hub names it; else it
         // is a replaced device's, and dropped (4.6).
+        *verified = true;
         self.remember(copy.message.as_slice());
         if let Some(Unpinned { account_key, username }) = unpinned {
             self.pin(&user, account_key, username);
@@ -690,4 +730,14 @@ impl Client {
         }
         Ok(())
     }
+}
+
+/// A copy's session message by its kind (spec 6.1).
+fn session_message(kind: u8, bytes: &[u8]) -> Result<CiphertextMessage> {
+    match kind {
+        KIND_PREKEY => PreKeySignalMessage::try_from(bytes).map(CiphertextMessage::PreKeySignalMessage),
+        KIND_MESSAGE => SignalMessage::try_from(bytes).map(CiphertextMessage::SignalMessage),
+        _ => return Err(Error::Protocol("message type")),
+    }
+    .map_err(signal::signal)
 }

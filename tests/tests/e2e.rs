@@ -2,6 +2,7 @@
 
 mod app_version;
 mod audit_groups;
+mod audit_sessions;
 mod backup_auth;
 mod bindings;
 mod blobs;
