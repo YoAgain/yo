@@ -24,6 +24,10 @@ const MAX_COMMANDS: usize = 32;
 const MAX_REQUEST: u64 = 64 * 1024;
 /// Blobs waiting to be fetched into nothing (`--drain-media`); more are left to expire at the hub.
 const MAX_DRAINING: usize = 64;
+/// How long after printing a message the listener waits for a command to come on the socket (a bot's answer), and
+/// how long at most for the commands under way to finish, before the work after a fetch takes the client again.
+const GIVE_WAY: Duration = Duration::from_millis(20);
+const GIVE_WAY_MAX: Duration = Duration::from_millis(500);
 
 struct Listener<'a> {
     client: &'a Mutex<Client>,
@@ -32,6 +36,9 @@ struct Listener<'a> {
     manual_ack: bool,
     /// `--drain-media`: the blobs for the drainer (fetched and checked, never opened).
     drain: Option<SyncSender<Media>>,
+    /// Commands on the control socket under way, and begun so far.
+    running: AtomicUsize,
+    begun: AtomicUsize,
 }
 
 impl Listener<'_> {
@@ -47,13 +54,15 @@ impl Listener<'_> {
         }
     }
 
-    /// The events printed, then acknowledged: they do not come again after a restart. A photo's or video's blob goes
-    /// to the drainer.
+    /// The events printed, then acknowledged.
     fn emit(&self, events: Vec<Event>) {
-        if events.is_empty() {
-            return;
-        }
-        for event in &events {
+        self.print_events(&events);
+        self.acknowledge(&events);
+    }
+
+    /// The events printed (a photo's or video's blob to the drainer).
+    fn print_events(&self, events: &[Event]) {
+        for event in events {
             if let Event::Message { content, .. } | Event::GroupMessage { content, .. } = event {
                 if let (Content::Photo(m) | Content::Video { media: m, .. }, Some(drain)) = (content, &self.drain) {
                     let _ = drain.try_send(m.clone());
@@ -61,8 +70,24 @@ impl Listener<'_> {
             }
             self.line(&commands::event(event, self.drain.is_none()));
         }
-        if !self.manual_ack {
+    }
+
+    /// The events printed acknowledged: they do not come again after a restart.
+    fn acknowledge(&self, events: &[Event]) {
+        if !events.is_empty() && !self.manual_ack {
             self.client().acknowledge_only(|e| events.contains(e));
+        }
+    }
+
+    /// A bot answers a message on the socket within milliseconds: its answer goes first, and the ack, receipts and
+    /// saves after the fetch (a save each, tens of milliseconds with a large state) take the client after it.
+    fn give_way(&self, begun: usize) {
+        let start = Instant::now();
+        while self.begun.load(Ordering::SeqCst) == begun && start.elapsed() < GIVE_WAY {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        while self.running.load(Ordering::SeqCst) > 0 && start.elapsed() < GIVE_WAY_MAX {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -132,14 +157,16 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
         out: Mutex::new(std::io::stdout()),
         manual_ack,
         drain: drain_media.then_some(drain),
+        running: AtomicUsize::new(0),
+        begun: AtomicUsize::new(0),
     };
-    let running = AtomicUsize::new(0);
     std::thread::scope(|scope| -> i32 {
         if drain_media {
             scope.spawn(move || drainer(transport.as_ref(), &to_drain));
         }
         scope.spawn(|| {
             for stream in socket.incoming().flatten() {
+                let running = &listener.running;
                 if running.fetch_add(1, Ordering::SeqCst) >= MAX_COMMANDS {
                     running.fetch_sub(1, Ordering::SeqCst);
                     let busy = Failure { retryable: true, ..Failure::new("busy") };
@@ -147,10 +174,11 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
                         (&stream).write_all(format!("{}\n", json!({ "code": FAILED, "out": busy.json() })).as_bytes());
                     continue;
                 }
-                let (listener, running) = (&listener, &running);
+                listener.begun.fetch_add(1, Ordering::SeqCst);
+                let listener = &listener;
                 scope.spawn(move || {
                     listener.serve(stream);
-                    running.fetch_sub(1, Ordering::SeqCst);
+                    listener.running.fetch_sub(1, Ordering::SeqCst);
                 });
             }
         });
@@ -182,10 +210,17 @@ fn receive(listener: &Listener) -> ! {
             Ok(events) => {
                 failures = 0;
                 let probes = listener.client().take_probe_requests();
-                listener.emit(events);
+                let message = events.iter().any(|e| matches!(e, Event::Message { .. } | Event::GroupMessage { .. }));
+                let begun = listener.begun.load(Ordering::SeqCst);
+                listener.print_events(&events);
+                let probed = !probes.is_empty();
                 for (user, token) in probes {
                     listener.line(&commands::probe(&user, &token));
                 }
+                if message || probed {
+                    listener.give_way(begun);
+                }
+                listener.acknowledge(&events);
             }
             Err(error) if crate::gone(&error) => {
                 eprintln!("yo: this device is gone for good (replaced by another, or the name released)");

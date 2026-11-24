@@ -7,6 +7,7 @@ else, never runs or logs what a message says, and logs counts only, never who.
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -45,9 +46,45 @@ def stop(code):
     os._exit(code)
 
 
+def forwarded(args, stdin, timeout):
+    """The command run in the listener on its control socket, as `yo` itself forwards it, without starting `yo` (~15 ms
+    on the server, most of an echo): (code, out), or None when no listener answers. `--media -` takes the reference from
+    `stdin`, as `yo` does."""
+    state = os.environ.get("YO_STATE")
+    if not state or (args and args[0] in ("register", "listen", "sync")):
+        return None
+    command = list(args)
+    if command[:1] == ["send"] and "--media" in command:
+        at = command.index("--media") + 1
+        if at < len(command) and command[at] == "-":
+            command[at] = (stdin or "").strip()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(timeout)
+            conn.connect(os.path.join(state, "control.sock"))
+            conn.sendall((json.dumps(command) + "\n").encode())
+            answer = conn.makefile("r", encoding="utf-8").readline()
+    except OSError:
+        return None
+    try:
+        answer = json.loads(answer)
+        return int(answer["code"]), answer["out"]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def yo(*args, stdin=None, timeout=180):
     """Runs one `yo` command, `stdin` its input: its JSON output, or `Failed` (never with the arguments in it). A device
     the hub no longer knows ends the skill."""
+    answered = forwarded(args, stdin, timeout)
+    if answered is not None:
+        code, out = answered
+        if code == 0:
+            return out
+        if code == GONE:
+            stop(GONE)
+        out = out if isinstance(out, dict) else {}
+        raise Failed(code, out.get("error"), out.get("retryable", False))
     failed = None
     try:
         done = subprocess.run([YO, *args], input=stdin, capture_output=True, text=True, timeout=timeout)
