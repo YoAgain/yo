@@ -409,7 +409,9 @@ struct FriendList: View {
     let height = max(base, (room - (notificationsDenied ? base : 0)) / CGFloat(count))
     // A short list keeps its place as the camera replaces the notifications button.
     let cameraSpace = cameraOn && notificationsDenied ? min(base, max(0, room - CGFloat(count) * height)) : 0
-    let rowMetrics = RowMetrics(height: height, font: RowMetrics.base.font * scale, smallFont: RowMetrics.base.smallFont * scale)
+    let fontScale = RowMetrics.fontScale(width: listViewport.width, height: height)
+    let rowMetrics = RowMetrics(height: height, font: RowMetrics.base.font * fontScale, smallFont: RowMetrics.base.smallFont * fontScale,
+      baseHeight: base)
     return NavigationStack {
       ScrollView {
         LazyVStack(spacing: 0) {

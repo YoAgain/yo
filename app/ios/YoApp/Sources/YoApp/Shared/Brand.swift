@@ -53,13 +53,20 @@ struct RowMetrics: Equatable {
   var height: CGFloat
   var font: CGFloat
   var smallFont: CGFloat
+  /// The fixed bars' height (notifications, the add row's actions): the list's layout counts them at the width's
+  /// scale, not the names'.
+  var baseHeight: CGFloat = Metrics.rowHeight
   static let base = RowMetrics(height: Metrics.rowHeight, font: Metrics.rowFont, smallFont: Metrics.rowSmallFont)
 
   /// Phone widths keep the original sizes; wider windows grow up to 1.35×.
   static func scale(width: CGFloat) -> CGFloat { min(1.35, 1 + max(0, width - 440) * 0.001) }
+  /// The names grow further than the bars' minimum: with the bar's own height (an iPad's bars are tall), up to 2×
+  /// on the widest windows. Phone widths keep 1×.
+  static func fontScale(width: CGFloat, height: CGFloat) -> CGFloat {
+    max(scale(width: width), min(1 + max(0, width - 440) * 0.0017, 2, height / base.height))
+  }
 
   var fontScale: CGFloat { font / Self.base.font }
-  var baseHeight: CGFloat { Self.base.height * fontScale }
 }
 
 extension EnvironmentValues {
