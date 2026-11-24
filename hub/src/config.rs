@@ -74,8 +74,15 @@ pub struct Limits {
     pub blob_put_per_ip_minute: u32,
     /// Fetches, which name no one: by address only.
     pub blob_get_per_ip_minute: u32,
-    /// Groups one user makes a day (spec 4.9): each is kept until its last member leaves.
+    /// Groups one user makes a day (spec 4.9): each is kept until its last member leaves. Signed requests only
+    /// (apps before 2026-11-24); an anonymous one counts by its address (`groups_per_ip_day`).
     pub groups_per_user_day: u32,
+    /// Groups made from one address a day, anonymously (spec 4.9: a group request names no account).
+    pub groups_per_ip_day: u32,
+    /// Anonymous group requests (fetch, change) from one address a minute: each makes the hub check proofs.
+    pub group_requests_per_ip_minute: u32,
+    /// Anonymous profile key credentials from one address an hour.
+    pub credentials_per_ip_hour: u32,
     /// Requests with a body read and handled at once from one address (`admit`, of `READING_AT_ONCE`): beyond,
     /// `503` for that address only. The server's own services pass.
     pub reading_per_ip: u32,
@@ -133,6 +140,9 @@ impl Default for Limits {
             blob_put_per_ip_minute: 120,
             blob_get_per_ip_minute: 600,
             groups_per_user_day: 100,
+            groups_per_ip_day: 200,
+            group_requests_per_ip_minute: 120,
+            credentials_per_ip_hour: 2000,
             reading_per_ip: 64,
         }
     }
@@ -170,6 +180,9 @@ impl Limits {
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,
             groups_per_user_day: u32::MAX,
+            groups_per_ip_day: u32::MAX,
+            group_requests_per_ip_minute: u32::MAX,
+            credentials_per_ip_hour: u32::MAX,
             reading_per_ip: u32::MAX,
             ..Limits::default()
         }

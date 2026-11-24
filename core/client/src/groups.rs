@@ -168,7 +168,7 @@ impl Client {
             title: title(&secret, name)?.into(),
             members: new,
         });
-        let response = expect(self.signed("PUT", &api::group_path(&id), &body)?, status::OK)?;
+        let response = expect(self.zk_request("PUT", &api::group_path(&id), &body)?, status::OK)?;
         let answer: GroupAnswer = decode(&response.body).map_err(|_| bad_answer())?;
         let id = hex(&id);
         self.state.groups.insert(id.clone(), Group { key: hex(&key), accepted: true, ..Default::default() });
@@ -338,6 +338,13 @@ impl Client {
         self.wall() / 1000
     }
 
+    /// A group request (spec 4.9): unsigned, on the connection that names no account (`api::anonymous`); its zkgroup
+    /// proof is all that authorises it, so the hub never learns which account is in which group.
+    fn zk_request(&self, method: &str, path: &str, body: &[u8]) -> Result<crate::Response> {
+        debug_assert!(api::anonymous(method, path));
+        self.unsigned(method, path, &[], body)
+    }
+
     /// An auth credential presentation for this group (today's credential, fetched once a day).
     fn auth_presentation(&mut self, zk: &ServerPublicParams, secret: &GroupSecretParams) -> Result<Vec<u8>> {
         let now = self.now_s();
@@ -400,7 +407,7 @@ impl Client {
             user_id: user_bytes(user)?,
             request: zkgroup::serialize(&context.get_request()).into(),
         });
-        let response = expect(self.signed("POST", api::GROUP_CREDENTIAL, &body)?, status::OK)?;
+        let response = expect(self.zk_request("POST", api::GROUP_CREDENTIAL, &body)?, status::OK)?;
         let issued: ExpiringProfileKeyCredentialResponse =
             zkgroup::deserialize(&response.body).map_err(|_| bad_answer())?;
         let now = Timestamp::from_epoch_seconds(self.now_s());
@@ -565,7 +572,7 @@ impl Client {
         let secret = secret(&key_of(&group)?);
         let auth = self.auth_presentation(&zk, &secret)?;
         let body = encode(&api::GroupRequest { auth: auth.into(), revision: 0, actions: Vec::new() });
-        let response = self.signed("POST", &api::group_path(&secret.get_group_identifier()), &body)?;
+        let response = self.zk_request("POST", &api::group_path(&secret.get_group_identifier()), &body)?;
         match response.status {
             status::OK => self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?),
             status::FORBIDDEN | status::NOT_FOUND => {
@@ -800,7 +807,7 @@ impl Client {
             let auth = self.auth_presentation(&zk, &secret)?;
             let revision = group.revision.checked_add(1).ok_or(Error::Protocol("a group's last revision"))?;
             let body = encode(&api::GroupRequest { auth: auth.into(), revision, actions });
-            let response = self.signed("POST", &api::group_path(&secret.get_group_identifier()), &body)?;
+            let response = self.zk_request("POST", &api::group_path(&secret.get_group_identifier()), &body)?;
             match response.status {
                 status::OK => {
                     self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?)?;

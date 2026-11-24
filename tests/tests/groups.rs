@@ -503,12 +503,12 @@ fn an_own_credential_refused_for_good_is_asked_for_after_a_pause_only() {
     assert_eq!(credential(&https[1]) - asked_before, 4, "the second pause is longer");
 }
 
-/// Groups one account makes are limited a day (each is kept until its last member leaves): past the limit `429`,
-/// another account is not held.
+/// Groups made are limited a day (each is kept until its last member leaves): by the address they come from, as the
+/// hub does not know whose they are (spec 4.9, 6.6); past the limit `429`, which the maker sees as a refusal.
 #[test]
-fn the_groups_an_account_makes_are_limited() {
+fn the_groups_made_from_one_address_are_limited() {
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.groups_per_user_day = 2;
+    config.limits.groups_per_ip_day = 2;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let mut p = people(&hub, 3);
     let [a, b, c] = p.as_mut_slice() else { unreachable!() };
@@ -516,6 +516,50 @@ fn the_groups_an_account_makes_are_limited() {
     for name in ["ONE", "TWO"] {
         a.create_group(name, &others).unwrap();
     }
-    assert!(a.create_group("THREE", &others).is_err(), "past the day's groups");
-    c.create_group("OTHER", &others).unwrap();
+    assert_eq!(a.create_group("THREE", &others).unwrap_err(), yo_core::Error::Refused(429), "past the day's groups");
+    assert!(c.create_group("OTHER", &others).is_err(), "the same address: not told apart by account");
+    assert_eq!(a.groups().len(), 2);
+}
+
+/// Audit M1 (spec 1, 4.9): the hub never learns who is in a group. Every group request but the day's auth credential
+/// goes unsigned, on the connection that names no account (`api::anonymous`): making, fetching, changing, the yes,
+/// leaving, the profile key credentials; a Yo and a photo to the group go as ever.
+#[test]
+fn group_requests_name_no_account() {
+    let hub = TestHub::start();
+    let https = [(); 3].map(|_| Http::new(hub.url()));
+    let base = random_u64() % 1_000_000_000;
+    let mut a = register(https[0].clone(), &username(base), Some("ANN"));
+    let mut b = register(https[1].clone(), &username(base + 7), Some("BEN"));
+    let mut c = register(https[2].clone(), &username(base + 14), Some("CLE"));
+    // Ann and Ben are contacts: Ben goes in with his key (a credential), Cleo invited.
+    b.send_yo(a.user_id()).unwrap();
+    take(&mut a);
+    take(&mut b);
+    let (id, _) = a.create_group("CREW", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(&mut b);
+    take(&mut c);
+    c.accept_group(&id).unwrap();
+    a.rename_group(&id, "GANG").unwrap();
+    take(&mut b);
+    b.send_group(&id, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(&mut c)), [(id.clone(), b.user_id().to_owned())]);
+    c.leave_group(&id).unwrap();
+    a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
+    let is_group =
+        |path: &str| path.starts_with(&format!("{}/", yo_wire::api::GROUPS)) || path == yo_wire::api::GROUP_CREDENTIAL;
+    let mut groups = 0;
+    for http in &https {
+        for (method, path, _) in http.sent.lock().unwrap().iter().filter(|(_, p, _)| is_group(p)) {
+            groups += 1;
+            assert!(yo_wire::api::anonymous(method, path), "{method} {path} on the anonymous connection");
+        }
+        // Signed requests (those with headers) are recorded: none is a group's.
+        for (method, path, headers, _) in http.recorded.lock().unwrap().iter().filter(|(_, p, _, _)| is_group(p)) {
+            let signed = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(yo_wire::request::HEADER_DEVICE));
+            assert!(!signed, "{method} {path} signed");
+        }
+    }
+    assert!(groups >= 8, "made, fetched, changed, credentials: {groups}");
+    assert_eq!(view(&a, &id).name, "GANG");
 }

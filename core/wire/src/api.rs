@@ -61,14 +61,17 @@ pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 /// hub's minimum for its platform is answered `426` (spec 6.3). Not signed; any request may carry it.
 pub const HEADER_APP: &str = "yo-app";
 
-/// The requests that name no account (sealed deliveries, blobs, help by install id): the only ones a client sends on
-/// its anonymous connections; every other request, signed or not (a registration, a backup's fetch), names its device
-/// or account and goes on the other ones, so no connection carries both, and no install id meets an account (spec 1).
+/// The requests that name no account (sealed deliveries, blobs, help by install id, groups by their zkgroup proof): the
+/// only ones a client sends on its anonymous connections; every other request, signed or not (a registration, a
+/// backup's fetch), names its device or account and goes on the other ones, so no connection carries both, and no
+/// install id meets an account (spec 1). A group's day's auth credential (`GROUP_AUTH`) is signed: it names the account.
 pub fn anonymous(method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     (method == "POST" && path.starts_with(&format!("{INBOX}/")) && path != INBOX_ACK)
         || path.starts_with(&format!("{BLOBS}/"))
         || path.starts_with("/v1/help/")
+        || path.starts_with(&format!("{GROUPS}/"))
+        || (method == "POST" && path == GROUP_CREDENTIAL)
 }
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
@@ -457,11 +460,11 @@ impl Devices {
 
 /// `GET`, signed: today's auth credential (`GroupAuthCredential`), what a member presents to the hub for a group.
 pub const GROUP_AUTH: &str = "/v1/group-auth";
-/// `POST`, signed: a profile key credential for a user whose profile key the asker holds (`ProfileCredentialRequest`
+/// `POST`, anonymous: a profile key credential for a user whose profile key the asker holds (`ProfileCredentialRequest`
 /// → zkgroup's `ExpiringProfileKeyCredentialResponse`): with it a member adds that user.
 pub const GROUP_CREDENTIAL: &str = "/v1/group-credential";
-/// `PUT /v1/groups/{id}` makes a group (`NewGroup`), `POST` fetches or changes it (`GroupRequest`); both answer
-/// `GroupAnswer`. `{id}` is the group's identifier (32 bytes, base64url).
+/// `PUT /v1/groups/{id}` makes a group (`NewGroup`), `POST` fetches or changes it (`GroupRequest`), anonymous (the
+/// zkgroup proof in the body); both answer `GroupAnswer`. `{id}` is the group's identifier (32 bytes, base64url).
 pub const GROUPS: &str = "/v1/groups";
 /// The hub's `ServerPublicParams` (zkgroup, bincode): for tools; apps pin their own copy.
 pub const ZK_PARAMS_PATH: &str = "/.well-known/yo-zk-params";
@@ -594,6 +597,11 @@ mod tests {
             assert!(anonymous("POST", path), "{path}");
         }
         assert!(anonymous("GET", HELP_MESSAGES));
+        // Groups by their zkgroup proof (spec 4.9); the day's auth credential names the account.
+        assert!(
+            anonymous("PUT", &group_path(&[1; GROUP_ID_LEN])) && anonymous("POST", &group_path(&[1; GROUP_ID_LEN]))
+        );
+        assert!(anonymous("POST", GROUP_CREDENTIAL) && !anonymous("GET", GROUP_AUTH));
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Groups at the hub (spec 4.9): Signal's Groups v2 with zkgroup; every request checked by proof, nothing learned.
 
 use crate::error::{refuse, Refusal, Res};
-use crate::request::{bad, path_id, Auth, Hubs, DAY};
+use crate::request::{bad, path_id, Auth, Hubs, Peer, Signed, DAY, HOUR, MINUTE};
 use crate::{now_ms, Hub};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use bytes::Bytes;
 use libsignal_protocol::{Aci, Pni, ServiceId};
 use yo_wire::api::{self, GroupAction, GroupAnswer, GroupMember, GroupState, NewGroup, NewMember};
 use yo_wire::content::MAX_GROUP;
@@ -278,22 +279,82 @@ pub(crate) async fn get_group_auth(State(hub): Hubs, Auth(device, _): Auth) -> R
     Ok(encode(&hub.group_auth(&device.user_id)))
 }
 
+/// A group request as it came (spec 4.9): anonymous, on the connection that names no account, the zkgroup proof in
+/// its body all that authorises it, limited by its address; or signed, as apps before 2026-11-24 send it (a device
+/// then, limited by that device or user as before). A signature that is there must hold.
+pub(crate) struct GroupAsk {
+    signed: Option<Signed>,
+    peer: std::net::SocketAddr,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+impl axum::extract::FromRequest<std::sync::Arc<Hub>> for GroupAsk {
+    type Rejection = Refusal;
+
+    async fn from_request(request: axum::extract::Request, hub: &std::sync::Arc<Hub>) -> Res<Self> {
+        let peer = request
+            .extensions()
+            .get::<Peer>()
+            .map(|axum::extract::ConnectInfo(peer)| *peer)
+            .ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let (parts, body) = request.into_parts();
+        let body = axum::body::to_bytes(body, yo_wire::limits::MAX_BODY)
+            .await
+            .map_err(|_| refuse(StatusCode::PAYLOAD_TOO_LARGE))?;
+        let signed = match parts.headers.contains_key(yo_wire::request::HEADER_DEVICE) {
+            true => Some(hub.authenticate(&parts.method, &parts.uri, &parts.headers, &body)?),
+            false => None,
+        };
+        Ok(GroupAsk { signed, peer, headers: parts.headers, body })
+    }
+}
+
+impl GroupAsk {
+    /// The limit of this request: `signed` (its id, how many, in what time) when signed, else `by_ip` per address.
+    fn limit(
+        &self,
+        hub: &Hub,
+        kind: &str,
+        signed: (&[u8], u32, std::time::Duration),
+        by_ip: (u32, std::time::Duration),
+    ) -> Res<()> {
+        match &self.signed {
+            Some(device) => hub.limit_signed(device, kind, signed.0, signed.1, signed.2),
+            None => hub.limit_ip(kind, self.peer, &self.headers, by_ip.0, by_ip.1),
+        }
+    }
+
+    fn id(&self) -> Option<Vec<u8>> {
+        self.signed.as_ref().map(|s| s.user_id.to_vec())
+    }
+}
+
 /// `POST /v1/group-credential`: a profile key credential for a user whose key the asker holds.
-pub(crate) async fn post_group_credential(State(hub): Hubs, Auth(device, body): Auth) -> Res<Vec<u8>> {
-    hub.limit_signed(&device, "credential", &device.device_id, CREDENTIALS_PER_DAY, DAY)?;
-    hub.profile_credential(&decode(&body)?)
+pub(crate) async fn post_group_credential(State(hub): Hubs, ask: GroupAsk) -> Res<Vec<u8>> {
+    let device = ask.signed.as_ref().map(|s| s.device_id.to_vec()).unwrap_or_default();
+    let by_ip = (hub.config.limits.credentials_per_ip_hour, HOUR);
+    ask.limit(&hub, "credential", (&device, CREDENTIALS_PER_DAY, DAY), by_ip)?;
+    hub.profile_credential(&decode(&ask.body)?)
 }
 
-/// `PUT /v1/groups/{id}`: a new group; so many a user a day, while the database's disk has room.
-pub(crate) async fn put_group(State(hub): Hubs, Path(id): Path<String>, Auth(device, body): Auth) -> Res<Vec<u8>> {
-    hub.limit_signed(&device, "group", &device.user_id, hub.config.limits.groups_per_user_day, DAY)?;
+/// `PUT /v1/groups/{id}`: a new group; so many from an address (or a signing user) a day, while the database's disk
+/// has room.
+pub(crate) async fn put_group(State(hub): Hubs, Path(id): Path<String>, ask: GroupAsk) -> Res<Vec<u8>> {
+    let limits = &hub.config.limits;
+    let user = ask.id().unwrap_or_default();
+    ask.limit(&hub, "group", (&user, limits.groups_per_user_day, DAY), (limits.groups_per_ip_day, DAY))?;
     hub.db_room()?;
-    Ok(encode(&hub.create_group(&path_id(&id)?, &decode(&body)?)?))
+    Ok(encode(&hub.create_group(&path_id(&id)?, &decode(&ask.body)?)?))
 }
 
-/// `POST /v1/groups/{id}`: a member's request (`GroupRequest`).
-pub(crate) async fn post_group(State(hub): Hubs, Path(id): Path<String>, Auth(_, body): Auth) -> Res<Vec<u8>> {
-    Ok(encode(&hub.group_request(&path_id(&id)?, &decode(&body)?)?))
+/// `POST /v1/groups/{id}`: a member's request (`GroupRequest`); anonymous ones so many from an address a minute.
+pub(crate) async fn post_group(State(hub): Hubs, Path(id): Path<String>, ask: GroupAsk) -> Res<Vec<u8>> {
+    if ask.signed.is_none() {
+        let per = hub.config.limits.group_requests_per_ip_minute;
+        hub.limit_ip("group-request", ask.peer, &ask.headers, per, MINUTE)?;
+    }
+    Ok(encode(&hub.group_request(&path_id(&id)?, &decode(&ask.body)?)?))
 }
 
 fn duplicates(members: &[GroupMember]) -> bool {
@@ -551,5 +612,111 @@ mod tests {
         hub.db.set_commitment_for_tests(&ann, &zkgroup::serialize(&commitment));
         assert!(hub.profile_credential(&request([5; 32])).is_ok());
         assert_eq!(hub.profile_credential(&request([6; 32])).unwrap_err().0, StatusCode::FORBIDDEN, "another key");
+    }
+
+    /// Audit M1: group requests go anonymous (the zkgroup proof all that authorises them, spec 4.9), counted by
+    /// address; a signed one, as apps before send it, is still taken and counted by its device or user, and a
+    /// signature that is there must hold.
+    #[tokio::test]
+    async fn group_requests_go_anonymous_and_anonymous_ones_count_by_address() {
+        use axum::{body::Body, extract::ConnectInfo, http::Request};
+        use std::net::SocketAddr;
+        use tower::ServiceExt;
+        let limits = crate::config::Limits {
+            groups_per_ip_day: 1,
+            group_requests_per_ip_minute: 3,
+            credentials_per_ip_hour: 2,
+            ..crate::config::Limits::unlimited()
+        };
+        let hub =
+            Hub::new(Config { limits, ..Config::for_tests() }, Arc::new(crate::push::Recorder::default())).unwrap();
+        // Ann's device, registered, for the signed requests of apps before.
+        let pair = libsignal_protocol::KeyPair::generate(&mut rand::rng());
+        let auth_key: [u8; 32] = pair.public_key.public_key_bytes().try_into().unwrap();
+        let ann = [1u8; 16];
+        let device = crate::db::NewDevice {
+            device_id: [1; 16],
+            device_key: [1; 32],
+            auth_key,
+            registration_id: 1,
+            push_platform: 0,
+            push_token: Vec::new(),
+            app: None,
+        };
+        let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
+        hub.db.register(b"ANN", "ANN", &ann, &[1; 32], &device, &prekeys, 10, 0).unwrap();
+        let send = |method: &str, path: String, body: Vec<u8>, ip: [u8; 4], signed: bool| {
+            let mut request = Request::builder().method(method).uri(&path);
+            if signed {
+                let time = crate::now_ms();
+                let message = yo_wire::request::to_be_signed(method, &path, time, &body);
+                let signature = pair.private_key.calculate_signature(&message, &mut rand::rng()).unwrap();
+                request = request
+                    .header(yo_wire::request::HEADER_DEVICE, yo_wire::b64(&[1; 16]))
+                    .header(yo_wire::request::HEADER_TIME, time.to_string())
+                    .header(yo_wire::request::HEADER_SIGNATURE, yo_wire::b64(&signature));
+            }
+            let mut request = request.body(Body::from(body)).unwrap();
+            request.extensions_mut().insert(ConnectInfo(SocketAddr::from((ip, 1))));
+            let router = hub.router();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+        let made = |key: u8| {
+            let secret = GroupSecretParams::derive_from_master_key(GroupMasterKey::new([key; 32]));
+            let new = NewGroup {
+                public_params: zkgroup::serialize(&secret.get_public_params()).into(),
+                auth: auth(&hub, &ann, &secret),
+                title: secret.encrypt_blob_with_padding(random(), b"T", 31).into(),
+                members: vec![keyed(&hub, &ann, [9; 32], &secret)],
+            };
+            (secret, yo_wire::encode(&new))
+        };
+        let (secret, body) = made(1);
+        let path = api::group_path(&secret.get_group_identifier());
+        let fetch =
+            || yo_wire::encode(&api::GroupRequest { auth: auth(&hub, &ann, &secret), revision: 0, actions: vec![] });
+        let ip = [192, 0, 2, 1];
+        assert_eq!(send("PUT", path.clone(), body, ip, false).await, StatusCode::OK, "made, anonymously");
+        let (other, body) = made(2);
+        let other_path = api::group_path(&other.get_group_identifier());
+        assert_eq!(send("PUT", other_path.clone(), body.clone(), ip, false).await, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(send("PUT", other_path, body, ip, true).await, StatusCode::OK, "signed: by the user, as before");
+        for _ in 0..3 {
+            assert_eq!(send("POST", path.clone(), fetch(), ip, false).await, StatusCode::OK);
+        }
+        assert_eq!(send("POST", path.clone(), fetch(), ip, false).await, StatusCode::TOO_MANY_REQUESTS, "by address");
+        assert_eq!(send("POST", path.clone(), fetch(), [192, 0, 2, 2], false).await, StatusCode::OK, "another address");
+        assert_eq!(send("POST", path.clone(), fetch(), ip, true).await, StatusCode::OK, "signed: not by address");
+        // A signature there that does not hold: refused, not taken as anonymous.
+        let mut forged = Request::post(&path)
+            .header(yo_wire::request::HEADER_DEVICE, yo_wire::b64(&[1; 16]))
+            .header(yo_wire::request::HEADER_TIME, crate::now_ms().to_string())
+            .header(yo_wire::request::HEADER_SIGNATURE, yo_wire::b64(&[0u8; 64]))
+            .body(Body::from(fetch()))
+            .unwrap();
+        forged.extensions_mut().insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 3], 1))));
+        assert_eq!(hub.router().oneshot(forged).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        // Not a member: the proof decides, as signed.
+        let stranger = api::GroupRequest { auth: auth(&hub, &[2; 16], &secret), revision: 0, actions: vec![] };
+        let status = send("POST", path.clone(), yo_wire::encode(&stranger), [192, 0, 2, 4], false).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // Credentials: anonymous, counted by address.
+        let context = test_public().create_profile_key_credential_request_context(
+            random(),
+            aci(&ann),
+            ProfileKey::create([9; 32]),
+        );
+        let asked = yo_wire::encode(&api::ProfileCredentialRequest {
+            user_id: ann,
+            request: zkgroup::serialize(&context.get_request()).into(),
+        });
+        let ip = [192, 0, 2, 5];
+        for _ in 0..2 {
+            assert_eq!(send("POST", api::GROUP_CREDENTIAL.into(), asked.clone(), ip, false).await, StatusCode::OK);
+        }
+        let status = send("POST", api::GROUP_CREDENTIAL.into(), asked.clone(), ip, false).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(send("POST", api::GROUP_CREDENTIAL.into(), asked, ip, true).await, StatusCode::OK, "signed");
+        hub.closing.send_replace(true);
     }
 }

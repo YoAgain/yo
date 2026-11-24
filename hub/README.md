@@ -34,11 +34,12 @@ registration on, written when it changes) and answers `426` to every request of 
 | GET | `/v1/blobs/{id}` | the blob, streamed; GET never consumes a fetch | **none**, the 128-bit id | 600/min (IP); 3 × original fetch count per blob | which blob, from where |
 | DELETE | `/v1/blobs/{id}` | acknowledge durable storage; consumes one fetch, the last deletes it; unknown/expired also `204` | **none**, the 128-bit id | 600/min (IP), shared with GET | which blob, from where |
 
-#### Groups (signed, plus a member proof that names no member)
+#### Groups (anonymous, a member proof that names no member)
 
 | Method | Path | Purpose | Auth | Limits (key) | Hub learns |
 |---|---|---|---|---|---|
-| PUT, POST | `/v1/groups/{id}` | make, fetch, change a group (spec 4.9): kept encrypted, checked by zero-knowledge proof, changes by revision (`409`) | signed, and a member's auth credential presentation | signed | which device touches which group id, when; never its members or name |
+| PUT, POST | `/v1/groups/{id}` | make, fetch, change a group (spec 4.9): kept encrypted, checked by zero-knowledge proof, changes by revision (`409`) | **none**: a member's auth credential presentation; a signed request (apps before 2026-11-24) is taken too | made 200/day, requests 120/min (IP); signed: made 100/day (user) | which group id is touched, when, from which address; never by which account, its members or name |
+| POST | `/v1/group-credential` | a profile key credential for a user whose profile key the asker holds (spec 4.9) | **none** (the request proves the key); signed taken too | 2000/h (IP); signed: 1000/day (device) | that someone asks a credential for that user, from which address |
 
 #### Public (anonymous)
 
@@ -76,7 +77,6 @@ registration on, written when it changes) and answers `426` to every request of 
 | POST | `/v1/lookup` | handle → user id, account key, device keys, a bundle per device if asked, username if asked; signed by the hub key when asked with `Yo-Nonce` (spec 6.10) | signed | 50/day with prekeys, 1000/day without (device) | who looks up whom |
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
 | GET | `/v1/group-auth` | the day's group auth credential (spec 4.9) | signed | signed | that the device asked |
-| POST | `/v1/group-credential` | a profile key credential for a user whose profile key the asker holds (spec 4.9) | signed | 1000/day (device) | who asks a credential for whom |
 | GET | `/v1/certificate` | a sender certificate for the signing device, a day (spec 6.1) | signed | signed | that the device asked |
 | PUT | `/v1/username` | change or give up the account's username | signed | signed | the name |
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |
