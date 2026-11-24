@@ -56,7 +56,30 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     with_support_done(conn)?;
     with_todos(conn)?;
     without_feedback(conn)?;
-    with_installs(conn)
+    with_installs(conn)?;
+    skeletons_of_today(conn)
+}
+
+/// Usernames are found by their skeleton (spec 3.3), which drops more since 2026-11-24 (U+200D, tag characters): a
+/// name kept under the skeleton of before gets today's, unless another name has that one already (that one keeps it; this
+/// one then is found by its user id, as before). Nothing to do where every skeleton is today's.
+fn skeletons_of_today(conn: &mut Connection) -> rusqlite::Result<()> {
+    immediate(conn, |tx| {
+        let names: Vec<(Vec<u8>, String)> = tx
+            .prepare("SELECT value, spelling FROM handles WHERE kind = ?1 AND spelling IS NOT NULL")?
+            .query_map([yo_wire::handle::KIND_USERNAME], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (value, spelling) in names {
+            let today = yo_wire::handle::skeleton(&spelling).into_bytes();
+            if today != value {
+                tx.execute(
+                    "UPDATE OR IGNORE handles SET value = ?3 WHERE kind = ?1 AND value = ?2",
+                    params![yo_wire::handle::KIND_USERNAME, value, today],
+                )?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// The schema this hub writes; another is refused, never half migrated (1 and 2 are brought up: `from_1`, `from_2`).

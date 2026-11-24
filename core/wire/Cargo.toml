@@ -16,6 +16,8 @@ thiserror = { workspace = true }
 unicode-normalization = "=0.1.26"
 unicode-segmentation = "=1.13.3"
 unicode-properties = "=0.1.5"
+# The RGI emoji (UTS #51, Unicode 18) a username may have: whole sequences only (spec 3.3).
+emojis = "=0.9.1"
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -610,3 +610,25 @@ fn a_group_change_for_an_unconfirmed_member_waits_for_the_confirmation() {
     assert_eq!(a.waiting(), 0);
     assert_eq!(unread_by(&mut b2), 3, "the held Yo, the group's change and the new Yo");
 }
+
+/// U1 at the hub: a name of more than 64 bytes or with a made-up emoji sequence is `400` (also on a lookup and a
+/// rename); a name that looks like one taken (a joiner or tags between) is that name, `409`.
+#[test]
+fn usernames_are_bounded_in_bytes_and_lookalikes_are_one_name() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    for name in
+        ["👍🏿".repeat(9), format!("Ab{n}{}", "\u{1F44D}\u{200D}\u{1F44D}"), format!("Ab{n}\u{1F3F4}\u{E0061}\u{E007F}")]
+    {
+        assert!(by_name(&hub, &name, None).is_err(), "{name:?}");
+        let raw = reqwest::blocking::Client::new().get(format!("{}{}", hub.url(), api::username_path(&name)));
+        assert_eq!(raw.send().unwrap().status().as_u16(), api::status::BAD_REQUEST, "{name:?}");
+    }
+    let mut leo = by_name(&hub, &format!("Leo{n}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), None).unwrap();
+    let taken = Err(Error::Refused(api::status::CONFLICT));
+    assert_eq!(by_name(&hub, &format!("LEO{n}\u{1F468}\u{1F469}\u{1F467}"), None).map(|_| ()), taken, "one skeleton");
+    let http = Http::new(hub.url());
+    assert_eq!(Client::username_free(&*http, &format!("leo{n}👨👩👧")), Ok(false), "taken in its look-alike");
+    assert!(leo.set_username(Some(&"🔥".repeat(17))).is_err(), "17 characters");
+    leo.set_username(Some(&format!("{}{}", "🔥".repeat(15), "a"))).unwrap();
+}

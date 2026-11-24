@@ -2534,6 +2534,46 @@ mod tests {
         assert!(db.username_taken(b"LEO").unwrap() && !db.username_taken(b"MIA").unwrap());
     }
 
+    /// U1: a name kept under the skeleton of before (with U+200D or tags in it) gets today's at the next start and is
+    /// found again; one whose new skeleton another name has keeps its old one.
+    #[test]
+    fn names_get_todays_skeleton_at_start() {
+        let db = Db::open(":memory:").unwrap();
+        let (joined, apart) = ("Leo\u{1F468}\u{200D}\u{1F469}", "LEO\u{1F468}\u{1F469}");
+        let old_skeleton = |name: &str| name.to_uppercase().into_bytes();
+        let leo = user(register(&db, b"MIA", 1, 1, 0));
+        let taken = user(register(&db, b"TOM", 2, 2, 0));
+        db.conn()
+            .execute(
+                "UPDATE handles SET value = ?1, spelling = ?2 WHERE user_id = ?3",
+                params![old_skeleton(joined), joined, leo],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE handles SET value = ?1, spelling = ?2 WHERE user_id = ?3",
+                params![yo_wire::handle::skeleton(apart).into_bytes(), apart, taken],
+            )
+            .unwrap();
+        let other = user(register(&db, b"ZOE", 3, 3, 0));
+        let second = "Zoe\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+        db.conn()
+            .execute(
+                "UPDATE handles SET value = ?1, spelling = ?2 WHERE user_id = ?3",
+                params![old_skeleton(second), second, other],
+            )
+            .unwrap();
+        schema::upgrade(&mut db.conn()).unwrap();
+        let owner = |name: &str| db.username_owner(yo_wire::handle::skeleton(name).as_bytes()).unwrap();
+        assert_eq!(owner(second), Some(other), "today's skeleton: found");
+        assert_eq!(owner(apart), Some(taken), "the name that had it keeps it");
+        assert_eq!(owner(joined), Some(taken), "one skeleton, one name");
+        let kept: Vec<u8> =
+            db.conn().query_row("SELECT value FROM handles WHERE user_id = ?1", [leo], |r| r.get(0)).unwrap();
+        assert_eq!(kept, old_skeleton(joined), "the later one keeps its old skeleton");
+        schema::upgrade(&mut db.conn()).unwrap();
+    }
+
     /// A backup knows the name the account had when it was made. Renamed since, its name taken by someone else or
     /// free again: the account key brings back the same user, with the name it has now (spec 6.4, 7).
     #[test]

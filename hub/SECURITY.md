@@ -46,6 +46,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
   `zk_groups_gone` (an ended group's id, 40 bytes, kept for good; bound by the groups made a day).
 - In-memory buckets: a delivery to a user that does not exist is `404` before any is made for it; a request's
   tokens are taken before it is stored and given back if it is not (requests sent at once share them).
+- Usernames: at most 16 characters and 64 bytes, only RGI emoji; the skeleton drops joiners and tag characters (spec 3.3).
 
 Open: `cargo audit` in CI.
 

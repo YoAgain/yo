@@ -75,14 +75,18 @@ impl Handle {
 
 /// Maximum username length in grapheme clusters.
 pub const USERNAME_MAX: usize = 16;
+/// Maximum username length in bytes (UTF-8): a character (a letter with marks, an emoji sequence) has no length of
+/// its own, a name does.
+pub const USERNAME_MAX_BYTES: usize = 64;
 
-/// A username as it may be written (spec 3.3): 1 to 16 characters (grapheme clusters, NFC) of Latin letters with their
-/// accents, 0–9, `_` and emoji, starting with a letter, an emoji or a digit, with at least one letter or emoji ("1abc",
-/// not "1234"), in any case ("YoGPT"). What the hub refuses with `400` (spec 6.3). Which names are reserved only the
-/// hub knows.
+/// A username as it may be written (spec 3.3): 1 to 16 characters (grapheme clusters, NFC), at most 64 bytes, of Latin
+/// letters with their accents, 0–9, `_` and emoji (RGI sequences), starting with a letter, an emoji or a digit, with at
+/// least one letter or emoji ("1abc", not "1234"), in any case ("YoGPT"). What the hub refuses with `400` (spec 6.3).
+/// Which names are reserved only the hub knows.
 pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();
     let ok = (1..=USERNAME_MAX).contains(&graphemes.len())
+        && name.len() <= USERNAME_MAX_BYTES
         && name.nfc().eq(name.chars())
         && graphemes.iter().all(|g| allowed(g))
         && graphemes.first().is_some_and(|g| *g != "_")
@@ -100,17 +104,25 @@ pub fn same_name(a: &str, b: &str) -> bool {
     skeleton(a) == skeleton(b)
 }
 
-/// What a person typed, as a username can be written: NFC, only the allowed characters, no `_` first, at most 16, the
-/// case as typed (digits alone stay: the letter may come next). The apps keep their field to this; the hub accepts only
-/// names already so.
+/// What a person typed, as a username can be written: NFC, only the allowed characters, no `_` first, at most 16 and 64
+/// bytes (whole characters), the case as typed (digits alone stay: the letter may come next). The apps keep their
+/// field to this; the hub accepts only names already so.
 pub fn canonical(typed: &str) -> String {
     let nfc: String = typed.nfc().collect();
-    nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| *g == "_").take(USERNAME_MAX).collect()
+    let mut name = String::new();
+    for g in nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| *g == "_").take(USERNAME_MAX) {
+        if name.len() + g.len() > USERNAME_MAX_BYTES {
+            break;
+        }
+        name.push_str(g);
+    }
+    name
 }
 
-/// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors
-/// and skin tones, then 0 → O, 1 → I, VV → W. Names that look alike have one skeleton, and the hub keeps one name
-/// per skeleton: Leo, LE0 and LÉO are one name, and so are 👍 and 👍🏿.
+/// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors,
+/// skin tones, the zero width joiner (U+200D) and tag characters (U+E0020–E007F), then 0 → O, 1 → I, VV → W. Names
+/// that look alike have one skeleton, and the hub keeps one name per skeleton: Leo, LE0 and LÉO are one name, and so
+/// are 👍 and 👍🏿, 👍👍 and 👍‍👍 (joined where a font has no such sequence), 🏴 and a flag of tags.
 pub fn skeleton(name: &str) -> String {
     let stripped: String = name
         .to_uppercase()
@@ -120,6 +132,8 @@ pub fn skeleton(name: &str) -> String {
             c.general_category() != GeneralCategory::NonspacingMark
                 && v != 0xFE0E
                 && v != 0xFE0F
+                && v != 0x200D
+                && !(0xE0020..=0xE007F).contains(&v)
                 && !(0x1F3FB..=0x1F3FF).contains(&v)
         })
         .collect();
@@ -148,8 +162,13 @@ fn is_latin_letter(g: &str) -> bool {
 
 /// An emoji as people type it (UTS #51), checked as a whole sequence: a keycap (`1️⃣`), a flag (two regional
 /// indicators), a tag sequence (🏴 and tags), or emoji joined by U+200D (`🧙‍♂️`), each one shown as emoji by default
-/// or made one by U+FE0F, with a skin tone on those that take one. Never a letter or digit with marks after it.
+/// or made one by U+FE0F, with a skin tone on those that take one; and one of the RGI emoji (Unicode's list, with
+/// its less qualified spellings), so no made-up chain or flag of any length. Never a letter or digit with marks.
 fn is_emoji(g: &str) -> bool {
+    is_emoji_form(g) && emojis::get(g).is_some()
+}
+
+fn is_emoji_form(g: &str) -> bool {
     let chars: Vec<char> = g.chars().collect();
     let regional = |c: &char| ('\u{1F1E6}'..='\u{1F1FF}').contains(c);
     let tag = |c: &char| ('\u{E0020}'..='\u{E007E}').contains(c);
@@ -298,6 +317,56 @@ mod tests {
             assert!(check_username_form(bad).is_err(), "{bad:?}");
         }
         assert_eq!(canonical("1\u{301}ab"), "ab", "skipped as typed");
+    }
+
+    /// U1: a character has no length of its own (a letter with marks, a chain of joined emoji, a tag sequence), a name
+    /// does: 64 bytes. Only RGI emoji: no made-up chain or tag flag of any length.
+    #[test]
+    fn a_username_has_a_byte_bound_and_only_rgi_emoji() {
+        let zalgo = format!("a{}", "\u{301}".repeat(2000));
+        let chain = vec!["\u{1F44D}"; 1000].join("\u{200D}");
+        let tags = format!("\u{1F3F4}{}\u{E007F}", "\u{E0061}".repeat(2000));
+        for name in [&zalgo, &chain, &tags] {
+            assert!(
+                check_username_form(name).is_err() && Handle::username(name).check().is_err(),
+                "{} bytes",
+                name.len()
+            );
+            assert!(canonical(name).len() <= USERNAME_MAX_BYTES);
+        }
+        assert!(check_username_form(&"a".repeat(16)).is_ok());
+        assert!(check_username_form(&"🔥".repeat(16)).is_ok(), "16 emoji of 4 bytes: 64 bytes");
+        let toned = "👍🏿".repeat(16);
+        assert_eq!(toned.len(), 128);
+        assert!(check_username_form(&toned).is_err(), "16 characters, 128 bytes");
+        assert_eq!(canonical(&toned), "👍🏿".repeat(8), "cut at whole characters within 64 bytes");
+        // Made-up sequences that pass the form are no RGI emoji.
+        for bad in ["👍\u{200D}👍ab", "🔥\u{200D}🔥ab", "\u{1F3F4}\u{E0061}\u{E007F}ab", "🇦🇦ab", "\u{1F3FF}ab", "🏿ab"]
+        {
+            assert!(check_username_form(bad).is_err(), "{bad:?}");
+        }
+        // The RGI ones stay.
+        for good in
+            ["👨‍👩‍👧ab", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}ab", "🇩🇪ab", "🧑🏽‍💻ab", "❤️‍🔥ab", "🧙‍♂️Yo"]
+        {
+            assert!(check_username_form(good).is_ok(), "{good:?}");
+        }
+    }
+
+    /// U1: the joiner (U+200D) and tag characters render as nothing where a font has no such sequence: the skeleton
+    /// drops them, so look-alike names are one name (spec 3.3), whichever of them the form admits.
+    #[test]
+    fn invisible_joiners_and_tags_are_no_part_of_the_skeleton() {
+        for (a, b) in [
+            ("Leo\u{1F44D}\u{1F44D}", "Leo\u{1F44D}\u{200D}\u{1F44D}"),
+            ("Leo\u{1F3F4}", "Leo\u{1F3F4}\u{E0061}\u{E007F}"),
+            ("Leo\u{1F3F4}", "Leo🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"),
+            ("👨👩👧ab", "👨‍👩‍👧ab"),
+            ("Leo", "L\u{200D}eo"),
+        ] {
+            assert!(same_name(a, b), "{a:?} {b:?}");
+        }
+        assert_eq!(skeleton("🧙‍♂️Yo"), skeleton("🧙♂Yo"));
     }
 
     #[test]
