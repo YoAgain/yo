@@ -72,6 +72,7 @@ The relay between phones. It holds encrypted Yos until the recipient fetches the
 | | Yos/s | |
 |---|---:|---|
 | Hub alone | 10,431 | 1 CPU core · p50 2.1 ms · p99 130 ms |
+| Send, one client core | 50 | p50 290 ms · p99 708 ms |
 | Lost | 0 | |
 
 Routes: [hub README](hub/README.md). Durability: [SECURITY.md](hub/SECURITY.md#durability). Load runs: [tests](tests/README.md#load).

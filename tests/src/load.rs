@@ -1,18 +1,27 @@
 //! yo-load: how many Yos the hub moves.
 //!
-//!   yo-load [--clients 200] [--seconds 15] [--raw-seconds 15] [--threads 16] [--connections 64] [--out tests/results]
+//!   yo-load [--clients 200] [--seconds 15] [--raw-seconds 15] [--threads 16] [--connections 64] [--client-threads 16]
+//!           [--out tests/results]
 //!
 //! Phase 1, end to end: real clients (sessions, HTTP, the hub, fetch, decrypt) in a ring, each sending Yos to the next
 //! and receiving its own. Clients and hub share this machine, so this is the whole system on one box.
 //! Phase 2, the hub alone: well-formed envelopes delivered over many connections at once, as fast as it takes them.
+//! Phase 3, with `YO_CLIENT_CPU=n` only, one client core: `--client-threads` threads on CPU n alone send Yos over the
+//! ring's established sessions through the core's whole send path (encrypt, sealed sender, saving the client's
+//! encrypted state file, HTTP), nothing received; everything else (the hub too) runs on the other CPUs. Each client
+//! then saves to its own state file, and the ring's first Yos (prekey fetch, PQXDH) are sent from CPU n too.
 //! The hub runs in-process on a SQLite file (WAL), as in production. Results are printed and written as JSON.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+use yo_core::statedb::{DbStore, StateDb};
 use yo_core::{Client, Content, Event, Push, Response, Transport};
 use yo_hub::config::{Config, Limits};
-use yo_tests::{hub_key, random_u64, username, Http, TestHub};
+use yo_tests::{affinity, hub_key, random_u64, set_affinity, username, Http, TestHub};
+
+/// The state files' key: a measurement's own, thrown away with them.
+const STATE_KEY: [u8; 32] = [7; 32];
 
 struct Args {
     clients: usize,
@@ -20,6 +29,7 @@ struct Args {
     raw_seconds: Option<u64>,
     threads: usize,
     connections: usize,
+    client_threads: usize,
     out: String,
 }
 
@@ -30,6 +40,7 @@ fn args() -> Args {
         raw_seconds: None,
         threads: 16,
         connections: 64,
+        client_threads: 16,
         out: "tests/results".into(),
     };
     let mut it = std::env::args().skip(1);
@@ -41,6 +52,7 @@ fn args() -> Args {
             "--raw-seconds" => args.raw_seconds = Some(value.parse().expect("--raw-seconds")),
             "--threads" => args.threads = value.parse().expect("--threads"),
             "--connections" => args.connections = value.parse().expect("--connections"),
+            "--client-threads" => args.client_threads = value.parse().expect("--client-threads"),
             "--out" => args.out = value,
             other => panic!("unknown flag {other}"),
         }
@@ -165,6 +177,26 @@ fn main() {
         config.db_path = path;
     }
     config.limits = Limits::unlimited();
+    // YO_CLIENT_CPU=n: CPU n is kept for the one-core send phase; the hub and the rest of the load get the others.
+    let client_cpu = std::env::var("YO_CLIENT_CPU").ok().and_then(|cpu| cpu.parse::<usize>().ok());
+    let all_cpus = affinity();
+    let other_cpus: Vec<_> = all_cpus.iter().copied().filter(|cpu| Some(*cpu) != client_cpu).collect();
+    if let Some(cpu) = client_cpu {
+        assert!(all_cpus.contains(&cpu), "YO_CLIENT_CPU must be in the allowed CPU set");
+        assert!(!other_cpus.is_empty(), "YO_CLIENT_CPU needs another CPU for the hub");
+        assert!(std::env::var("YO_HUB_CPU").ok() != Some(cpu.to_string()), "YO_CLIENT_CPU and YO_HUB_CPU must differ");
+        set_affinity(&other_cpus); // the hub's threads inherit it
+    }
+    // The clients' state files, next to the hub's database (on the same disk).
+    let states = std::env::var("YO_LOAD_DB")
+        .ok()
+        .and_then(|db| std::path::Path::new(&db).parent().map(|parent| parent.to_path_buf()))
+        .filter(|parent| parent.is_dir())
+        .unwrap_or_else(|| dir.clone())
+        .join(format!("yo-load-clients-{}", random_u64()));
+    if client_cpu.is_some() {
+        std::fs::create_dir_all(&states).unwrap();
+    }
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let url = hub.url();
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -182,6 +214,7 @@ fn main() {
         .map(|t| {
             let url = url.clone();
             let errors = http_errors.clone();
+            let states = client_cpu.map(|_| states.clone());
             std::thread::spawn(move || {
                 (t * per_thread..((t + 1) * per_thread))
                     .map(|i| {
@@ -190,6 +223,11 @@ fn main() {
                         let user = username(base + i as u64);
                         let mut client = Client::register_username(transport, &user, None, None, Push::none()).unwrap();
                         client.set_hub_keys(vec![hub_key()]);
+                        if let Some(states) = &states {
+                            let path = states.join(format!("{i}.sqlite"));
+                            let db = Arc::new(StateDb::open_fresh(path, STATE_KEY, Arc::new(|_| {})).unwrap());
+                            client.persist_to(Arc::new(DbStore::new(db, None, None)), STATE_KEY).unwrap();
+                        }
                         (i, client)
                     })
                     .collect::<Vec<_>>()
@@ -209,8 +247,18 @@ fn main() {
     // ---- chats: a ring, each to the next ----
     let n = clients.len();
     let started = Instant::now();
+    // Each first Yo to a username: its lookup, prekey fetch and PQXDH, on the client CPU when there is one.
+    let mut first_latency = Latency::new();
+    if let Some(cpu) = client_cpu {
+        set_affinity(&[cpu]);
+    }
     for (i, client) in clients.iter_mut() {
+        let t = Instant::now();
         client.send_yo(&username(base + ((*i + 1) % n) as u64)).unwrap();
+        first_latency.record(t.elapsed());
+    }
+    if client_cpu.is_some() {
+        set_affinity(&other_cpus);
     }
     for (_, client) in clients.iter_mut() {
         let events = client.sync(0).unwrap();
@@ -399,12 +447,71 @@ fn main() {
     });
     println!("hub alone: {delivered} deliveries, {errors} errors, {:.0}/s", delivered as f64 / raw_s);
 
+    // ---- phase 3: one client core sending ----
+    let one_core = client_cpu.map(|cpu| {
+        http_errors.store(0, Ordering::Relaxed);
+        let stop = AtomicBool::new(false);
+        let per_thread = n.div_ceil(args.client_threads);
+        let started = Instant::now();
+        let mut latencies = Latency::new();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = peers
+                .chunks_mut(per_thread)
+                .map(|mine| {
+                    let stop = &stop;
+                    scope.spawn(move || {
+                        set_affinity(&[cpu]);
+                        let mut latencies = Latency::new();
+                        while !stop.load(Ordering::Relaxed) {
+                            for peer in mine.iter_mut() {
+                                let t = Instant::now();
+                                peer.client.send_yo(&peer.to).unwrap();
+                                latencies.record(t.elapsed());
+                            }
+                        }
+                        latencies
+                    })
+                })
+                .collect();
+            std::thread::sleep(Duration::from_secs(args.seconds));
+            stop.store(true, Ordering::Relaxed);
+            for worker in workers {
+                latencies.merge(worker.join().unwrap());
+            }
+        });
+        let seconds = started.elapsed().as_secs_f64();
+        let errors = http_errors.load(Ordering::Relaxed);
+        println!(
+            "one client core: {} Yos sent, {errors} HTTP errors, {:.0} Yos/s, send p50 {:.1} ms, p99 {:.1} ms",
+            latencies.count,
+            latencies.count as f64 / seconds,
+            latencies.percentile(0.50),
+            latencies.percentile(0.99),
+        );
+        println!(
+            "first Yo: p50 {:.1} ms, p99 {:.1} ms",
+            first_latency.percentile(0.50),
+            first_latency.percentile(0.99)
+        );
+        assert_eq!(errors, 0, "the one-core send phase had HTTP errors");
+        serde_json::json!({
+            "cpu": cpu,
+            "threads": n.div_ceil(per_thread),
+            "seconds": seconds,
+            "yos_sent": latencies.count,
+            "yos_per_s": latencies.count as f64 / seconds,
+            "send": latencies.json(),
+            "first_yo": first_latency.json(),
+        })
+    });
+
     let hub_cpu = std::env::var("YO_HUB_CPU").ok().and_then(|cpu| cpu.parse::<usize>().ok());
     let result = serde_json::json!({
         "date": std::env::var("YO_DATE").unwrap_or_default(),
         "commit": std::env::var("YO_COMMIT").unwrap_or_default(),
         "cores": cores,
         "hub_cpu": hub_cpu,
+        "client_cpu": client_cpu,
         "requested_seconds": args.seconds,
         "requested_raw_seconds": raw_seconds,
         "clients": n,
@@ -412,6 +519,7 @@ fn main() {
         "registration": { "seconds": registration_s, "per_s": n as f64 / registration_s },
         "end_to_end": e2e,
         "hub_alone": raw,
+        "one_client_core": one_core,
     });
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     std::fs::create_dir_all(&args.out).unwrap();
@@ -420,6 +528,7 @@ fn main() {
     println!("written to {name}");
     hub.stop();
     let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(&states);
     for peer in &peers {
         let receiver = &peers[(peer.index + 1) % n];
         assert_eq!(peer.sent, receiver.received, "mismatched Yo count on ring hop {}", peer.index);

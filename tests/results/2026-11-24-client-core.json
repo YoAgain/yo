@@ -1,0 +1,224 @@
+{
+  "date": "2026-11-24",
+  "revision": "yo-load YO_CLIENT_CPU working tree on f27e76f",
+  "build": "native release",
+  "database": "fresh SQLite file per run and one SQLCipher state file per client, SSD, Btrfs, under ~/.cache",
+  "hub_cpu": 0,
+  "client_cpu": 1,
+  "command": "YO_HUB_CPU=0 YO_CLIENT_CPU=1 nice -n 10 yo-load --clients 200 --seconds 15 --threads 16 --connections 64 --client-threads 16",
+  "summary": "One client core sending over established sessions, state saved per send: median of three runs. Bound by the state files' fsyncs, the core mostly in iowait; with the files in tmpfs the core reaches about 390 Yos/s.",
+  "median": {
+    "yos_per_s": 49.57007747581418,
+    "send_p50_ms": 289.7,
+    "send_p99_ms": 708.4,
+    "first_yo_p50_ms": 86.6,
+    "first_yo_p99_ms": 386.0,
+    "hub_yos_per_s": 10386.714468097369
+  },
+  "runs": [
+    {
+      "client_cpu": 1,
+      "clients": 200,
+      "commit": "f27e76f",
+      "cores": 22,
+      "date": "2026-11-24-client-core-1",
+      "end_to_end": {
+        "dropped": 0,
+        "http_errors": 0,
+        "seconds": 18.110847889,
+        "send": {
+          "max_ms": 731.257,
+          "p50_ms": 224.4,
+          "p90_ms": 395.4,
+          "p99_ms": 541.9
+        },
+        "waiting": 0,
+        "yo_to_yo": {
+          "max_ms": 9874.131,
+          "p50_ms": 464.9,
+          "p90_ms": 4602.5,
+          "p99_ms": 6884.7
+        },
+        "yos_per_s": 39.14780822772113,
+        "yos_received": 709,
+        "yos_sent": 709
+      },
+      "hub_alone": {
+        "connections": 64,
+        "delivered": 179186,
+        "errors": 0,
+        "latency": {
+          "max_ms": 1017.341,
+          "p50_ms": 2.3,
+          "p90_ms": 3.5,
+          "p99_ms": 34.0
+        },
+        "per_s": 11833.974511931725,
+        "seconds": 15.141658436
+      },
+      "hub_cpu": 0,
+      "one_client_core": {
+        "cpu": 1,
+        "first_yo": {
+          "max_ms": 193.894,
+          "p50_ms": 42.9,
+          "p90_ms": 62.1,
+          "p99_ms": 94.6
+        },
+        "seconds": 17.436768183,
+        "send": {
+          "max_ms": 717.828,
+          "p50_ms": 289.7,
+          "p90_ms": 473.6,
+          "p99_ms": 708.4
+        },
+        "threads": 16,
+        "yos_per_s": 47.60056400871404,
+        "yos_sent": 830
+      },
+      "registration": {
+        "per_s": 131.3140599555521,
+        "seconds": 1.523066152
+      },
+      "requested_raw_seconds": 15,
+      "requested_seconds": 15,
+      "threads": 16
+    },
+    {
+      "client_cpu": 1,
+      "clients": 200,
+      "commit": "f27e76f",
+      "cores": 22,
+      "date": "2026-11-24-client-core-2",
+      "end_to_end": {
+        "dropped": 0,
+        "http_errors": 0,
+        "seconds": 18.738298387,
+        "send": {
+          "max_ms": 854.52,
+          "p50_ms": 240.9,
+          "p90_ms": 438.9,
+          "p99_ms": 826.2
+        },
+        "waiting": 0,
+        "yo_to_yo": {
+          "max_ms": 10747.871,
+          "p50_ms": 486.3,
+          "p90_ms": 4317.3,
+          "p99_ms": 9874.8
+        },
+        "yos_per_s": 35.915747849703614,
+        "yos_received": 673,
+        "yos_sent": 673
+      },
+      "hub_alone": {
+        "connections": 64,
+        "delivered": 127986,
+        "errors": 0,
+        "latency": {
+          "max_ms": 1951.054,
+          "p50_ms": 2.2,
+          "p90_ms": 3.8,
+          "p99_ms": 40.0
+        },
+        "per_s": 8055.602567288702,
+        "seconds": 15.887824521
+      },
+      "hub_cpu": 0,
+      "one_client_core": {
+        "cpu": 1,
+        "first_yo": {
+          "max_ms": 504.132,
+          "p50_ms": 86.6,
+          "p90_ms": 147.3,
+          "p99_ms": 386.0
+        },
+        "seconds": 17.577282622,
+        "send": {
+          "max_ms": 835.983,
+          "p50_ms": 253.7,
+          "p90_ms": 441.0,
+          "p99_ms": 779.5
+        },
+        "threads": 16,
+        "yos_per_s": 51.20245372134747,
+        "yos_sent": 900
+      },
+      "registration": {
+        "per_s": 47.23770979098007,
+        "seconds": 4.233905515
+      },
+      "requested_raw_seconds": 15,
+      "requested_seconds": 15,
+      "threads": 16
+    },
+    {
+      "client_cpu": 1,
+      "clients": 200,
+      "commit": "f27e76f",
+      "cores": 22,
+      "date": "2026-11-24-client-core-3",
+      "end_to_end": {
+        "dropped": 0,
+        "http_errors": 0,
+        "seconds": 18.461258959,
+        "send": {
+          "max_ms": 701.771,
+          "p50_ms": 276.9,
+          "p90_ms": 476.5,
+          "p99_ms": 632.8
+        },
+        "waiting": 0,
+        "yo_to_yo": {
+          "max_ms": 9651.478,
+          "p50_ms": 700.4,
+          "p90_ms": 6885.8,
+          "p99_ms": 9107.4
+        },
+        "yos_per_s": 32.500492048376564,
+        "yos_received": 600,
+        "yos_sent": 600
+      },
+      "hub_alone": {
+        "connections": 64,
+        "delivered": 161267,
+        "errors": 0,
+        "latency": {
+          "max_ms": 1191.739,
+          "p50_ms": 2.2,
+          "p90_ms": 3.5,
+          "p99_ms": 36.1
+        },
+        "per_s": 10386.714468097369,
+        "seconds": 15.526276426999999
+      },
+      "hub_cpu": 0,
+      "one_client_core": {
+        "cpu": 1,
+        "first_yo": {
+          "max_ms": 585.321,
+          "p50_ms": 86.9,
+          "p90_ms": 178.8,
+          "p99_ms": 558.1
+        },
+        "seconds": 16.743972216,
+        "send": {
+          "max_ms": 666.445,
+          "p50_ms": 303.4,
+          "p90_ms": 493.6,
+          "p99_ms": 624.5
+        },
+        "threads": 16,
+        "yos_per_s": 49.57007747581418,
+        "yos_sent": 830
+      },
+      "registration": {
+        "per_s": 67.98953838989716,
+        "seconds": 2.941629032
+      },
+      "requested_raw_seconds": 15,
+      "requested_seconds": 15,
+      "threads": 16
+    }
+  ]
+}

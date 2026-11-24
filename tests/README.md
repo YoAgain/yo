@@ -78,6 +78,14 @@ throughput on one core. The harness captures the allowed CPU set before pinning,
 other CPUs; previously it queried after pinning and silently left the load on the hub's CPU. Use fresh database
 paths for comparable runs. The command above builds natively and keeps the database on the SSD, outside tmpfs.
 
+`YO_CLIENT_CPU=n` (e.g. `YO_CLIENT_CPU=1` next to `YO_HUB_CPU=0`) adds phase 3, one client core: the hub and all
+other load stay off CPU n, then `--client-threads` (16) threads pinned to CPU n send Yos over the ring's established
+sessions through the core's whole `send_yo` (sealed-sender encrypt, saving the client's encrypted state file, HTTP
+POST), receiving nothing. Each client then keeps a state file next to `YO_LOAD_DB`, and the ring's first Yos
+(lookup, prekey fetch, PQXDH) are sent from CPU n too and reported as `first_yo`. On the SSD/Btrfs this phase is bound
+by the state file's fsyncs, not the CPU (CPU n is mostly in iowait); with `YO_LOAD_DB` in tmpfs the same core reaches
+about 390 Yos/s, CPU-bound. [Runs](results/2026-11-24-client-core.json).
+
 Phase 1 is the whole system on one machine (clients with sessions, the hub, fetch, decrypt); phase 2 the hub alone
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
 keeping, so a regression shows against them.

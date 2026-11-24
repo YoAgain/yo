@@ -9,16 +9,16 @@ use yo_hub::{push, Hub};
 
 /// Pins the calling thread to these CPUs (Linux; elsewhere it stays as it is).
 #[cfg(not(target_os = "linux"))]
-fn set_affinity(_cpus: &[usize]) {}
+pub fn set_affinity(_cpus: &[usize]) {}
 
 #[cfg(not(target_os = "linux"))]
-fn affinity() -> Vec<usize> {
+pub fn affinity() -> Vec<usize> {
     (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect()
 }
 
 /// Read before pinning: available_parallelism after pinning sees only the hub's CPU.
 #[cfg(target_os = "linux")]
-fn affinity() -> Vec<usize> {
+pub fn affinity() -> Vec<usize> {
     // SAFETY: sched_getaffinity initializes the set; CPU_ISSET reads indices within CPU_SETSIZE.
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
@@ -29,7 +29,7 @@ fn affinity() -> Vec<usize> {
 
 /// Pins the calling thread to these CPUs (Linux).
 #[cfg(target_os = "linux")]
-fn set_affinity(cpus: &[usize]) {
+pub fn set_affinity(cpus: &[usize]) {
     // SAFETY: a zeroed cpu_set_t is a valid empty set; CPU_SET writes inside it; sched_setaffinity reads it.
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
