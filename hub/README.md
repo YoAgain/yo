@@ -31,7 +31,7 @@ registration on, written when they change) and answers `426` to every request of
 | Method | Path | Purpose | Auth | Limits (key) | Hub learns |
 |---|---|---|---|---|---|
 | POST | `/v1/inbox/{user id}` | deliver an envelope to every device of a user, `Yo-Devices` checked; `409` with the current account key and device keys | **none** (sealed sender); signed for a request or an identified envelope (spec 4.10, 6.1) | 1000/min and 64 MiB/h (IP); sealed: 50 MiB at once +50 MiB/h of envelope bytes per recipient (`429 recipient`); 5000 waiting per device; `507` disk floor | the recipient, the bucket size, the address |
-| PUT | `/v1/blobs/{id}?fetches=n` | store a photo or video, encrypted, for `n` (1–32) fetches (spec 6.8) | signed, by the body's hash (`Yo-Body-SHA256`) | 120/min (IP); 4 at once (user), 256 at once (all); 2000 and 2 GiB/day, 1 GiB waiting (user); 10 MiB; 300 s; budget and disk floor (`507`) | uploader, size, fetch count |
+| PUT | `/v1/blobs/{id}?fetches=n` | store a photo or video, encrypted, for `n` (1–320) fetches (spec 6.8) | signed, by the body's hash (`Yo-Body-SHA256`) | 120/min (IP); 4 at once (user), 256 at once (all); 2000 and 2 GiB/day, 1 GiB waiting (user); 10 MiB; 300 s; budget and disk floor (`507`) | uploader, size, fetch count |
 | GET | `/v1/blobs/{id}` | the blob, streamed; GET never consumes a fetch | **none**, the 128-bit id | 600/min (IP); 3 × original fetch count per blob | which blob, from where |
 | DELETE | `/v1/blobs/{id}` | acknowledge durable storage; consumes one fetch, the last deletes it; unknown/expired also `204` | **none**, the 128-bit id | 600/min (IP), shared with GET | which blob, from where |
 
@@ -109,6 +109,7 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   (signed requests, lookups, storage, credentials, request buckets, the blob quota); the disk floor still holds.
   What they send is counted apart, out of `yo-in`, `media-in` and the live strip: `bot-media` and `bot-media:LABEL`
   per upload, and `bot-yo` per Yo from the server's own services (sealed, so by address: not per bot).
+- Test hubs can set `YO_ADD_DEVICES=1` to add devices at registration. At 16 it refuses the next one (`409 device_limit`) and retires none by itself. By default registration replaces the previous device.
 - **Push pacing and flood limits** (spec 6.6, 6.7). Pushes are paced per device: one per window at most (contacts 1 s, requests
   10 s; `YO_PUSH_WINDOW_CONTACT_MS`, `YO_PUSH_WINDOW_REQUEST_MS`), what comes meanwhile in one push at its end, a
   quiet device's at once; past 50 envelopes waiting (`YO_PUSH_BACKLOG`) a device gets one push per 10 minutes (`YO_PUSH_BACKLOG_INTERVAL_S`, 600) until its backlog is down again (counted as `push-folded` and `push-paced`, shown in the admin's Push pacing card). Sealed deliveries' envelope bytes into one recipient are a bucket as Signal's inbound

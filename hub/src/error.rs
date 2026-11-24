@@ -46,6 +46,7 @@ impl From<crate::db::Conflict> for Refusal {
         refuse(match conflict {
             Conflict::DeviceGone => StatusCode::GONE,
             Conflict::SupportFull => StatusCode::TOO_MANY_REQUESTS,
+            Conflict::DeviceLimit => return Refusal(StatusCode::CONFLICT, b"device_limit".to_vec()),
             _ => StatusCode::CONFLICT,
         })
     }

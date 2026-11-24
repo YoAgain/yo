@@ -214,7 +214,9 @@ pub fn now_ms() -> u64 {
 
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
-        let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
+        let mut db = Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?;
+        db.add_devices = config.add_devices;
+        let db = Arc::new(db);
         if !config.reserved.is_empty() {
             db.add_reserved(&config.reserved, now_ms()).map_err(|e| format!("database: {e}"))?;
         }

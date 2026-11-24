@@ -95,6 +95,7 @@ fn config() -> Result<(Config, String), String> {
     }
     let defaults = Limits::default();
     let config = Config {
+        add_devices: var("YO_ADD_DEVICES").as_deref() == Some("1"),
         admin_token: var("YO_ADMIN_TOKEN"),
         db_path,
         reserved: Vec::new(), // the names live in the database, added through the admin page

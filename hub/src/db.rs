@@ -39,6 +39,7 @@ pub type Install = [u8; 16];
 pub type Sealed = (u64, Vec<u8>);
 
 pub struct Db {
+    pub(crate) add_devices: bool,
     conn: Mutex<Connection>,
 }
 
@@ -144,6 +145,8 @@ pub enum Conflict {
     LocatorTaken,
     /// The device was replaced, or its account removed.
     DeviceGone,
+    /// A hub that adds devices: the account has 16 already (`409 device_limit`); one goes only by the owner's choice.
+    DeviceLimit,
 }
 
 pub enum Write<T> {
@@ -511,7 +514,7 @@ impl Db {
             "UPDATE diagnostics SET done = 1 WHERE done = 0 AND json_extract(payload, '$.severity') = 'expected'",
             [],
         )?;
-        Ok(Db { conn: Mutex::new(conn) })
+        Ok(Db { conn: Mutex::new(conn), add_devices: false })
     }
 
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -696,8 +699,16 @@ impl Db {
                     *fresh
                 }
             };
-            retire_devices(tx, &user, now)?;
-            // The lowest number free among the user's devices (all of them replaced: 1).
+            if !self.add_devices {
+                retire_devices(tx, &user, now)?;
+            } else {
+                let count: usize =
+                    tx.query_row("SELECT count(*) FROM devices WHERE user_id = ?1", [&user], |r| r.get(0))?;
+                // Never one removed by itself: the new device asks which one may go (multi-device phase 2).
+                if count >= yo_wire::limits::MAX_DEVICES {
+                    return Ok(Write::Refused(Conflict::DeviceLimit));
+                }
+            }
             let taken: Vec<u8> = tx
                 .prepare_cached("SELECT number FROM devices WHERE user_id = ?1")?
                 .query_map([&user], |row| row.get(0))?
@@ -2655,6 +2666,36 @@ mod tests {
             Write::Done((user, _, _)) => user,
             Write::Refused(conflict) => panic!("{conflict:?}"),
         }
+    }
+
+    #[test]
+    fn add_devices_adds_up_to_sixteen_and_never_retires_one_by_itself() {
+        let mut db = Db::open(":memory:").unwrap();
+        db.add_devices = true;
+        let add = |n, now| db.register(b"test", "Test", &[1; 16], &[2; 32], &device(n), &prekeys(0), 100, now).unwrap();
+        for n in 1..=16 {
+            assert!(matches!(add(n, 0), Write::Done((_, _, slot)) if slot == n));
+        }
+        let keys = (1..=16).map(|n| device(n).device_key).collect::<Vec<_>>();
+        let devices_hash = yo_wire::devices::hash(&[2; 32], &keys);
+        db.deliver(&[Incoming { user: [1; 16], devices_hash, envelope: b"queued" }], 0, 100).unwrap();
+        // The 17th: refused, nothing retired, every device keeps its mail.
+        assert!(matches!(add(17, 7_200_000), Write::Refused(Conflict::DeviceLimit)));
+        assert!(matches!(add(2, 7_200_001), Write::Refused(Conflict::DeviceTaken)));
+        let found = db.lookup(KIND_USER, &[1; 16], true, &[]).unwrap().unwrap();
+        assert_eq!(found.devices.len(), 16);
+        assert_eq!(found.bundles.len(), 16);
+        for n in 1..=16 {
+            assert!(!db.is_gone(&device(n).device_id).unwrap());
+            assert_eq!(db.fetch(&device(n).device_id, 10).unwrap().len(), 1);
+        }
+        assert!(db.device(&device(17).device_id).unwrap().is_none());
+
+        db.add_devices = false;
+        let replaced =
+            db.register(b"test", "Test", &[1; 16], &[2; 32], &device(18), &prekeys(0), 100, 8_000_000).unwrap();
+        assert!(matches!(replaced, Write::Done((_, _, 1))));
+        assert_eq!(db.lookup(KIND_USER, &[1; 16], false, &[]).unwrap().unwrap().devices.len(), 1);
     }
 
     /// A registration has no time or nonce (spec 6.4): an old one played back (a TLS proxy's log, years later) must

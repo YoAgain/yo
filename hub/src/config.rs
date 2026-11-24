@@ -238,6 +238,8 @@ pub const NAME_MIN: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Test hub registration adds devices up to the roster limit.
+    pub add_devices: bool,
     /// Shared admin credential; absent disables the admin route.
     pub admin_token: Option<String>,
     /// The SQLite file; ":memory:" for tests.
@@ -393,6 +395,7 @@ impl Config {
     /// A hub for tests: in memory, no rate limits, no push services.
     pub fn for_tests() -> Self {
         Config {
+            add_devices: false,
             db_path: ":memory:".into(),
             reserved: Vec::new(),
             admin_token: None,
