@@ -45,6 +45,12 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         ["whois", name] => whois(context, name).map(|(user, username)| json!({ "user": user, "username": username })),
         ["add", name] => add(context, name),
         ["send", to, rest @ ..] => send(context, to, rest),
+        ["requests"] => Ok(json!({ "requests_open": context.client().requests_open() })),
+        ["requests", switch @ ("on" | "off")] => {
+            let open = *switch == "on";
+            context.client().set_requests_open(open)?;
+            Ok(json!({ "requests_open": open }))
+        }
         ["groups"] | ["groups", "list"] => Ok(groups(&context.client())),
         ["groups", "create", name, members @ ..] if !members.is_empty() => {
             let members = users(context, members)?;
