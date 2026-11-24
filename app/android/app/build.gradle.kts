@@ -101,6 +101,10 @@ val buildCore = tasks.register<Exec>("buildCore") {
     commandLine("bash", "dev/core.sh")
     inputs.files(fileTree(rootProject.file("../../core")), rootProject.file("../../Cargo.lock"), rootProject.file("../../Cargo.toml"), rootProject.file("dev/core.sh"), rootProject.file("dev/uniffi.toml"), rootProject.file("dev/fix-bindings.py"))
     outputs.dirs(file("build/generated/yo"), file("build/rustJniLibs"))
+    // CI builds (or restores) the core once in a step before Gradle and passes -PyoCorePrebuilt; plain Gradle, as
+    // F-Droid runs it, builds the core here.
+    val prebuilt = providers.gradleProperty("yoCorePrebuilt").isPresent
+    onlyIf("the core is not prebuilt (-PyoCorePrebuilt)") { !prebuilt }
 }
 tasks.named("preBuild") { dependsOn(buildCore) }
 dependencies {

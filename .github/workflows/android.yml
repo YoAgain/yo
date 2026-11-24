@@ -33,6 +33,50 @@ jobs:
           unset JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT
           export PATH="$HOME/.cargo/bin:$PATH"
           nice -n 10 app/android/dev/bootstrap.sh
+      # The Rust core (libyo.so for arm64-v8a and x86_64, the host libyo.so for the unit tests, the UniFFI Kotlin) is
+      # built once per run, before Gradle, and only when it changed: its outputs are kept under a hash of everything
+      # they are made from, the cargo registry and target dir in case they have to be rebuilt. Gradle then skips
+      # buildCore (-PyoCorePrebuilt); without that property, as F-Droid builds, Gradle builds the core itself.
+      - id: core
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            app/android/app/build/rustJniLibs
+            app/android/app/build/generated/yo
+            target/android/debug/libyo.so
+          key: core-android-${{ hashFiles('core/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/android/dev/core.sh', 'app/android/dev/uniffi.toml', 'app/android/dev/fix-bindings.py') }}
+      - id: cargo
+        if: steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/android
+          key: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('core/**') }}
+          restore-keys: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Rust core
+        if: steps.core.outputs.cache-hit != 'true'
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          export JAVA_HOME="$HOME/Android/jdk" ANDROID_HOME="$HOME/Android/sdk" ANDROID_SDK_ROOT="$HOME/Android/sdk"
+          nice -n 10 app/android/dev/core.sh
+      - if: steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            app/android/app/build/rustJniLibs
+            app/android/app/build/generated/yo
+            target/android/debug/libyo.so
+          key: ${{ steps.core.outputs.cache-primary-key }}
+      - if: steps.core.outputs.cache-hit != 'true' && steps.cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/android
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
       # Two flavors (app/android/README.md): play, the Google Play build, and floss, the F-Droid build (unsigned here:
       # F-Droid signs its own build; a release signs a copy with Yo's own floss key for direct installs). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep build.gradle.kts's.
       - name: Build, unit tests and lint
@@ -51,7 +95,7 @@ jobs:
           export YO_BUILD=$(date -u +%Y%m%d%H%M)  # the Yo-App build: the UTC minute, as iOS and the CLI
           cd app/android
           nice -n 10 ./gradlew --max-workers=4 assemblePlayDebug assemblePlayRelease assembleFlossDebug assembleFlossRelease \
-            testPlayDebugUnitTest testFlossDebugUnitTest lint "${version[@]}" \
+            testPlayDebugUnitTest testFlossDebugUnitTest lint -PyoCorePrebuilt "${version[@]}" \
             "-PyoVersionCode=$(( $(date +%s) / 60 ))"  # rising, as play.yml: a directly installed floss APK updates
       # F-Droid takes no Google or other proprietary library: the floss runtime classpath must have none.
       - name: floss has no Google dependency
