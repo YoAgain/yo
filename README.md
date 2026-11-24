@@ -72,7 +72,7 @@ The relay between phones. It holds encrypted Yos until the recipient fetches the
 | | Yos/s | |
 |---|---:|---|
 | Hub alone | 10,431 | 1 CPU core · p50 2.1 ms · p99 130 ms |
-| Yo to Yo | — | real phone, Wi-Fi, round trip to a bot and back · p50 102 ms · p90 113 ms |
+| Yo to Yo | — | real phone, Wi-Fi, round trip to a bot and back · p50 71 ms · p90 89 ms |
 | Send, one client core | 50 | p50 290 ms · p99 708 ms |
 | Lost | 0 | |
 
