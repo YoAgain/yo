@@ -1535,12 +1535,12 @@ impl Db {
 
     // ---- upkeep and audit ----
 
-    /// Deletes envelopes older than the TTL, and forgets replaced devices after a year.
+    /// Deletes envelopes older than the TTL. Replaced devices stay in `gone` for good (about 40 bytes each): a
+    /// registration carries no time, so its body played back after any while must still find its device id taken.
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
         let messages = conn.execute("DELETE FROM messages WHERE received_at < ?1", [before])?;
-        conn.execute("DELETE FROM gone WHERE gone_at < ?1", [now.saturating_sub(365 * 24 * 3600 * 1000) as i64])?;
         // Crash and error groups not seen for 90 days go, with their uuids and installs (spec 6.4).
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
         conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
@@ -2442,6 +2442,32 @@ mod tests {
         match written {
             Write::Done((user, _, _)) => user,
             Write::Refused(conflict) => panic!("{conflict:?}"),
+        }
+    }
+
+    /// A registration has no time or nonce (spec 6.4): an old one played back (a TLS proxy's log, years later) must
+    /// never register its long-replaced device again and so retire the current one. `gone` is kept for good.
+    #[test]
+    fn an_old_registration_played_back_years_later_is_still_refused() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        assert_eq!(user(register(&db, b"LEO", 1, 3, 10)), leo, "a new phone: device 1 replaced");
+        assert!(matches!(register(&db, b"LEO", 1, 1, 20), Write::Refused(Conflict::DeviceTaken)));
+        let years = 5 * 365 * DAY_MS;
+        for now in [365 * DAY_MS + DAY_MS + 10, years] {
+            db.prune(now, 30 * DAY_MS).unwrap();
+            assert!(matches!(register(&db, b"LEO", 1, 1, now + 1), Write::Refused(Conflict::DeviceTaken)));
+            assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, leo, "the current device stays");
+            assert!(db.is_gone(&[1; 16]).unwrap(), "the old one still answers 410");
+        }
+        // A deleted account's devices too: its old registration cannot come back as a new account.
+        assert!(db.delete_account(&[3; 16], years).is_ok());
+        db.prune(years + 2 * 365 * DAY_MS, 30 * DAY_MS).unwrap();
+        for n in [1, 3] {
+            assert!(matches!(
+                register(&db, b"LEO", 1, n, years + 2 * 365 * DAY_MS),
+                Write::Refused(Conflict::DeviceTaken)
+            ));
         }
     }
 

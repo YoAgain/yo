@@ -29,6 +29,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Use the admin token from the internet | Behind Cloudflare the admin routes answer loopback without `CF-Connecting-IP` only (the admin page); else `404` | a process on the server |
 | Spoof `CF-Connecting-IP` | Only with `YO_TRUST_CLOUDFLARE`; warning when not listening on loopback | operator: check the published port |
 | Lose recent commits to an OS crash or power cut | SQLite WAL `synchronous = NORMAL`; process crashes preserve commits | Recent acknowledged deliveries and other state changes can roll back; see durability below |
+| Log out a device with an old registration (a proxy's log) | The proof has no time, so replaced device ids are kept for good (`gone`): the old body is `409` however late | – |
 | Act as a replaced device | Every write checks the device in its own transaction (`410`) | – |
 | Replay a signed request | 5-minute window, cache keyed by signature; a signature has one encoding (its scalar reduced, `yo_wire::xeddsa_verify`) | the cache is in memory: a restart within 5 min |
 | Probe without an account | username taken (by design), device replaced (`410` vs `401`) | device ids are random and unpublished |
@@ -41,7 +42,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 - Every signed route acts on the signer's own user, device or inbox; a blob needs its 128-bit id.
 - SQL: bound parameters only. Bodies: 65 KiB, blobs `Content-Length` ≤ 10 MiB, counted as they come.
 - Refusals carry a status and no text; logs carry no user text and no push token.
-- Growing tables: `feedback` (10/user/day), `gone` (a year), `diagnostics` (8 MiB/IP/hour, `507` below the disk floor, 90 days),
+- Growing tables: `feedback` (10/user/day), `gone` (for good, about 40 bytes per replaced device: an old registration played back stays refused), `diagnostics` (8 MiB/IP/hour, `507` below the disk floor, 90 days),
   `zk_groups_gone` (an ended group's id, 40 bytes, kept for good; bound by the groups made a day).
 - In-memory buckets: a delivery to a user that does not exist is `404` before any is made for it; a request's
   tokens are taken before it is stored and given back if it is not (requests sent at once share them).

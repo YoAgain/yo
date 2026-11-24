@@ -116,7 +116,7 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   sender and hour (`request_hours`, 25 hours) for the admin's "Requests 24h"; sealed deliveries never by sender.
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries
   are refused (`507`) while the database's disk has less than 1 GiB free.
-- **Cleanup**, hourly: envelopes after 30 days, blobs after their last acknowledgement or 30 days, replaced devices' `410` memory after a year, crash and error groups 90 days after last seen. Rate-limit buckets idle for a day and
+- **Cleanup**, hourly: envelopes after 30 days, blobs after their last acknowledgement or 30 days, crash and error groups 90 days after last seen (replaced device ids stay for good). Rate-limit buckets idle for a day and
   expired replay-cache entries are dropped from memory.
 - **Schema.** A database of schema 1 (the hubs of MLS chats) is brought to schema 2 at start: accounts stay, the
   MLS tables and the envelopes waiting go (spec 6.4).

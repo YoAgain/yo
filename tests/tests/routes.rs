@@ -928,19 +928,20 @@ fn one_time_prekeys_go_once_also_to_lookups_at_once() {
     assert_eq!(distinct.len(), ids.len(), "none twice");
 }
 
-/// Spec 6.3: a replaced device is answered `410` for a year, then `401`, as a device the hub never knew.
+/// Spec 6.3, 6.4: a replaced device is answered `410` for good, never `401` as a device the hub never knew.
 #[test]
-fn a_replaced_device_is_gone_for_a_year() {
+fn a_replaced_device_is_gone_for_good() {
     const DAY: u64 = 24 * 3600 * 1000;
     let hub = TestHub::start();
     let (mut old, _, name) = account(&hub);
     let mut phone = new_phone(Http::new(hub.url()), &name, &old);
     phone.put_backup(&backup_record(Vec::new())).unwrap();
     let now = yo_hub::now_ms();
-    hub.hub.prune(now + 364 * DAY).unwrap();
-    assert_eq!(signed(&mut old, "GET", &api::inbox_path(0), &[]).0, status::GONE);
-    hub.hub.prune(now + 366 * DAY).unwrap();
-    assert_eq!(signed(&mut old, "GET", &api::inbox_path(0), &[]).0, status::UNAUTHORIZED);
+    // A year, and years later: still `410` (its id kept, so an old registration played back stays refused, R1).
+    for days in [364, 366, 5 * 365] {
+        hub.hub.prune(now + days * DAY).unwrap();
+        assert_eq!(signed(&mut old, "GET", &api::inbox_path(0), &[]).0, status::GONE, "{days} days");
+    }
     assert_eq!(signed(&mut phone, "GET", &api::inbox_path(0), &[]).0, status::OK, "secured: kept");
 }
 
