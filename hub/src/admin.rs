@@ -173,7 +173,7 @@ async fn post_todo(
 
 // ---- the live strip ----
 
-/// Server-Sent Events, one per Yo the moment it is counted: `{"k":"yo"}` or `{"k":"media"}`, bots left out, nothing of
+/// Server-Sent Events, one per Yo the moment it is counted: `{"k":"yo"}`, `{"k":"media"}` or `{"k":"bot"}` (a bot's Yo or photo, to or from it), nothing of
 /// who; a comment every 15 s keeps the connection open. Ends when the hub shuts down.
 async fn get_live(State(hub): Hubs) -> Sse<impl Stream<Item = Result<sse::Event, Infallible>>> {
     use tokio::sync::broadcast::error::RecvError;
@@ -186,7 +186,11 @@ async fn get_live(State(hub): Hubs) -> Sse<impl Stream<Item = Result<sse::Event,
             tokio::select! {
                 got = yos.recv() => match got {
                     Ok(event) => {
-                        let k = if matches!(event, Event::MediaIn) { "media" } else { "yo" };
+                        let k = match event {
+                            Event::MediaIn => "media",
+                            Event::YoInBot | Event::BotYo | Event::BotMedia => "bot",
+                            _ => "yo",
+                        };
                         let event = sse::Event::default().data(format!(r#"{{"k":"{k}"}}"#));
                         return Some((Ok(event), (yos, closing)));
                     }

@@ -202,18 +202,25 @@ def week_series(db, hour, has_app):
             if has_table(db, "support_messages") else None}
 
 
-LIVE_KINDS = ("yo-in", "media-in")  # people's Yos and media; a bot's inbox (yo-in-bot) left out
+LIVE_KINDS = ("yo-in", "media-in")  # people's Yos and media
+LIVE_BOT_KINDS = ("yo-in-bot", "bot-yo", "bot-media")  # a bot's: into its inbox, or sent by it (blue on the page)
 LIVE_MINUTES = 60
 
 
 def live(db, now: int) -> dict:
-    """The header's live strip: Yos (yo-in and media-in, bots left out) per minute for the last 60, the running
-    minute last, and its UTC minute ("minute"), so the page can tell new Yos from ones it already showed. Counts only."""
+    """The header's live strip: all Yos (people's yo-in and media-in, and bots' in "bots") per minute for the last 60,
+    the running minute last, and its UTC minute ("minute"), so the page can tell new Yos from ones it already showed.
+    Counts only."""
     minute = now // 60000
-    rows = dict(db.execute(f"SELECT minute, sum(n) FROM events WHERE kind IN ({','.join('?' * len(LIVE_KINDS))})"
-                           " AND minute > ? AND minute <= ? GROUP BY 1",
-                           (*LIVE_KINDS, minute - LIVE_MINUTES, minute)).fetchall())
-    return {"minute": minute, "minutes": [rows.get(m, 0) for m in range(minute - LIVE_MINUTES + 1, minute + 1)]}
+
+    def per_minute(kinds):
+        rows = dict(db.execute(f"SELECT minute, sum(n) FROM events WHERE kind IN ({','.join('?' * len(kinds))})"
+                               " AND minute > ? AND minute <= ? GROUP BY 1",
+                               (*kinds, minute - LIVE_MINUTES, minute)).fetchall())
+        return [rows.get(m, 0) for m in range(minute - LIVE_MINUTES + 1, minute + 1)]
+
+    people, bots = per_minute(LIVE_KINDS), per_minute(LIVE_BOT_KINDS)
+    return {"minute": minute, "minutes": [p + b for p, b in zip(people, bots)], "bots": bots}
 
 
 def retention(db, now: int) -> dict:

@@ -1790,7 +1790,7 @@ if (document.body.classList.contains("login")) {
     liveTimers.push(t);
   };
   // One dot from the logo's right edge into the last bar (rects read once, then transform and opacity only).
-  const liveFly = () => {
+  const liveFly = (bot) => {
     const lane = $("live-lane"), bar = $("live-spark").lastElementChild, logo = $("hub-word");
     if (!bar || document.visibilityState !== "visible") return;
     const o = lane.getBoundingClientRect(), l = logo.getBoundingClientRect(), b = bar.getBoundingClientRect();
@@ -1807,7 +1807,7 @@ if (document.body.classList.contains("login")) {
     frames[frames.length - 1].easing = "cubic-bezier(.5, 0, .9, .6)";
     frames.push({ offset: 0.96, transform: `translate(${ex.toFixed(1)}px, ${(ey - 1).toFixed(1)}px) scale(.8, 1.15)`, opacity: 1, easing: "ease-out" });
     frames.push({ offset: 1, transform: `translate(${ex.toFixed(1)}px, ${(ey + 1).toFixed(1)}px) scale(.4)`, opacity: 0 });
-    const s = el("i", "yo-spark");
+    const s = el("i", bot ? "yo-spark bot" : "yo-spark");
     lane.append(s);
     s.animate(frames, { duration: LIVE_FLY * (0.92 + Math.random() * 0.16), easing: "cubic-bezier(.3, .1, .6, 1)", fill: "forwards" })
       .finished.then(() => s.remove(), () => s.remove());
@@ -1818,9 +1818,9 @@ if (document.body.classList.contains("login")) {
     const bar = $("live-spark").lastElementChild;
     if (bar && !calm.matches) bar.animate([{ transform: "scaleY(1)" }, { transform: "scaleY(1.22)" }, { transform: "scaleY(1)" }], { duration: 260, easing: "ease-out" });
   };
-  const liveSpark = () => {
+  const liveSpark = (bot) => {
     if (calm.matches || document.visibilityState !== "visible") return;
-    liveFly();
+    liveFly(bot);
     liveBump();
   };
   const paintLive = () => {
@@ -1837,7 +1837,8 @@ if (document.body.classList.contains("login")) {
         const avg = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
         return { head: "Yos per minute", nodes: [plotWithAxis(sparkBars(minutes, ""), "Last hour", "now")],
           rows: [{ label: "This minute", value: num(minutes.at(-1)) }, { label: "Per minute (5 min average)", value: avg.toFixed(1) },
-            { label: "Last hour", value: num(minutes.reduce((a, b) => a + b, 0)) }], note: ["Bots left out", box.dataset.state].filter(Boolean).join(" · ") };
+            { label: "Last hour", value: num(minutes.reduce((a, b) => a + b, 0)) },
+            { label: "Of them bots' (blue)", value: num((liveData.bots || []).reduce((a, b) => a + b, 0)) }], note: box.dataset.state || "" };
       });
     }
     box.setAttribute("aria-label", `${num(rate)} Yos this minute, ${num(hour)} in the last hour`);
@@ -1856,7 +1857,13 @@ if (document.body.classList.contains("login")) {
       const streamed = liveData?.minutes[liveData.minutes.length - 1 + k - liveData.minute] ?? 0;
       return Math.max(snapshot, streamed);
     });
-    liveData = { hub: which, minute, minutes };
+    const bots = d.minutes.map((_, i) => {
+      const k = minute - d.minutes.length + 1 + i;
+      const snapshot = d.bots?.[d.minutes.length - 1 + k - d.minute] ?? 0;
+      const streamed = liveData?.bots?.[liveData.minutes.length - 1 + k - liveData.minute] ?? 0;
+      return Math.max(snapshot, streamed);
+    });
+    liveData = { hub: which, minute, minutes, bots };
     paintLive();
     const m = d.minutes, n = m.length;
     // New Yos by the minutes: what this refresh counts above the last one (the running minute only on the first look).
@@ -1908,21 +1915,27 @@ if (document.body.classList.contains("login")) {
       liveState();
     };
     source.addEventListener("ping", () => { if (mine()) liveHeard = Date.now(); });
-    source.onmessage = () => {
+    source.onmessage = (e) => {
       if (!mine()) return;
+      let bot = false;
+      try { bot = JSON.parse(e.data).k === "bot"; } catch { /* an old hub's event: a person's Yo */ }
       liveHeard = Date.now();
       liveOpen = true;
       const minute = Math.floor(Date.now() / 60000);
-      if (liveData?.hub !== hub) liveData = { hub, minute, minutes: Array(60).fill(0) };
+      if (liveData?.hub !== hub) liveData = { hub, minute, minutes: Array(60).fill(0), bots: Array(60).fill(0) };
+      liveData.bots ||= Array(liveData.minutes.length).fill(0);
       const elapsed = Math.min(liveData.minutes.length, minute - liveData.minute);
       if (elapsed > 0) {
         liveData.minutes.splice(0, elapsed);
         liveData.minutes.push(...Array(elapsed).fill(0));
+        liveData.bots.splice(0, elapsed);
+        liveData.bots.push(...Array(elapsed).fill(0));
         liveData.minute = minute;
       }
       liveData.minutes[liveData.minutes.length - 1]++;
+      if (bot) liveData.bots[liveData.bots.length - 1]++;
       paintLive();
-      liveSpark();
+      liveSpark(bot);
     };
     source.onerror = () => {
       if (!mine()) return;

@@ -381,7 +381,9 @@ impl Hub {
     /// One more event of a kind, counted in memory until the next minute's flush.
     pub(crate) fn count(&self, event: Event, n: u64) {
         self.events[event as usize].fetch_add(n, Ordering::Relaxed);
-        if matches!(event, Event::YoIn | Event::MediaIn) && self.live.receiver_count() > 0 {
+        if matches!(event, Event::YoIn | Event::YoInBot | Event::BotYo | Event::MediaIn | Event::BotMedia)
+            && self.live.receiver_count() > 0
+        {
             for _ in 0..n.min(LIVE_QUEUE as u64) {
                 let _ = self.live.send(event);
             }

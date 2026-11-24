@@ -1,4 +1,4 @@
-"""The header's live strip: Yos per minute for the last hour, bots left out, counts only."""
+"""The header's live strip: all Yos per minute for the last hour, bots' apart in "bots", counts only."""
 import sqlite3
 import unittest
 
@@ -16,14 +16,16 @@ class LiveTests(unittest.TestCase):
             ("yo-in", m, 3), ("media-in", m, 2), ("yo-in-bot", m, 50), ("yo-out", m, 9),
             ("yo-in", m - 1, 4), ("yo-in", m - 59, 7), ("yo-in", m - 60, 100), ("yo-in", m + 1, 100)])
 
-    def test_last_hour_per_minute_without_bots(self):
+    def test_last_hour_per_minute_with_bots_apart(self):
         out = users.live(self.db, NOW)
         self.assertEqual(out["minute"], NOW // 60000)
         self.assertEqual(len(out["minutes"]), 60)
-        self.assertEqual(out["minutes"][-1], 5)  # yo-in + media-in; yo-in-bot and yo-out left out
+        self.assertEqual(out["minutes"][-1], 55)  # yo-in + media-in + yo-in-bot; yo-out left out
+        self.assertEqual(out["bots"][-1], 50)
         self.assertEqual(out["minutes"][-2], 4)
         self.assertEqual(out["minutes"][0], 7)  # 59 minutes ago is the first; 60 ago and the future are out
-        self.assertEqual(sum(out["minutes"]), 16)
+        self.assertEqual(sum(out["minutes"]), 66)
+        self.assertEqual(sum(out["bots"]), 50)
         self.db.execute("DELETE FROM events")
         self.assertEqual(users.live(self.db, NOW)["minutes"], [0] * 60)
 
