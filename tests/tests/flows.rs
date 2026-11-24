@@ -448,13 +448,13 @@ fn a_new_phone_from_the_words_gets_its_friends_back_and_sessions_form_again() {
     let (a, b) = friends(&hub);
     a.set_friend(b.user(), Some("Bob".into()), Some(2)).unwrap();
     a.write_storage().unwrap();
-    let (k, words) = (vec![1; 32], yo_tests::backup::recovery_key([9; 16]));
+    let words = yo_tests::backup::recovery_key([9; 16]);
     let json = format!("{{\"secret\":{:?}}}", a.account_secret());
-    a.put_backup(k.clone(), json.clone().into_bytes(), words.clone(), yo::YoPasskeyDoor::None).unwrap();
+    a.put_backup(json.clone().into_bytes(), words.clone(), yo::YoPasskeyDoor::None).unwrap();
     // The new phone: nothing but the words.
     let app = App::new(Http::new(hub.url()));
     let opened = yo::open_backup(app, None, yo::YoDoor::RecoveryKey { key: words }).unwrap().expect("the record");
-    assert_eq!((opened.k, String::from_utf8(opened.sealed).unwrap()), (k, json));
+    assert_eq!((opened.k.len(), String::from_utf8(opened.sealed).unwrap()), (32, json));
     let a2 = Phone::register(&hub, &a.name, None, Some(a.account_secret()));
     assert_eq!(a2.user(), a.user());
     assert_eq!(a2.username(), Some(a.name.clone()));

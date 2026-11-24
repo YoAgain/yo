@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// The item's format today: the libsignal account key and the recovery key.
 pub const ITEM_VERSION: i64 = 3;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// Its `Debug` leaves out the secrets (the account key, the recovery key, an old seed).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub username: String,
@@ -31,6 +32,18 @@ pub struct Item {
     /// The seed a v1 item had: the hub's storage may still be sealed under its key (spec 6.9).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_option")]
     pub legacy_seed: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Item {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Item")
+            .field("username", &self.username)
+            .field("by_passkey", &self.by_passkey)
+            .field("by_code", &self.by_code)
+            .field("signed_out", &self.signed_out)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 pub fn decode(json: &[u8]) -> Option<Item> {

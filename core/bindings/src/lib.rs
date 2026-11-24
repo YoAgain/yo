@@ -605,7 +605,7 @@ pub enum YoPasskeyDoor {
     None,
     /// A passkey, by its PRF output.
     New { prf: Vec<u8> },
-    /// As in this record (opened with the same K): its wrap and its auth key, or none.
+    /// As in this record, under the same recovery key (K the same): its wrap and its auth key, or none.
     Keep { record: YoBackup },
 }
 
@@ -1000,23 +1000,20 @@ impl YoClient {
     }
 
     /// Stores the backup record, replacing the one before: `sealed` (the app's JSON) under K, K wrapped by the recovery
-    /// key and as `passkey` says.
-    pub fn put_backup(
-        &self,
-        k: Vec<u8>,
-        sealed: Vec<u8>,
-        recovery_key: String,
-        passkey: YoPasskeyDoor,
-    ) -> Result<(), YoError> {
-        let k = key_of(k)?;
+    /// key and as `passkey` says. K is the core's: the kept record's with `Keep` (under the same recovery key, else
+    /// `State`), a new one with `New` or `None`, so a door changed (a new recovery key, a passkey added or removed)
+    /// never leaves an old door able to open what is sealed from then on (spec 7). A rotation with a passkey asks it
+    /// again (`New`).
+    pub fn put_backup(&self, sealed: Vec<u8>, recovery_key: String, passkey: YoPasskeyDoor) -> Result<(), YoError> {
         let code = self::recovery_key(&recovery_key)?;
-        let kept;
-        let door = match &passkey {
-            YoPasskeyDoor::None => PasskeyDoor::None,
-            YoPasskeyDoor::New { prf } => PasskeyDoor::New(prf),
+        let kept: yo_core::Backup;
+        let (k, door) = match &passkey {
+            YoPasskeyDoor::None => (yo_core::backup::new_k(), PasskeyDoor::None),
+            YoPasskeyDoor::New { prf } => (yo_core::backup::new_k(), PasskeyDoor::New(prf)),
             YoPasskeyDoor::Keep { record } => {
                 kept = record.clone().into();
-                PasskeyDoor::Keep(&kept)
+                let opened = yo_core::backup::open(kept.clone(), &Door::Code(&code)).ok_or(YoError::State)?;
+                (opened.k.clone(), PasskeyDoor::Keep(&kept))
             }
         };
         let record = yo_core::backup::make(&k, &sealed, &code, door)?;

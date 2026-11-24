@@ -38,15 +38,15 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     let secret = old.account_secret();
     assert_eq!(secret.len(), 32);
     // What the app makes: its JSON under K, K wrapped by the words and the passkey, their auth keys.
-    let (k, prf, words) = (vec![1; 32], vec![2; 32], yo_tests::backup::recovery_key([3; 16]));
+    let (prf, words) = (vec![2; 32], yo_tests::backup::recovery_key([3; 16]));
     let passkey = yo::YoDoor::Passkey { prf: prf.clone() };
     let by_words = || yo::YoDoor::RecoveryKey { key: words.clone() };
-    old.put_backup(k.clone(), b"{\"account\":1}".to_vec(), words.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() })
-        .unwrap();
+    old.put_backup(b"{\"account\":1}".to_vec(), words.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() }).unwrap();
     // A new phone: the record by the words alone, or by the passkey's user handle and PRF output; either opens it.
     let user = hex(&old.user_id());
     let found = yo::open_backup(app(), None, by_words()).unwrap().unwrap();
-    assert_eq!((found.k.clone(), found.sealed.clone()), (k.clone(), b"{\"account\":1}".to_vec()));
+    let k = found.k.clone();
+    assert_eq!((k.len(), found.sealed.clone()), (32, b"{\"account\":1}".to_vec()), "K is the core's");
     assert!(found.record.sealed.len() == 1024 && found.record.auth_passkey.len() == 32, "padded, both keys");
     let by_passkey = yo::open_backup(app(), Some(user.clone()), passkey).unwrap().unwrap();
     assert_eq!((by_passkey.k, by_passkey.sealed), (k.clone(), found.sealed.clone()));
@@ -61,15 +61,26 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     let new = register(Some(secret)).unwrap();
     assert_eq!(new.user_id(), old.user_id());
     assert!(matches!(old.sync(0), Err(yo::YoError::Replaced)));
-    // New words, the passkey kept: the old words open nothing, the passkey still does.
+    // The same words, the passkey kept: the same K (a content change), the passkey still opens it.
+    let keep = yo::YoPasskeyDoor::Keep { record: found.record.clone() };
+    new.put_backup(b"{\"same\":1}".to_vec(), words.clone(), keep).unwrap();
+    let same = yo::open_backup(app(), None, by_words()).unwrap().unwrap();
+    assert_eq!((same.k.clone(), same.sealed.clone()), (k.clone(), b"{\"same\":1}".to_vec()));
+    // New words cannot keep the passkey's door (B1): the passkey is asked again, and K is new.
     let renewed = yo_tests::backup::recovery_key([5; 16]);
-    let keep = yo::YoPasskeyDoor::Keep { record: found.record };
-    new.put_backup(k.clone(), b"{}".to_vec(), renewed.clone(), keep).unwrap();
+    let keep = yo::YoPasskeyDoor::Keep { record: same.record };
+    assert!(matches!(new.put_backup(b"{}".to_vec(), renewed.clone(), keep), Err(yo::YoError::State)));
+    new.put_backup(b"{}".to_vec(), renewed.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() }).unwrap();
     assert!(yo::open_backup(app(), None, by_words()).unwrap().is_none());
-    let found = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed }).unwrap().unwrap();
-    let passkey = yo::YoDoor::Passkey { prf };
-    assert_eq!(yo::open_backup(app(), Some(user), passkey).unwrap().unwrap().sealed, b"{}");
-    assert_eq!(found.k, k);
+    let found = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed.clone() }).unwrap().unwrap();
+    let passkey = yo::YoDoor::Passkey { prf: prf.clone() };
+    assert_eq!(yo::open_backup(app(), Some(user.clone()), passkey).unwrap().unwrap().sealed, b"{}");
+    assert_ne!(found.k, k, "a new K with the new words");
+    // The passkey removed: a new K again, the words alone open it.
+    new.put_backup(b"{}".to_vec(), renewed.clone(), yo::YoPasskeyDoor::None).unwrap();
+    let alone = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed }).unwrap().unwrap();
+    assert!(alone.record.by_passkey.is_empty() && alone.k != found.k);
+    assert!(yo::open_backup(app(), Some(user.clone()), yo::YoDoor::Passkey { prf }).unwrap().is_none());
 }
 
 fn hex(text: &str) -> Vec<u8> {
@@ -118,8 +129,7 @@ fn the_app_layer_runs_other_calls_while_sync_waits() {
         let (a, pb) = (a.clone(), pb.clone());
         std::thread::spawn(move || {
             a.send_yo(pb).unwrap();
-            a.put_backup(vec![1; 32], b"{}".to_vec(), yo_tests::backup::recovery_key([2; 16]), yo::YoPasskeyDoor::None)
-                .unwrap();
+            a.put_backup(b"{}".to_vec(), yo_tests::backup::recovery_key([2; 16]), yo::YoPasskeyDoor::None).unwrap();
             done.send(a.contacts().len()).unwrap();
         });
     }

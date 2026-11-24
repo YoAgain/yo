@@ -600,15 +600,16 @@ final class AccountStore {
     account.byCode = true
     account.codeAuth = true
     account.passkeyAuth = prf != nil
-    try await put(account, code: securing.code, k: securing.k, passkey: prf.map { .new(prf: $0) } ?? .none, by: client)
+    try await put(account, code: securing.code, passkey: prf.map { .new(prf: $0) } ?? .none, by: client)
     self.account = account
     self.securing = nil
     if prf != nil { passkeyTurnedOff = false }
   }
 
   /// Through the client the change began with. New words are staged first and settled once the hub has them, so a
-  /// failure leaves the words the backup opens with here.
-  private func put(_ account: Account, code: String, k: Data, passkey: YoPasskeyDoor, by client: YoClient)
+  /// failure leaves the words the backup opens with here. K is the core's: the same only while both doors stay
+  /// (`keep` under the same words), new with any other door (spec 7).
+  private func put(_ account: Account, code: String, passkey: YoPasskeyDoor, by client: YoClient)
     async throws
   {
     try still(client)
@@ -621,7 +622,7 @@ final class AccountStore {
       try await Hub.run {
         let sealed = try JSONEncoder().encode(
           BackupRecord.Sealed(account: account, accountKey: client.accountSecret(), code: code))
-        try client.putBackup(k: k, sealed: sealed, recoveryKey: code, passkey: passkey)
+        try client.putBackup(sealed: sealed, recoveryKey: code, passkey: passkey)
       }
     } catch let error as YoError {
       throw AccountError.hub(error)
@@ -665,6 +666,19 @@ final class AccountStore {
     let words = new ?? code
     let door: YoPasskeyDoor
     switch passkey {
+    case .keep where words != code && !record.byPasskey.isEmpty:
+      // New words come with a new K (spec 7): the passkey's door is made anew, so the passkey is asked once more.
+      let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
+      guard let prf = answer.prf else { throw Diagnostics.expected(AccountError.noPRF) }
+      guard answer.userID == account.userID else { throw Diagnostics.expected(AccountError.noBackup) }
+      try still(client)
+      door = .new(prf: prf)
+      account.byPasskey = true
+      account.passkeyAuth = true
+    case .keep where words != code:
+      door = .none
+      account.byPasskey = false
+      account.passkeyAuth = false
     case .keep:
       door = .keep(record: record)
       account.byPasskey = !record.byPasskey.isEmpty
@@ -680,7 +694,7 @@ final class AccountStore {
     }
     account.byCode = true
     account.codeAuth = true
-    try await put(account, code: words, k: opened.k, passkey: door, by: client)
+    try await put(account, code: words, passkey: door, by: client)
     self.account = account
     if case .set = passkey { passkeyTurnedOff = false }
     if case .remove = passkey { passkeyTurnedOff = true }
@@ -728,7 +742,7 @@ final class AccountStore {
     if removingPasskey { account.byPasskey = false }
     if prf != nil { account.byPasskey = true }
     let passkey: YoPasskeyDoor = prf.map { .new(prf: $0) } ?? .none
-    try await put(account, code: words, k: BackupRecord.newKey(), passkey: passkey, by: client)
+    try await put(account, code: words, passkey: passkey, by: client)
     self.account = account
   }
 

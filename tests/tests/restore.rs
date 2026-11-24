@@ -106,13 +106,17 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             p.client.set_friend(&friend_id, Some(format!("Friend {cycle}")), Some((cycle % 7) as u8)).unwrap();
             p.client.set_app_icon(if cycle % 2 == 0 { Some("Original".into()) } else { None }).unwrap();
             p.client.maintenance().unwrap();
-            // (d): the passkey replaced and the words renewed first; the old ones must open nothing any more.
+            // (d): the passkey replaced and the words renewed first, with a new K (B1); the old ones must open
+            // nothing any more, also with their old wraps spliced into the new record.
             if way == 3 {
                 let (old_code, old_prf) = (p.code.clone(), p.prf);
+                let http = Http::new(hub.url());
+                let old_id = yo_core::state::unhex(&p.user).unwrap();
+                let before = Client::fetch_backup(&*http, &old_id, &Door::Passkey(&old_prf)).unwrap().unwrap();
                 p.code = backup::recovery_key(random(&mut rng));
                 p.prf = random(&mut rng);
+                p.k = random(&mut rng);
                 p.put_backup();
-                let http = Http::new(hub.url());
                 let record =
                     Client::open_backup(&*http, None, &Door::Code(&yo_tests::backup::pool(&old_code))).unwrap();
                 assert!(record.is_none(), "{ctx}: the old words still find a record");
@@ -125,6 +129,14 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
                     backup::open_sealed(&current, &Door::Passkey(&old_prf)).is_none(),
                     "{ctx}: the old passkey opens it"
                 );
+                let spliced = yo_core::Backup {
+                    by_passkey: before.by_passkey.clone(),
+                    by_code: before.by_code.clone(),
+                    ..current.clone()
+                };
+                let old_pool = yo_tests::backup::pool(&old_code);
+                assert!(backup::open_sealed(&spliced, &Door::Passkey(&old_prf)).is_none(), "{ctx}: old passkey wrap");
+                assert!(backup::open_sealed(&spliced, &Door::Code(&old_pool)).is_none(), "{ctx}: old words' wrap");
             }
             // (e): the old phone is still running and sends meanwhile.
             sent += 1;

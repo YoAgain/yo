@@ -24,7 +24,7 @@ class DevHubSmokeTest {
             assertEquals(name, made.username())
             val recovery = newRecoveryKey()
             val plain = "{\"synthetic\":true}".toByteArray()
-            made.putBackup(randomBytes(32), plain, recovery, YoPasskeyDoor.None)
+            made.putBackup(plain, recovery, YoPasskeyDoor.None)
             assertArrayEquals(plain, openBackup(transport, null, YoDoor.RecoveryKey(recovery))!!.sealed)
             made.shutdown()
             account = YoClient.openDb(transport, db, key, false, null)

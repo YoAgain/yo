@@ -517,24 +517,34 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
 
     /**
-     * "Turn Off Recovery Key" (iOS `newRecoveryKey`): the backup is rewrapped at once under a new key, same K and
-     * passkey door, so the saved key stops working now; the new one shows "Not Saved" until it is saved. The new key
-     * is staged first (`recovery-pending`): if the hub's answer is lost, the next try opens the backup with it.
+     * "Turn Off Recovery Key" (iOS `newRecoveryKey`): the backup is made at once under a new key and a new K (the core
+     * makes it, spec 7), so the saved key, with any copy of the record it opened, stops working now; the new one shows
+     * "Not Saved" until it is saved. A passkey door is made anew too: `askPasskey` (the system's sheet) gives its PRF;
+     * cancelled, nothing changes. The new key is staged first (`recovery-pending`): if the hub's answer is lost, the
+     * next try opens the backup with it.
      */
-    suspend fun turnOffRecovery() = accountTurn.withLock {
+    internal suspend fun turnOffRecovery(askPasskey: suspend () -> Passkeys.Answer) = accountTurn.withLock {
         val c = client ?: return@withLock
         val (backup, _) = listOfNotNull(vault.read("recovery"), vault.read("recovery-pending")).map { it.decodeToString() }
             .firstNotNullOfOrNull { key -> openBackup(transport, null, YoDoor.RecoveryKey(key))?.let { it to key } }
             ?: error(context.getString(R.string.ui_recovery_key_missing))
         check(c === client)
+        val door = if (backup.record.byPasskey.isEmpty()) YoPasskeyDoor.None else {
+            val answer = try { askPasskey() } catch (_: androidx.credentials.exceptions.GetCredentialCancellationException) {
+                return@withLock
+            }
+            check(answer.user.contentEquals(c.userId().hexBytes())) { context.getString(R.string.no_passkey) }
+            YoPasskeyDoor.New(answer.prf)
+        }
+        check(c === client)
         val code = newRecoveryKey()
         vault.write("recovery-pending", code.toByteArray())
         val sealed = JSONObject(backup.sealed.decodeToString()).put("code", code)
         sealed.optJSONObject("account")?.put("byCode", true)?.put("codeAuth", true)
-        c.putBackup(backup.k, sealed.toString().toByteArray(), code, YoPasskeyDoor.Keep(backup.record))
+        c.putBackup(sealed.toString().toByteArray(), code, door)
         check(c === client)
         vault.write("recovery", code.toByteArray()); vault.delete("recovery-pending")
-        val passkey = backup.record.byPasskey.isNotEmpty() && backup.record.authPasskey.isNotEmpty()
+        val passkey = door is YoPasskeyDoor.New
         mutable.update { it.copy(recovery = code, recoverySaved = false, recoveryPasskey = passkey) }; changes.withLock { persist() }
         syncItem()
     }
@@ -557,17 +567,21 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             else error(context.getString(R.string.ui_recovery_key_missing))
         val backup = old?.let { openBackup(transport, null, YoDoor.RecoveryKey(it)) }
         if (removePasskey) checkNotNull(backup)
+        // The passkey's door kept only under the same recovery key (the same K); any other door change a new K (the core's).
         val passkey = if (removePasskey) YoPasskeyDoor.None else answer?.let { YoPasskeyDoor.New(it.prf) }
-            ?: backup?.let { YoPasskeyDoor.Keep(it.record) } ?: YoPasskeyDoor.None
+            ?: backup?.takeIf { code == old }?.let { YoPasskeyDoor.Keep(it.record) } ?: YoPasskeyDoor.None
+        val kept = (passkey as? YoPasskeyDoor.Keep)?.record
+        val byPasskey = answer != null || kept?.byPasskey?.isNotEmpty() == true
+        val passkeyAuth = answer != null || kept?.authPasskey?.isNotEmpty() == true
         val account = JSONObject().put("username", c.username()).put("userID", encode(c.userId().hexBytes()))
-            .put("accountKey", encode(c.accountSecret())).put("byPasskey", !removePasskey && (answer != null || backup?.record?.byPasskey?.isNotEmpty() == true)).put("byCode", true)
-            .put("codeAuth", true).put("passkeyAuth", !removePasskey && (answer != null || backup?.record?.authPasskey?.isNotEmpty() == true)).put("backupVersion", 3)
+            .put("accountKey", encode(c.accountSecret())).put("byPasskey", byPasskey).put("byCode", true)
+            .put("codeAuth", true).put("passkeyAuth", passkeyAuth).put("backupVersion", 3)
         val sealed = JSONObject().put("account", account).put("code", code).toString().toByteArray()
-        c.putBackup(backup?.k ?: randomBytes(32), sealed, code, passkey)
+        c.putBackup(sealed, code, passkey)
         check(c === client)
         vault.write("recovery", code.toByteArray()); vault.delete("recovery-pending")
-        passkeyBackup = !removePasskey && (answer != null || backup?.record?.byPasskey?.isNotEmpty() == true)
-        val passkeyOn = !removePasskey && (answer != null || backup?.record?.authPasskey?.isNotEmpty() == true) && passkeyBackup
+        passkeyBackup = byPasskey
+        val passkeyOn = passkeyAuth && passkeyBackup
         mutable.update { it.copy(secured = true, recovery = code, recoveryPasskey = passkeyOn,
             recoverySaved = it.recoverySaved || answer == null && !removePasskey) }; changes.withLock { persist() }
         syncItem()

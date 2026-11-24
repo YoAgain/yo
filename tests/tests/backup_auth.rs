@@ -87,7 +87,7 @@ fn only_a_door_fetches_a_record() {
     let without = backup::make(&k, b"{}", &code, PasskeyDoor::None).unwrap();
     t.put_backup(&without).unwrap();
     assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf)), Ok(None));
-    assert_eq!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap().k, k);
+    assert_eq!(*Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap().k, k);
     // A record whose auth key is no canonical Curve25519 key is refused.
     let bad = Backup { auth_code: vec![0xff; 32].into(), ..without };
     assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &yo_wire::encode(&bad)).unwrap().status, 400);
@@ -120,14 +120,14 @@ fn a_record_without_auth_keys_is_never_served_and_the_app_makes_a_new_one() {
     // The app makes a new one from the recovery key on the phone: a new K, the recovery key's door only.
     t.put_backup(&backup::make(&k, b"{\"new\":1}", &code, PasskeyDoor::None).unwrap()).unwrap();
     let opened = Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap();
-    assert_eq!((opened.k, opened.plain.as_slice()), (k, &b"{\"new\":1}"[..]));
+    assert_eq!((*opened.k, opened.plain.as_slice()), (k, &b"{\"new\":1}"[..]));
     assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None), "no passkey yet");
     // Confirmed: the passkey asked once, its door added to the record as it is (the same K).
     let record = backup::make(&opened.k, &opened.plain, &code, PasskeyDoor::New(&prf)).unwrap();
     t.put_backup(&record).unwrap();
     // A new phone, by the passkey: the record, K, and the account registered again with its key.
     let by_passkey = Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)).unwrap().unwrap();
-    assert_eq!(by_passkey.k, k);
+    assert_eq!(*by_passkey.k, k);
     let name = t.username().unwrap().to_owned();
     let new = Client::register_username(Http::new(hub.url()), &name, Some(secret), None, Push::none()).unwrap();
     assert_eq!(new.user_id(), t.user_id());
