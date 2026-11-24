@@ -451,6 +451,7 @@ final class Inbox {
         Task { await respell(client: client, accounts: accounts, friends: friends) }
       }
       retryNow = false
+      seenClient = client
       do {
         // What the notification service saved: on the bars before the hub is asked.
         let (saved, known) = try await Hub.run { try Perf.timed("inbox.listen.saved.core") { (try client.savedEvents(), client.contacts()) } }
@@ -465,6 +466,7 @@ final class Inbox {
         Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
         await take(events, contacts: contacts, client: client, friends: friends)
+        await clearSeen(client: client)
         if !storageTaken {  // read by the core before its first receive, if registering could not
           storageTaken = true
           await accounts.takeStorage(into: friends, read: true)
@@ -491,6 +493,32 @@ final class Inbox {
   }
 
   @ObservationIgnored private var retryNow = false
+  /// The account's client the inbox listens with: what `collectDelivered` tells the other devices through.
+  @ObservationIgnored private weak var seenClient: YoClient?
+
+  /// Threads shown in this app (user or group id): this account's other devices clear their notifications of them
+  /// (Sync Read, spec 5). Nothing goes while the account has one device (the core asks nobody then).
+  private func markSeen(_ threads: Set<String>, client: YoClient) {
+    guard !threads.isEmpty else { return }
+    let now = UInt64(Date().timeIntervalSince1970 * 1000)
+    Task.detached(priority: .utility) {
+      for thread in threads { try? client.markSeen(userOrGroup: thread, throughSentAtMs: now) }
+    }
+  }
+
+  /// What another device of this account showed: its notifications here go too (Sync Read, spec 5).
+  private func clearSeen(client: YoClient) async {
+    guard let seen = try? await Hub.run({ try client.takeSeen() }), !seen.isEmpty else { return }
+    let center = UNUserNotificationCenter.current()
+    let delivered = await center.deliveredNotifications()
+    let gone = delivered.filter { note in
+      seen.contains { mark in
+        note.request.content.threadIdentifier.caseInsensitiveCompare(mark.thread) == .orderedSame
+          && note.date.timeIntervalSince1970 * 1000 <= Double(mark.throughMs)
+      }
+    }.map(\.request.identifier)
+    if !gone.isEmpty { center.removeDeliveredNotifications(withIdentifiers: gone) }
+  }
   @ObservationIgnored private var napping: Task<Void, Never>?
 
   /// Back in front after being away, or on another network (`Reconnect`): the inbox's wait from before is cut off
@@ -594,6 +622,16 @@ final class Inbox {
       }
     }
     let resolved = friends.reconcile(contacts, users: users, changedKeys: changedKeys)
+    // Shown in the front: this account's other devices let their notifications of these threads go (Sync, spec 5).
+    if UIApplication.shared.applicationState == .active {
+      markSeen(Set(events.compactMap { event -> String? in
+        switch event {
+        case .message(let user, _, _): user
+        case .groupMessage(let group, _, _, _): group
+        default: nil
+        }
+      }), client: client)
+    }
     for contact in contacts {
       if let name = resolved[contact.user]?.name ?? contact.handles.first ?? contact.name, name != "?", !name.isEmpty {
         memberNames[contact.user] = name
@@ -740,7 +778,7 @@ final class Inbox {
     guard !collectingDelivered else { return }
     collectingDelivered = true
     defer { collectingDelivered = false }
-    let waiting = await Task.detached(priority: .utility) {
+    let (waiting, threads) = await Task.detached(priority: .utility) {
       let center = Perf.timed("inbox.notifications.center") { UNUserNotificationCenter.current() }
       let delivered = await center.deliveredNotifications()
       let waiting = Perf.timed("inbox.notifications.decode") {
@@ -755,9 +793,13 @@ final class Inbox {
         center.removeDeliveredNotifications(
           withIdentifiers: delivered.map(\.request.identifier))
       }
+      let threads = Set(delivered.filter { $0.request.content.categoryIdentifier == Self.category }
+        .map(\.request.content.threadIdentifier).filter { !$0.isEmpty })
       try? await center.setBadgeCount(0)
-      return waiting
+      return (waiting, threads)
     }.value
+    // Shown now: this account's other devices let theirs go too (Sync, spec 5).
+    if let client = seenClient { markSeen(threads, client: client) }
     Perf.timed("inbox.notifications.apply") {
       for (arrival, name) in waiting { received(id: arrival.id, from: arrival.from, senderName: name) }
     }

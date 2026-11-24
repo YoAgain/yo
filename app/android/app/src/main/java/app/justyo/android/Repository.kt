@@ -610,7 +610,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         present { foreground(it, on) }
         if (on && state.value.updating && !state.value.loading) keepResuming()
         else if (on) command {
+            val shown = notifications.threads()
             notifications.clear()
+            client?.let { markSeen(it, shown) }
             listen()
             client?.let { source ->
                 Push.register(context)
@@ -649,7 +651,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                                 .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "yo:inbox")
                                 .apply { setReferenceCounted(false); acquire(5_000L) }
                         else null
-                        try { if (c === client) absorb(events, c) }
+                        try { if (c === client) { absorb(events, c); clearSeen(c) } }
                         finally { if (wake?.isHeld == true) wake.release() }
                         Lat.mark("sync.absorbed")
                         // absorb refreshed the list for events; an empty answer may still have changed the core's lists
@@ -693,6 +695,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             val c = client ?: return
             absorb(c.savedEvents(), c)
             absorb(c.sync(0u), c)
+            if (c === client) clearSeen(c)
             if (c === client) {
                 mutable.update { it.copy(lastSync = android.os.SystemClock.elapsedRealtime()) }
             }
@@ -996,6 +999,23 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
         media.wake()
     }
+    /** Threads shown in this app (a user id, or "group:" and a group id): this account's other devices clear their
+     *  notifications of them (Sync Read, spec 5). The core asks nobody while the account has one device. */
+    private fun markSeen(c: YoClient, targets: Collection<String>) {
+        if (targets.isEmpty()) return
+        val now = System.currentTimeMillis().toULong()
+        scope.launch(Dispatchers.IO) { for (t in targets.toSet()) runCatching { c.markSeen(t.removePrefix("group:"), now) } }
+    }
+
+    /** What another device of this account showed: its notifications here go too. */
+    private fun clearSeen(c: YoClient) {
+        val seen = runCatching { c.takeSeen() }.getOrNull() ?: return
+        for (mark in seen) {
+            val thread = if (mark.thread.length == 64) "group:${mark.thread}" else mark.thread
+            notifications.clearSeen(thread, mark.throughMs.toLong())
+        }
+    }
+
     /** A message event's Yo on its bar (once: `seen`), its media expected, a notification in the background. */
     private suspend fun arrive(event: YoEvent, profiles: Map<String, String>, contacts: Map<String, YoContact>) {
         val user = when (event) { is YoEvent.Message -> event.user; is YoEvent.GroupMessage -> event.user; else -> return }
@@ -1020,6 +1040,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (name == null) {
             crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
         }
+        // Shown in front: this account's other devices let theirs go (Sync Read, spec 5).
+        if (inFront) client?.let { markSeen(it, listOf(friend.target)) }
         try {
             if (!inFront) notifications.show(friend.target, id, kind, friend, name, user, sender?.color,
                 client?.userId(), friends.asSequence().filter { it.shortcutEligible }.indexOf(friend))

@@ -178,6 +178,16 @@ internal class YoNotifications(private val context: Context) {
     }
 
     fun clear() = manager.cancelAll()
+
+    /** The threads with a notification now (a user id, or "group:" and a group id). */
+    fun threads(): List<String> =
+        manager.activeNotifications.mapNotNull { it.tag?.takeIf { tag -> tag.startsWith(CONVERSATION) }?.removePrefix(CONVERSATION) }
+
+    /** Another device of this account showed `thread` through `throughMs`: its notification goes if it is no newer. */
+    fun clearSeen(thread: String, throughMs: Long) {
+        val tag = "$CONVERSATION$thread"
+        if (manager.activeNotifications.any { it.tag == tag && it.postTime <= throughMs }) clear(thread)
+    }
     /** A thread's notifications, once its Yo Back went. */
     fun clear(thread: String) {
         manager.cancel("$CONVERSATION$thread", 1)
