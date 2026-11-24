@@ -44,6 +44,10 @@ pub struct StateDb {
     path: PathBuf,
     cipher: cipher::Cipher,
     access: Mutex<Option<Arc<dyn Access>>>,
+    /// Without an access guard (a process that is never suspended: Android, the CLI, the bots) one connection stays
+    /// open, as Signal keeps its database open: a connection per step made and deleted the `-wal` and `-shm` files every
+    /// time, and on a phone that was most of a save.
+    kept: Mutex<Option<Connection>>,
     /// The rows of the state last read or written here, under its word: a write that replaces that state compares
     /// with them instead of reading every row back (each word is one state's). With the number of clears: a read or
     /// write begun before a clear never puts its rows back.
@@ -62,11 +66,15 @@ impl Drop for Snapshot {
     }
 }
 
-/// Checkpoints and truncates the WAL, as Signal does after writes; busy connections leave it for the next one.
+/// Checkpoints and truncates the WAL after a guarded write (iOS); busy connections leave it for the next one. A kept
+/// connection leaves it to SQLite's own checkpoint every 1000 pages, as Signal's Android database does: no fsync on a
+/// step's way (WAL with `synchronous = NORMAL`: a crash of the app loses nothing, a power cut at most the last step).
 fn checkpoint(conn: &Connection) {
     if conn.busy_timeout(CHECKPOINT_BUSY).is_ok() {
         let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     }
+    // A kept connection goes on with the access's patience.
+    let _ = conn.busy_timeout(BUSY);
 }
 
 /// Apple's SQLite uses this flag for the database and its WAL sidecars.
@@ -85,16 +93,24 @@ impl StateDb {
     pub fn open_fresh(path: impl Into<PathBuf>, key: [u8; 32], report: Report) -> Result<Self> {
         let path = path.into();
         let cipher = cipher::Cipher::open_fresh(&path, key, report)?;
-        Ok(Self { path, cipher, access: Mutex::new(None), snapshot: Mutex::new((None, 0)) })
+        Ok(Self { path, cipher, access: Mutex::new(None), kept: Mutex::new(None), snapshot: Mutex::new((None, 0)) })
     }
 
     /// Every later access runs within `access` (none: unguarded, a process that is never suspended).
     pub fn set_access(&self, access: Option<Arc<dyn Access>>) {
+        // The kept connection first, as an access takes them: one under way finishes before it goes.
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        // A guarded process opens and closes its connection within each access.
+        if access.is_some() {
+            *kept = None;
+        }
         *self.access.lock().unwrap_or_else(PoisonError::into_inner) = access;
     }
 
-    /// Every access goes through here, its connection opened and closed within: no SQLite lock outlives a call.
-    fn on_cipher<T>(&self, operation: impl FnOnce(&cipher::Cipher) -> Result<T>) -> Result<T> {
+    /// Every access goes through here. Guarded, its connection is opened and closed within: no SQLite lock outlives a
+    /// call. Unguarded, the kept connection (no transaction outlives a call either).
+    /// `operation` is told whether the access is guarded.
+    fn on_cipher<T>(&self, operation: impl FnOnce(&cipher::Cipher, &mut Connection, bool) -> Result<T>) -> Result<T> {
         let cipher = &self.cipher;
         let access = self.access.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if access.as_ref().is_some_and(|access| !access.begin()) {
@@ -111,7 +127,23 @@ impl StateDb {
             }
         }
         let ends = Ends(access);
-        let result = operation(cipher);
+        let result = if ends.0.is_some() {
+            cipher.connect(&self.path, false).and_then(|mut conn| operation(cipher, &mut conn, true))
+        } else {
+            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+            let conn = match kept.take() {
+                Some(conn) => Ok(conn),
+                None => cipher.connect(&self.path, false),
+            };
+            conn.and_then(|mut conn| {
+                let result = operation(cipher, &mut conn, false);
+                // A failed access starts again on a new connection; a guard set meanwhile closes it.
+                if result.is_ok() && self.access.lock().unwrap_or_else(PoisonError::into_inner).is_none() {
+                    *kept = Some(conn);
+                }
+                result
+            })
+        };
         drop(ends);
         if let Err(error) = &result {
             cipher::report_failure(&cipher.report, error);
@@ -120,12 +152,11 @@ impl StateDb {
     }
 
     pub fn load(&self, known: Option<&str>, key: &[u8; 32]) -> Result<Loaded> {
-        self.on_cipher(|cipher| {
+        self.on_cipher(|cipher, conn, _| {
             if key != &*cipher.key {
                 return Err(Error::State);
             }
             let clears = self.snapshot().1;
-            let mut conn = cipher.connect(&self.path, false)?;
             let tx = conn.transaction().map_err(cipher::sqlite_error)?;
             Ok(match cipher::Cipher::word(&tx)? {
                 None => Loaded::Gone,
@@ -148,7 +179,7 @@ impl StateDb {
     }
 
     pub fn word(&self) -> Result<Option<String>> {
-        self.on_cipher(|cipher| cipher::Cipher::word(&cipher.connect(&self.path, false)?))
+        self.on_cipher(|_, conn, _| cipher::Cipher::word(conn))
     }
 
     fn snapshot(&self) -> std::sync::MutexGuard<'_, (Option<Snapshot>, u64)> {
@@ -177,9 +208,8 @@ impl StateDb {
         records: &crate::signal::Entries,
         held: Option<&dyn Fn() -> bool>,
     ) -> Result<String> {
-        self.on_cipher(|cipher| {
+        self.on_cipher(|cipher, conn, guarded| {
             let clears = self.snapshot().1;
-            let mut conn = cipher.connect(&self.path, false)?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(cipher::sqlite_error)?;
             // The turn first: a turn taken back lets another process write, and its newer state is no stale save.
             if held.is_some_and(|held| !held()) {
@@ -198,7 +228,9 @@ impl StateDb {
             }
             tx.commit().map_err(cipher::sqlite_error)?;
             self.keep(clears, Snapshot { word: word.clone(), rows });
-            checkpoint(&conn);
+            if guarded {
+                checkpoint(conn);
+            }
             Ok(word)
         })
     }
@@ -207,14 +239,14 @@ impl StateDb {
     pub fn clear(&self) -> Result<()> {
         // Forgotten first, also when the clear fails, and again after it.
         self.forget();
-        self.on_cipher(|cipher| {
-            let mut conn = cipher.connect(&self.path, false)?;
+        self.on_cipher(|_, conn, _| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(cipher::sqlite_error)?;
             tables::clear(&tx).map_err(cipher::sqlite_error)?;
             cipher::Cipher::set_word(&tx, None)?;
             tx.commit().map_err(cipher::sqlite_error)?;
             self.forget();
-            checkpoint(&conn);
+            // Signed out: what was in the WAL goes now, whoever keeps the connection.
+            checkpoint(conn);
             Ok(())
         })
     }

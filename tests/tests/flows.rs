@@ -85,15 +85,17 @@ impl Phone {
     }
 
     /// The app killed and started again from what its file holds.
-    fn restart(&self, hub: &TestHub) -> Phone {
-        self.file.thaw();
+    fn restart(self, hub: &TestHub) -> Phone {
+        // The dead process's database closes first: it keeps its connection open as a live one does.
+        let Phone { client, app, http, file, name } = self;
+        drop((client, app, http));
+        file.thaw();
         let http = Http::new(hub.url());
         let app = App::new(http.clone());
-        let file = self.file.clone();
         let client =
             YoClient::open_db(app.clone(), file.db(), KEY.to_vec(), false, Some(Arc::new(Alone(file.clone()))))
                 .unwrap();
-        Phone { client, app, http, file, name: self.name.clone() }
+        Phone { client, app, http, file, name }
     }
 
     fn user(&self) -> String {
