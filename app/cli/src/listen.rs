@@ -203,7 +203,8 @@ fn receive(listener: &Listener) -> ! {
             let wait = listener.client().sync_begin(WAIT_S);
             wait.and_then(|wait| {
                 let response = wait.send();
-                listener.client().sync_end(&wait, response)
+                // Printed before they are saved: a bot's answer goes first (`sync_end_unsaved`), the save after.
+                listener.client().sync_end_unsaved(&wait, response)
             })
         };
         match result {
@@ -219,6 +220,10 @@ fn receive(listener: &Listener) -> ! {
                 }
                 if message || probed {
                     listener.give_way(begun);
+                }
+                // Not saved: the hub sends them again, after a restart they come once more.
+                if let Err(error) = listener.client().save_handed() {
+                    eprintln!("yo: {}", crate::reason(&error));
                 }
                 listener.acknowledge(&events);
             }

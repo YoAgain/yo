@@ -540,6 +540,10 @@ pub struct Client {
     names_asked: BTreeSet<String>,
     /// Inbox ids received and not yet handed out: acknowledged only once their events are saved and handed over.
     received_ids: Vec<u64>,
+    /// `sync_end_unsaved` under way: `finish` hands the events out without saving; `save_handed` saves them.
+    hand_unsaved: bool,
+    /// What it handed out is not saved yet.
+    handed_pending: bool,
     /// `sync_end` received: the work after it waits for `after_sync` or the next `sync_begin`.
     after_due: bool,
     /// Once a signed inbox response says this device is revoked, no further sends leave.
@@ -924,6 +928,8 @@ impl Client {
             unacked: Vec::new(),
             names_asked: BTreeSet::new(),
             received_ids: Vec::new(),
+            hand_unsaved: false,
+            handed_pending: false,
             after_due: false,
             replaced: std::cell::Cell::new(false),
             probe_requests: Vec::new(),
@@ -1346,6 +1352,11 @@ impl Client {
             self.state.handed.extend(new);
             returned
         });
+        // Handed out before the save (`sync_end_unsaved`): their ids wait in `received_ids` for `save_handed`.
+        if self.hand_unsaved {
+            self.handed_pending = true;
+            return result;
+        }
         match self.persist() {
             // Not saved: nothing is handed out, it waits for the next call.
             Err(error) if result.is_ok() => {
@@ -2183,11 +2194,43 @@ impl Client {
             return Ok(Vec::new());
         }
         let events = self.finish_receiving(received);
-        // Handed out only once saved: from now on the hub may forget them.
+        // Handed out only once saved: from now on the hub may forget them. Not saved yet: with the others, at the save.
         if events.is_ok() {
-            self.unacked.extend(saved_later);
+            match self.hand_unsaved {
+                true => self.received_ids.extend(saved_later),
+                false => self.unacked.extend(saved_later),
+            }
         }
         events
+    }
+
+    /// `sync_end`, its events handed out before they are saved, for a caller that shows or answers them first (a
+    /// single process: Android, a bot's listener; never one that shares the database with another process, which may
+    /// replace the unsaved state). Nothing of it is acknowledged at the hub until it is saved, by `save_handed` or any
+    /// later save: a process that dies first gets the envelopes again and processes them anew, the same keys, so it
+    /// shows them once more. An answer sent meanwhile is saved with them before it leaves, as every send is.
+    pub fn sync_end_unsaved(
+        &mut self,
+        wait: &InboxWait,
+        response: std::result::Result<Response, String>,
+    ) -> Result<Vec<Event>> {
+        self.hand_unsaved = self.guest_events.is_none();
+        let events = self.sync_end(wait, response);
+        self.hand_unsaved = false;
+        events
+    }
+
+    /// Saves what `sync_end_unsaved` handed out; from then on the hub may forget it. Not saved: the hub sends it again
+    /// (acknowledged with the next save that succeeds).
+    pub fn save_handed(&mut self) -> Result<()> {
+        if !self.handed_pending {
+            return Ok(());
+        }
+        self.persist()?;
+        self.handed_pending = false;
+        let received = std::mem::take(&mut self.received_ids);
+        self.unacked.extend(received);
+        Ok(())
     }
 
     /// The rest of a `sync`: acknowledges at the hub what was saved and, for the app, sends receipts and decryption
