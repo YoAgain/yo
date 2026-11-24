@@ -32,7 +32,50 @@ extension ShareBridge.Friend {
   static func title(_ name: String, to: String) -> String { listBarTitle(name: name, group: to.hasPrefix("group:")) }
 }
 
-/// In the list's order; a group is found with or without its "#".
+extension ShareBridge.Friend {
+  /// The friends a heard name means, the best first: the name itself, then names holding it, then names it sounds
+  /// like (Siri hears "Lena" for lina): at most two letters apart, or the same first three; only the closest are kept.
+  /// Case, accents and a group's "#" don't count.
+  static func heard(_ name: String, in friends: [Self]) -> (friends: [Self], exact: Bool) {
+    func key(_ name: String) -> [Character] {
+      Array(name.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "#" })
+        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
+    }
+    let query = key(name)
+    guard !query.isEmpty else { return ([], false) }
+    let keyed = friends.map { (friend: $0, keys: [key($0.name), key($0.title)]) }
+    let exact = keyed.filter { $0.keys.contains(query) }.map(\.friend)
+    if !exact.isEmpty { return (exact, true) }
+    let holding = keyed.filter { $0.keys.contains { $0.count > query.count && String($0).contains(String(query)) } }
+    if !holding.isEmpty { return (holding.map(\.friend), false) }
+    let limit = min(2, max(1, query.count / 3))
+    let near = keyed.compactMap { entry -> (friend: Self, distance: Int)? in
+      let distance = entry.keys.map { distanceBetween($0, query) }.min() ?? .max
+      let prefix = query.count >= 3 && entry.keys.contains { $0.starts(with: query.prefix(3)) }
+      guard distance <= limit || prefix else { return nil }
+      return (entry.friend, distance)
+    }
+    guard let best = near.map(\.distance).min() else { return ([], false) }
+    return (near.filter { $0.distance == best }.map(\.friend), false)
+  }
+
+  /// Letters to change, add or drop to turn one into the other (Levenshtein).
+  private static func distanceBetween(_ a: [Character], _ b: [Character]) -> Int {
+    var row = Array(0...b.count)
+    for (i, x) in a.enumerated() {
+      var previous = row[0]
+      row[0] = i + 1
+      for (j, y) in b.enumerated() {
+        let next = min(row[j + 1] + 1, row[j] + 1, previous + (x == y ? 0 : 1))
+        previous = row[j + 1]
+        row[j + 1] = next
+      }
+    }
+    return row[b.count]
+  }
+}
+
+/// In the list's order; a group is found with or without its "#", a name also as Siri may mishear it.
 struct FriendQuery: EntityStringQuery {
   private var all: [FriendEntity] { (ShareBridge.readList()?.friends ?? []).map(FriendEntity.init) }
 
@@ -41,8 +84,7 @@ struct FriendQuery: EntityStringQuery {
   }
 
   func entities(matching string: String) async throws -> [FriendEntity] {
-    let string = string.hasPrefix("#") ? String(string.dropFirst()) : string
-    return all.filter { $0.name.localizedCaseInsensitiveContains(string) }
+    ShareBridge.Friend.heard(string, in: ShareBridge.readList()?.friends ?? []).friends.map(FriendEntity.init)
   }
 
   func suggestedEntities() async throws -> [FriendEntity] { all }

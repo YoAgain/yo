@@ -36,14 +36,6 @@ final class SiriMessages: NSObject, INSendMessageIntentHandling, INSearchForMess
       .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
   }
 
-  private func matches(_ name: String, in friends: [Friend]) -> (friends: [Friend], exact: Bool) {
-    let query = key(name)
-    guard !query.isEmpty else { return ([], false) }
-    let exact = friends.filter { key($0.name) == query || key($0.title) == query }
-    if !exact.isEmpty { return (exact, true) }
-    return (friends.filter { key($0.name).contains(query) || key($0.title).contains(query) }, false)
-  }
-
   func resolveRecipients(for intent: INSendMessageIntent) async -> [INSendMessageRecipientResolutionResult] {
     guard let list = ShareBridge.readList() else { return [.unsupported(forReason: .noAccount)] }
     guard let recipients = intent.recipients, !recipients.isEmpty else {
@@ -57,11 +49,12 @@ final class SiriMessages: NSObject, INSendMessageIntentHandling, INSearchForMess
       // first word.
       let names = [recipient.displayName, recipient.spokenPhrase, recipient.nameComponents?.givenName ?? "",
         recipient.displayName.split(separator: " ").first.map(String.init) ?? ""]
-      guard let found = names.lazy.map({ self.matches($0, in: list.friends) }).first(where: { !$0.friends.isEmpty }),
+      // Nobody by that name: Siri says it can't find them (noAccount would tell a signed-in user Yo isn't set up).
+      guard let found = names.lazy.map({ Friend.heard($0, in: list.friends) }).first(where: { !$0.friends.isEmpty }),
         let first = found.friends.first
-      else { return .unsupported(forReason: .noAccount) }
+      else { return .unsupported(forReason: .noValidHandle) }
       if found.friends.count > 1 { return .disambiguation(with: found.friends.map(person)) }
-      return found.exact ? .success(with: person(first)) : .confirmationRequired(with: person(first))
+      return .success(with: person(first))  // Siri still shows the message before it goes
     }
   }
 
@@ -70,7 +63,7 @@ final class SiriMessages: NSObject, INSendMessageIntentHandling, INSearchForMess
     guard let list = ShareBridge.readList() else { return .unsupported() }
     let groups = list.friends.filter { $0.to.hasPrefix("group:") }
     if let group = groups.first(where: { $0.to == name.vocabularyIdentifier }) { return .success(with: groupName(group)) }
-    let found = matches(name.spokenPhrase, in: groups).friends
+    let found = Friend.heard(name.spokenPhrase, in: groups).friends
     guard let first = found.first else { return .unsupported() }
     return found.count == 1 ? .success(with: groupName(first)) : .disambiguation(with: found.map(groupName))
   }
