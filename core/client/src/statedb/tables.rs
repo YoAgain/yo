@@ -236,3 +236,60 @@ pub(super) fn read(db: &Connection, key: &[u8; 32]) -> crate::Result<(State, Ent
 pub(super) fn clear(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("DELETE FROM rows")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{Contact, Outgoing, Slot};
+    use serde_json::json;
+
+    #[test]
+    fn reads_single_device_rows_with_their_sessions_and_queued_ciphertext() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../../migrations/V0001__initial_state.sql")).unwrap();
+        let user = crate::state::hex(&[2; 16]);
+        let slot = Slot { key: [3; 32], slot: 7 };
+        let mut state = State::default();
+        state
+            .contacts
+            .insert(user.clone(), Contact { devices: vec![slot], chat: true, accepted: true, ..Default::default() });
+        let queued = Outgoing {
+            user: user.clone(),
+            seq: 9,
+            plain: vec![1, 2],
+            payload: Some(vec![3, 4]),
+            made_for: vec![slot.key],
+            ..Default::default()
+        };
+        state.outbox.push_back(queued.clone());
+        let records = Entries::from([("session".into(), vec![8]), ("seen".into(), Vec::new())]);
+        let key = [0; 32];
+        let mut rows = encode(&state, &records);
+        for ((kind, owner, entry), value) in &mut rows {
+            let mut fields: Value = serde_json::from_slice(value).unwrap_or(Value::Null);
+            match kind.as_str() {
+                "state" => {
+                    for name in ["siblings", "own_roster_at", "sibling_sent_at", "seen_through"] {
+                        fields.as_object_mut().unwrap().remove(name);
+                    }
+                }
+                "contacts" => {
+                    fields.as_object_mut().unwrap().remove("devices");
+                    fields["device"] = json!(slot);
+                }
+                "outbox" => fields["made_for"] = json!(slot.key),
+                _ => {}
+            }
+            if matches!(kind.as_str(), "state" | "outbox" | "contacts") {
+                *value = json(&fields);
+            }
+            let sealed = super::super::cipher::seal(&key, aad(kind, owner, entry), value).unwrap();
+            db.execute("INSERT INTO rows VALUES (?1, ?2, ?3, ?4)", params![kind, owner, entry, sealed]).unwrap();
+        }
+        let (loaded, sessions, _) = read(&db, &key).unwrap();
+        assert_eq!(loaded.contacts[&user], state.contacts[&user]);
+        assert_eq!(loaded.outbox[0], queued);
+        assert_eq!(sessions, records);
+        assert!(loaded.siblings.is_empty());
+    }
+}

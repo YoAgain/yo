@@ -58,3 +58,7 @@ zkgroup = { workspace = true }
 rand = { workspace = true }
 libc = "=0.2.191"
 rusqlite = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tower = { version = "=0.5.3", features = ["util"] }

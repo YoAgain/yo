@@ -223,14 +223,6 @@ fn a_bot_state_file_goes_on_as_the_same_device() {
     // The file as that build wrote it: a list of devices for each contact and outbox item.
     let saved = bot.saved();
     let mut json = serde_json::to_value(&saved.state).unwrap();
-    let listed =
-        |value: serde_json::Value| serde_json::Value::Array(value.is_null().then(Vec::new).unwrap_or(vec![value]));
-    for contact in json["contacts"].as_object_mut().unwrap().values_mut() {
-        contact["devices"] = listed(contact.as_object_mut().unwrap().remove("device").unwrap());
-    }
-    for item in json["outbox"].as_array_mut().unwrap() {
-        item["made_for"] = listed(item["made_for"].take());
-    }
     // A Yo to the bot not handed on yet, and the copy of one it sent (`own`, kept by that build): no Yo to answer.
     let message =
         |own| serde_json::json!({ "Message": { "user": pal.user_id(), "sent_at_ms": 1, "content": "Yo", "own": own } });

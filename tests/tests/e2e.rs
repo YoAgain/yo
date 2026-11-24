@@ -14,6 +14,7 @@ mod handover;
 mod hub_signed;
 mod media;
 mod migration;
+mod multi_device;
 mod probe;
 mod push;
 mod requests;

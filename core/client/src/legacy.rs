@@ -220,20 +220,7 @@ pub fn read_state(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
     if version == 1 {
         return Err(Error::State);
     }
-    // Lists of devices then, one device now.
-    let first = |object: &mut Value, from: &str, to: &str| {
-        if let Some(fields) = object.as_object_mut() {
-            let list = fields.remove(from).unwrap_or(Value::Null);
-            fields.insert(to.into(), list.get(0).cloned().unwrap_or(Value::Null));
-        }
-    };
     let list = |json: &mut Value, name: &str| json.get_mut(name).and_then(Value::as_array_mut).map(std::mem::take);
-    for contact in json.get_mut("contacts").and_then(Value::as_object_mut).into_iter().flat_map(|c| c.values_mut()) {
-        first(contact, "devices", "device");
-    }
-    for item in json.get_mut("outbox").and_then(Value::as_array_mut).into_iter().flatten() {
-        first(item, "made_for", "made_for");
-    }
     // A name as `Profile { name }`; copies of what this device sent (`own`), text, links and places are gone.
     let event = |event: &mut Value| {
         let Some(fields) = event.as_object_mut().and_then(|e| e.values_mut().next()).and_then(Value::as_object_mut)

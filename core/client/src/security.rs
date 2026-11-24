@@ -52,7 +52,7 @@ impl Client {
         for (user, contact) in self.state.contacts.iter().filter(|(_, c)| !c.blocked && !c.gone && c.chat) {
             status.contacts += 1;
             status.verified += contact.verified as u32;
-            if let Some(device) = &contact.device {
+            for device in &contact.devices {
                 status.devices += 1;
                 let usable = self.address(user, device.slot).is_ok_and(|a| self.records.usable(&a));
                 status.pq_sessions += usable as u32;

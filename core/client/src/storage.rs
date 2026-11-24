@@ -174,6 +174,9 @@ pub struct Storage {
     /// Left-handed mode: none until a device chooses it.
     #[serde(default)]
     pub left_handed: Field<Option<bool>>,
+    /// "Requests from Strangers" (spec 4.10): one choice for the account, none until a device sets it.
+    #[serde(default, rename = "ro", skip_serializing_if = "Field::unset")]
+    pub requests_open: Field<Option<bool>>,
     /// This account's profile key (base64url), so a restored phone keeps its contacts' deliveries good (spec 4.10).
     #[serde(default, rename = "pk", skip_serializing_if = "Field::unset")]
     pub profile_key: Field<Option<String>>,
@@ -199,6 +202,7 @@ impl Storage {
         }
         self.icon.merge(&other.icon);
         self.left_handed.merge(&other.left_handed);
+        self.requests_open.merge(&other.requests_open);
         self.profile_key.merge(&other.profile_key);
         self.profile_key_gen.merge(&other.profile_key_gen);
         for (user, key) in &other.keys {
@@ -380,6 +384,14 @@ impl Client {
         Ok(())
     }
 
+    /// "Requests from Strangers", kept in the storage too (`set_requests_open`): one choice for the account.
+    pub(crate) fn storage_requests_open(&mut self, open: bool) {
+        if self.state.storage.requests_open.value != Some(open) {
+            self.state.storage.requests_open.set(Some(open), crate::wall_ms());
+            self.state.storage_dirty = true;
+        }
+    }
+
     /// A block or unblock, kept in the storage too (`set_blocked`).
     pub(crate) fn storage_block(&mut self, user: &str, blocked: bool) {
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
@@ -559,6 +571,13 @@ impl Client {
         }
         self.apply_keys();
         self.apply_groups();
+        // "Requests from Strangers" as another device of this account set it: the hub is told again (4.10).
+        if let Some(open) = self.state.storage.requests_open.value {
+            if open != self.state.requests_open {
+                self.state.requests_open = open;
+                self.state.access_key_told = false;
+            }
+        }
     }
 
     /// Takes in a version from the hub: merged with this device's, applied.
@@ -609,27 +628,33 @@ impl Client {
         }
     }
 
+    /// A first read or a sibling's StorageChanged hint. The caller saves the merged state.
+    pub(super) fn read_storage(&mut self) -> Result<()> {
+        let response = self.signed("GET", api::STORAGE, &[])?;
+        match response.status {
+            status::OK => {
+                self.take_stored(decode(&response.body)?);
+            }
+            status::GONE => return Err(Error::Replaced),
+            other if crate::retryable(&Error::Refused(other)) => return Err(Error::Refused(other)),
+            _ => {}
+        }
+        // Blocks this device had and the storage has not go up with the first write.
+        let blocked: Vec<String> =
+            self.state.contacts.iter().filter(|(_, c)| c.blocked).map(|(u, _)| u.clone()).collect();
+        for user in blocked {
+            if self.state.storage.friends.get(&user).is_none_or(|f| f.blocked.at == 0) {
+                self.storage_block(&user, true);
+            }
+        }
+        self.state.storage_fetched = true;
+        Ok(())
+    }
+
     /// Brings the storage in line with the hub's: fetched once before anything is received, then written on change.
     pub(crate) fn sync_storage(&mut self) -> Result<()> {
         if !self.state.storage_fetched {
-            let response = self.signed("GET", api::STORAGE, &[])?;
-            match response.status {
-                status::OK => {
-                    self.take_stored(decode(&response.body)?);
-                }
-                status::GONE => return Err(Error::Replaced),
-                other if crate::retryable(&Error::Refused(other)) => return Err(Error::Refused(other)),
-                _ => {}
-            }
-            // Blocks this device had and the storage has not go up with the first write.
-            let blocked: Vec<String> =
-                self.state.contacts.iter().filter(|(_, c)| c.blocked).map(|(u, _)| u.clone()).collect();
-            for user in blocked {
-                if self.state.storage.friends.get(&user).is_none_or(|f| f.blocked.at == 0) {
-                    self.storage_block(&user, true);
-                }
-            }
-            self.state.storage_fetched = true;
+            self.read_storage()?;
             self.persist()?;
         }
         // The groups this device knows, also those the storage does not have yet.
@@ -662,6 +687,7 @@ impl Client {
                     self.state.storage_saved_at = crate::wall_ms();
                     // Under this key now: the one of before opens nothing more.
                     self.state.legacy_storage_key = None;
+                    self.queue_seen(yo_wire::content::SyncMessage::StorageChanged)?;
                     self.persist()?;
                 }
                 // Another writer was first: its version, merged, goes up again.
@@ -743,11 +769,13 @@ mod tests {
         let mut a = Storage::default();
         a.friends.insert("aa".into(), friend("Leo", 5));
         a.left_handed = Field { value: Some(true), at: 4 };
+        a.requests_open = Field { value: Some(false), at: 12 };
         a.icon = Field { value: Some("Negative".into()), at: 9 };
         let mut b = Storage::default();
         b.friends.insert("aa".into(), Friend { blocked: Field { value: true, at: 7 }, ..friend("Leonard", 3) });
         b.friends.insert("bb".into(), friend("Mia", 1));
         b.left_handed = Field { value: Some(false), at: 9 };
+        b.requests_open = Field { value: Some(true), at: 3 };
         b.icon = Field { value: Some("Original".into()), at: 4 };
         let mut ab = a.clone();
         ab.merge(&b);
@@ -758,6 +786,8 @@ mod tests {
         assert_eq!(ab.friends["aa"].name.value.as_deref(), Some("Leo"), "the later name");
         assert!(ab.friends["aa"].blocked.value, "the block from the other side");
         assert_eq!(ab.left_handed.value, Some(false));
+        // "Requests from Strangers": the later choice of any device of the account.
+        assert_eq!(ab.requests_open.value, Some(false));
         assert_eq!(ab.icon.value.as_deref(), Some("Negative"));
     }
 

@@ -92,7 +92,10 @@ impl Client {
         }
         let answer = hub_signed(&self.hub_keys, nonce.as_ref(), api::LOOKUP, &body, &response.body)?;
         let named: api::LookupNamed = decode(answer)?;
-        crate::one_device(&named.found.devices)?;
+        crate::validate_roster(&named.found.devices)?;
+        if handle.kind == yo_wire::handle::KIND_USER && handle.value.as_slice() != named.found.user_id {
+            return Err(Error::Protocol("the hub answered for another user"));
+        }
         Ok((named.found, spelled(named.username)))
     }
 }

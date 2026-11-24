@@ -41,6 +41,8 @@ impl Client {
     pub fn set_requests_open(&mut self, open: bool) -> Result<()> {
         self.state.requests_open = open;
         self.state.access_key_told = false;
+        // One choice for the account: kept in the storage, so its other devices take it too (6.9).
+        self.storage_requests_open(open);
         self.persist()?;
         self.profile_keys()
     }
@@ -82,7 +84,7 @@ impl Client {
             .contacts
             .iter()
             .filter(|(_, c)| {
-                c.profile_due && c.accepted && !c.blocked && !c.unconfirmed && !c.gone && c.device.is_some()
+                c.profile_due && c.accepted && !c.blocked && !c.unconfirmed && !c.gone && !c.devices.is_empty()
             })
             .map(|(user, _)| user.clone())
             .collect();
@@ -121,7 +123,7 @@ impl Client {
     pub fn sessions_with(&self, user: &str) -> Vec<SessionInfo> {
         let Some(contact) = self.state.contacts.get(user) else { return Vec::new() };
         contact
-            .device
+            .devices
             .iter()
             .map(|device| SessionInfo {
                 device: hex(&device.key),

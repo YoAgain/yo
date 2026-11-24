@@ -137,6 +137,7 @@ impl Client {
     }
 
     fn open_chat_inner(&mut self, to: &str) -> Result<u32> {
+        self.refresh_own_roster()?;
         if let Some(fetches) = self.media_fetches(to) {
             return Ok(fetches);
         }
@@ -160,12 +161,16 @@ impl Client {
 
     /// The fetch count once this device can send media to the recipient.
     pub fn media_fetches(&self, to: &str) -> Option<u32> {
+        if self.own_roster_due() {
+            return None;
+        }
         let handle = yo_wire::handle::Handle::parse(to).ok()?;
         self.fetches_for(&self.known_user(&handle)?)
     }
 
     fn fetches_for(&self, user: &str) -> Option<u32> {
-        self.state.contacts.get(user)?.device.map(|_| 1)
+        let devices = &self.state.contacts.get(user)?.devices;
+        (!devices.is_empty()).then(|| (devices.len() + self.state.siblings.len()) as u32)
     }
 }
 

@@ -14,7 +14,7 @@ impl Client {
     /// Makes the envelopes of what waits for `user` where its session is there (local work; the rest at send).
     pub(super) fn encrypt_waiting(&mut self, user: &str) {
         if self.delivering.contains(user)
-            || self.device_of(user).is_none()
+            || self.devices_of(user).is_empty()
             || self.no_session(user)
             || self.blocked(user)
         {
@@ -26,10 +26,11 @@ impl Client {
                 continue;
             }
             let plain = item.plain.clone();
-            if let Ok((payload, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain, false)) {
+            let audience = item.audience.clone();
+            if let Ok((payload, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain, false, &audience)) {
                 let item = &mut self.state.outbox[i];
                 item.payload = Some(payload);
-                item.made_for = Some(made_for);
+                item.made_for = made_for;
                 self.envelopes_unsaved.set(true);
             }
         }
@@ -128,6 +129,15 @@ impl Client {
         if self.prune_outbox() {
             self.persist()?;
         }
+        if self.state.outbox.iter().any(|i| i.user == self.state.user_id) {
+            if !self.state.storage_fetched {
+                self.storage_fetched()?;
+            }
+            if self.state.profile_key.is_none() {
+                self.profile_keys_with(false)?;
+            }
+            self.refresh_certificate()?;
+        }
         let now = (self.clock)();
         let outdated: Vec<String> =
             self.state.contacts.iter().filter(|(_, c)| c.outdated_at > 0).map(|(user, _)| user.clone()).collect();
@@ -139,16 +149,17 @@ impl Client {
             .outbox
             .iter()
             .filter(|item| item.device.is_none() && !self.blocked(&item.user) && !self.delivering.contains(&item.user))
+            .filter(|item| self.roster_unknown(&item.user) || self.missing_session(&item.user, &item.audience))
             .filter(|item| {
                 self.state.contacts.get(&item.user).is_none_or(|c| passed(now, c.outdated_at, OUTDATED_RETRY_MS))
             })
             .map(|item| item.user.clone())
             .collect();
         for user in users {
-            match self.ensure_sessions(&user) {
+            match self.fetch_bundles(&user) {
                 Ok(()) => {}
                 Err(error) if retryable(&error) || error == Error::Unconfirmed => {}
-                Err(error @ (Error::Save(_) | Error::Replaced)) => return Err(error),
+                Err(error @ (Error::Save(_) | Error::Protocol(_) | Error::Replaced)) => return Err(error),
                 Err(Error::NotOnYo) => self.user_gone(&user),
                 Err(error) => self.drop_one(format!("sessions: {error}")),
             }
@@ -189,26 +200,31 @@ impl Client {
                 self.note("a group's message after its member left".into());
                 continue;
             }
-            let current = self.device_of(&user).map(|d| d.key);
-            // A decryption error for a device gone since: of use to nobody either.
-            if self.state.outbox[i].device.is_some_and(|device| current != Some(device)) {
+            let current = self.roster_keys(&user);
+            let item = &self.state.outbox[i];
+            // Never redirect a repair or transcript to a device that joined later.
+            if item.device.is_some_and(|key| !current.contains(&key))
+                || (!item.audience.is_empty() && !item.audience.iter().any(|key| current.contains(key)))
+            {
                 self.state.outbox.remove(i);
                 continue;
             }
             let item = &self.state.outbox[i];
             if item.payload.is_none() || item.made_for != current {
                 // A plaintext (a decryption error) needs no session, only the device.
-                if (item.device.is_none() && self.no_session(&user)) || self.roster_unknown(&user) {
+                if (item.device.is_none() && self.missing_session(&user, &item.audience)) || self.roster_unknown(&user)
+                {
                     waiting.insert(user);
                     i += 1;
                     continue;
                 }
                 let (plain, plaintext) = (item.plain.clone(), item.device.is_some());
-                match self.atomic(|c| c.encrypt_for(&user, &plain, plaintext)) {
+                let audience = item.device.map_or_else(|| item.audience.clone(), |d| vec![d]);
+                match self.atomic(|c| c.encrypt_for(&user, &plain, plaintext, &audience)) {
                     Ok((payload, made_for)) => {
                         let item = &mut self.state.outbox[i];
                         item.payload = Some(payload);
-                        item.made_for = Some(made_for);
+                        item.made_for = made_for;
                         encrypted = true;
                         self.envelopes_unsaved.set(true);
                     }
@@ -226,10 +242,11 @@ impl Client {
             self.persist()?;
         }
         let mut items = Vec::new();
+        let mut preparation_error = None;
         // Sealed while the certificate is in date; else identified and signed at once, and a fresh one fetched after.
         let certificate = self.certificate();
         let own = identity::account_pair(&self.state.account_secret)?;
-        let mut too_large = Vec::new();
+
         let mut first = BTreeSet::new();
         for item in &self.state.outbox {
             let Some(payload) = &item.payload else { continue };
@@ -242,11 +259,24 @@ impl Client {
             if self.request_wait.get(&item.user).is_some_and(|(_, key_refused)| *key_refused || !key_may) {
                 continue;
             }
-            let Some(account_key) = self.state.contacts.get(&item.user).map(|c| c.account_key) else { continue };
+            let sibling = item.user == self.state.user_id;
+            let (account_key, access) = if sibling {
+                if certificate.is_none() || self.state.profile_key.is_none() {
+                    continue;
+                }
+                (self.my_account_key(), self.state.profile_key)
+            } else if let Some(contact) = self.state.contacts.get(&item.user) {
+                (contact.account_key, contact.profile_key)
+            } else {
+                continue;
+            };
             let Ok(user) = user_bytes(&item.user) else { continue };
-            let hash = yo_wire::devices::hash(&account_key, item.made_for.as_slice());
+            let mut roster = item.made_for.clone();
+            if sibling {
+                roster.push(self.state.device_key);
+            }
+            let hash = yo_wire::devices::hash(&account_key, &roster);
             let nonce = self.hub_nonce();
-            let access = self.state.contacts.get(&item.user).and_then(|c| c.profile_key);
             let mut headers = vec![
                 (api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash)),
                 (
@@ -266,8 +296,7 @@ impl Client {
             if let Some(token) = endorsement {
                 headers.push((api::HEADER_GROUP_SEND.to_owned(), token));
             }
-            // Identified for want of a certificate, or as a request (spec 4.10). A payload too large to seal is
-            // dropped.
+            // Identified for want of a certificate, or as a request (spec 4.10).
             let envelope = match (&certificate, access.is_some() || endorsed) {
                 (Some(certificate), true) => {
                     sealed::seal(certificate, &own, &signal::identity_of(&account_key)?, payload)
@@ -275,9 +304,10 @@ impl Client {
                 _ => yo_wire::envelope::pad(payload, &yo_wire::envelope::BUCKETS).map_err(Error::from),
             };
             let envelope = match envelope {
-                Ok(envelope) => envelope,
-                Err(_) => {
-                    too_large.push(item.seq);
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    waiting.insert(item.user.clone());
+                    preparation_error = Some(error);
                     continue;
                 }
             };
@@ -296,18 +326,12 @@ impl Client {
         if items.iter().any(|d| !d.sealed && d.access.is_some()) {
             self.note("sent identified: no sender certificate in date".into());
         }
-        if !too_large.is_empty() {
-            self.state.outbox.retain(|item| !too_large.contains(&item.seq));
-            for _ in &too_large {
-                self.drop_one("too large for an envelope".into());
-            }
-        }
         for delivery in items.iter_mut().filter(|d| !d.sealed) {
             let (signed, _) = self.sign("POST", &delivery.path, &delivery.envelope);
             delivery.headers.extend(signed);
         }
         self.delivering.extend(items.iter().map(|d| d.user.clone()));
-        Ok(Deliveries { transport: self.transport.clone(), items, to: None })
+        Ok(Deliveries { transport: self.transport.clone(), items, preparation_error, to: None })
     }
 
     /// Takes the hub's answers: what it took leaves the outbox, what it refused for good is dropped, the rest waits.
@@ -317,7 +341,7 @@ impl Client {
         let mut gone = BTreeSet::new();
         let mut recover = BTreeSet::new();
         let mut changed = false;
-        let mut result = Ok(());
+        let mut result = deliveries.preparation_error.clone().map_or(Ok(()), Err);
         for (item, answer) in deliveries.items.iter().zip(answers) {
             self.delivering.remove(&item.user);
             // Signed with a time the hub's window missed: its clock kept, the envelope goes again, signed anew.
@@ -333,6 +357,7 @@ impl Client {
             match answer {
                 Some(Ok(response)) if response.status == status::ACCEPTED => {
                     done.insert(item.seq);
+                    changed |= self.release_sent_copy(item.seq)?;
                     if item.endorsed {
                         self.endorsed_sent += 1;
                     }
@@ -341,7 +366,7 @@ impl Client {
                     let answer =
                         hub_signed(&self.hub_keys, item.nonce.as_ref(), &item.path, &item.envelope, &response.body);
                     let roster = answer.and_then(|answer| Ok(decode::<api::Devices>(answer)?));
-                    match roster.and_then(|devices| crate::one_device(&devices.devices).map(|()| devices)) {
+                    match roster.and_then(|devices| crate::validate_roster(&devices.devices).map(|()| devices)) {
                         Ok(devices) => match self
                             .read_before_roster(&item.user, &devices.devices)
                             .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices, None))
@@ -352,7 +377,7 @@ impl Client {
                             Err(error) => result = Err(error),
                         },
                         // The hub did not take it: kept, and tried again like any "not now".
-                        Err(_) => self.note("hub answered 409 without a roster of one device".into()),
+                        Err(_) => self.note("hub answered 409 without a readable roster".into()),
                     }
                 }
                 Some(Ok(response)) if response.status == status::NOT_FOUND => {
@@ -365,6 +390,10 @@ impl Client {
                     if response.status == status::FORBIDDEN
                         || (response.status == status::UNAUTHORIZED && item.access.is_some()) =>
                 {
+                    if item.user == self.state.user_id {
+                        self.state.storage_fetched = false;
+                        continue;
+                    }
                     // A contact's key that changed: forgotten, the new one may wait in the inbox; it goes again after
                     // the next receive. Only a request's `403` drops it: a forgotten key never loses a message.
                     if let Some(contact) =

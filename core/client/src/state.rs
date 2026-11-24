@@ -98,7 +98,25 @@ impl<'de> Deserialize<'de> for SentCache {
     }
 }
 
-/// A user's one device: its key and its number from the hub, the session's address (spec 4.1).
+/// Read both the current list and the optional single value saved by earlier installs.
+fn roster_list<'de, D, T>(d: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored<T> {
+        List(Vec<T>),
+        Single(Option<T>),
+    }
+    Ok(match Stored::deserialize(d)? {
+        Stored::List(list) => list,
+        Stored::Single(one) => one.into_iter().collect(),
+    })
+}
+
+/// A user's device: its key and its number from the hub, the session's address (spec 4.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slot {
     pub key: Key,
@@ -123,13 +141,17 @@ pub struct Contact {
     /// The hub no longer knows the user; its handles are forgotten, so its old name finds the new owner.
     pub gone: bool,
     /// The user's device as the hub named it last (spec 4.4).
-    pub device: Option<Slot>,
+    #[serde(default, alias = "device", deserialize_with = "roster_list")]
+    pub devices: Vec<Slot>,
     /// Something was sent to the user or came from them: a chat the app shows.
     pub chat: bool,
     /// The own name is still to be told to the user.
     pub profile_due: bool,
     /// The last plaintexts sent, resent when a `DecryptionErrorMessage` names their time (spec 4.6).
     pub sent: SentCache,
+    /// Which devices the cached content was encrypted for, by its original timestamp.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sent_devices: BTreeMap<u64, Vec<Key>>,
     /// Something came from the user since the last receipt (spec 4.5).
     pub receipt_due: bool,
     /// `DecryptionErrorMessage`s due to its device (spec 4.6).
@@ -187,7 +209,14 @@ pub struct Outgoing {
     /// Its encrypted payload and the device it was made for: made again if that changed (spec 6.1).
     #[serde(default, with = "compact::optional")]
     pub payload: Option<Vec<u8>>,
-    pub made_for: Option<Key>,
+    #[serde(default, deserialize_with = "roster_list")]
+    pub made_for: Vec<Key>,
+    /// Only these keys get a copy (targeted repair or a sibling delivery).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audience: Vec<Key>,
+    /// Siblings known when a shown message was queued. Released on the first accepted leg.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sent_to_siblings: Vec<Key>,
     /// Refused (`403`) with the recipient's key: their new key may wait in the inbox, so it goes again after the
     /// next receive (spec 4.10).
     pub refused: bool,
@@ -248,6 +277,18 @@ pub struct State {
     pub registration_id: u32,
     pub name: Option<String>,
     pub contacts: BTreeMap<String, Contact>,
+    #[serde(default)]
+    pub siblings: Vec<Slot>,
+    #[serde(default)]
+    pub own_roster_at: u64,
+    /// Latest outgoing Yo from a sibling and read watermark, keyed by direct or group thread id.
+    #[serde(default)]
+    pub sibling_sent_at: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub seen_through: BTreeMap<String, u64>,
+    /// Threads a sibling showed, not yet handed to the app (`take_seen`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seen_due: BTreeMap<String, u64>,
     pub outbox: VecDeque<Outgoing>,
     pub next_seq: u64,
     /// Events not yet handed to the app: saved, so a crash after the hub's ack loses nothing.

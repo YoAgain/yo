@@ -32,6 +32,53 @@ pub const TYPE_PROFILE_KEY: u16 = 10;
 /// Silent roundtrip request / response, carrying a random 32-byte token.
 pub const TYPE_PROBE: u16 = 11;
 pub const TYPE_PROBE_REPLY: u16 = 12;
+pub const TYPE_SYNC: u16 = 13;
+
+/// A read watermark names exactly one direct or group thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Read {
+    pub user: Option<crate::UserId>,
+    pub group: Option<[u8; 32]>,
+    pub through_sent_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Type 13 (spec 5): what one device of an account tells its other devices, Signal's `SyncMessage`. Own devices
+/// only; unknown kinds are skipped, later own-device syncs come as new kinds.
+pub enum SyncMessage {
+    Read(Read),
+    StorageChanged,
+    Unknown(u8),
+}
+
+impl SyncMessage {
+    fn body(&self) -> Result<Vec<u8>, Error> {
+        match self {
+            Self::Read(read) if read.user.is_some() != read.group.is_some() => {
+                let mut bytes = vec![0];
+                bytes.extend(crate::encode(read));
+                Ok(bytes)
+            }
+            Self::StorageChanged => Ok(vec![1]),
+            _ => Err(Error::Format),
+        }
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        match bytes.split_first() {
+            Some((0, body)) => {
+                let read: Read = crate::decode(body)?;
+                if read.user.is_some() == read.group.is_some() {
+                    return Err(Error::Format);
+                }
+                Ok(Self::Read(read))
+            }
+            Some((1, [])) => Ok(Self::StorageChanged),
+            Some((1, _)) | None => Err(Error::Format),
+            Some((&kind, _)) => Ok(Self::Unknown(kind)),
+        }
+    }
+}
 
 /// A group's master key (Signal's `GroupMasterKey`, zkgroup): 32 random bytes its creator chooses; its members hold it,
 /// the hub never does. The group's id at the hub (its `GroupIdentifier`) is derived from it.
@@ -104,6 +151,7 @@ pub enum Content {
     ProfileKey([u8; 32]),
     Probe([u8; 32]),
     ProbeReply([u8; 32]),
+    Sync(SyncMessage),
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -252,6 +300,7 @@ impl Message {
             Content::Profile { name } => (TYPE_PROFILE, text(name, MAX_NAME_LEN)?),
             Content::Probe(token) => (TYPE_PROBE, token.to_vec()),
             Content::ProbeReply(token) => (TYPE_PROBE_REPLY, token.to_vec()),
+            Content::Sync(seen) => (TYPE_SYNC, seen.body()?),
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
             Content::Group(tag) => (TYPE_GROUP, crate::encode(tag)),
             Content::ProfileKey(key) => (TYPE_PROFILE_KEY, crate::encode(&ProfileKeyBody { key: *key })),
@@ -292,6 +341,7 @@ impl Message {
                 content
             }
             TYPE_PROFILE => Content::Profile { name: read_text(body, MAX_NAME_LEN)? },
+            TYPE_SYNC => Content::Sync(SyncMessage::decode(body)?),
             TYPE_RECEIPT if !body.is_empty() => return Err(Error::Format),
             TYPE_RECEIPT => Content::Receipt,
             TYPE_PROBE => Content::Probe(body.try_into().map_err(|_| Error::Format)?),
@@ -418,5 +468,25 @@ mod tests {
         fn never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..300)) {
             let _ = Message::decode(&bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod seen_tests {
+    use super::*;
+
+    #[test]
+    fn seen_bodies_are_exact_and_unknown_kinds_are_skipped() {
+        for seen in [
+            SyncMessage::Read(Read { user: Some([3; 16]), group: None, through_sent_at: 10 }),
+            SyncMessage::Read(Read { user: None, group: Some([4; 32]), through_sent_at: 11 }),
+            SyncMessage::StorageChanged,
+        ] {
+            let message = Message { sent_at_ms: 1, group: None, content: Content::Sync(seen) };
+            assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
+        }
+        assert_eq!(SyncMessage::decode(&[1, 0]), Err(Error::Format));
+        assert_eq!(SyncMessage::decode(&[42, 1, 2]), Ok(SyncMessage::Unknown(42)));
+        assert_eq!(SyncMessage::decode(&[0; 11]), Err(Error::Format));
     }
 }

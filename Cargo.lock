@@ -4056,6 +4056,7 @@ dependencies = [
 name = "yo-tests"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64",
  "getrandom 0.4.3",
  "libc",
@@ -4066,6 +4067,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tower",
  "yo-bindings",
  "yo-core",
  "yo-hub",

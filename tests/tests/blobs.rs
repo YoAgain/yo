@@ -167,11 +167,11 @@ fn an_upload_must_be_signed_whole_and_once() {
     let (media, sealed) = media::seal(&noise(5000), 10, 10).unwrap();
     let path = api::blob_put_path(&media.id, 1);
     let hash = vec![(api::HEADER_BODY_HASH.to_string(), yo_wire::b64(&media.sha256))];
-    // Checked before anything else: a length (`411` without, sent chunked), a tag at least (`400`), fetches 1 to 64
+    // Checked before anything else: a length (`411` without, sent chunked), a tag at least (`400`), fetches 1 to 320
     // (a group's members), then the signature (`401` unsigned).
     assert_eq!(refused_by_head(&hub, &path, &hash, None), 411);
     assert_eq!(refused_by_head(&hub, &path, &hash, Some(15)), 400);
-    for (n, refused) in [(0, 400), (65, 400), (64, 401)] {
+    for (n, refused) in [(0, 400), (321, 400), (320, 401)] {
         assert_eq!(refused_by_head(&hub, &api::blob_put_path(&media.id, n), &hash, Some(sealed.len())), refused);
     }
     // A body that is not the signed one: refused, nothing kept.

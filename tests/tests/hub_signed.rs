@@ -24,7 +24,10 @@ struct Between {
 impl Transport for Between {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         let mut response = self.http.request(method, path, headers, body)?;
-        if path != yo_wire::api::LOOKUP || response.status != 200 {
+        if path != yo_wire::api::LOOKUP
+            || response.status != 200
+            || !headers.iter().any(|(name, _)| name == yo_wire::hubsig::NONCE_HEADER)
+        {
             return Ok(response);
         }
         match self.tamper {
@@ -97,19 +100,19 @@ fn an_old_answer_played_back_is_not_taken() {
 }
 
 /// A hub that names a second device first: in each lookup, and once as a delivery's `409`.
-struct TwoDevices {
+struct DuplicateNumber {
     http: Arc<Http>,
     account_key: Mutex<Option<[u8; 32]>>,
     conflict: std::sync::atomic::AtomicBool,
 }
 
-impl Transport for TwoDevices {
+impl Transport for DuplicateNumber {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         use yo_wire::api;
         let Some(account_key) = *self.account_key.lock().unwrap() else {
             return self.http.request(method, path, headers, body);
         };
-        let other = api::Device { key: [9; 32], id: 2 };
+        let other = api::Device { key: [9; 32], id: 1 };
         let delivery = method != "GET" && path.starts_with(api::INBOX) && path != api::INBOX_ACK;
         if delivery && !self.conflict.swap(true, std::sync::atomic::Ordering::Relaxed) {
             // The first delivery is not taken: a `409` naming two devices.
@@ -126,12 +129,12 @@ impl Transport for TwoDevices {
     }
 }
 
-/// Spec 4.4: one device per account. A roster naming more (a hub's mistake, or its own device put first) is refused
+/// Spec 4.4: a roster naming two keys at the same number is refused
 /// before anything is pinned or changed: the session with the known device goes on.
 #[test]
-fn a_roster_of_two_devices_changes_nothing() {
+fn duplicate_device_numbers_change_nothing() {
     let hub = TestHub::start();
-    let transport = Arc::new(TwoDevices {
+    let transport = Arc::new(DuplicateNumber {
         http: Http::new(hub.url()),
         account_key: Mutex::new(None),
         conflict: Default::default(),

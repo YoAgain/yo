@@ -231,7 +231,7 @@ impl Client {
     /// with every member, the Yo is queued and saved and the deliveries are handed out. `None`, with nothing changed:
     /// `send_group` instead.
     pub fn send_group_begin(&mut self, id: &str, content: Content) -> Option<crate::Deliveries> {
-        if self.replaced.get() {
+        if self.own_roster_due() || self.replaced.get() {
             return None;
         }
         if !shown(&content) || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
@@ -246,7 +246,7 @@ impl Client {
         for member in group.members.iter().filter(|m| **m != me) {
             match self.state.contacts.get(member) {
                 Some(contact) if contact.gone => continue,
-                Some(contact) if contact.device.is_some() && !self.no_session(member) => {}
+                Some(contact) if !contact.devices.is_empty() && !self.no_session(member) => {}
                 // A session to start first (`reach_all`, which asks the hub): `send_group`.
                 _ => return None,
             }
@@ -265,15 +265,22 @@ impl Client {
         Some(self.deliveries().unwrap_or_else(|_| self.no_deliveries()))
     }
 
-    /// Fetches a group photo or video is uploaded for: one per other member (`MAX_BLOB_FETCHES` at most).
+    /// Fetches a group photo or video is uploaded for: one per intended device (`MAX_BLOB_FETCHES` at most).
     pub fn group_media_fetches(&self, id: &str) -> Option<u32> {
         let group = self.state.groups.get(id).filter(|g| !g.left && g.revision > 0)?;
-        let members = group.members.iter().filter(|m| **m != self.state.user_id).count();
-        Some((members as u32).clamp(1, MAX_BLOB_FETCHES))
+        let others: usize = group
+            .members
+            .iter()
+            .filter(|m| **m != self.state.user_id)
+            .filter(|m| !self.state.contacts.get(*m).is_some_and(|c| c.gone))
+            .map(|m| self.devices_of(m).len().max(1))
+            .sum();
+        Some(((others + self.state.siblings.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
     }
 
     /// Opens the sessions a group's photo or video needs and says for how many fetches to upload it.
     pub fn open_group(&mut self, id: &str) -> Result<(u32, Vec<Event>)> {
+        self.refresh_own_roster()?;
         let result = self.group(id).and_then(|g| {
             self.not_empty(&g)?;
             self.reach_all(&g.members)?;
@@ -299,6 +306,7 @@ impl Client {
     }
 
     fn send_group_inner(&mut self, id: &str, content: Content) -> Result<()> {
+        self.refresh_own_roster()?;
         if self.replaced.get() {
             return Err(Error::Replaced);
         }
@@ -915,10 +923,8 @@ impl Client {
         if users.is_empty() {
             return Ok(());
         }
-        // Strictly increasing, as signing times (spec 6.2): a floor far ahead of this clock (set back) is dropped.
-        let (wall, floor) = (self.wall(), self.state.last_sent_ms);
-        let sent_at_ms = if floor >= wall + crate::SIGN_AHEAD_MS { wall } else { wall.max(floor + 1) };
-        self.state.last_sent_ms = sent_at_ms;
+        let sent_at_ms = self.next_sent_at();
+        let transcript = matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. });
         let keep = shown(&content);
         // A Yo to accepted contacts or joined members carries the profile key (spec 4.10); never to a request.
         let accepted = users.iter().all(|user| {
@@ -928,11 +934,20 @@ impl Client {
         let message = yo_wire::content::Message { sent_at_ms, group, content }.encode_with_key(key)?;
         for user in &users {
             self.enqueue(user, encode(&yo_wire::envelope::Plain { to: None, content: message.clone().into() }));
+            if transcript && !self.state.siblings.is_empty() {
+                let siblings = self.roster_keys(&self.state.user_id);
+                self.state.outbox.back_mut().expect("enqueued").sent_to_siblings = siblings;
+            }
             if keep {
                 if let Some(contact) = self.state.contacts.get_mut(user) {
                     contact.sent.push_back(message.clone());
+                    contact.sent_devices.insert(sent_at_ms, Vec::new());
                     while contact.sent.len() > crate::KEPT_FOR_RESEND {
-                        contact.sent.pop_front();
+                        if let Some(old) =
+                            contact.sent.pop_front().and_then(|m| yo_wire::content::Message::decode(&m).ok())
+                        {
+                            contact.sent_devices.remove(&old.sent_at_ms);
+                        }
                     }
                 }
             }

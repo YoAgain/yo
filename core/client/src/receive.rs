@@ -153,7 +153,9 @@ impl Client {
     /// Whether a sender's next payloads are parked behind one of theirs: its message opened, or no contact here has
     /// the key it names (its first message waits for a lookup, and so do the ones after it).
     fn parks_by(&self, account_key: &Key, verified: bool) -> bool {
-        verified || !self.state.contacts.values().any(|c| c.account_key == *account_key && !c.gone)
+        verified
+            || (*account_key != self.my_account_key()
+                && !self.state.contacts.values().any(|c| c.account_key == *account_key && !c.gone))
     }
 
     /// Parks a payload for a later sync (`State::deferred`); past `DEFERRED` the oldest parked one is dropped, so
@@ -279,7 +281,7 @@ impl Client {
         match self.lookup(&Handle::account_key(&account_key), 0, Vec::new()) {
             Ok((found, username)) if found.account_key == account_key => {
                 let user = hex(&found.user_id);
-                Ok(Some((user, Some(Unpinned { account_key, username }))))
+                Ok(Some((user, Some(Unpinned { account_key, username, roster: found.devices }))))
             }
             Ok(_) | Err(Error::NotOnYo) => Ok(None),
             Err(error) => Err(error),
@@ -376,14 +378,12 @@ impl Client {
             self.drop_one("a sender certificate for another user".into());
             return Ok(());
         }
-        if user == self.state.user_id {
-            return Ok(());
-        }
+
         // Another device of the user under this number: one was replaced, and only the hub knows which (a replaced
         // device can still deliver). Nothing the payload claims is taken in before its message opens: anyone can seal
         // one. So it is opened first (and undone): only a message of that account's asks the hub, or waits for it; one
         // that does not open is no one's to ask about, and goes the way of any that does not (a decryption error).
-        let other = self.device_of(&user).is_some_and(|d| d.slot == payload.device_id && d.key != payload.device_key);
+        let other = unpinned.is_none() && !self.knows_device(&user, &payload.device_key, payload.device_id);
         let address = self.address(&user, payload.device_id)?;
         let bytes = copy.message.as_slice();
         if other && copy.kind != KIND_PLAINTEXT && self.opens(&address, &payload.account_key, copy.kind, bytes) {
@@ -418,7 +418,14 @@ impl Client {
                 return Ok(());
             }
             self.remember(bytes);
-            return self.decryption_error(&user, &address, bytes);
+            return self.decryption_error(&user, payload.device_key, &address, bytes);
+        }
+        if unpinned
+            .as_ref()
+            .is_some_and(|u| !u.roster.iter().any(|d| d.key == payload.device_key && d.id == payload.device_id))
+        {
+            self.drop_one("a message from a replaced device: not on the hub's roster".into());
+            return Ok(());
         }
         let message = session_message(copy.kind, bytes)?;
         let decrypted = self.decrypt(&address, &payload.account_key, &message)?;
@@ -450,10 +457,14 @@ impl Client {
                     Timestamp::from_epoch_millis(payload.sent_at),
                     payload.device_id.into(),
                 );
-                if let (true, Ok(made), Some(contact)) = (rostered, made, self.state.contacts.get_mut(&user)) {
-                    if contact.decryption_errors.len() < KEPT_FOR_RESEND {
-                        let content = PlaintextContent::from(made).serialized().to_vec();
-                        contact.decryption_errors.push(DecryptionError { device: payload.device_key, content });
+                if let (true, Ok(made)) = (rostered, made) {
+                    let content = PlaintextContent::from(made).serialized().to_vec();
+                    if user == self.state.user_id {
+                        self.enqueue_plaintext(&user, payload.device_key, content);
+                    } else if let Some(contact) = self.state.contacts.get_mut(&user) {
+                        if contact.decryption_errors.len() < KEPT_FOR_RESEND {
+                            contact.decryption_errors.push(DecryptionError { device: payload.device_key, content });
+                        }
                     }
                 }
                 self.drop_one(format!("session: {error}"));
@@ -464,32 +475,35 @@ impl Client {
         // is a replaced device's, and dropped (4.6).
         *verified = true;
         self.remember(copy.message.as_slice());
-        if let Some(Unpinned { account_key, username }) = unpinned {
-            self.pin(&user, account_key, username);
+        if let Some(Unpinned { account_key, username, roster }) = unpinned {
+            self.take_devices(&user, account_key, &roster, username)?;
         }
-        if !self.knows_device(&user, &payload.device_key, payload.device_id)
-            && !self.hub_lists(&user, &payload, None)?
-        {
-            self.drop_one("a message from a replaced device".into());
-            return Ok(());
-        }
-        self.note_device(&user, payload.device_key, payload.device_id)?;
         self.note_updated(&user);
         let plain: Plain = decode(&plaintext)?;
         let message = Message::decode(plain.content.as_slice())?;
+        if user == self.state.user_id {
+            if self.first_time(&user, &payload.device_key, &plaintext) {
+                self.receive_sibling(plain, message)?;
+            }
+            return Ok(());
+        }
         if plain.to.is_some() {
             return Err(Error::Protocol("a copy for another"));
+        }
+        if matches!(message.content, Content::Sync(_)) {
+            return Ok(());
         }
         if certified.is_none() && !self.probe_service(&user) {
             self.identified_from(&user)?;
         }
-        self.received(&user, plain.content.as_slice(), message)
+        self.received(&user, &payload.device_key, plain.content.as_slice(), message)
     }
 
     /// Whether this plaintext from `user` comes for the first time (the last `SEEN` kept), noting it.
-    pub(super) fn first_time(&mut self, user: &str, plaintext: &[u8]) -> bool {
-        let id = sha256(&[user.as_bytes(), plaintext].concat());
-        if self.state.received.contains(&id) {
+    pub(super) fn first_time(&mut self, user: &str, device: &Key, plaintext: &[u8]) -> bool {
+        let id = sha256(&[user.as_bytes(), device, plaintext].concat());
+        let legacy = sha256(&[user.as_bytes(), plaintext].concat());
+        if self.state.received.contains(&id) || self.state.received.contains(&legacy) {
             return false;
         }
         self.state.received.push_back(id);
@@ -554,9 +568,9 @@ impl Client {
     }
 
     /// A message from a contact.
-    pub(super) fn received(&mut self, user: &str, plaintext: &[u8], message: Message) -> Result<()> {
+    pub(super) fn received(&mut self, user: &str, device: &Key, plaintext: &[u8], message: Message) -> Result<()> {
         if let Content::Probe(token) | Content::ProbeReply(token) = message.content {
-            if self.first_time(user, plaintext) && message.group.is_none() {
+            if self.first_time(user, device, plaintext) && message.group.is_none() {
                 if matches!(message.content, Content::Probe(_)) {
                     if self.probe_requests.len() < 256 {
                         self.probe_requests.push((user.to_owned(), token));
@@ -580,7 +594,7 @@ impl Client {
             if let Content::ProfileKey(key) = &message.content {
                 self.adopt_key(user, *key);
             }
-            self.first_time(user, plaintext);
+            self.first_time(user, device, plaintext);
             return Ok(());
         }
         // The carried key is kept even from a blocked user: after an unblock theirs is a contact's again (spec 4.10).
@@ -612,7 +626,7 @@ impl Client {
             }
         }
         // A copy resent for a decryption error and seen already (4.6): messages differ at least in their time.
-        if !self.first_time(user, plaintext) {
+        if !self.first_time(user, device, plaintext) {
             return Ok(());
         }
         // Everything but a receipt gets a receipt so the ratchet moves on (spec 4.5); not a request yet (4.10).
@@ -663,7 +677,13 @@ impl Client {
     /// it still sends with the named ratchet key, and the message sent at the named time goes again if kept (else a
     /// receipt starts the new session). A forger (not the session's peer) gets at most a message the contact has
     /// already.
-    pub(super) fn decryption_error(&mut self, user: &str, address: &ProtocolAddress, bytes: &[u8]) -> Result<()> {
+    pub(super) fn decryption_error(
+        &mut self,
+        user: &str,
+        device: Key,
+        address: &ProtocolAddress,
+        bytes: &[u8],
+    ) -> Result<()> {
         let Some(error) = PlaintextContent::try_from(bytes)
             .ok()
             .and_then(|content| extract_decryption_error_message_from_serialized_content(content.body()).ok())
@@ -678,7 +698,13 @@ impl Client {
         let archived = error.ratchet_key().is_some_and(|key| self.records.archive_if_current(address, key));
         let sent_at = error.timestamp().epoch_millis();
         let Some(contact) = self.state.contacts.get(user) else { return Ok(()) };
-        let kept = contact.sent.iter().find(|m| Message::decode(m).is_ok_and(|m| m.sent_at_ms == sent_at)).cloned();
+        let intended = contact.sent_devices.get(&sent_at).is_none_or(|keys| keys.contains(&device));
+        let kept = contact
+            .sent
+            .iter()
+            .filter(|_| intended)
+            .find(|m| Message::decode(m).is_ok_and(|m| m.sent_at_ms == sent_at))
+            .cloned();
         match kept {
             Some(message) => {
                 // A group's message only while both are still in it (left, or the user removed: not again).
@@ -686,6 +712,7 @@ impl Client {
                 let in_group = self.both_in(tag.as_ref(), user);
                 if in_group {
                     self.enqueue_with_urgency(user, encode(&Plain { to: None, content: message.into() }), true);
+                    self.state.outbox.back_mut().expect("enqueued").audience = vec![device];
                 }
             }
             None if archived => {
@@ -710,7 +737,7 @@ impl Client {
                 // heals.
                 let answers = c.accepted || !c.chat || self.in_joined_group(user);
                 let errors = if answers { c.decryption_errors.clone() } else { Vec::new() };
-                (user.clone(), c.receipt_due && c.device.is_some(), errors)
+                (user.clone(), c.receipt_due && !c.devices.is_empty(), errors)
             })
             .filter(|(_, receipt, errors)| *receipt || !errors.is_empty())
             .collect();

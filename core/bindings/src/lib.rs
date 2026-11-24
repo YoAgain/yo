@@ -95,6 +95,15 @@ pub struct SupportMessage {
     pub read_at: u64,
 }
 
+/// A thread another device of this account showed (`take_seen`): its notifications go here too.
+#[derive(uniffi::Record)]
+pub struct SeenThread {
+    /// User id (32 hex digits) or group id (64 hex digits).
+    pub thread: String,
+    /// Shown through this time (ms since 1970).
+    pub through_ms: u64,
+}
+
 #[derive(uniffi::Record)]
 pub struct SupportThread {
     pub messages: Vec<SupportMessage>,
@@ -386,6 +395,7 @@ impl From<Content> for MessageKind {
             | Content::Group(_)
             | Content::ProfileKey(_)
             | Content::Probe(_)
+            | Content::Sync(_)
             | Content::ProbeReply(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
@@ -1180,6 +1190,18 @@ impl YoClient {
     /// Blocks (or unblocks) a user by user id or handle: nothing from them is shown, nothing is sent to them.
     pub fn set_blocked(&self, who: String, blocked: bool) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_blocked(&who, blocked))??)
+    }
+
+    /// Shares a direct or group thread's read watermark with this account's other devices.
+    pub fn mark_seen(&self, user_or_group: String, through_sent_at_ms: u64) -> Result<(), YoError> {
+        Ok(self.with(|c| c.mark_seen(&user_or_group, through_sent_at_ms))??)
+    }
+
+    /// Threads (user or group id, hex) another device of this account showed, with the time through (ms): their
+    /// notifications go here too. Each is handed out once.
+    pub fn take_seen(&self) -> Result<Vec<SeenThread>, YoError> {
+        let due = self.with(|c| c.take_seen())??;
+        Ok(due.into_iter().map(|(thread, through_ms)| SeenThread { thread, through_ms }).collect())
     }
 
     /// Says yes to a request (spec 4.10).
