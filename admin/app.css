@@ -1490,3 +1490,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
   .diag-item > button { grid-column: 2; grid-row: 1; }
   .diag-stats { grid-column: 1 / -1; grid-row: 2; margin-left: 16px; }
 }
+
+.diag-head { margin: 14px 0 6px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.diag-still-note { color: #e67e22; }
+.diag-recent { color: #e67e22; font-weight: 700; }

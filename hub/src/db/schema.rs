@@ -1,7 +1,7 @@
 //! The store's schema (`SCHEMA`, schema 9) and the way every older database a hub has written comes up to it.
 //! A database of another schema is refused, never half migrated.
 
-use super::{diagnostic_write, immediate, legacy_crash};
+use super::{diagnostic_signature, diagnostic_write, immediate, legacy_crash, newest_builds};
 use rusqlite::{params, Connection};
 use yo_wire::KEY_LEN;
 
@@ -49,12 +49,14 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
         0
     };
     conn.execute_batch(DIAGNOSTIC_DAYS)?;
+    conn.execute_batch(DIAGNOSTIC_BUILDS)?;
     migrate_diagnostics(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
     conn.execute_batch(DIAGNOSTIC_INSTALLS)?;
     if !has_column(conn, "diagnostic_installs", "at")? {
         conn.execute_batch("ALTER TABLE diagnostic_installs ADD COLUMN at INTEGER")?;
     }
+    problems_without_builds(conn)?;
     with_support(conn, legacy_max)?;
     with_support_done(conn)?;
     with_todos(conn)?;
@@ -308,9 +310,18 @@ CREATE TABLE IF NOT EXISTS diagnostics (
  signature TEXT NOT NULL UNIQUE, count INTEGER NOT NULL DEFAULT 1,
  first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
  app TEXT NOT NULL, os TEXT NOT NULL, model TEXT NOT NULL,
- payload TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0
+ payload TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0,
+ done_builds TEXT, done_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
+
+// A problem's builds (its reports per build, the last when) and its reports per hour (kept 8 days), spec 6.4.
+pub(super) const DIAGNOSTIC_BUILDS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_builds (
+    diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, app TEXT NOT NULL,
+    count INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, app)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS diagnostic_hours (
+    diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, hour INTEGER NOT NULL,
+    count INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, hour)) WITHOUT ROWID;";
 
 // Which install sent a crash or error group on which day (days since the epoch, UTC), so the operator counts
 // installs, not reports (`at` the last report of that day, to the hour; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 6.4).
@@ -446,6 +457,69 @@ pub(super) fn migrate_diagnostics(conn: &mut Connection) -> rusqlite::Result<()>
             diagnostic_write(tx, "crash", &legacy_crash(&text, &app), at)?;
         }
         tx.execute_batch("DELETE FROM feedback WHERE type='crash' OR auto=1; PRAGMA user_version = 4")
+    })
+}
+
+/// A problem's identity lost its build (2026-11-24, spec 6.4): the groups of one problem in several builds become
+/// one, their counts per build in `diagnostic_builds`, its installs and uuids with it; open if any was open, else done
+/// in the newest build per platform it had. Nothing to do where `done_builds` is there.
+fn problems_without_builds(conn: &mut Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "diagnostics", "done_builds")? {
+        return Ok(());
+    }
+    immediate(conn, |tx| {
+        tx.execute_batch(
+            "ALTER TABLE diagnostics ADD COLUMN done_builds TEXT; ALTER TABLE diagnostics ADD COLUMN done_at INTEGER;
+             INSERT OR IGNORE INTO diagnostic_builds(diagnostic_id, app, count, last_seen)
+                 SELECT id, app, count, last_seen FROM diagnostics;",
+        )?;
+        let rows: Vec<(i64, String, String)> = tx
+            .prepare("SELECT id, kind, payload FROM diagnostics ORDER BY last_seen DESC, id DESC")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut keeper: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (id, kind, payload) in &rows {
+            let payload: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+            let signature = diagnostic_signature(kind, &payload);
+            let Some(&into) = keeper.get(&signature) else {
+                keeper.insert(signature, *id);
+                continue;
+            };
+            // The newest group stays (its latest payload); this older one goes into it.
+            tx.execute(
+                "UPDATE diagnostics SET count = count + (SELECT count FROM diagnostics WHERE id = ?2),
+                     first_seen = min(first_seen, (SELECT first_seen FROM diagnostics WHERE id = ?2)),
+                     done = min(done, (SELECT done FROM diagnostics WHERE id = ?2)) WHERE id = ?1",
+                params![into, id],
+            )?;
+            tx.execute(
+                "INSERT INTO diagnostic_builds(diagnostic_id, app, count, last_seen)
+                     SELECT ?1, app, count, last_seen FROM diagnostic_builds WHERE diagnostic_id = ?2 AND true
+                 ON CONFLICT(diagnostic_id, app) DO UPDATE SET count = count + excluded.count,
+                     last_seen = max(last_seen, excluded.last_seen)",
+                params![into, id],
+            )?;
+            tx.execute(
+                "INSERT INTO diagnostic_installs(diagnostic_id, install, day, at)
+                     SELECT ?1, install, day, at FROM diagnostic_installs WHERE diagnostic_id = ?2 AND true
+                 ON CONFLICT(diagnostic_id, install, day) DO UPDATE SET at = coalesce(max(at, excluded.at), at, excluded.at)",
+                params![into, id],
+            )?;
+            tx.execute("UPDATE diagnostic_seen SET diagnostic_id = ?1 WHERE diagnostic_id = ?2", params![into, id])?;
+            tx.execute("DELETE FROM diagnostics WHERE id = ?1", [id])?;
+        }
+        for (signature, id) in keeper {
+            let apps: Vec<String> = tx
+                .prepare("SELECT app FROM diagnostic_builds WHERE diagnostic_id = ?1")?
+                .query_map([id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            tx.execute(
+                "UPDATE diagnostics SET signature = ?2, done_builds = CASE WHEN done = 1 THEN ?3 END,
+                     done_at = CASE WHEN done = 1 THEN last_seen END WHERE id = ?1",
+                params![id, signature, newest_builds(apps.iter().map(String::as_str))],
+            )?;
+        }
+        Ok(())
     })
 }
 

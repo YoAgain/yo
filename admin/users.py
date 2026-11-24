@@ -347,7 +347,19 @@ def diagnostics(db):
                 if has_table(db, "diagnostic_installs") else "NULL")
     cursor = db.execute(f"SELECT d.*, {installs} AS installs FROM diagnostics d ORDER BY last_seen DESC")
     columns = [c[0] for c in cursor.description]
-    return with_causes(db, [dict(zip(columns, row)) for row in cursor])
+    rows = [dict(zip(columns, row)) for row in cursor]
+    # Its builds ([app, reports, last seen]) and its reports in the last 24 hours, per hour (newer hubs, spec 6.4).
+    builds, hours = {}, {}
+    if has_table(db, "diagnostic_builds"):
+        for i, app, n, seen in db.execute("SELECT diagnostic_id, app, count, last_seen FROM diagnostic_builds ORDER BY app"):
+            builds.setdefault(i, []).append([app, n, seen])
+    if has_table(db, "diagnostic_hours"):
+        now_h = int(time.time()) // 3600
+        for i, hour, n in db.execute("SELECT diagnostic_id, hour, count FROM diagnostic_hours WHERE hour > ?", (now_h - 24,)):
+            hours.setdefault(i, [0] * 24)[min(23, max(0, 23 - (now_h - hour)))] += n
+    for r in rows:
+        r["builds"], r["hours_24h"] = builds.get(r["id"], []), hours.get(r["id"], [0] * 24)
+    return with_causes(db, rows)
 
 
 def with_causes(db, rows):

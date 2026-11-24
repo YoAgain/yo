@@ -203,6 +203,9 @@ account; shown by its first 6 hex characters, the people it reported folded unde
 the default) or "Answered", newest first; the right side is the conversation under one line of facts. Each of their
 messages is ticked handled by hand; a reply ticks the ones it answers. The list's logic is `supportList` in `app.js`,
 tested in node by `test_support.py` (skipped without node). Errors in Attention open the diagnostics table, open
-groups first, newest first, with Done/Reopen per row; Reports open the reports table; Sign-ups the users table. Every bubble can be completed or reopened;
+groups first, newest first, with Done/Reopen per row; then "Acknowledged, still coming in" (done, still reported in
+24 hours by the builds it was marked done in: "N in 24 h, only on old builds (≤ 1.0.0-RC33)"; a newer build opens it
+again in the hub, spec 6.4), "Expected" (its own section, N in 24 h) and Done. The Problems count reads "open · N still";
+`test_problems.py`; Reports open the reports table; Sign-ups the users table. Every bubble can be completed or reopened;
 viewing a thread changes no completion state. Badges and the Overview red curve count open user
 messages only. App unread team replies still use `read_at`. Old JSON flags still serve user reports.

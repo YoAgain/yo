@@ -381,14 +381,44 @@ fn network_errors_sql() -> String {
     format!("NOT ({})", each.join(" OR "))
 }
 
-fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, now: u64) -> rusqlite::Result<i64> {
+/// A problem's identity (spec 6.4), without the build: kind and domain, code and place (errors), or exception, top
+/// frames and termination (crashes). The builds it came in are counted apart (`diagnostic_builds`).
+fn diagnostic_signature(kind: &str, payload: &serde_json::Value) -> String {
     let field = |name| payload[name].as_str().unwrap_or("");
     let identity = if kind == "error" {
-        serde_json::json!([kind, field("domain"), field("code"), field("place"), field("app")])
+        serde_json::json!([kind, field("domain"), field("code"), field("place")])
     } else {
-        serde_json::json!([kind, field("exception"), field("frames"), field("termination"), field("app")])
+        serde_json::json!([kind, field("exception"), field("frames"), field("termination")])
     };
-    let signature = yo_wire::b64(&yo_wire::sha256(identity.to_string().as_bytes()));
+    yo_wire::b64(&yo_wire::sha256(identity.to_string().as_bytes()))
+}
+
+/// The newest build per platform among `apps` ("ios/202611241344,android/202611241341"), as `YO_MIN_APP` is written.
+fn newest_builds<'a>(apps: impl IntoIterator<Item = &'a str>) -> String {
+    let mut newest: Vec<(String, u64)> = Vec::new();
+    for (platform, build) in apps.into_iter().filter_map(crate::config::app) {
+        match newest.iter_mut().find(|(p, _)| *p == platform) {
+            Some(known) => known.1 = known.1.max(build),
+            None => newest.push((platform, build)),
+        }
+    }
+    newest.sort();
+    newest.iter().map(|(p, b)| format!("{p}/{b}")).collect::<Vec<_>>().join(",")
+}
+
+/// Whether `app` is newer than every build a problem was marked done in (`done_builds`): a build of its platform
+/// above that platform's, or a platform it was not seen on then.
+fn newer_than(app: &str, done_builds: &str) -> bool {
+    let Some((platform, build)) = crate::config::app(app) else { return false };
+    crate::config::parse_min_app(done_builds)
+        .ok()
+        .and_then(|done| done.into_iter().find(|(p, _)| *p == platform))
+        .is_none_or(|(_, done)| build > done)
+}
+
+fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, now: u64) -> rusqlite::Result<i64> {
+    let field = |name| payload[name].as_str().unwrap_or("");
+    let signature = diagnostic_signature(kind, payload);
     // One report may stand for several of the same, counted on the phone (checked on receipt).
     let count = field("count").parse::<i64>().unwrap_or(1).max(1);
     // "Expected" (the network, an answer the app takes in, iOS taking time back): counts to learn from, never an open
@@ -407,7 +437,29 @@ fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, 
         params![now / 86_400_000, kind, count],
     )?;
     conn.execute("DELETE FROM diagnostic_days WHERE day < ?1", [now.saturating_sub(14 * 86_400_000) / 86_400_000])?;
-    conn.query_row("SELECT id FROM diagnostics WHERE signature=?1", [signature], |r| r.get(0))
+    let (id, done_builds): (i64, Option<String>) = conn.query_row(
+        "SELECT id, CASE WHEN done = 1 THEN coalesce(done_builds, '') END FROM diagnostics WHERE signature=?1",
+        [&signature],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    // The builds it came in, and per hour (kept 8 days): "still reported" on the operator's page.
+    conn.execute(
+        "INSERT INTO diagnostic_builds(diagnostic_id, app, count, last_seen) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(diagnostic_id, app) DO UPDATE SET count = count + excluded.count, last_seen = excluded.last_seen",
+        params![id, field("app"), count, now],
+    )?;
+    conn.execute(
+        "INSERT INTO diagnostic_hours(diagnostic_id, hour, count) VALUES (?1, ?2, ?3)
+         ON CONFLICT(diagnostic_id, hour) DO UPDATE SET count = count + excluded.count",
+        params![id, (now / 3_600_000) as i64, count],
+    )?;
+    // Done, and now reported by a newer build than any it was marked done in: open again. Expected ones stay counts.
+    if let Some(done_builds) = done_builds {
+        if !expected && newer_than(field("app"), &done_builds) {
+            conn.execute("UPDATE diagnostics SET done = 0, done_at = NULL, done_builds = NULL WHERE id = ?1", [id])?;
+        }
+    }
+    Ok(id)
 }
 
 fn legacy_crash(text: &str, app: &str) -> serde_json::Value {
@@ -1132,20 +1184,38 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,
-            (SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id=d.id)
+            (SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id=d.id), done_builds, done_at,
+            (SELECT json_group_array(json_array(app, count, last_seen)) FROM diagnostic_builds WHERE diagnostic_id=d.id),
+            (SELECT json_group_object(hour, count) FROM diagnostic_hours WHERE diagnostic_id=d.id)
             FROM diagnostics d ORDER BY last_seen DESC",
         )?;
+        let json =
+            |text: Option<String>| text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(serde_json::Value::Null);
         let rows = stmt.query_map([], |r| Ok(serde_json::json!({
             "id":r.get::<_,i64>(0)?, "kind":r.get::<_,String>(1)?, "count":r.get::<_,i64>(2)?,
             "first_seen":r.get::<_,i64>(3)?, "last_seen":r.get::<_,i64>(4)?, "app":r.get::<_,String>(5)?,
             "os":r.get::<_,String>(6)?, "model":r.get::<_,String>(7)?, "payload":r.get::<_,String>(8)?, "done":r.get::<_,bool>(9)?,
-            "installs":r.get::<_,i64>(10)?
+            "installs":r.get::<_,i64>(10)?, "done_builds":r.get::<_,Option<String>>(11)?, "done_at":r.get::<_,Option<i64>>(12)?,
+            // [[app, reports, last seen]] and {hour: reports} (hours since 1970, the last 8 days).
+            "builds":json(r.get(13)?), "hours":json(r.get(14)?)
         })))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::json!(rows))
     }
 
-    pub fn diagnostic_done(&self, id: i64, done: bool) -> rusqlite::Result<()> {
-        self.run("UPDATE diagnostics SET done=?2 WHERE id=?1", params![id, done])
+    /// Marked done (with the newest build per platform it came in so far, and when) or open again.
+    pub fn diagnostic_done(&self, id: i64, done: bool, now: u64) -> rusqlite::Result<()> {
+        self.write(|tx| {
+            let apps: Vec<String> = tx
+                .prepare("SELECT app FROM diagnostic_builds WHERE diagnostic_id = ?1")?
+                .query_map([id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let builds = done.then(|| newest_builds(apps.iter().map(String::as_str)));
+            tx.execute(
+                "UPDATE diagnostics SET done = ?2, done_builds = ?3, done_at = CASE WHEN ?2 THEN ?4 END WHERE id = ?1",
+                params![id, done, builds, now as i64],
+            )?;
+            Ok(())
+        })
     }
 
     /// A support message done (`Some(at)`) or open again.
@@ -1565,6 +1635,10 @@ impl Db {
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
         conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
         conn.execute("DELETE FROM diagnostic_installs WHERE day < ?1", [(kept / DAY_MS) as i64])?;
+        conn.execute(
+            "DELETE FROM diagnostic_hours WHERE hour < ?1",
+            [(now.saturating_sub(8 * DAY_MS) / 3_600_000) as i64],
+        )?;
         // Levels older than 30 days: the day's last alone (the one at the next midnight, UTC; spec 6.6).
         conn.execute(
             "DELETE FROM levels WHERE hour < ?1 AND EXISTS (SELECT 1 FROM levels l WHERE l.kind = levels.kind
@@ -1939,7 +2013,7 @@ mod tests {
         assert_eq!(rows[0]["count"], 2);
         assert_eq!(rows[0]["first_seen"], 2);
         assert_eq!(rows[0]["last_seen"], 3);
-        db.diagnostic_done(rows[0]["id"].as_i64().unwrap(), true).unwrap();
+        db.diagnostic_done(rows[0]["id"].as_i64().unwrap(), true, 0).unwrap();
         db.diagnostic("crash", &legacy_crash("trace", "1"), None, 4).unwrap();
         assert_eq!(db.diagnostics().unwrap()[0]["done"], true);
         let mut error = serde_json::json!({"domain":"test", "code":"1", "place":"sync", "app":"ios/2", "os":"26", "model":"iPhone"});
@@ -1954,7 +2028,86 @@ mod tests {
         assert_eq!(rows[0]["first_seen"], 10);
         error["app"] = serde_json::json!("ios/3");
         db.diagnostic("error", &error, None, 111).unwrap();
-        assert_eq!(db.diagnostics().unwrap().as_array().unwrap().len(), 3);
+        let rows = db.diagnostics().unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 2, "another build: the same problem");
+        assert_eq!(rows[0]["count"], 102);
+        assert_eq!(rows[0]["builds"], serde_json::json!([["ios/2", 101, 110], ["ios/3", 1, 111]]));
+    }
+
+    /// A problem marked done comes back with a report of a newer build than any it was marked done in (spec 6.4);
+    /// the builds it had stay done, an expected one stays a count.
+    #[test]
+    fn a_done_problem_reopens_in_a_newer_build() {
+        let db = Db::open(":memory:").unwrap();
+        let report = |app: &str, at: u64| {
+            let error = serde_json::json!({"domain":"d", "code":"1", "place":"p", "app":app, "os":"26", "model":"x"});
+            db.diagnostic("error", &error, None, at).unwrap();
+            let row = db.diagnostics().unwrap()[0].clone();
+            (row["done"].as_bool().unwrap(), row["done_builds"].clone())
+        };
+        report("ios/200", 1);
+        report("android/7", 2);
+        report("ios/100", 3);
+        db.diagnostic_done(1, true, 4).unwrap();
+        assert_eq!(db.diagnostics().unwrap()[0]["done_builds"], "android/7,ios/200");
+        assert_eq!(db.diagnostics().unwrap()[0]["done_at"], 4);
+        assert!(report("ios/100", 5).0, "an older build still reporting: done, still counted");
+        assert!(report("ios/200", 6).0);
+        assert!(report("android/7", 7).0);
+        assert_eq!(report("ios/201", 8), (false, serde_json::Value::Null), "a newer build: open again");
+        db.diagnostic_done(1, true, 9).unwrap();
+        assert!(!report("cli/1", 10).0, "a platform it was not seen on");
+        let hours = db.diagnostics().unwrap()[0]["hours"].clone();
+        assert_eq!(hours, serde_json::json!({"0": 8}), "reports per hour");
+        // Expected: a count, never an open problem, whatever the build.
+        let expected = serde_json::json!({"domain":"e", "code":"1", "place":"p", "app":"ios/1", "os":"26", "model":"x",
+            "severity":"expected"});
+        db.diagnostic("error", &expected, None, 11).unwrap();
+        let mut newer = expected.clone();
+        newer["app"] = serde_json::json!("ios/999");
+        db.diagnostic("error", &newer, None, 12).unwrap();
+        assert_eq!(db.diagnostics().unwrap()[0]["done"], true);
+    }
+
+    /// Groups of one problem in several builds, from before its identity lost the build, become one (spec 6.4).
+    #[test]
+    fn the_groups_of_one_problem_in_several_builds_become_one() {
+        let dir = std::env::temp_dir().join(format!("yo-problems-{}-{}", std::process::id(), crate::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hub.sqlite");
+        let path = path.to_str().unwrap();
+        {
+            let db = Db::open(path).unwrap();
+            let conn = db.conn();
+            conn.execute_batch(
+                "ALTER TABLE diagnostics DROP COLUMN done_builds; ALTER TABLE diagnostics DROP COLUMN done_at;
+                 INSERT INTO diagnostics(id, kind, signature, count, first_seen, last_seen, app, os, model, payload, done) VALUES
+                 (1, 'error', 'old1', 3, 10, 20, 'ios/100', '26', 'x', '{\"domain\":\"d\",\"code\":\"1\",\"place\":\"p\",\"app\":\"ios/100\"}', 1),
+                 (2, 'error', 'old2', 2, 15, 30, 'ios/200', '26', 'x', '{\"domain\":\"d\",\"code\":\"1\",\"place\":\"p\",\"app\":\"ios/200\"}', 1),
+                 (3, 'error', 'old3', 1, 40, 40, 'ios/200', '26', 'x', '{\"domain\":\"other\",\"code\":\"1\",\"place\":\"p\",\"app\":\"ios/200\"}', 0);
+                 INSERT INTO diagnostic_installs VALUES (1, X'01', 0, NULL), (2, X'01', 0, 5), (2, X'02', 0, NULL);
+                 INSERT INTO diagnostic_seen VALUES ('u1', 1);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        let rows = db.diagnostics().unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let merged = rows.iter().find(|r| r["id"] == 2).unwrap();
+        assert_eq!(
+            (merged["count"].as_i64(), merged["first_seen"].as_i64(), merged["last_seen"].as_i64()),
+            (Some(5), Some(10), Some(30))
+        );
+        assert_eq!((merged["done"].as_bool(), merged["done_builds"].as_str()), (Some(true), Some("ios/200")));
+        assert_eq!(merged["installs"], 2);
+        assert_eq!(merged["builds"], serde_json::json!([["ios/100", 3, 20], ["ios/200", 2, 30]]));
+        let seen: i64 = db.conn().query_row("SELECT diagnostic_id FROM diagnostic_seen", [], |r| r.get(0)).unwrap();
+        assert_eq!(seen, 2);
+        let open = rows.iter().find(|r| r["id"] == 3).unwrap();
+        assert_eq!((open["done"].as_bool(), open["done_builds"].is_null()), (Some(false), true));
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2230,7 +2383,7 @@ mod tests {
             ]
         );
         // The hourly sample keeps the hour's first; a problem marked done replaces the open problems of the hour.
-        db.diagnostic_done(1, true).unwrap();
+        db.diagnostic_done(1, true, 0).unwrap();
         db.sample_levels(now + 60_000, false).unwrap();
         assert_eq!(rows(&db)[5], row("open-errors", h, 3));
         db.sample_levels(now + 60_000, true).unwrap();

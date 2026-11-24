@@ -1503,14 +1503,22 @@ if (document.body.classList.contains("login")) {
     done.open = !!previous.querySelector(".diag-done[open]");
     for (const d of rows) {
       const key = diagCause(d);
-      if (!groups.has(key)) groups.set(key, { key, rows: [], open: false, first: d.first_seen, last: d.last_seen });
+      if (!groups.has(key)) groups.set(key, { key, rows: [], open: false, expected: true, recent: 0, recentApps: new Set(), first: d.first_seen, last: d.last_seen });
       const g = groups.get(key);
       g.rows.push(d);
-      g.open ||= !d.done;
+      g.open ||= !d.done && !diagInfo(d).expected;
+      g.expected &&= diagInfo(d).expected;
+      // Its reports in the last 24 hours and the builds they came from (the hub's diagnostic_hours and _builds).
+      g.recent += (d.hours_24h || []).reduce((a, n) => a + n, 0);
+      for (const [app, , seen] of d.builds || []) if (seen > Date.now() - 864e5) g.recentApps.add(app);
       g.first = Math.min(g.first, d.first_seen);
       g.last = Math.max(g.last, d.last_seen);
     }
-    for (const g of [...groups.values()].sort((a, b) => b.open - a.open || b.last - a.last)) {
+    const still = el("div", "diag-list diag-still"), expectedList = el("div", "diag-list");
+    const expected = el("details", "diag-done diag-expected");
+    expected.open = !!previous.querySelector(".diag-expected[open]");
+    let expectedRecent = 0;
+    for (const g of [...groups.values()].sort((a, b) => b.open - a.open || b.recent - a.recent || b.last - a.last)) {
       const details = el("details"), summary = el("summary"), item = el("article", "diag-item");
       details.dataset.cause = g.key;
       details.open = expanded.has(g.key);
@@ -1537,6 +1545,7 @@ if (document.body.classList.contains("login")) {
       recent.title = "Last seen " + date(g.last);
       stats.append(el("span", null, `${num(reports)} occurrence${reports === 1 ? "" : "s"}`),
         el("span", null, `${num(phones)} phone${phones === 1 ? "" : "s"}`), share, recent);
+      if (g.recent) stats.append(el("span", "diag-recent", `${num(g.recent)} in 24 h`));
       const placeLine = el("div", "diag-place");
       const main = locations[0]?.replace(/^\S*\/([^/\s]+\.swift:\d+)/, "$1").replace(/^\d+\s+Yo\s+/, "");
       placeLine.append(el("span", null, main || "Location unknown"));
@@ -1566,8 +1575,23 @@ if (document.body.classList.contains("login")) {
         } catch (error) { item.append(el("span", "error", error.message)); }
         finally { await refresh(); button.disabled = false; }
       });
-      item.append(title, stats, button, placeLine, details);
-      (g.open ? list : doneList).append(item);
+      item.append(title, stats, button, placeLine);
+      // Done and still coming in: from builds it was marked done in (a newer build opens it again, spec 6.4).
+      const stillIn = !g.open && !g.expected && g.recent > 0;
+      if (stillIn) {
+        const newest = [...g.recentApps].sort((a, b) => build(b).localeCompare(build(a)));
+        const names = ["ios", "android"].map(p => newest.find(a => a.startsWith(`${p}/`))).filter(Boolean)
+          .map(a => `≤ ${/^\d{12}$/.test(build(a)) && versionOf(a) ? `${a.startsWith("android/") ? "Android " : ""}${versionOf(a)}` : buildDate(a)}`);
+        item.append(el("div", "diag-place diag-still-note", `Still reported: ${num(g.recent)} in 24 h, only on old builds${names.length ? ` (${names.join(", ")})` : ""}`));
+      }
+      item.append(details);
+      if (g.expected) expectedRecent += g.recent;
+      (g.open ? list : stillIn ? still : g.expected ? expectedList : doneList).append(item);
+    }
+    if (still.childElementCount) list.append(el("h4", "diag-head", `Acknowledged, still coming in (${still.childElementCount})`), still);
+    if (expectedList.childElementCount) {
+      expected.append(el("summary", null, `Expected (${expectedList.childElementCount}) · ${num(expectedRecent)} in 24 h`), expectedList);
+      list.append(expected);
     }
     if (doneList.childElementCount) {
       done.append(el("summary", null, `Done (${doneList.childElementCount})`), doneList);
@@ -1624,6 +1648,9 @@ if (document.body.classList.contains("login")) {
   };
   const openReportCount = h => reportGroups({ reports: h?.reports || [], isDone: (r) => lastDone.has(reportKey(r)) }).filter(g => g.open).length;
   const openProblemGroups = h => (h?.diagnostics || []).filter(d => !d.done && !diagInfo(d).expected);
+  // Done, no expected one, and still reported in the last 24 hours (on the builds it was marked done in).
+  const stillProblemGroups = h => (h?.diagnostics || []).filter(d => d.done && !diagInfo(d).expected
+    && (d.hours_24h || []).some(n => n > 0));
   const causeCount = groups => new Set(groups.map(diagCause)).size;
   $("tables").addEventListener("scroll", ({ target }) => {
     if (target.matches(".scroll")) target.classList.toggle("scrolled-x", target.scrollLeft > 0);
@@ -1631,6 +1658,7 @@ if (document.body.classList.contains("login")) {
   const drawTables = () => {
     const box = $("tables"), list = last?.[which]?.tables || [];
     const openGroups = openProblemGroups(last?.[which]), openCauses = causeCount(openGroups);
+    const stillCauses = causeCount(stillProblemGroups(last?.[which]).filter(d => !openGroups.some(o => diagCause(o) === diagCause(d))));
     const openSupport = openSupportCount(last?.[which]), openReports = openReportCount(last?.[which]);
     const occurrences = openGroups.reduce((n, d) => n + (d.count || 0), 0);
     const drawn = JSON.stringify([which, tableOpen, openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
@@ -1650,17 +1678,18 @@ if (document.body.classList.contains("login")) {
       return i < 0 ? t.count : t.rows.filter((r) => !r[i]).length; };
     const viewCount = (key) => key === "v-support" ? openSupport
       : key === "v-reports" ? openReports
-      : key === "v-errors" ? openCauses
+      : key === "v-errors" ? (stillCauses ? `${num(openCauses)} · ${num(stillCauses)} still` : openCauses)
       : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
       const b = el("button", `main view${tableOpen === key ? " on" : ""}`), name = el("span", null, label);
       b.type = "button";
       if (key === "v-errors") {
         // Groups (a row per build and line), causes (what they are about) and reports (the sum of counts), open ones.
-        hint(b, { cap: 1, head: "Problems", rows: [{ label: "Groups", value: num(openGroups.length) }, { label: "Causes", value: num(openCauses) }, { label: "Occurrences", value: num(occurrences) }] });
+        hint(b, { cap: 1, head: "Problems", rows: [{ label: "Groups", value: num(openGroups.length) }, { label: "Causes", value: num(openCauses) }, { label: "Occurrences", value: num(occurrences) }, { label: "Done, still reported in 24 h", value: num(stillCauses) }] });
       } else b.title = tip;
       name.prepend(icon(ico));
-      b.append(name, el("small", null, num(viewCount(key))));
+      const n = viewCount(key);
+      b.append(name, el("small", null, typeof n === "string" ? n : num(n)));
       b.addEventListener("click", () => { unpin(); tableOpen = key; drawTables(); });
       side.append(b);
     }
@@ -2878,9 +2907,10 @@ if (document.body.classList.contains("login")) {
             path += `${levels[i - 1] == null ? "M" : "L"}${x} ${7 - 6 * v / peak}h0`;
           });
           $("problem-trend").replaceChildren(svg("path", { d: path }));
-          problemCard = { head: "Problems", nodes: [trend], rows: [{ label: "Open causes", value: num(openCount) }],
+          const stillCount = causeCount(stillProblemGroups(h).filter(d => !open.some(o => diagCause(o) === diagCause(d))));
+          problemCard = { head: "Problems", nodes: [trend], rows: [{ label: "Open causes", value: num(openCount) }, { label: "Done, still reported in 24 h", value: num(stillCount) }],
             note: "Occurrences of open problems, including crashes." };
-          return { ico: "warn", label: "Problems", title: { cap: 1, head: "Problems", rows: [{ label: "Open causes", value: num(openCount) }, { label: "Occurrences", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Occurrence", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line · build" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed. The same bug in a new build reopens as a new group." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
+          return { ico: "warn", label: "Problems", title: { cap: 1, head: "Problems", rows: [{ label: "Open causes", value: num(openCount) }, { label: "Done, still reported in 24 h", value: num(stillCount) }, { label: "Occurrences", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Occurrence", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed for the builds it was ticked in; a newer build reporting it opens it again." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => problemTip(p, i) }; })(),
         { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
         { ico: "flag", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
