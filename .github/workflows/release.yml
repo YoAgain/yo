@@ -1,0 +1,63 @@
+# One button for a release (Actions → Release → Run workflow, version 1.0.0-RC37); dev/release.sh does the same from
+# a machine with signed commits. It bumps app/android/version.properties on main (versionCode +1, versionName the
+# version) in one commit made through the GitHub API, which GitHub signs (main requires signed commits), and publishes
+# the release v<version> on that commit (pre-release for -RC). That release event runs testflight.yml, play.yml,
+# android.yml and cli.yml, and F-Droid's checkupdates picks the tag up from version.properties.
+#
+# A release made with GITHUB_TOKEN starts no other workflow, so the release is created with the secret
+# YO_RELEASE_TOKEN: a fine-grained personal access token for YoAgain/yo with Contents: read and write.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the v, e.g. 1.0.0-RC37 or 1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: write  # the version commit, made with GITHUB_TOKEN
+
+concurrency:
+  group: release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Bump version.properties on main and publish the release
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ secrets.YO_RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-RC[0-9]+)?$ ]] \
+            || { echo "::error::version '$VERSION' is not x.y.z or x.y.z-RCn"; exit 1; }
+          [ -n "$RELEASE_TOKEN" ] || { echo "::error::secret YO_RELEASE_TOKEN is missing (see the top of release.yml)"; exit 1; }
+          tag="v$VERSION"
+          if gh api "repos/$REPO/git/ref/tags/$tag" --silent 2>/dev/null; then
+            echo "::error::$tag exists already"; exit 1
+          fi
+          file=app/android/version.properties
+          gh api "repos/$REPO/contents/$file?ref=main" > current.json
+          jq -r .content current.json | base64 -d > old.properties
+          code=$(sed -n 's/^versionCode=//p' old.properties)
+          [[ "$code" =~ ^[0-9]+$ ]] || { echo "::error::no versionCode in $file"; exit 1; }
+          code=$((code + 1))
+          grep -v '^version\(Code\|Name\)=' old.properties > new.properties || true
+          printf 'versionCode=%s\nversionName=%s\n' "$code" "$VERSION" >> new.properties
+          # The blob's sha makes the update fail if main's file changed in between; the commit lands on main's head.
+          sha=$(jq -n --arg m "Release $VERSION: version.properties versionCode $code, versionName $VERSION" \
+              --arg c "$(base64 -w0 new.properties)" --arg s "$(jq -r .sha current.json)" \
+              '{message: $m, content: $c, sha: $s, branch: "main"}' \
+            | gh api -X PUT "repos/$REPO/contents/$file" --input - -q .commit.sha)
+          echo "version commit $sha"
+          prerelease=()
+          [[ "$VERSION" == *-RC* ]] && prerelease=(--prerelease)
+          GH_TOKEN=$RELEASE_TOKEN gh release create "$tag" --repo "$REPO" --target "$sha" --title "$tag" \
+            --generate-notes "${prerelease[@]}"
+          echo "::notice::released $tag (versionCode $code) on $sha"

@@ -223,4 +223,14 @@ needs a higher `-PyoVersionCode` (minutes since 1970):
 nice -n 19 ionice -c3 ./gradlew :app:bundlePlayRelease -PyoVersionCode=$(( $(date +%s) / 60 ))
 ```
 
+## Releases and F-Droid
+
+`version.properties` holds the last release: `versionName` is the tag without the v, `versionCode` rises by one per
+release (1.0.0-RC37 is 37, 1.0.0 the one after the last RC). Plain Gradle builds it, as F-Droid builds the floss
+flavor from each tag `v1.0.0-RC37` (its checkupdates reads this file, so new tags need nothing in F-Droid); CI's
+`-PyoVersionCode`/`-PyoVersionName` override it for Play and the GitHub floss APK, whose code is the rising minute
+stamp. F-Droid signs its own build, so its codes need not match Play's. A release is `dev/release.sh 1.0.0-RC37`
+(signed commit, push, release, release card) or Actions → Release with that version (needs the secret
+`YO_RELEASE_TOKEN`, see `release.yml`); never edit the file by hand.
+
 Generated bindings, native libraries, SDK paths, signing files and machine settings are not checked in.

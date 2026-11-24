@@ -78,7 +78,7 @@ jobs:
             target/android
           key: ${{ steps.cargo.outputs.cache-primary-key }}
       # Two flavors (app/android/README.md): play, the Google Play build, and floss, the F-Droid build (unsigned here:
-      # F-Droid signs its own build; a release signs a copy with Yo's own floss key for direct installs). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep build.gradle.kts's.
+      # F-Droid signs its own build; a release signs a copy with Yo's own floss key for direct installs). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep app/android/version.properties'.
       - name: Build, unit tests and lint
         env:
           TAG: ${{ github.event.release.tag_name }}

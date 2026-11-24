@@ -153,6 +153,7 @@ Workflows ([.github/workflows](.github/workflows)):
 - **iOS**: push → internal TestFlight · RC release (`v1.0.0-RC`) → public TestFlight · stable release → App Store (by hand for now)
 - **Android**: push → build · RC release → test build · stable release → Play Store (by hand for now)
 - **CLI**: push → binary artifact · release → binary attached to the release
+- **Release**: `dev/release.sh 1.0.0-RC37`, or the button Actions → Release: bumps [version.properties](app/android/version.properties) in a signed commit on main and publishes `v1.0.0-RC37`, which runs the rows above; F-Droid picks up the tag by itself ([Android](app/android/README.md#releases-and-f-droid))
 - **Test**: every push → Rust tests, lint · **Fuzz**: push → 1 min, nightly → 15 min · **Dependencies**: monthly → pull request
 
 ```sh

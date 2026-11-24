@@ -12,6 +12,13 @@ plugins {
 val yoBuild = providers.environmentVariable("YO_BUILD").getOrElse(
     DateTimeFormatter.ofPattern("yyyyMMddHHmm").withZone(ZoneOffset.UTC).format(Instant.now()))
     .also { require(Regex("\\d{12}").matches(it)) { "YO_BUILD '$it' is not YYYYMMDDHHMM" } }
+// The release version: version.properties (the last release's, bumped by dev/release.sh and release.yml) is what
+// plain Gradle builds, as F-Droid does from a release tag. CI's -PyoVersionCode/-PyoVersionName override it for Play
+// and the GitHub floss APK, whose code is the rising minute stamp (Play's codes only rise).
+val versionFile = Properties().apply { rootProject.file("version.properties").inputStream().use { load(it) } }
+val yoVersionCode = providers.gradleProperty("yoVersionCode").map(String::toInt)
+    .getOrElse(versionFile.getProperty("versionCode").toInt())
+val yoVersionName = providers.gradleProperty("yoVersionName").getOrElse(versionFile.getProperty("versionName"))
 // Firebase normally gets these resources from the Google Services plugin. Emit them only when google-services.json
 // (ignored: CI writes it from the secret GOOGLE_SERVICES_JSON, a dev copies it; README: Push) is present, so builds
 // without Firebase use the same variant. Each variant takes the client of its own package: release app.justyo.android,
@@ -45,14 +52,15 @@ android {
         manifestPlaceholders["yoAppLabel"] = "Yo"
         minSdk = 34
         targetSdk = 37
-        versionCode = providers.gradleProperty("yoVersionCode").map(String::toInt).getOrElse(1)  // rising, from CI
-        versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
+        versionCode = yoVersionCode
+        versionName = yoVersionName
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")  // debug and the device QA build: the dev hub
         // Debug and QA builds say "android/dev<build>": not a Play build, so the admin never takes one as the newest.
         buildConfigField("String", "YO_APP", "\"android/dev$yoBuild\"")
         buildConfigField("String", "YO_BUILD", "\"$yoBuild\"")
-        // A release's version (the tag, "1.0.0-RC36"), sent after the build in Yo-App (spec 6.3); other builds: "".
+        // A release's version (the tag, "1.0.0-RC36"), sent after the build in Yo-App (spec 6.3); other builds: "",
+        // except the floss release, which F-Droid builds from a release tag with plain Gradle: version.properties'.
         buildConfigField("String", "YO_VERSION", "\"${providers.gradleProperty("yoVersionName").getOrElse("")}\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
@@ -158,6 +166,8 @@ androidComponents {
             }.toMap()
         })
         variant.sources.kotlin?.addStaticSourceDirectory("build/generated/yo")
+        if (!play && variant.buildType == "release") variant.buildConfigFields?.put("YO_VERSION",
+            com.android.build.api.variant.BuildConfigField("String", "\"$yoVersionName\"", null))
     }
 }
 tasks.withType<Test>().configureEach {

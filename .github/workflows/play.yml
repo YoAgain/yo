@@ -107,7 +107,7 @@ jobs:
           python3 -m venv "$d/venv"
           "$d/venv/bin/pip" install -q google-auth requests
 
-      # The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; builds of main keep build.gradle.kts's.
+      # The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; builds of main keep app/android/version.properties'.
       # The version code only rises: minutes since 1970 (29 million in 2026; Play takes up to 2100000000).
       - name: Build and sign
         env:
