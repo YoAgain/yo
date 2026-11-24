@@ -1,0 +1,7 @@
+Thirty-eighth release candidate — Yo to Yo in about 70 ms.
+
+• Yos arrive faster: on Android a Yo shows before it is saved, and sending no longer waits on saves
+• A Yo or notification seen on one device is marked seen on your others too
+• Ready for several devices per account (switched on in a later release)
+• Siri finds friends by names it hears a little differently
+• Fewer false alarms in error reports
