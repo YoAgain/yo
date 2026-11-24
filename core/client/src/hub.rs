@@ -60,6 +60,63 @@ impl Client {
         Ok(response)
     }
 
+    /// Signs a request to send without the client; the signing clock is saved first (spec 6.2).
+    pub(super) fn request(&mut self, method: &'static str, path: &'static str, body: Vec<u8>) -> Result<Request> {
+        let (headers, _) = self.sign(method, path, &body);
+        self.persist()?;
+        Ok(Request { transport: self.transport.clone(), method, path, headers, body })
+    }
+
+    /// Whether to attest now (spec 6.11): registered, not attested yet, its wait over.
+    pub fn attest_due(&self, now_ms: u64) -> bool {
+        let schedule = &self.state.attestation;
+        !self.state.user_id.is_empty() && !schedule.attested && now_ms >= schedule.next_try_ms
+    }
+
+    /// The signed challenge request, to send without the client.
+    pub fn attest_challenge_begin(&mut self) -> Result<Request> {
+        self.request("GET", api::ATTEST_CHALLENGE, Vec::new())
+    }
+
+    /// The signed attestation, to send without the client.
+    pub fn attest_send_begin(&mut self, platform: u8, payload: Vec<u8>) -> Result<Request> {
+        self.request("POST", api::ATTEST, encode(&api::Attest { platform, payload: payload.into() }))
+    }
+
+    /// The hub's challenge; `None`: attestation is off at the hub (`204`, or `404` from a hub before it).
+    pub fn attest_challenge(&mut self) -> Result<Option<Vec<u8>>> {
+        self.attest_challenge_begin()?.attest_challenge()
+    }
+
+    /// The hub's verdict on an attestation.
+    pub fn attest_send(&mut self, platform: u8, payload: Vec<u8>) -> Result<u8> {
+        self.attest_send_begin(platform, payload)?.attest_send()
+    }
+
+    /// The hub has attestation off: look again in a day, no attempt counted.
+    pub fn attest_off(&mut self) -> Result<()> {
+        self.state.attestation.next_try_ms = wall_ms().saturating_add(24 * HOUR_MS);
+        self.persist()
+    }
+
+    /// Attested for good, or (failed, unjudged, not sent) the next wait.
+    pub fn attest_outcome(&mut self, verdict: Option<u8>) -> Result<()> {
+        if verdict == Some(api::ATTEST_ATTESTED) {
+            self.state.attestation.attested = true;
+            return self.persist();
+        }
+        self.attest_failed(wall_ms())
+    }
+
+    /// A failed attempt: waits 1 h, doubling, at most 7 days.
+    pub fn attest_failed(&mut self, now_ms: u64) -> Result<()> {
+        let schedule = &mut self.state.attestation;
+        let hours = (1u64 << schedule.attempts.min(8)).min(7 * 24);
+        schedule.next_try_ms = now_ms.saturating_add(hours * HOUR_MS);
+        schedule.attempts = schedule.attempts.saturating_add(1);
+        self.persist()
+    }
+
     pub fn set_push(&mut self, push: Push) -> Result<()> {
         let response = self.signed("PUT", api::PUSH, &encode(&push))?;
         // Its signing time kept (spec 6.3: one clock for every process of the device).
@@ -97,5 +154,24 @@ impl Client {
             return Err(Error::Protocol("the hub answered for another user"));
         }
         Ok((named.found, spelled(named.username)))
+    }
+}
+
+impl Request {
+    pub fn attest_challenge(&self) -> Result<Option<Vec<u8>>> {
+        let response = self.response()?;
+        if matches!(response.status, status::NO_CONTENT | status::NOT_FOUND) {
+            return Ok(None);
+        }
+        let challenge: api::AttestChallenge = decode(&expect(response, status::OK)?.body)?;
+        if challenge.challenge.as_slice().len() != api::ATTEST_CHALLENGE_LEN {
+            return Err(Error::Protocol("invalid attestation challenge"));
+        }
+        Ok(Some(challenge.challenge.into()))
+    }
+
+    pub fn attest_send(&self) -> Result<u8> {
+        let result: api::AttestResult = decode(&expect(self.response()?, status::OK)?.body)?;
+        Ok(result.verdict)
     }
 }

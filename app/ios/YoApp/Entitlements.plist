@@ -4,7 +4,7 @@
      /.well-known/apple-app-site-association naming this app; the hub does, YO_APPLE_APP_IDS); the website's, whose
      links justyo.co/NAME open the app (Invite.swift; its association file names Yo and Yo Dev); and push, communication notifications,
      Siri messaging and CarPlay as a communication app (Apple's managed capability: Yos read out and answered by Siri
-     in the car, no CarPlay screen of its own). The signing tools sign aps-environment as the profile grants it: development for Yo Dev,
+     in the car, no CarPlay screen of its own). Push and optional App Attest use the environments granted by the profile: development for Yo Dev,
      production for TestFlight and the App Store. -->
 <plist version="1.0">
 <dict>
@@ -19,6 +19,8 @@
 	<true/>
 	<key>com.apple.developer.usernotifications.communication</key>
 	<true/>
+	<key>com.apple.developer.devicecheck.appattest-environment</key>
+	<string>production</string>
 	<key>aps-environment</key>
 	<string>development</string>
 </dict>

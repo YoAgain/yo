@@ -116,6 +116,30 @@ def yogpt_min():
         return None
 
 
+def attestation(db, now):
+    """Current account verdicts and active phones without any account verdict (spec 6.11)."""
+    if not has_table(db, "attestation"):
+        return None
+    counts = {p: {"attested": 0, "failed": 0, "unknown": 0, "reasons": {}, "levels": {}, "last": None}
+              for p in ("ios", "android")}
+    for platform, state, reason, level, n, last in db.execute("""
+        SELECT platform,state,reason,level,count(*),max(at_ms) FROM attestation
+        GROUP BY platform,state,reason,level ORDER BY platform,state,reason,level"""):
+        row = counts[platform]
+        row[state] += n
+        row["last"] = max(row["last"] or 0, last)
+        if reason:
+            row["reasons"][reason] = row["reasons"].get(reason, 0) + n
+        if level:
+            row["levels"][level] = row["levels"].get(level, 0) + n
+    for platform, n in db.execute("""
+        SELECT substr(app,1,instr(app,'/')-1),count(DISTINCT user_id) FROM devices d
+        WHERE (app LIKE 'ios/%' OR app LIKE 'android/%') AND last_seen_at > ?
+        AND NOT EXISTS (SELECT 1 FROM attestation a WHERE a.user_id=d.user_id) GROUP BY 1""", (now - 2 * DAY_MS,)):
+        counts[platform]["unknown"] = n
+    return counts
+
+
 def has_table(db, table: str) -> bool:
     return db.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()[0] > 0
 
@@ -581,6 +605,7 @@ def hub(name: str, path: str) -> dict:
             # Stored reserved names; enforcement is a separate database setting.
             "reserved": part("reserved", lambda: one("SELECT count(*) FROM reserved")),
             # Statistics without anyone's friends: with Signal's protocol the hub keeps no chats or groups at all.
+            "attestation": part("attestation", lambda: attestation(db, now)),
             "active_users": part("active_users", lambda: one(
                 "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", week_ago)),
             "active_today": part("active_today", lambda: one(

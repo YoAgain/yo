@@ -256,8 +256,18 @@ pub struct Group {
     pub unreadable: Vec<String>,
 }
 
+/// When to attest the device next (spec 6.11).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Attestation {
+    pub attested: bool,
+    pub attempts: u32,
+    pub next_try_ms: u64,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default)]
+    pub attestation: Attestation,
     pub user_id: String,
     pub username: Option<String>,
     pub account_secret: [u8; 32],

@@ -78,6 +78,8 @@ registration on, written when they change) and answers `426` to every request of
 | POST | `/v1/lookup` | handle → user id, account key, device keys, a bundle per device if asked, username if asked; signed by the hub key when asked with `Yo-Nonce` (spec 6.10) | signed | 50/day with prekeys, 1000/day without (device) | who looks up whom |
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
 | GET | `/v1/group-auth` | the day's group auth credential (spec 4.9) | signed | signed | that the device asked |
+| GET | `/v1/attest/challenge` | challenge, or empty 204 when off | signed | 20/h (device) when on | that the device asked |
+| POST | `/v1/attest` | measure app and device (spec 6.11) | signed | 16 KiB payload | account verdict, platform, date, reason, Android level |
 | GET | `/v1/certificate` | a sender certificate for the signing device, a day (spec 6.1) | signed | signed | that the device asked |
 | PUT | `/v1/username` | change or give up the account's username | signed | signed | the name |
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |
@@ -87,6 +89,27 @@ registration on, written when they change) and answers `426` to every request of
 | POST | `/v1/inbox/ack` | delete envelopes by id (≤ 1000), only the device's own | signed | signed | – |
 
 Spec 6.3 lists the same routes, without `/` and the apple-app-site-association file, which are not part of the protocol.
+
+## Device attestation
+
+Set `YO_ATTEST=1` in the server's `hub.env` and restart the hub to enable measurement. It defaults off. iOS uses the
+existing `YO_APPLE_APP_IDS` and the embedded Apple root. Leaving the Play keys unset keeps Android unjudged.
+
+The local Android verifier takes `YO_PLAY_INTEGRITY_DECRYPT_KEY` (base64 AES-256 key) and
+`YO_PLAY_INTEGRITY_VERIFY_KEY` (base64 DER P-256 SubjectPublicKeyInfo). `YO_PLAY_PACKAGE` defaults to
+`app.justyo.android`.
+
+Android sends the token of a classic Play Integrity request (its nonce the challenge's hash): the only kind Google
+encrypts with the app's own keys, so the hub decrypts and verifies it locally, with no call to Google.
+
+Switching on (the owner; no secret goes into the repository):
+
+1. iOS: nothing more. TestFlight and App Store builds use Apple's production App Attest environment.
+2. Play Console › Test and release › App integrity: link the Firebase Cloud project (the one in the app's
+   `google-services.json`), then under Classic requests › Response encryption choose "Manage and download my response
+   encryption keys" and save the decryption and verification keys (base64) in 1Password.
+3. On the server, in `/etc/yo/hub.env`: `YO_ATTEST=1`, `YO_PLAY_INTEGRITY_DECRYPT_KEY=…`,
+   `YO_PLAY_INTEGRITY_VERIFY_KEY=…`; then `systemctl restart yo-hub`. The apps already out start within a day.
 
 ## Protections outside the routes
 

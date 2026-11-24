@@ -23,7 +23,6 @@ with tempfile.TemporaryDirectory() as folder:
             "com.apple.developer.associated-domains": ["*"],
         },
     }
-    (root / (bundle + ".mobileprovision")).write_bytes(plistlib.dumps(profile))
     mock = root / "rcodesign"
     mock.write_text('''#!/usr/bin/env python3
 import os, plistlib, sys
@@ -35,9 +34,14 @@ expected = "AAAAAAAAAA.app.justyo.ios.dev"
 assert ent["application-identifier"] == expected
 assert ent["keychain-access-groups"] == [expected, "AAAAAAAAAA.*"]
 assert info["YoKeychainAccessGroup"] == expected
+assert ent.get("com.apple.developer.devicecheck.appattest-environment") == (os.environ["TEST_ATTEST_ENV"] or None)
 ''')
     mock.chmod(0o755)
-    subprocess.run(["bash", str(script), str(app), str(root / "out.ipa"), str(root)],
-                   env={**os.environ, "PATH": str(root) + ":" + os.environ["PATH"]}, check=True,
-                   stdout=subprocess.DEVNULL)
+    for environment in ("", "development", "production"):
+        if environment:
+            profile["Entitlements"]["com.apple.developer.devicecheck.appattest-environment"] = environment
+        (root / (bundle + ".mobileprovision")).write_bytes(plistlib.dumps(profile))
+        subprocess.run(["bash", str(script), str(app), str(root / "out.ipa"), str(root)],
+                       env={**os.environ, "PATH": str(root) + ":" + os.environ["PATH"], "TEST_ATTEST_ENV": environment},
+                       check=True, stdout=subprocess.DEVNULL)
 print("Dev signing: concrete app identity, app-id prefix and legacy access passed")

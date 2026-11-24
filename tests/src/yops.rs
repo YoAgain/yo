@@ -40,6 +40,7 @@ impl Device {
         let device_key: Key = identity::random();
         let registration_id = 1 + u32::from(number);
         let state = State {
+            attestation: Default::default(),
             user_id: state::hex(&user),
             username: None,
             account_secret: *account,

@@ -157,7 +157,7 @@ jobs:
       # enabled in the developer portal: Yos announced and answered in CarPlay). Each is signed on the app as its profile grants it (enabled on the
       # app id); one the profile does not grant is left out with a warning (the notification then shows plainly, the
       # sender's name as title). Patched into this checkout only; fails if the tool changed.
-      - name: OAD, Communication Notifications, Siri and CarPlay entitlements
+      - name: OAD, Communication Notifications, Siri, CarPlay and App Attest entitlements
         run: |
           python3 -I - .oad/tools/asc.py <<'EOF'
           import sys
@@ -175,7 +175,14 @@ jobs:
               "                    if granted.get(key) is True:\n"
               "                        entitlements[key] = True\n"
               "                    else:\n"
-              "                        print(f'::warning::profile for {ident} does not grant {key}: signed without it')\n")
+              "                        print(f'::warning::profile for {ident} does not grant {key}: signed without it')\n"
+              "            key = 'com.apple.developer.devicecheck.appattest-environment'\n"
+              "            if key in own:\n"
+              "                if granted.get(key) in ('development', 'production'):\n"
+              "                    entitlements[key] = granted[key]\n"
+              "                else:\n"
+              "                    entitlements.pop(key, None)\n"
+              "                    print(f'::warning::profile for {ident} does not grant {key}: signed without it')\n")
           open(path, "w").write(s)
           EOF
           python3 -I -m py_compile .oad/tools/asc.py

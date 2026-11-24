@@ -232,10 +232,11 @@ final class HubTransport: HttpTransport {
     }
     let task = (anonymous ? Self.anonymousSession : Self.signedSession).dataTask(with: request)
     let diagnosticUpload = path == "/v1/help/error" || path == "/v1/help/crash"
+    let attestation = route == "/v1/attest" || route == "/v1/attest/challenge"
     // Only static route components: never account, blob, group or username path values.
     let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
-    task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace) { data, response, error in
+    task.delegate = Limited(diagnosticPlace: diagnosticUpload || attestation ? nil : codePlace) { data, response, error in
       answer.result =
         if let error {
           HttpResult(status: 0, body: Data(), error: error)
@@ -243,7 +244,7 @@ final class HubTransport: HttpTransport {
           HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data, error: nil)
         }
       DataUsage.record(sent: Int(task.countOfBytesSent), received: Int(task.countOfBytesReceived))
-      if answer.result.status == 426 {
+      if !attestation, answer.result.status == 426 {
         Self.tooOld.store(true, ordering: .relaxed)
         AppUpdate.tooOld()
       }
@@ -266,6 +267,7 @@ final class HubTransport: HttpTransport {
       // Not reported: the caller tries again in its next turn.
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
+    if attestation { return answer.result }
     let status = answer.result.status
     if !diagnosticUpload, status >= 400, !Noise.status(status, method: method, route: route) {
       Diagnostics.record(NSError(domain: "HTTP", code: Int(status)), place: codePlace)
@@ -516,14 +518,19 @@ enum Keychain {
 
   /// Updated in place (never deleted first), then read back.
   static func write(_ query: [String: Any], _ data: Data, accessible: CFString) throws {
-    guard let query = own(query) else { throw Failure(status: errSecInteractionNotAllowed) }
+    let status = put(query, data, accessible: accessible)
+    guard status == errSecSuccess else { throw Failure(status: status) }
+    guard try read(query) == data else { throw Failure(status: errSecDecode) }
+  }
+
+  static func put(_ query: [String: Any], _ data: Data, accessible: CFString) -> OSStatus {
+    guard let query = own(query) else { return errSecInteractionNotAllowed }
     let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: accessible]
     var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
     if status == errSecItemNotFound {
       status = SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
     }
-    guard status == errSecSuccess else { throw Failure(status: status) }
-    guard try read(query) == data else { throw Failure(status: errSecDecode) }
+    return status
   }
 }
 

@@ -13,6 +13,8 @@ use yo_core::{Client, ContactInfo, Content, Event, SessionInfo};
 uniffi::setup_scaffolding!();
 
 mod android;
+#[cfg(test)]
+mod attestation_tests;
 mod keychain;
 mod list;
 mod product;
@@ -1124,6 +1126,29 @@ impl YoClient {
         // What the maintenance queued (receipts, a profile key for contacts).
         received.extend(self.deliver_waiting());
         events(Ok(received))
+    }
+
+    pub fn attest_due(&self, now_ms: u64) -> bool {
+        self.look(|c| c.attest_due(now_ms)).unwrap_or(false)
+    }
+
+    pub fn attest_challenge(&self) -> Result<Option<Vec<u8>>, YoError> {
+        let challenge = self.with(|c| c.attest_challenge_begin())??.attest_challenge()?;
+        if challenge.is_none() {
+            self.with(|c| c.attest_off())??;
+        }
+        Ok(challenge)
+    }
+
+    pub fn attest_send(&self, platform: u8, payload: Vec<u8>) -> Result<u8, YoError> {
+        let verdict =
+            self.with(|c| c.attest_send_begin(platform, payload)).and_then(|request| Ok(request?.attest_send()?));
+        self.with(|c| c.attest_outcome(verdict.as_ref().ok().copied()))??;
+        verdict
+    }
+
+    pub fn attest_failed(&self, now_ms: u64) -> Result<(), YoError> {
+        Ok(self.with(|c| c.attest_failed(now_ms))??)
     }
 
     pub fn set_push(&self, platform: u8, token: String) -> Result<(), YoError> {

@@ -6,6 +6,8 @@
 //!   YO_ROBOT_RANGES       ADDRESS/BITS, comma-separated: test robots, whose support messages, reports and
 //!                         diagnostics are answered 204 and dropped; default Firebase Test Lab's (config::ROBOT_RANGES)
 //!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
+//!   YO_ATTEST             1: measure device attestation; off by default
+//!   YO_PLAY_INTEGRITY_DECRYPT_KEY, YO_PLAY_INTEGRITY_VERIFY_KEY, YO_PLAY_PACKAGE (see README)
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE, YO_ASSET_LINKS_FILE
 //!   YO_RESERVED_FILE      deprecated: accepted but ignored; names and switch live in the database.
@@ -93,6 +95,29 @@ fn config() -> Result<(Config, String), String> {
     if var("YO_RESERVED_FILE").is_some() {
         eprintln!("yo-hub: YO_RESERVED_FILE is deprecated and ignored; manage reserved names through admin");
     }
+    let attest = var("YO_ATTEST").as_deref() == Some("1");
+    let play_keys = match (var("YO_PLAY_INTEGRITY_DECRYPT_KEY"), var("YO_PLAY_INTEGRITY_VERIFY_KEY")) {
+        (Some(decrypt), Some(verify)) if attest => {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            let decrypt = STANDARD
+                .decode(decrypt)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or("invalid YO_PLAY_INTEGRITY_DECRYPT_KEY")?;
+            let verify = STANDARD.decode(verify).map_err(|_| "invalid YO_PLAY_INTEGRITY_VERIFY_KEY")?;
+            use aws_lc_rs::signature::{ParsedPublicKey, ECDSA_P256_SHA256_FIXED};
+            if verify.first() != Some(&0x30) {
+                return Err("YO_PLAY_INTEGRITY_VERIFY_KEY: expected DER SubjectPublicKeyInfo".into());
+            }
+            ParsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &verify)
+                .map_err(|_| "invalid YO_PLAY_INTEGRITY_VERIFY_KEY")?;
+            Some(yo_hub::config::PlayKeys { decrypt, verify })
+        }
+        _ => None,
+    };
+    if attest && play_keys.is_none() {
+        eprintln!("yo-hub: Play Integrity keys not configured; Android attestation unjudged");
+    }
     let defaults = Limits::default();
     let config = Config {
         add_devices: var("YO_ADD_DEVICES").as_deref() == Some("1"),
@@ -101,6 +126,9 @@ fn config() -> Result<(Config, String), String> {
         reserved: Vec::new(), // the names live in the database, added through the admin page
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
         robot_ranges: parse_ranges(&var("YO_ROBOT_RANGES").unwrap_or_else(|| ROBOT_RANGES.to_owned()))?,
+        attest,
+        play_keys,
+        play_package: var("YO_PLAY_PACKAGE").unwrap_or_else(|| "app.justyo.android".into()),
         apple_app_ids: var("YO_APPLE_APP_IDS")
             .map(|ids| ids.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect())
             .unwrap_or_default(),

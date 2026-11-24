@@ -18,6 +18,12 @@ Build with `assemblePlayDebug`, `assembleFlossDebug`, or `assembleFlossRelease`.
 (`app.justyo.android.floss`) is unsigned for F-Droid. To inspect its runtime libraries, run
 `./gradlew :app:dependencies --configuration flossReleaseRuntimeClasspath` from this directory.
 
+## Device attestation
+
+The Play flavor checks the hub in the background on registered devices with a Firebase project number. Play
+Integrity stays dormant until the hub enables `YO_ATTEST`. The app then requests a classic token, its nonce the hub's
+challenge hashed, which the hub decrypts with the Play keys (hub/README.md). The verdict never affects access to Yo. FLOSS skips attestation.
+
 ## Toolchain, without sudo
 
 On Linux x86_64, with curl, unzip, tar, Python 3, a host C/C++ toolchain, protoc and the repository’s Rust toolchain:

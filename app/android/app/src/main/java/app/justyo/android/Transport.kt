@@ -27,6 +27,7 @@ class HubTransport(
         .connectTimeout(15, TimeUnit.SECONDS).pingInterval(15, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false).build()
     override fun request(method: String, path: String, headers: List<Header>, body: ByteArray): HttpResult {
+        val attestation = path == "/v1/attest" || path == "/v1/attest/challenge"
         if (stopped.get()) return HttpResult(426u, byteArrayOf(), null)
         return try {
             require(path.startsWith("/") && !path.startsWith("//"))
@@ -38,8 +39,10 @@ class HubTransport(
             val started = System.nanoTime()
             client.newCall(request.build()).execute().use { response ->
                 if (Lat.on) Lat.mark("http $method ${path.substringBefore('?').take(24)} ${response.protocol} ${response.code} ${(System.nanoTime() - started) / 1_000_000}ms")
-                if (response.code == 426) { stopped.set(true); unsupported() }
-                reached(true); Problems.answered(response.code)
+                if (!attestation) {
+                    if (response.code == 426) { stopped.set(true); unsupported() }
+                    reached(true); Problems.answered(response.code)
+                }
                 val input = response.body
                 require(input.contentLength() <= MAX_ANSWER) { "Answer too large" }
                 val bytes = input.byteStream().use { stream ->
@@ -59,7 +62,7 @@ class HubTransport(
             // TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`), not the
             // connection: it must not say "Offline".
             val dates = refusedForDates(e)
-            if (dates) clockOff() else reached(false)
+            if (!attestation) { if (dates) clockOff() else reached(false) }
             HttpResult(0u, byteArrayOf(), if (dates) "clock: $unreachable" else unreachable)
         }
     }

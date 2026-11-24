@@ -302,13 +302,6 @@ impl Client {
         crate::help::report(&*self.transport, install, user_bytes(&user)?, reason)
     }
 
-    /// Signs a request to send without the client; the signing clock is saved first (spec 6.2).
-    fn request(&mut self, method: &'static str, path: &'static str, body: Vec<u8>) -> Result<Request> {
-        let (headers, _) = self.sign(method, path, &body);
-        self.persist()?;
-        Ok(Request { transport: self.transport.clone(), method, path, headers, body })
-    }
-
     /// A read-only connectivity check (`Request::status`).
     pub fn status_probe_begin(&mut self) -> Result<Request> {
         self.request("GET", api::CERTIFICATE, Vec::new())

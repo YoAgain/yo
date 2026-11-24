@@ -232,6 +232,20 @@ pub struct FcmConfig {
     pub service_account_json: String,
 }
 
+/// The Play Console response encryption and verification keys.
+#[derive(Clone)]
+pub struct PlayKeys {
+    pub decrypt: [u8; 32],
+    /// DER SubjectPublicKeyInfo of the P-256 key (checked at start).
+    pub verify: Vec<u8>,
+}
+
+impl std::fmt::Debug for PlayKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlayKeys").finish_non_exhaustive()
+    }
+}
+
 /// The fewest characters (grapheme clusters) of a new username when `YO_NAME_MIN` sets none (spec 3.3). Only the hub
 /// has a least: the apps show its `400`.
 pub const NAME_MIN: usize = 3;
@@ -253,6 +267,9 @@ pub struct Config {
     pub robot_ranges: Vec<(std::net::IpAddr, u8)>,
     /// Apps allowed passkeys for this domain (`TEAMID.bundle.id`), for `/.well-known/apple-app-site-association`.
     pub apple_app_ids: Vec<String>,
+    pub attest: bool,
+    pub play_keys: Option<PlayKeys>,
+    pub play_package: String,
     /// Digital Asset Links statements served at /.well-known/assetlinks.json.
     pub asset_links: Option<Vec<serde_json::Value>>,
     pub limits: Limits,
@@ -402,6 +419,9 @@ impl Config {
             trust_cloudflare: false,
             robot_ranges: parse_ranges(ROBOT_RANGES).expect("the robot ranges"),
             apple_app_ids: Vec::new(),
+            attest: false,
+            play_keys: None,
+            play_package: "app.justyo.android".into(),
             asset_links: None,
             limits: Limits::unlimited(),
             apns: None,

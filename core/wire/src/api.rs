@@ -697,3 +697,48 @@ pub struct SupportThread {
 pub struct SupportRead {
     pub through: u64,
 }
+
+// ---- device attestation (spec 6.11): measured, never enforced ----
+
+/// `GET`, signed: a fresh challenge for the signing device, single-use, valid `ATTEST_CHALLENGE_TTL_MS`.
+pub const ATTEST_CHALLENGE: &str = "/v1/attest/challenge";
+/// `POST`, signed, `Attest`: the platform's attestation over the device's last challenge. Answered `AttestResult`;
+/// nothing is ever refused for a missing or failed attestation.
+pub const ATTEST: &str = "/v1/attest";
+/// How long a challenge may be used.
+pub const ATTEST_CHALLENGE_TTL_MS: u64 = 5 * 60 * 1000;
+/// The length of a challenge.
+pub const ATTEST_CHALLENGE_LEN: usize = 32;
+/// The largest attestation payload.
+pub const MAX_ATTEST_PAYLOAD: usize = 16 * 1024;
+/// `Attest::platform`: an iOS App Attest attestation object (CBOR), made over SHA-256 of the challenge.
+pub const ATTEST_IOS: u8 = 1;
+/// `Attest::platform`: an Android Play Integrity token of a classic request (JWE, UTF-8), its nonce base64url
+/// (unpadded) SHA-256 of the challenge.
+pub const ATTEST_ANDROID: u8 = 2;
+/// `AttestResult::verdict`: the attestation holds.
+pub const ATTEST_ATTESTED: u8 = 1;
+/// `AttestResult::verdict`: it does not (the reason stays at the hub).
+pub const ATTEST_FAILED: u8 = 2;
+/// `AttestResult::verdict`: the hub cannot judge it (no keys for the platform, or no challenge): try again later.
+pub const ATTEST_UNJUDGED: u8 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct AttestChallenge {
+    /// `ATTEST_CHALLENGE_LEN` random bytes.
+    pub challenge: VLBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Attest {
+    /// `ATTEST_IOS` or `ATTEST_ANDROID`.
+    pub platform: u8,
+    /// At most `MAX_ATTEST_PAYLOAD` bytes.
+    pub payload: VLBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct AttestResult {
+    /// `ATTEST_ATTESTED`, `ATTEST_FAILED` or `ATTEST_UNJUDGED`.
+    pub verdict: u8,
+}

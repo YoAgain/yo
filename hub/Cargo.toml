@@ -33,7 +33,14 @@ rand = { workspace = true }
 libsignal-protocol = { workspace = true }
 zkgroup = { workspace = true }
 
+aws-lc-rs = "=1.19.0"
+rustls-webpki = { version = "=0.103.17", features = ["aws-lc-rs"] }
+rustls-pki-types = "=1.16.0"
+x509-parser = "=0.18.1"
+ciborium = "=0.2.2"
+base64.workspace = true
 subtle = "=2.6.1"
 
 [dev-dependencies]
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs"] }
 tower = { version = "=0.5.3", features = ["util"] }

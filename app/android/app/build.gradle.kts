@@ -122,6 +122,7 @@ dependencies {
     implementation("androidx.heifwriter:heifwriter:1.2.0")
     implementation("androidx.glance:glance-appwidget:1.2.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
+    "playImplementation"("com.google.android.play:integrity:1.6.0")
     "playImplementation"("com.google.firebase:firebase-messaging:26.0.2")
     implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.activity:activity-compose:1.13.0")

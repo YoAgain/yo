@@ -145,6 +145,7 @@ final class AccountStore {
   private func use(_ client: YoClient, secret: Data) {
     self.client = client
     self.secret = secret
+    Attestation.start(client)
   }
 
   private(set) var wordsSaved: Bool = UserDefaults.standard.object(forKey: "recovery.saved") as? Bool ?? true {

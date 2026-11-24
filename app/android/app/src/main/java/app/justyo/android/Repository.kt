@@ -356,6 +356,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         c.setHubKeys(Hub.hubKeys.map(::decodeUrl))
         c.setTrustRoots(Hub.roots.map(::decodeUrl))
         c.setZkParams(decodeUrl(Hub.groupParams))
+        scope.launch(Dispatchers.IO) { Attestation.check(context, c) }
     }
     /** Orders the saves of the UI vault by themselves, apart from `changes`: a save (~15-30 ms, encrypted) after a send
      *  held an arriving Yo off its bar. Each writes the newest state when its turn comes. */

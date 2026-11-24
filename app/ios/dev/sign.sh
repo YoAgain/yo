@@ -43,13 +43,14 @@ if info["CFBundleIdentifier"].endswith(".dev"):
 own = plistlib.load(open(sys.argv[2], "rb"))
 for key, value in own.items():
     if key in ("com.apple.developer.usernotifications.communication", "com.apple.developer.siri",
-               "com.apple.developer.carplay-communication") and not entitlements.get(key):
+               "com.apple.developer.carplay-communication", "com.apple.developer.devicecheck.appattest-environment") and not entitlements.get(key):
         print(f"sign.sh: {key} not on the app id, signed without it", file=sys.stderr)
         entitlements.pop(key, None)
         continue
     if key not in entitlements:
         sys.exit(f"the profile does not allow {key}: enable it for the app id and make the profile again")
-    entitlements[key] = value
+    if key != "com.apple.developer.devicecheck.appattest-environment":
+        entitlements[key] = value
 # A development build reads its domains' association files straight from the domain, not through Apple's CDN (which
 # keeps an old one up to a day): "?mode=developer", honoured with Settings > Developer > Associated Domains Development.
 domains = entitlements.get("com.apple.developer.associated-domains")

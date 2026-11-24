@@ -1013,6 +1013,19 @@ if (document.body.classList.contains("login")) {
   const overview = (h) => {
     const ok = h && !h.error;
     hubNow = ok ? h : null;
+    const attest = $("attestation");
+    attest.hidden = !hubNow?.attestation;
+    if (!attest.hidden) {
+      const rows = Object.entries(h.attestation);
+      const platform = p => p === "ios" ? "iOS" : "Android";
+      attest.textContent = "Attested / failed / unknown · " + rows.map(([p, r]) =>
+        `${platform(p)} ${num(r.attested)} / ${num(r.failed)} / ${num(r.unknown)}`).join(" · ");
+      attest.title = rows.map(([p, r]) => {
+        const details = [...Object.entries(r.reasons), ...Object.entries(r.levels)].map(([k, n]) => `${k} ${num(n)}`);
+        details.push(r.last ? "Last " + new Date(r.last).toLocaleString() : "No attestation yet");
+        return [platform(p), ...details].join(" · ");
+      }).concat("Unknown counts phone accounts seen within 48 hours.").join("\n");
+    }
     if (!hubNow) {
       set("problem-n", "–");
       state("problem-dial", null);

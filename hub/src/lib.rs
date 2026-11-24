@@ -6,6 +6,7 @@
 
 mod account;
 mod admin;
+mod attest;
 pub mod blobs;
 pub mod certificate;
 pub mod config;
@@ -187,6 +188,7 @@ pub struct Hub {
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
     fetching: Arc<Places>,
+    challenges: Mutex<attest::Challenges>,
     limiter: Limiter,
     /// Requests' buckets (spec 4.10), by the hub's clock as tests move it.
     requests: Requests,
@@ -254,6 +256,7 @@ impl Hub {
             pushes: Mutex::default(),
             waiting: Mutex::default(),
             fetching: Arc::default(),
+            challenges: Mutex::default(),
             limiter: Limiter::default(),
             requests,
             replay: ReplayCache::default(),
@@ -283,6 +286,8 @@ impl Hub {
             .route("/v1/username/{name}", get(account::get_username))
             .route(api::USERNAME, put(account::put_username))
             .route(api::PREKEYS, put(account::put_prekeys))
+            .route(api::ATTEST_CHALLENGE, get(attest::challenge))
+            .route(api::ATTEST, post(attest::submit))
             .route(api::LOOKUP, post(account::post_lookup))
             .route(api::CERTIFICATE, get(account::get_certificate))
             .route(api::PUSH, put(account::put_push))

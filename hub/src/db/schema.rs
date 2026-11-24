@@ -31,6 +31,15 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "zk_groups", "created_at")? {
         conn.execute_batch("ALTER TABLE zk_groups ADD COLUMN created_at INTEGER")?;
     }
+    // Device attestation (spec 6.11): a table of its own, no schema step, so the hub before it still opens the store.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS attestation (
+            user_id BLOB PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            state TEXT NOT NULL CHECK(state IN ('attested','failed')),
+            platform TEXT NOT NULL CHECK(platform IN ('ios','android')),
+            reason TEXT, level TEXT, at_ms INTEGER NOT NULL
+        ) WITHOUT ROWID;",
+    )?;
     // Initialize once: fresh hubs enforce reservations; existing hubs retain their old effective state.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",

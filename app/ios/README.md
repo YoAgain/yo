@@ -58,6 +58,14 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 
 Account storage backs up contacts, groups, keys and settings like the app icon and left-handed mode.
 
+## Device attestation
+
+A registered device checks the hub in the background. Until the hub enables `YO_ATTEST`, App Attest stays dormant
+and the app checks again after a day. Once enabled, it attests a new key over the hub's challenge. The verdict
+never affects access to Yo. Signing includes the profile's App Attest environment only when the App ID grants it
+(Developer portal › Identifiers › app.justyo.ios › App Attest). TestFlight and App Store builds use Apple's
+production App Attest environment.
+
 ## Build and run
 
 ```sh

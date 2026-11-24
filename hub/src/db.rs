@@ -1522,6 +1522,27 @@ impl Db {
             .query_row(params![device, ONE_TIME, KYBER], |row| row.get(0))
     }
 
+    /// A success sticks until the account is deleted. Only a current device can record a verdict.
+    pub(crate) fn record_attestation(
+        &self,
+        device: &DeviceId,
+        platform: &str,
+        reason: Option<&str>,
+        level: Option<&str>,
+        now: u64,
+    ) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT INTO attestation(user_id,state,platform,reason,level,at_ms)
+             SELECT user_id,?2,?3,?4,?5,?6 FROM devices WHERE id=?1
+             ON CONFLICT(user_id) DO UPDATE SET state=excluded.state, platform=excluded.platform,
+               reason=excluded.reason, level=excluded.level, at_ms=excluded.at_ms
+             WHERE (excluded.state='attested' AND attestation.state='failed')
+                OR (excluded.state=attestation.state AND excluded.at_ms>=attestation.at_ms)",
+            params![device, if reason.is_some() { "failed" } else { "attested" }, platform, reason, level, now],
+        )?;
+        Ok(())
+    }
+
     /// Sets a device's push token, taken from any other device that held it; refused for a device replaced since it
     /// authenticated.
     pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<Write<()>> {
@@ -1768,6 +1789,31 @@ mod tests {
         let spelling = std::str::from_utf8(name).unwrap();
         let skeleton = yo_wire::handle::skeleton(spelling);
         db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &prekeys(0), 100, now).unwrap()
+    }
+
+    #[test]
+    fn attestation_sticks_until_account_deletion() {
+        let db = Db::open(":memory:").unwrap();
+        register(&db, b"test", 1, 2, 1).done().unwrap();
+        let id = [2; 16];
+        let row = || {
+            db.conn().query_row("SELECT platform,reason,level,at_ms FROM attestation", [], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, u64>(3)?,
+                ))
+            })
+        };
+        db.record_attestation(&id, "ios", Some("nonce"), None, 10).unwrap();
+        db.record_attestation(&id, "ios", Some("chain"), None, 11).unwrap();
+        assert_eq!(row().unwrap().1.as_deref(), Some("chain"));
+        db.record_attestation(&id, "android", None, Some("device"), 12).unwrap();
+        db.record_attestation(&id, "ios", Some("format"), None, 13).unwrap();
+        assert_eq!(row().unwrap(), ("android".into(), None, Some("device".into()), 12));
+        db.delete_account(&id, 14).unwrap().done().unwrap();
+        assert!(matches!(row(), Err(rusqlite::Error::QueryReturnedNoRows)));
     }
 
     /// A lookup hands out a bundle per device: its one-time prekeys once each, the last resort Kyber prekey when
@@ -3254,7 +3300,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_7_with_feedback_reaches_9_with_its_rows_moved_and_the_table_gone() {
+    fn schema_7_with_feedback_reaches_10_with_its_rows_moved_and_the_table_gone() {
         let path = std::env::temp_dir().join(format!("yo-hub-feedback-{}.db", std::process::id()));
         let path = path.to_str().unwrap();
         let leo = {
