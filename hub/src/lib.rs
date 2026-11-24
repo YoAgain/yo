@@ -169,6 +169,8 @@ pub struct Hub {
     zk: groups::Zk,
     /// To the writer, which stores deliveries in group commits (`mail::writer`).
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
+    /// The bytes of the deliveries waiting for the writer (`mail::QUEUED_BYTES` at most).
+    pub(crate) queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
     /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in`, `yo-in-bot` also into
     /// `deliveries_hourly`) once a minute.
     events: [AtomicU64; Event::KINDS.len()],
@@ -244,6 +246,7 @@ impl Hub {
             signer,
             zk,
             deliveries,
+            queued_bytes: Arc::default(),
             events: Default::default(),
             bot_media: config.bots.iter().map(|_| AtomicU64::new(0)).collect(),
             live: tokio::sync::broadcast::channel(LIVE_QUEUE).0,
@@ -264,9 +267,10 @@ impl Hub {
         });
         // The writer ends with the hub: when the last sender of its queue goes.
         let (db, most, woken) = (hub.db.clone(), hub.config.limits.max_pending_per_device, Arc::downgrade(&hub));
+        let queued = hub.queued_bytes.clone();
         std::thread::Builder::new()
             .name("yo-hub-writer".into())
-            .spawn(move || mail::writer(db, queue, most, woken))
+            .spawn(move || mail::writer(db, queue, most, woken, queued))
             .map_err(|e| format!("writer: {e}"))?;
         Ok(hub)
     }
@@ -304,7 +308,8 @@ impl Hub {
             .route_layer(from_fn_with_state(self.clone(), admit));
         let delivering = Router::new()
             .route("/v1/inbox/{user}", post(mail::post_envelope))
-            .route_layer(from_fn_with_state(self.clone(), admit));
+            .route_layer(from_fn_with_state(self.clone(), admit))
+            .layer(DefaultBodyLimit::max(limits::MAX_DELIVERY_BODY));
         let mut router = Router::new()
             .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
             .route(api::INBOX, get(mail::get_inbox))
@@ -1061,6 +1066,9 @@ mod tests {
             .send(Delivery {
                 user: [1; 16],
                 devices_hash,
+                from: None,
+                copies: None,
+                size: 0,
                 envelope,
                 urgent: true,
                 from_bot: false,
@@ -1087,6 +1095,9 @@ mod tests {
             .send(Delivery {
                 user: [1; 16],
                 devices_hash,
+                from: None,
+                copies: None,
+                size: 0,
                 envelope,
                 urgent: true,
                 from_bot: true,
@@ -1253,7 +1264,12 @@ mod tests {
         assert_eq!(hub.push_window(false, 51), Duration::from_secs(600));
         assert_eq!(hub.push_window(true, 51), Duration::from_secs(600));
         let hash = leo(&hub, None);
-        let item = |hash: &[u8; 32]| db::Incoming { user: [1; 16], devices_hash: *hash, envelope: &[7; 40] };
+        let item = |hash: &[u8; 32]| db::Incoming {
+            user: [1; 16],
+            devices_hash: *hash,
+            from: None,
+            copies: db::Copies::Legacy(&[7; 40]),
+        };
         for waiting in 1..=3u32 {
             let out = hub.db.deliver(&[item(&hash)], 10, 5000).unwrap();
             let db::Delivered::Stored(devices) = &out[0] else { panic!("stored") };

@@ -100,7 +100,7 @@ pub struct SupportMessage {
 pub struct SeenThread {
     /// User id (32 hex digits) or group id (64 hex digits).
     pub thread: String,
-    /// Shown through this time (ms since 1970).
+    /// Shown through the message sent at this time (ms since 1970): what its notifications' ids end in.
     pub through_ms: u64,
 }
 
@@ -443,6 +443,10 @@ pub enum YoEvent {
     GroupChanged {
         group: String,
     },
+    /// The hub lists a device more for `user` (this account's own id: one of its devices): for the app's log.
+    DeviceAdded {
+        user: String,
+    },
 }
 
 impl From<Event> for YoEvent {
@@ -456,6 +460,7 @@ impl From<Event> for YoEvent {
                 YoEvent::GroupMessage { group, user, sent_at_ms, kind: content.into() }
             }
             Event::GroupChanged { group } => YoEvent::GroupChanged { group },
+            Event::DeviceAdded { user } => YoEvent::DeviceAdded { user },
         }
     }
 }
@@ -1192,13 +1197,14 @@ impl YoClient {
         Ok(self.with(|c| c.set_blocked(&who, blocked))??)
     }
 
-    /// Shares a direct or group thread's read watermark with this account's other devices.
-    pub fn mark_seen(&self, user_or_group: String, through_sent_at_ms: u64) -> Result<(), YoError> {
-        Ok(self.with(|c| c.mark_seen(&user_or_group, through_sent_at_ms))??)
+    /// The threads shown here (user or group ids, hex): this account's other devices let their notifications of them
+    /// go, through the newest message received here (spec 5).
+    pub fn mark_seen(&self, threads: Vec<String>) -> Result<(), YoError> {
+        Ok(self.with(|c| c.mark_seen(&threads))??)
     }
 
-    /// Threads (user or group id, hex) another device of this account showed, with the time through (ms): their
-    /// notifications go here too. Each is handed out once.
+    /// Threads (user or group id, hex) another device of this account showed, through the message sent then (ms):
+    /// their notifications of messages sent up to then go here too. Each is handed out once.
     pub fn take_seen(&self) -> Result<Vec<SeenThread>, YoError> {
         let due = self.with(|c| c.take_seen())??;
         Ok(due.into_iter().map(|(thread, through_ms)| SeenThread { thread, through_ms }).collect())

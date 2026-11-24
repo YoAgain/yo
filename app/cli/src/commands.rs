@@ -233,6 +233,7 @@ pub fn event(event: &Event, refs: bool) -> Value {
         Event::Profile { user, name } => json!({ "type": "profile", "user": user, "name": name }),
         Event::IdentityChanged { user } => json!({ "type": "identity_changed", "user": user }),
         Event::GroupChanged { group } => json!({ "type": "group_changed", "group": group }),
+        Event::DeviceAdded { user } => json!({ "type": "device_added", "user": user }),
     }
 }
 

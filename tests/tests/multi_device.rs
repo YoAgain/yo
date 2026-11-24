@@ -16,44 +16,54 @@ fn exercise(http: Arc<dyn Transport>) {
     };
     let mut a2 = register("First", None);
     let mut b = register("Second", None);
-    let yos = |events: Vec<Event>| {
-        events.into_iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count()
-    };
+    let yos =
+        |events: &[Event]| events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count();
+    let added = |events: &[Event]| events.iter().filter(|e| matches!(e, Event::DeviceAdded { .. })).count();
     b.send_yo(a2.user_id()).unwrap();
-    assert_eq!(yos(a2.sync(0).unwrap()), 1);
+    assert_eq!(yos(&a2.sync(0).unwrap()), 1);
     a2.accept(b.user_id()).unwrap();
     a2.maintenance().unwrap();
+
+    // A1 joins the account: A2, there before it, is trusted at once; A1's first word (a storage hint) tells A2 of
+    // the new device and lets A2's syncs go to it.
     let mut a1 = register("First", Some(a2.account_secret()));
     assert_eq!(a1.user_id(), a2.user_id());
+    assert_eq!(a1.saved().state.siblings.len(), 1);
+    assert!(a1.saved().state.siblings_held.is_empty());
+    a1.maintenance().unwrap();
+    let events = a2.sync(0).unwrap();
+    assert_eq!(added(&events), 1, "{events:?}");
+    assert_eq!(a2.saved().state.siblings.len(), 1);
+    assert!(a2.saved().state.siblings_held.is_empty());
 
-    // B has only the first slot. Its next delivery sees a signed 409 and opens the added session.
+    // B has only the first slot. Its next delivery sees a signed 409 and opens the added session; each device gets
+    // its own copy.
     b.send_yo(a2.user_id()).unwrap();
     assert_eq!(b.sessions_with(a2.user_id()).len(), 2);
     for a in [&mut a1, &mut a2] {
-        assert_eq!(yos(a.sync(0).unwrap()), 1);
-        assert_eq!(yos(a.sync(0).unwrap()), 0);
+        assert_eq!(yos(&a.sync(0).unwrap()), 1);
+        assert_eq!(yos(&a.sync(0).unwrap()), 0);
     }
-    a1.send_yo(b.user_id()).unwrap();
-    assert_eq!(yos(b.sync(0).unwrap()), 1);
-    assert!(a2.sync(0).unwrap().is_empty(), "a transcript is silent");
-    assert!(a2.saved().state.sibling_sent_at[b.user_id()] > 0);
-    assert!(a2.saved().state.contacts[b.user_id()].chat);
-    assert_eq!(a2.saved().state.siblings.len(), 1);
-
+    // What A2 sends goes to B alone: no copy of it to A1.
     a2.send_yo(b.user_id()).unwrap();
-    assert_eq!(yos(b.sync(0).unwrap()), 1);
+    assert_eq!(yos(&b.sync(0).unwrap()), 1);
     assert!(a1.sync(0).unwrap().is_empty());
-    assert!(a1.saved().state.sibling_sent_at[b.user_id()] > 0);
-    for at in [91, 77] {
-        a2.mark_seen(b.user_id(), at).unwrap();
-    }
-    assert!(a1.sync(0).unwrap().is_empty());
-    assert_eq!(a1.saved().state.seen_through[b.user_id()], 91);
 
+    // A2 shows B's thread: A1 lets its notifications of it go, through B's Yo (its sent time, not a clock).
+    let through = a2.saved().state.last_in[b.user_id()];
+    a2.mark_seen(&[b.user_id().to_owned()]).unwrap();
+    a2.mark_seen(&[b.user_id().to_owned()]).unwrap();
+    assert!(a2.sync(0).unwrap().is_empty(), "never back to the sending device");
+    assert!(a1.sync(0).unwrap().is_empty());
+    assert_eq!(a1.take_seen().unwrap(), [(b.user_id().to_owned(), through)]);
+    assert!(a1.take_seen().unwrap().is_empty());
+
+    // A storage change: read on A1 once its inbox is.
     a2.set_app_icon(Some("test".into())).unwrap();
     a2.write_storage().unwrap();
     a2.maintenance().unwrap();
     assert!(a1.sync(0).unwrap().is_empty());
+    a1.maintenance().unwrap();
     assert_eq!(a1.app_icon().as_deref(), Some("test"));
 
     let mut c = register("Third", None);
@@ -81,27 +91,25 @@ fn exercise(http: Arc<dyn Transport>) {
         media::ack(&*http, &photo.id).unwrap();
     }
     assert!(media::fetch(&*http, &photo).unwrap().is_none());
-
-    // Two accepted group legs release a single transcript to A's sibling.
     a1.accept_group(&group).unwrap();
     a1.send_group(&group, Content::Yo).unwrap();
-    let events = a2.sync(0).unwrap();
-    assert!(!events.iter().any(|e| matches!(e, Event::GroupMessage { .. })));
-    assert!(a2.saved().state.sibling_sent_at[&group] > 0);
-    assert_eq!(a1.open_group(&group).unwrap().0, 3);
+    assert!(!a2.sync(0).unwrap().iter().any(|e| matches!(e, Event::GroupMessage { .. })));
+    assert_eq!(yos(&b.sync(0).unwrap()), 0);
 
-    // A1 still knows only A2. Its own-account POST gets 409 after another installation
-    // joins. The roster hash changes, but the transcript's original audience stays A2.
+    // A3 joins: told on A1 and A2 once it writes, and their syncs go to it from then on. (A roster is asked at most
+    // once a minute a user, and A2 asked for A1's: a minute on.)
     let mut a3 = register("First", Some(a1.account_secret()));
-    let before = a2.saved().state.sibling_sent_at[b.user_id()];
-    a1.send_yo(b.user_id()).unwrap();
-    assert_eq!(a1.saved().state.siblings.len(), 2);
-    assert!(a2.sync(0).unwrap().is_empty());
-    assert!(a2.saved().state.sibling_sent_at[b.user_id()] > before);
+    a3.maintenance().unwrap();
+    for a in [&mut a1, &mut a2] {
+        a.set_clock(Arc::new(|| yo_hub::now_ms() + 2 * 60 * 1000));
+        let events = a.sync(0).unwrap();
+        assert_eq!(added(&events), 1, "{events:?}");
+        assert_eq!(a.saved().state.siblings.len(), 2);
+        assert!(a.saved().state.siblings_held.is_empty());
+    }
     // A3 restored the account's storage (its groups); no message of A1's reached it.
     let left = a3.sync(0).unwrap();
     assert!(!left.iter().any(|e| matches!(e, Event::Message { .. } | Event::GroupMessage { .. })), "{left:?}");
-    assert!(!a3.saved().state.sibling_sent_at.contains_key(b.user_id()));
 }
 
 #[test]

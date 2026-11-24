@@ -118,11 +118,21 @@ pub fn is_bot_app(app: Option<&str>) -> bool {
     app.is_some_and(|app| app.starts_with("yogpt/") || app.starts_with("cli/"))
 }
 
+/// What a delivery brings for the writer (spec 4.4).
+pub enum Copies<'a> {
+    /// One envelope for each device, by its number (`api::Copies`).
+    Each(Vec<(u8, &'a [u8])>),
+    /// One envelope for every device: an app before multi-device, while each account has one device (phase 1).
+    Legacy(&'a [u8]),
+}
+
 /// An envelope for the writer (`Db::deliver`): for a user, with the sender's device check.
 pub struct Incoming<'a> {
     pub user: UserId,
     pub devices_hash: [u8; 32],
-    pub envelope: &'a [u8],
+    /// The sending device, when it writes to its own user: neither checked for nor delivered to (Signal's sync).
+    pub from: Option<DeviceId>,
+    pub copies: Copies<'a>,
 }
 
 pub enum Delivered {
@@ -1406,7 +1416,7 @@ impl Db {
     /// The file is in place, the blob handed out from now on; `false`: its row went meanwhile, the upload failed.
     pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
         self.one_changed(
-            "UPDATE blobs SET ready = 1, gets_left = max(3, 3 * fetches_left) WHERE id = ?1 AND created_at = ?2 AND ready = 0",
+            "UPDATE blobs SET ready = 1, gets_left = fetches_left + 3 WHERE id = ?1 AND created_at = ?2 AND ready = 0",
             params![id, created_at as i64],
         )
     }
@@ -1545,7 +1555,7 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut outcomes = Vec::with_capacity(items.len());
-        for Incoming { user, devices_hash, envelope } in items {
+        for Incoming { user, devices_hash, from, copies } in items {
             let Some(current) = roster(&tx, user)? else {
                 outcomes.push(Delivered::Unknown);
                 continue;
@@ -1554,26 +1564,43 @@ impl Db {
                 outcomes.push(Delivered::Unknown);
                 continue;
             }
-            if yo_wire::devices::hash(&current.account_key, &current.keys()) != *devices_hash {
+            let mut devices: Vec<(u8, Wake)> = tx
+                .prepare_cached("SELECT id, number, push_platform, push_token, app FROM devices WHERE user_id = ?1")?
+                .query_map([user], |row| {
+                    Ok((
+                        row.get(1)?,
+                        Wake {
+                            device_id: array(row.get(0)?)?,
+                            push_platform: row.get(2)?,
+                            push_token: row.get(3)?,
+                            bot: is_bot_app(row.get::<_, Option<String>>(4)?.as_deref()),
+                            waiting: 0,
+                        },
+                    ))
+                })?
+                .collect::<Result<_, _>>()?;
+            let sender = from.and_then(|from| devices.iter().find(|(_, d)| d.device_id == from).map(|(n, _)| *n));
+            devices.retain(|(number, _)| Some(*number) != sender);
+            let addressed: Vec<_> = current.devices.iter().filter(|d| Some(d.id) != sender).map(|d| d.key).collect();
+            // The sender knows the roster as it is (the hash); it may write to some of its devices only (a
+            // decryption error's answer, a message sent again to one device, a sync to devices it trusts).
+            let listed: Vec<u8> = match copies {
+                Copies::Each(each) => each.iter().map(|(n, _)| *n).collect(),
+                Copies::Legacy(_) => devices.iter().map(|(n, _)| *n).collect(),
+            };
+            if addressed.is_empty()
+                || yo_wire::devices::hash(&current.account_key, &addressed) != *devices_hash
+                || listed.is_empty()
+                || !listed.iter().all(|n| devices.iter().any(|(d, _)| d == n))
+            {
                 outcomes.push(Delivered::Mismatch(current));
                 continue;
             }
-            let mut devices: Vec<Wake> = tx
-                .prepare_cached("SELECT id, push_platform, push_token, app FROM devices WHERE user_id = ?1")?
-                .query_map([user], |row| {
-                    Ok(Wake {
-                        device_id: array(row.get(0)?)?,
-                        push_platform: row.get(1)?,
-                        push_token: row.get(2)?,
-                        bot: is_bot_app(row.get::<_, Option<String>>(3)?.as_deref()),
-                        waiting: 0,
-                    })
-                })?
-                .collect::<Result<_, _>>()?;
+            devices.retain(|(number, _)| listed.contains(number));
             // Only the last allowed slot matters: an index probe, no count.
             let mut slot = tx.prepare_cached("SELECT 1 FROM messages WHERE device_id = ?1 LIMIT 1 OFFSET ?2")?;
             let mut full = most == 0;
-            for device in &devices {
+            for (_, device) in &devices {
                 if full {
                     break;
                 }
@@ -1586,10 +1613,16 @@ impl Db {
             let mut insert =
                 tx.prepare_cached("INSERT INTO messages (device_id, envelope, received_at) VALUES (?1, ?2, ?3)")?;
             let mut waiting = tx.prepare_cached("SELECT COUNT(*) FROM messages WHERE device_id = ?1")?;
-            for device in &mut devices {
+            // Each device only its own copy (Signal's per-device message): nothing stored N times.
+            for (number, device) in &mut devices {
+                let envelope = match copies {
+                    Copies::Each(each) => each.iter().find(|(n, _)| n == number).map_or(&[][..], |(_, e)| *e),
+                    Copies::Legacy(envelope) => *envelope,
+                };
                 insert.execute(params![device.device_id, envelope, now])?;
                 device.waiting = waiting.query_row([device.device_id], |row| row.get(0))?;
             }
+            let devices = devices.into_iter().map(|(_, wake)| wake).collect();
             outcomes.push(Delivered::Stored(devices));
         }
         tx.commit()?;
@@ -2678,7 +2711,8 @@ mod tests {
         }
         let keys = (1..=16).map(|n| device(n).device_key).collect::<Vec<_>>();
         let devices_hash = yo_wire::devices::hash(&[2; 32], &keys);
-        db.deliver(&[Incoming { user: [1; 16], devices_hash, envelope: b"queued" }], 0, 100).unwrap();
+        db.deliver(&[Incoming { user: [1; 16], devices_hash, from: None, copies: Copies::Legacy(b"queued") }], 0, 100)
+            .unwrap();
         // The 17th: refused, nothing retired, every device keeps its mail.
         assert!(matches!(add(17, 7_200_000), Write::Refused(Conflict::DeviceLimit)));
         assert!(matches!(add(2, 7_200_001), Write::Refused(Conflict::DeviceTaken)));
@@ -2696,6 +2730,39 @@ mod tests {
             db.register(b"test", "Test", &[1; 16], &[2; 32], &device(18), &prekeys(0), 100, 8_000_000).unwrap();
         assert!(matches!(replaced, Write::Done((_, _, 1))));
         assert_eq!(db.lookup(KIND_USER, &[1; 16], false, &[]).unwrap().unwrap().devices.len(), 1);
+    }
+
+    /// Each device stores only its own envelope (spec 4.4, Signal's per-device messages); to its own user the
+    /// sending device is left out of the check and gets nothing; numbers that are not the roster's store nothing.
+    #[test]
+    fn each_device_gets_its_own_copy_and_the_sender_none_of_its_own() {
+        let mut db = Db::open(":memory:").unwrap();
+        db.add_devices = true;
+        for n in 1..=3 {
+            db.register(b"test", "Test", &[1; 16], &[2; 32], &device(n), &prekeys(0), 100, 0).unwrap();
+        }
+        let keys = |ns: &[u8]| ns.iter().map(|n| device(*n).device_key).collect::<Vec<_>>();
+        let hash = |ns: &[u8]| yo_wire::devices::hash(&[2; 32], &keys(ns));
+        let each = |ns: &[u8]| Copies::Each(ns.iter().map(|n| (*n, &b"for each"[..*n as usize])).collect());
+        let deliver = |hash, from, copies| {
+            db.deliver(&[Incoming { user: [1; 16], devices_hash: hash, from, copies }], 0, 100).unwrap().remove(0)
+        };
+        assert!(matches!(deliver(hash(&[1, 2, 3]), None, each(&[1, 2, 3])), Delivered::Stored(d) if d.len() == 3));
+        for n in 1..=3u8 {
+            assert_eq!(db.fetch(&device(n).device_id, 10).unwrap()[0].1, &b"for each"[..n as usize]);
+        }
+        // Device 2 to its others: checked and stored without it.
+        let from = Some(device(2).device_id);
+        assert!(matches!(deliver(hash(&[1, 2, 3]), from, each(&[1, 3])), Delivered::Mismatch(_)));
+        assert!(matches!(deliver(hash(&[1, 3]), from, each(&[1, 2, 3])), Delivered::Mismatch(_)));
+        assert!(matches!(deliver(hash(&[1, 3]), from, each(&[1, 3])), Delivered::Stored(d) if d.len() == 2));
+        assert_eq!(db.fetch(&device(2).device_id, 10).unwrap().len(), 1);
+        assert_eq!(db.fetch(&device(3).device_id, 10).unwrap().len(), 2);
+        // Some devices only (an answer to one device's decryption error): the roster known, stored for those.
+        assert!(matches!(deliver(hash(&[1, 2, 3]), None, each(&[2])), Delivered::Stored(d) if d.len() == 1));
+        assert_eq!(db.fetch(&device(2).device_id, 10).unwrap().len(), 2);
+        assert!(matches!(deliver(hash(&[1, 2, 3]), None, each(&[4])), Delivered::Mismatch(_)));
+        assert!(matches!(deliver(hash(&[1, 2]), None, each(&[1, 2])), Delivered::Mismatch(_)));
     }
 
     /// A registration has no time or nonce (spec 6.4): an old one played back (a TLS proxy's log, years later) must
@@ -2963,7 +3030,8 @@ mod tests {
         assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), None);
         assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), None, "not ready");
         db.blob_ready(&id, 5).unwrap();
-        for _ in 0..6 {
+        // Its two fetches and three more (spec 6.8).
+        for _ in 0..5 {
             assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), Some((100, 5)));
         }
         assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), None);
@@ -2971,7 +3039,7 @@ mod tests {
         assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), None, "recovery never resets budget");
         db.return_blob_get(&id, 5).unwrap();
         assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), Some((100, 5)), "cut-off slot returned");
-        assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), None, "one fetch remains despite six GETs");
+        assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), None, "one fetch remains despite five GETs");
         assert_eq!(db.ack_blob(&id, 106, 100).unwrap(), None, "expired ack never consumes");
         assert_eq!(db.take_blob_get(&id, 106, 100).unwrap(), None);
         assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), Some(5), "last ack deletes immediately");
@@ -2991,7 +3059,7 @@ mod tests {
         assert_eq!(db.blob_ready_state(&id).unwrap(), Some(false));
         assert!(db.blob_ready(&id, 5).unwrap());
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Taken, "done: it is there");
-        for _ in 0..6 {
+        for _ in 0..5 {
             assert_eq!(db.take_blob_get(&id, 5, ttl).unwrap(), Some((100, 5)));
         }
         assert_eq!(db.take_blob_get(&id, 5, ttl).unwrap(), None);
@@ -3016,7 +3084,8 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
-        db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
+        db.deliver(&[Incoming { user: leo, devices_hash, from: None, copies: Copies::Legacy(b"envelope") }], 0, 10)
+            .unwrap();
         let synchronous = || -> i64 { db.conn().query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap() };
         assert_eq!(synchronous(), 1);
         assert_eq!(db.conn().query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0)).unwrap(), 16384);
@@ -3046,7 +3115,9 @@ mod tests {
             })
         };
         let committer = commit_later(other);
-        let delivered = db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
+        let delivered = db
+            .deliver(&[Incoming { user: leo, devices_hash, from: None, copies: Copies::Legacy(b"envelope") }], 0, 10)
+            .unwrap();
         assert!(matches!(&delivered[..], [Delivered::Stored(_)]));
         let ids: Vec<u64> = db.fetch(&[1; 16], 10).unwrap().into_iter().map(|(id, _, _)| id).collect();
         let committer = commit_later(committer.join().unwrap());
@@ -3066,7 +3137,9 @@ mod tests {
         let bot = user(register(&db, b"BOT", 1, 1, 0));
         db.touch(&[1; 16], 0, Some(("cli/7", None))).unwrap();
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
-        let delivered = db.deliver(&[Incoming { user: bot, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
+        let delivered = db
+            .deliver(&[Incoming { user: bot, devices_hash, from: None, copies: Copies::Legacy(b"envelope") }], 0, 10)
+            .unwrap();
         assert!(matches!(&delivered[..], [Delivered::Stored(devices)] if devices.iter().all(|w| w.bot)));
     }
 
@@ -3091,7 +3164,12 @@ mod tests {
             let db = Db::open(&path).unwrap();
             let leo = user(register(&db, b"LEO", 1, 1, 0));
             let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
-            db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"committed" }], 0, 10).unwrap();
+            db.deliver(
+                &[Incoming { user: leo, devices_hash, from: None, copies: Copies::Legacy(b"committed") }],
+                0,
+                10,
+            )
+            .unwrap();
             std::process::exit(0);
         }
         let path = std::env::temp_dir().join(format!("yo-db-crash-{}.sqlite", std::process::id()));
@@ -3122,7 +3200,8 @@ mod tests {
             let incoming = Incoming {
                 user: leo,
                 devices_hash: yo_wire::devices::hash(&[1; 32], &[[1; 32]]),
-                envelope: b"envelope",
+                from: None,
+                copies: Copies::Legacy(b"envelope"),
             };
             db.deliver(&[incoming], 0, 10).unwrap();
             let reported = |install: &Install, whom: &UserId| db.report(install, whom, 1, 0).unwrap();

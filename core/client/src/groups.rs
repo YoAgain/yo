@@ -231,7 +231,7 @@ impl Client {
     /// with every member, the Yo is queued and saved and the deliveries are handed out. `None`, with nothing changed:
     /// `send_group` instead.
     pub fn send_group_begin(&mut self, id: &str, content: Content) -> Option<crate::Deliveries> {
-        if self.own_roster_due() || self.replaced.get() {
+        if self.replaced.get() {
             return None;
         }
         if !shown(&content) || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
@@ -275,12 +275,11 @@ impl Client {
             .filter(|m| !self.state.contacts.get(*m).is_some_and(|c| c.gone))
             .map(|m| self.devices_of(m).len().max(1))
             .sum();
-        Some(((others + self.state.siblings.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
+        Some((others as u32).clamp(1, MAX_BLOB_FETCHES))
     }
 
     /// Opens the sessions a group's photo or video needs and says for how many fetches to upload it.
     pub fn open_group(&mut self, id: &str) -> Result<(u32, Vec<Event>)> {
-        self.refresh_own_roster()?;
         let result = self.group(id).and_then(|g| {
             self.not_empty(&g)?;
             self.reach_all(&g.members)?;
@@ -306,7 +305,6 @@ impl Client {
     }
 
     fn send_group_inner(&mut self, id: &str, content: Content) -> Result<()> {
-        self.refresh_own_roster()?;
         if self.replaced.get() {
             return Err(Error::Replaced);
         }
@@ -924,7 +922,6 @@ impl Client {
             return Ok(());
         }
         let sent_at_ms = self.next_sent_at();
-        let transcript = matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. });
         let keep = shown(&content);
         // A Yo to accepted contacts or joined members carries the profile key (spec 4.10); never to a request.
         let accepted = users.iter().all(|user| {
@@ -934,10 +931,6 @@ impl Client {
         let message = yo_wire::content::Message { sent_at_ms, group, content }.encode_with_key(key)?;
         for user in &users {
             self.enqueue(user, encode(&yo_wire::envelope::Plain { to: None, content: message.clone().into() }));
-            if transcript && !self.state.siblings.is_empty() {
-                let siblings = self.roster_keys(&self.state.user_id);
-                self.state.outbox.back_mut().expect("enqueued").sent_to_siblings = siblings;
-            }
             if keep {
                 if let Some(contact) = self.state.contacts.get_mut(user) {
                     contact.sent.push_back(message.clone());

@@ -991,6 +991,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             val contacts = c.contacts().associateBy { it.user }
             for (event in events) {
                 if(event is YoEvent.Profile) present { senderNamed(it,event.user,event.name) }
+                // The hub lists a device more (this account's own: one of its devices, as Signal tells of a linked one).
+                if (event is YoEvent.DeviceAdded) android.util.Log.i("Yo", "device added")
                 if (event is YoEvent.IdentityChanged) {
                     val friend = state.value.friends.firstOrNull { it.user == event.user }
                     if (friend != null) mutable.update { s -> s.copy(friends = s.friends.map { if (it.key == friend.key) it.copy(keyChanged = true) else it },
@@ -1003,11 +1005,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         media.wake()
     }
     /** Threads shown in this app (a user id, or "group:" and a group id): this account's other devices clear their
-     *  notifications of them (Sync Read, spec 5). The core asks nobody while the account has one device. */
+     *  notifications of them, through the newest message the core received (Sync Read, spec 5). */
     private fun markSeen(c: YoClient, targets: Collection<String>) {
         if (targets.isEmpty()) return
-        val now = System.currentTimeMillis().toULong()
-        scope.launch(Dispatchers.IO) { for (t in targets.toSet()) runCatching { c.markSeen(t.removePrefix("group:"), now) } }
+        val threads = targets.map { it.removePrefix("group:") }.distinct()
+        scope.launch(Dispatchers.IO) { runCatching { c.markSeen(threads) } }
     }
 
     /** What another device of this account showed: its notifications here go too. */

@@ -3,6 +3,7 @@
 import AVFoundation
 import Intents
 import Observation
+import OSLog
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -496,29 +497,40 @@ final class Inbox {
   /// The account's client the inbox listens with: what `collectDelivered` tells the other devices through.
   @ObservationIgnored private weak var seenClient: YoClient?
 
-  /// Threads shown in this app (user or group id): this account's other devices clear their notifications of them
-  /// (Sync Read, spec 5). Nothing goes while the account has one device (the core asks nobody then).
+  /// Threads shown in this app (user or group id): this account's other devices clear their notifications of them,
+  /// through the newest message the core received (Sync Read, spec 5). The core asks nobody while it has one device.
   private func markSeen(_ threads: Set<String>, client: YoClient) {
     guard !threads.isEmpty else { return }
-    let now = UInt64(Date().timeIntervalSince1970 * 1000)
-    Task.detached(priority: .utility) {
-      for thread in threads { try? client.markSeen(userOrGroup: thread, throughSentAtMs: now) }
-    }
+    let ids = threads.map(Self.threadID)
+    Task.detached(priority: .utility) { try? client.markSeen(threads: ids) }
   }
 
-  /// What another device of this account showed: its notifications here go too (Sync Read, spec 5).
+  /// What another device of this account showed: its notifications here of messages sent up to then go too.
   private func clearSeen(client: YoClient) async {
     guard let seen = try? await Hub.run({ try client.takeSeen() }), !seen.isEmpty else { return }
     let center = UNUserNotificationCenter.current()
     let delivered = await center.deliveredNotifications()
     let gone = delivered.filter { note in
-      seen.contains { mark in
-        note.request.content.threadIdentifier.caseInsensitiveCompare(mark.thread) == .orderedSame
-          && note.date.timeIntervalSince1970 * 1000 <= Double(mark.throughMs)
+      let content = note.request.content
+      guard let sentAt = Self.sentAt(content.userInfo["id"] as? String) else { return false }
+      return seen.contains { mark in
+        Self.threadID(content.threadIdentifier).caseInsensitiveCompare(mark.thread) == .orderedSame
+          && sentAt <= mark.throughMs
       }
     }.map(\.request.identifier)
     if !gone.isEmpty { center.removeDeliveredNotifications(withIdentifiers: gone) }
   }
+
+  /// A notification thread as the core names it: a user id, or a group's id without "group:".
+  nonisolated static func threadID(_ thread: String) -> String {
+    thread.hasPrefix("group:") ? String(thread.dropFirst("group:".count)) : thread
+  }
+
+  /// The sent time in a notification's id ("user/sent at", "group/user/sent at", a media id after it).
+  nonisolated static func sentAt(_ id: String?) -> UInt64? {
+    id?.split(separator: "/").last { $0.count <= 15 && UInt64($0) != nil }.flatMap { UInt64($0) }
+  }
+
   @ObservationIgnored private var napping: Task<Void, Never>?
 
   /// Back in front after being away, or on another network (`Reconnect`): the inbox's wait from before is cut off
@@ -618,6 +630,9 @@ final class Inbox {
       case .identityChanged(let user):
         if seenUsers.insert(user).inserted { users.append(user) }
         changedKeys.insert(user)
+      case .deviceAdded(let user):
+        // The hub lists a device more (this account's own: one of its devices, as Signal tells of a linked one).
+        Logger(subsystem: "app.justyo", category: "devices").notice("device added for \(user, privacy: .private)")
       default: break
       }
     }
@@ -700,7 +715,7 @@ final class Inbox {
           _ = friend(user)
         case .identityChanged:
           break  // reconciled with the batch before publication
-        case .profile:
+        case .profile, .deviceAdded:
           break
         }
         kept.append(event)

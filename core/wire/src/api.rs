@@ -83,6 +83,9 @@ pub fn deliver_path(user: &UserId) -> String {
 pub const HEADER_URGENT: &str = "yo-urgent";
 /// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
 pub const HEADER_DEVICES: &str = "yo-devices";
+/// On a delivery whose body is `Copies`, one envelope per device (spec 4.4); without it (an app before multi-device)
+/// the body is one envelope for every device of the user.
+pub const HEADER_COPIES: &str = "yo-copies";
 /// On a delivery: the recipient's access key (base64url, 16 bytes: Signal's unidentified access key, derived from its
 /// profile key), as its contacts have it; without it, or with another, the delivery is a request (spec 4.10). It
 /// names no sender: every contact has the same key.
@@ -441,6 +444,19 @@ pub struct Storage {
     pub version: u64,
     /// At most `MAX_STORAGE_LEN` bytes.
     pub data: VLBytes,
+}
+
+/// A delivery's body (spec 4.4, `HEADER_COPIES`): an envelope for each device of the user, by its number, as Signal's
+/// message list. To the sender's own user, every device but the sending one.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Copies {
+    pub copies: Vec<CopyFor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct CopyFor {
+    pub device: u8,
+    pub envelope: VLBytes,
 }
 
 /// The body of a `409` to a delivery: the user's current account key and devices (spec 4.4).

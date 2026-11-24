@@ -148,6 +148,7 @@ fn describe(events: &[YoEvent]) -> String {
             format!("group {} message {} {}", &group[..8], &user[..8], kind_name(kind))
         }
         YoEvent::GroupChanged { group } => format!("group {} changed", &group[..8]),
+        YoEvent::DeviceAdded { user } => format!("device added {}", &user[..8]),
     };
     events.iter().map(one).collect::<Vec<_>>().join(", ")
 }

@@ -183,10 +183,16 @@ internal class YoNotifications(private val context: Context) {
     fun threads(): List<String> =
         manager.activeNotifications.mapNotNull { it.tag?.takeIf { tag -> tag.startsWith(CONVERSATION) }?.removePrefix(CONVERSATION) }
 
-    /** Another device of this account showed `thread` through `throughMs`: its notification goes if it is no newer. */
+    /** Another device of this account showed `thread` through the message sent at `throughMs`: its notification goes
+     *  if it holds no later one (each id ends in its message's sent time: "bar/user/sent at"). */
     fun clearSeen(thread: String, throughMs: Long) {
         val tag = "$CONVERSATION$thread"
-        if (manager.activeNotifications.any { it.tag == tag && it.postTime <= throughMs }) clear(thread)
+        val shown = manager.activeNotifications.firstOrNull { it.tag == tag } ?: return
+        val ids = shown.notification.extras?.getStringArray(IDS).orEmpty()
+        val sent = ids.mapNotNull { id -> id.split("/").lastOrNull { it.length <= 15 && it.toULongOrNull() != null }?.toULong() }
+        // One posted by a build without ids: by when it was posted.
+        val seen = if (sent.isEmpty()) shown.postTime <= throughMs else sent.all { it <= throughMs.toULong() }
+        if (seen) clear(thread)
     }
     /** A thread's notifications, once its Yo Back went. */
     fun clear(thread: String) {

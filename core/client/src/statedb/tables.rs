@@ -287,7 +287,7 @@ mod tests {
             user: user.clone(),
             seq: 9,
             plain: vec![1, 2],
-            payload: Some(vec![3, 4]),
+            payloads: vec![crate::state::DevicePayload { device: 1, payload: vec![3, 4] }],
             made_for: vec![slot.key],
             ..Default::default()
         };
@@ -366,8 +366,11 @@ mod tests {
         }
         for ((kind, owner, entry), value) in &rows {
             let sealed = super::super::cipher::seal(&KEY, aad(kind, owner, entry), value).unwrap();
-            db.execute("INSERT INTO rows (kind, owner, entry, value) VALUES (?1, ?2, ?3, ?4)", params![kind, owner, entry, sealed])
-                .unwrap();
+            db.execute(
+                "INSERT INTO rows (kind, owner, entry, value) VALUES (?1, ?2, ?3, ?4)",
+                params![kind, owner, entry, sealed],
+            )
+            .unwrap();
         }
         let (read_back, _, baseline) = read(&db, &KEY).unwrap();
         assert_eq!((&read_back.seen, &read_back.received), (&state.seen, &state.received));

@@ -34,7 +34,7 @@ pub const TYPE_PROBE: u16 = 11;
 pub const TYPE_PROBE_REPLY: u16 = 12;
 pub const TYPE_SYNC: u16 = 13;
 
-/// A read watermark names exactly one direct or group thread.
+/// A read watermark (Signal's `SyncMessage.Read`): one direct or group thread, read through the message sent then.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Read {
     pub user: Option<crate::UserId>,
@@ -42,24 +42,35 @@ pub struct Read {
     pub through_sent_at: u64,
 }
 
+/// The most threads one `SyncMessage::Read` names.
+pub const MAX_READ: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 /// Type 13 (spec 5): what one device of an account tells its other devices, Signal's `SyncMessage`. Own devices
 /// only; unknown kinds are skipped, later own-device syncs come as new kinds.
 pub enum SyncMessage {
-    Read(Read),
+    /// Kind 0: threads shown on the sending device, each naming exactly one thread.
+    Read(Vec<Read>),
+    /// Kind 1: the storage (spec 6.9) changed: read it.
     StorageChanged,
-    Unknown(u8),
+    /// A kind this version does not know, its body kept as it came.
+    Unknown(u8, Vec<u8>),
 }
 
 impl SyncMessage {
     fn body(&self) -> Result<Vec<u8>, Error> {
         match self {
-            Self::Read(read) if read.user.is_some() != read.group.is_some() => {
+            Self::Read(reads)
+                if !reads.is_empty()
+                    && reads.len() <= MAX_READ
+                    && reads.iter().all(|r| r.user.is_some() != r.group.is_some()) =>
+            {
                 let mut bytes = vec![0];
-                bytes.extend(crate::encode(read));
+                bytes.extend(crate::encode(reads));
                 Ok(bytes)
             }
             Self::StorageChanged => Ok(vec![1]),
+            Self::Unknown(kind, body) if *kind > 1 => Ok([&[*kind][..], body].concat()),
             _ => Err(Error::Format),
         }
     }
@@ -67,15 +78,15 @@ impl SyncMessage {
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         match bytes.split_first() {
             Some((0, body)) => {
-                let read: Read = crate::decode(body)?;
-                if read.user.is_some() == read.group.is_some() {
-                    return Err(Error::Format);
-                }
-                Ok(Self::Read(read))
+                let reads: Vec<Read> = crate::decode(body)?;
+                let message = Self::Read(reads);
+                // Only what `body` makes: one thread each, at most `MAX_READ`.
+                message.body()?;
+                Ok(message)
             }
             Some((1, [])) => Ok(Self::StorageChanged),
             Some((1, _)) | None => Err(Error::Format),
-            Some((&kind, _)) => Ok(Self::Unknown(kind)),
+            Some((&kind, body)) => Ok(Self::Unknown(kind, body.to_vec())),
         }
     }
 }
@@ -478,15 +489,28 @@ mod seen_tests {
     #[test]
     fn seen_bodies_are_exact_and_unknown_kinds_are_skipped() {
         for seen in [
-            SyncMessage::Read(Read { user: Some([3; 16]), group: None, through_sent_at: 10 }),
-            SyncMessage::Read(Read { user: None, group: Some([4; 32]), through_sent_at: 11 }),
+            SyncMessage::Read(vec![
+                Read { user: Some([3; 16]), group: None, through_sent_at: 10 },
+                Read { user: None, group: Some([4; 32]), through_sent_at: 11 },
+            ]),
             SyncMessage::StorageChanged,
+            SyncMessage::Unknown(42, vec![1, 2]),
         ] {
             let message = Message { sent_at_ms: 1, group: None, content: Content::Sync(seen) };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         }
         assert_eq!(SyncMessage::decode(&[1, 0]), Err(Error::Format));
-        assert_eq!(SyncMessage::decode(&[42, 1, 2]), Ok(SyncMessage::Unknown(42)));
+        assert_eq!(SyncMessage::decode(&[42, 1, 2]), Ok(SyncMessage::Unknown(42, vec![1, 2])));
+        let neither = crate::encode(&vec![Read { user: None, group: None, through_sent_at: 1 }]);
+        assert_eq!(SyncMessage::decode(&[&[0][..], &neither].concat()), Err(Error::Format));
+        assert_eq!(SyncMessage::decode(&[&[0][..], &crate::encode(&Vec::<Read>::new())].concat()), Err(Error::Format));
+        // The fuzzer's find: a kind this version does not know encodes back as it came.
+        let mut found = vec![0, 1, 0x10, 0, 0, 0x10, 0, 0, 0, 0, 0, 0x0d];
+        found.extend([0x1d; 29]);
+        found.push(0);
+        let message = Message::decode(&found).unwrap();
+        assert!(matches!(message.content, Content::Sync(SyncMessage::Unknown(0x1d, _))));
+        assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         assert_eq!(SyncMessage::decode(&[0; 11]), Err(Error::Format));
     }
 }

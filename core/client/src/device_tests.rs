@@ -44,8 +44,13 @@ fn receive(c: &mut Client, payload: &[u8]) -> Result<()> {
     c.receive(&[&[0; 16][..], payload].concat(), &mut BTreeSet::new(), &mut false)
 }
 
+/// The payload made for `c` among one per device.
+fn for_device(payloads: &[state::DevicePayload], device: u8) -> &[u8] {
+    &payloads.iter().find(|p| p.device == device).expect("a payload for the device").payload
+}
+
 #[test]
-fn sixteen_session_copies_fit_and_every_device_can_answer() {
+fn sixteen_devices_get_a_payload_each_and_every_device_can_answer() {
     use libsignal_protocol::{Aci, KeyPair, SenderCertificate, ServerCertificate};
     let mut sender = phone(33, 17);
     let mut peers: Vec<_> = (1..=16).map(|i| phone(44, i)).collect();
@@ -56,22 +61,23 @@ fn sixteen_session_copies_fit_and_every_device_can_answer() {
     sender.take_bundles(&user, key, &peers.iter_mut().map(bundle).collect::<Vec<_>>()).unwrap();
     let yo = plaintext(None, Content::Yo);
     let (first, _) = sender.encrypt_for(&user, &yo, false, &[]).unwrap();
-    let first_payload: Payload = decode(&first).unwrap();
-    assert_eq!(first_payload.copies.len(), 16);
-    assert!(first_payload.copies.iter().all(|c| c.kind == KIND_PREKEY));
-    // Measured with the small direct Yo and registration id above: 16 PreKey copies total 29,389 bytes before sealing.
+    assert_eq!(first.len(), 16);
+    for p in &first {
+        let payload: Payload = decode(&p.payload).unwrap();
+        assert_eq!(payload.copies.len(), 1, "one copy each: nothing stored for every device");
+        assert_eq!(payload.copies[0].kind, KIND_PREKEY);
+    }
     for peer in &mut peers {
         peer.take_devices(sender.user_id(), sender.my_account_key(), &[rostered(&sender)], Some("Sender".into()))
             .unwrap();
-        receive(peer, &first).unwrap();
+        let mine = for_device(&first, peer.state.device_number).to_vec();
+        receive(peer, &mine).unwrap();
         let (answer, _) = peer.encrypt_for(sender.user_id(), &yo, false, &[]).unwrap();
-        receive(&mut sender, &answer).unwrap();
+        receive(&mut sender, &answer[0].payload).unwrap();
     }
     assert_eq!(sender.state.events.iter().filter(|e| matches!(e, Event::Message { .. })).count(), 16);
     let (ordinary, _) = sender.encrypt_for(&user, &yo, false, &[]).unwrap();
-    let payload: Payload = decode(&ordinary).unwrap();
-    assert_eq!(payload.copies.len(), 16);
-    assert!(payload.copies.iter().all(|c| c.kind == KIND_MESSAGE));
+    assert!(ordinary.iter().all(|p| decode::<Payload>(&p.payload).unwrap().copies[0].kind == KIND_MESSAGE));
     let own = identity::account_pair(&sender.state.account_secret).unwrap();
     let root = KeyPair::generate(&mut rand::rng());
     let server = KeyPair::generate(&mut rand::rng());
@@ -87,16 +93,23 @@ fn sixteen_session_copies_fit_and_every_device_can_answer() {
         &mut rand::rng(),
     )
     .unwrap();
-    for bytes in [&first, &ordinary] {
-        let envelope = sealed::seal(&cert, &own, &signal::identity_of(&key).unwrap(), bytes).unwrap();
-        assert!(yo_wire::envelope::BUCKETS.contains(&envelope.len()));
-    }
+    let copies: Vec<api::CopyFor> = first
+        .iter()
+        .chain(&ordinary)
+        .map(|p| {
+            let envelope = sealed::seal(&cert, &own, &signal::identity_of(&key).unwrap(), &p.payload).unwrap();
+            // A Yo per device: a small envelope each (a first message carries the PQXDH prekey material).
+            assert!(envelope.len() <= yo_wire::envelope::BUCKETS[1]);
+            api::CopyFor { device: p.device, envelope: envelope.into() }
+        })
+        .collect();
+    assert!(encode(&api::Copies { copies }).len() <= yo_wire::limits::MAX_DELIVERY_BODY);
 
     let (misdirected, _) = sender.encrypt_for(&user, &plaintext(Some([5; 16]), Content::Yo), false, &[]).unwrap();
-    assert_eq!(receive(&mut peers[0], &misdirected), Err(Error::Protocol("a copy for another")));
-    let seen = Content::Sync(SyncMessage::Read(Read { user: Some([7; 16]), group: None, through_sent_at: 90 }));
+    assert_eq!(receive(&mut peers[0], &misdirected[0].payload), Err(Error::Protocol("a copy for another")));
+    let seen = Content::Sync(SyncMessage::Read(vec![Read { user: Some([7; 16]), group: None, through_sent_at: 90 }]));
     let (contact_seen, _) = sender.encrypt_for(&user, &plaintext(None, seen), false, &[]).unwrap();
-    receive(&mut peers[0], &contact_seen).unwrap();
+    receive(&mut peers[0], &contact_seen[0].payload).unwrap();
     assert!(peers[0].state.seen_through.is_empty());
 
     // Removing a member of the roster deletes only its session.
@@ -125,7 +138,7 @@ fn invalid_rosters_do_not_change_pins_or_devices() {
 }
 
 #[test]
-fn siblings_take_sent_and_read_without_an_event_or_response() {
+fn siblings_take_reads_and_skip_sent_copies_without_an_event_or_response() {
     let mut a = phone(1, 1);
     let mut b = phone(1, 2);
     let user = a.user_id().to_owned();
@@ -138,22 +151,59 @@ fn siblings_take_sent_and_read_without_an_event_or_response() {
     let group = [4; 32];
     let mut messages = vec![plaintext(Some(direct), Content::Yo)];
     for at in [18, 8] {
-        messages.push(plaintext(
-            None,
-            Content::Sync(SyncMessage::Read(Read { user: None, group: Some(group), through_sent_at: at })),
-        ));
+        let read = Read { user: None, group: Some(group), through_sent_at: at };
+        messages.push(plaintext(None, Content::Sync(SyncMessage::Read(vec![read]))));
     }
     for plain in messages {
-        let (payload, _) = a.encrypt_for(&user, &plain, false, &[]).unwrap();
-        receive(&mut b, &payload).unwrap();
-        receive(&mut b, &payload).unwrap();
+        let (payloads, _) = a.encrypt_for(&user, &plain, false, &[]).unwrap();
+        let mine = for_device(&payloads, 2).to_vec();
+        receive(&mut b, &mine).unwrap();
+        receive(&mut b, &mine).unwrap();
     }
-    assert!(b.state.contacts[&hex(&direct)].chat);
-    assert_eq!(b.state.sibling_sent_at[&hex(&direct)], 100);
+    // A sent copy is not taken yet: no contact made of it.
+    assert!(!b.state.contacts.contains_key(&hex(&direct)));
     assert_eq!(b.state.seen_through[&hex(&group)], 18);
     // Handed to the app once, for its notifications (`take_seen`).
     assert_eq!(b.state.seen_due.get(&hex(&group)), Some(&18));
     assert!(b.state.events.is_empty() && b.state.outbox.is_empty());
+}
+
+/// A device the hub lists for this account after this one joined (a new one, or one replaced and listed again)
+/// is told to the app and gets no sync until it has written here itself.
+#[test]
+fn a_later_sibling_is_announced_and_held_until_it_writes() {
+    let mut a = phone(1, 1);
+    let mut b = phone(1, 2);
+    let user = a.user_id().to_owned();
+    a.state.own_roster_known = true;
+    a.take_devices(&user, a.my_account_key(), &[rostered(&a)], None).unwrap();
+    a.take_devices(&user, a.my_account_key(), &[rostered(&a), rostered(&b)], None).unwrap();
+    assert_eq!(a.state.events, [Event::DeviceAdded { user: user.clone() }]);
+    assert_eq!(a.state.siblings_held, [b.state.device_key]);
+    a.queue_sync(SyncMessage::StorageChanged).unwrap();
+    assert!(a.state.outbox.is_empty(), "nothing for a held device");
+
+    // B joined with A listed: A is trusted there, and B's first word releases it at A.
+    b.take_devices(&user, b.my_account_key(), &[rostered(&a), rostered(&b)], None).unwrap();
+    assert!(b.state.siblings_held.is_empty() && b.state.events.is_empty());
+    b.take_bundles(&user, a.my_account_key(), &[bundle(&mut a)]).unwrap();
+    let (payloads, _) =
+        b.encrypt_for(&user, &plaintext(None, Content::Sync(SyncMessage::StorageChanged)), false, &[]).unwrap();
+    receive(&mut a, for_device(&payloads, 1)).unwrap();
+    assert!(a.state.siblings_held.is_empty());
+    assert!(!a.state.storage_fetched, "the storage is read after the batch, not in it");
+    a.queue_sync(SyncMessage::StorageChanged).unwrap();
+    assert_eq!(a.state.outbox.len(), 1);
+
+    // A contact's roster that grows is told too; one device in place of another is not.
+    let peer = hex(&[2; 16]);
+    a.state.events.clear();
+    let one = api::Device { key: [2; 32], id: 1 };
+    a.take_devices(&peer, [3; 32], &[one], None).unwrap();
+    a.take_devices(&peer, [3; 32], &[api::Device { key: [5; 32], id: 2 }], None).unwrap();
+    assert!(a.state.events.is_empty());
+    a.take_devices(&peer, [3; 32], &[one, api::Device { key: [5; 32], id: 2 }], None).unwrap();
+    assert_eq!(a.state.events, [Event::DeviceAdded { user: peer }]);
 }
 
 #[test]
@@ -215,7 +265,7 @@ fn lookup_and_signed_conflict_keep_usable_sessions_and_reencrypt() {
     let mut body = encode(&api::Devices { account_key: key, devices: devices.clone() });
     body.extend(identity::sign(&signer(), &hubsig::message(&item.nonce.unwrap(), &item.path, &item.envelope, &body)));
     assert!(c.delivered(&deliveries, vec![Some(Ok(Response { status: 409, body }))]).unwrap());
-    assert!(c.state.outbox[0].payload.is_none());
+    assert!(c.state.outbox[0].payloads.is_empty());
     assert!(!c.records.usable(&c.address(&user, 2).unwrap()));
     assert!(c.records.usable(&c.address(&user, 3).unwrap()));
     {
@@ -225,12 +275,16 @@ fn lookup_and_signed_conflict_keep_usable_sessions_and_reencrypt() {
     }
     c.prepare().unwrap();
     let retried = c.deliveries().unwrap();
-    let payload: Payload =
-        decode(yo_wire::envelope::unpad(&retried.items[0].envelope, &yo_wire::envelope::BUCKETS).unwrap()).unwrap();
-    assert_eq!(
-        payload.copies.iter().map(|c| c.device_key).collect::<Vec<_>>(),
-        [q.state.device_key, r.state.device_key]
-    );
+    let body: api::Copies = decode(&retried.items[0].envelope).unwrap();
+    let keys: Vec<_> = body
+        .copies
+        .iter()
+        .map(|copy| {
+            let payload = yo_wire::envelope::unpad(copy.envelope.as_slice(), &yo_wire::envelope::BUCKETS).unwrap();
+            decode::<Payload>(payload).unwrap().copies[0].device_key
+        })
+        .collect();
+    assert_eq!(keys, [q.state.device_key, r.state.device_key]);
     let requests = hub.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(requests.iter().all(|r| r.flags & api::LOOKUP_PREKEYS != 0));
@@ -238,7 +292,7 @@ fn lookup_and_signed_conflict_keep_usable_sessions_and_reencrypt() {
 }
 
 #[test]
-fn sibling_storage_changed_reads_and_merges_dirty_fields() {
+fn sibling_storage_changed_is_read_after_the_batch_and_merges_dirty_fields() {
     struct StorageRead(Vec<u8>);
     impl Transport for StorageRead {
         fn request(
@@ -260,7 +314,9 @@ fn sibling_storage_changed_reads_and_merges_dirty_fields() {
     b.transport = Arc::new(StorageRead(encode(&api::Storage { version: 3, data })));
     let plain: Plain = decode(&plaintext(None, Content::Sync(SyncMessage::StorageChanged))).unwrap();
     let message = Message::decode(plain.content.as_slice()).unwrap();
-    b.receive_sibling(plain, message).unwrap();
+    b.receive_sibling([1; 32], plain, message).unwrap();
+    assert!(!b.state.storage_fetched && b.after_due);
+    b.read_storage().unwrap();
     assert_eq!(b.app_icon().as_deref(), Some("Original"));
     assert_eq!(b.left_handed(), Some(true));
     assert_eq!(b.state.storage_version, 3);
@@ -269,18 +325,17 @@ fn sibling_storage_changed_reads_and_merges_dirty_fields() {
 }
 
 #[test]
-fn an_oversized_envelope_returns_an_error_and_keeps_the_prepared_item() {
+fn an_envelope_too_large_is_dropped() {
     let mut sender = phone(1, 1);
     let peer = phone(2, 2);
     let user = peer.user_id();
     sender.take_devices(user, peer.my_account_key(), &[rostered(&peer)], None).unwrap();
     sender.enqueue(user, plaintext(None, Content::Yo));
     let item = sender.state.outbox.back_mut().unwrap();
-    item.payload = Some(vec![5; 65536]);
+    item.payloads = vec![state::DevicePayload { device: 2, payload: vec![5; 65536] }];
     item.made_for = vec![peer.state.device_key];
-    let before = item.clone();
     let deliveries = sender.deliveries().unwrap();
     assert!(deliveries.items.is_empty());
-    assert!(sender.delivered(&deliveries, vec![]).is_err());
-    assert_eq!(sender.state.outbox[0], before);
+    assert!(sender.state.outbox.is_empty());
+    assert_eq!(sender.dropped(), 1);
 }

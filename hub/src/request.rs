@@ -57,7 +57,17 @@ pub(crate) async fn too_old(State(hub): Hubs, request: Request, next: Next) -> R
 /// too slow `408`.
 pub(crate) async fn admit(State(hub): Hubs, request: Request, next: Next) -> Response {
     let said = header(request.headers(), CONTENT_LENGTH).and_then(|v| v.parse::<usize>().ok());
-    if said.is_some_and(|n| n > limits::MAX_BODY) {
+    // A delivery carries an envelope per device (spec 4.4); its own envelopes are checked there.
+    let path = request.uri().path();
+    let most = if request.method() == axum::http::Method::POST
+        && path.starts_with(&format!("{}/", api::INBOX))
+        && path != api::INBOX_ACK
+    {
+        limits::MAX_DELIVERY_BODY
+    } else {
+        limits::MAX_BODY
+    };
+    if said.is_some_and(|n| n > most) {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     // One address's first: slow bodies from one place must not hold everyone's.
@@ -80,7 +90,7 @@ pub(crate) async fn admit(State(hub): Hubs, request: Request, next: Next) -> Res
     };
     let _by_ip = by_ip;
     let (parts, body) = request.into_parts();
-    let Ok(read) = tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, limits::MAX_BODY)).await else {
+    let Ok(read) = tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, most)).await else {
         return StatusCode::REQUEST_TIMEOUT.into_response();
     };
     let Ok(body) = read else {

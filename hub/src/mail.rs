@@ -1,6 +1,6 @@
 //! Mail (spec 4.4, 6.3, 6.7): sealed deliveries stored by one writer in group commits, long polls, pushes.
 
-use crate::db::{self, Db, Delivered, Incoming};
+use crate::db::{self, Copies, Db, Delivered, Incoming};
 use crate::error::{self, refuse, Refusal, Res};
 use crate::limiter::{self, Place};
 use crate::request::{b64_array, bad, header, held, path_id, query, Auth, Hubs, Peer, MINUTE};
@@ -26,12 +26,21 @@ const BATCH: usize = 512;
 
 /// The most deliveries waiting for the writer (each up to 64 KiB): beyond, `503` rather than the memory growing.
 pub(crate) const QUEUED: usize = 2048;
+/// The most bytes waiting for the writer (a delivery of copies per device up to 257 KiB): beyond, `503` too.
+pub(crate) const QUEUED_BYTES: usize = 128 << 20;
 
 /// An envelope on its way to the writer.
 pub(crate) struct Delivery {
     pub user: UserId,
     pub devices_hash: [u8; 32],
+    /// The sending device, writing to its own user (`Incoming::from`).
+    pub from: Option<DeviceId>,
+    /// One envelope per device by number (`api::Copies`); none: `envelope` is one envelope for every device (else
+    /// empty, the body not kept twice).
+    pub copies: Option<Vec<(u8, Vec<u8>)>>,
     pub envelope: Bytes,
+    /// Its bytes in `Hub::queued_bytes`, given back once stored.
+    pub size: usize,
     pub urgent: bool,
     /// From the operator's bots (the server's own services, or a bot account's request): `bot-yo`, not `yo-in`.
     pub from_bot: bool,
@@ -52,17 +61,36 @@ pub(crate) struct Pushed {
 pub(crate) type Pushes = HashMap<DeviceId, Pushed>;
 
 /// Group commit: what has queued up, in one transaction; then wakes the devices and answers each.
-pub(crate) fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hub: Weak<Hub>) {
+pub(crate) fn writer(
+    db: Arc<Db>,
+    queue: std::sync::mpsc::Receiver<Delivery>,
+    most: u32,
+    hub: Weak<Hub>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+) {
     while let Ok(first) = queue.recv() {
         let mut batch = vec![first];
         batch.extend(queue.try_iter().take(BATCH - 1));
+        // Given back once written: what is being written still counts.
+        let bytes: usize = batch.iter().map(|d| d.size).sum();
         let items: Vec<Incoming<'_>> = batch
             .iter()
-            .map(|d| Incoming { user: d.user, devices_hash: d.devices_hash, envelope: &d.envelope })
+            .map(|d| Incoming {
+                user: d.user,
+                devices_hash: d.devices_hash,
+                from: d.from,
+                copies: match &d.copies {
+                    Some(each) => Copies::Each(each.iter().map(|(n, e)| (*n, e.as_slice())).collect()),
+                    None => Copies::Legacy(&d.envelope),
+                },
+            })
             .collect();
         let hub = hub.upgrade();
         let now = hub.as_ref().map_or_else(now_ms, |hub| hub.clock_ms());
-        match db.deliver(&items, now, most) {
+        let delivered = db.deliver(&items, now, most);
+        drop(items);
+        queued.fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+        match delivered {
             Ok(outcomes) => {
                 for (delivery, mut outcome) in batch.into_iter().zip(outcomes) {
                     // Here, not in the request: one cut off after its envelope was stored still wakes and pushes.
@@ -319,7 +347,28 @@ pub(crate) async fn post_envelope(
         _ => return Err(bad()),
     };
     let devices_hash: [u8; 32] = header(&headers, HEADER_DEVICES).and_then(b64_array).ok_or_else(bad)?;
-    yo_wire::envelope::check(&body, headers.contains_key(HEADER_DEVICE))?;
+    let signed = headers.contains_key(HEADER_DEVICE);
+    // One envelope per device (spec 4.4), each a bucket's size; an app before multi-device sends one for all.
+    let copies = if headers.contains_key(api::HEADER_COPIES) {
+        let copies: api::Copies = decode(&body).map_err(|_| bad())?;
+        let mut numbers = std::collections::BTreeSet::new();
+        if copies.copies.is_empty()
+            || copies.copies.len() > limits::MAX_DEVICES
+            || !copies.copies.iter().all(|c| numbers.insert(c.device))
+        {
+            return Err(bad());
+        }
+        for copy in &copies.copies {
+            yo_wire::envelope::check(copy.envelope.as_slice(), signed)?;
+        }
+        Some(copies.copies.into_iter().map(|c| (c.device, c.envelope.as_slice().to_vec())).collect())
+    } else {
+        if body.len() > limits::MAX_BODY {
+            return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+        }
+        yo_wire::envelope::check(&body, signed)?;
+        None
+    };
     // Limited by its address only, and by the bytes it stores (6.6). An `Authorization` header is ignored.
     hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)
         .map_err(|_| error::limited("ip", None))?;
@@ -327,15 +376,18 @@ pub(crate) async fn post_envelope(
 
     // Whose it is (spec 4.10): a contact's (the profile key shown, or a group send token, 4.9), else a request,
     // which its sending device signs; unsigned it is `403`.
-    let sender = if headers.contains_key(HEADER_DEVICE) {
+    let signer = if signed {
         let (uri, headers, body) = (uri.clone(), headers.clone(), body.clone());
-        Some(hub.blocking(move |hub| hub.authenticate(&method, &uri, &headers, &body)).await??.user_id)
+        Some(hub.blocking(move |hub| hub.authenticate(&method, &uri, &headers, &body)).await??)
     } else {
         None
     };
+    let sender = signer.as_ref().map(|s| s.user_id);
+    // To its own user (Signal's sync): never a request, never back to the sending device.
+    let from = signer.filter(|s| s.user_id == user).map(|s| s.device_id);
     let shown = header(&headers, api::HEADER_ACCESS).and_then(b64_array).map(|key| api::access_check(&key));
     let endorsed = header(&headers, api::HEADER_GROUP_SEND).is_some_and(|token| hub.endorsed(&user, token));
-    let request = if endorsed {
+    let request = if endorsed || from.is_some() {
         None
     } else {
         match hub.blocking(move |hub| hub.db.admit(&user, shown, sender.as_ref())).await?? {
@@ -379,21 +431,35 @@ pub(crate) async fn post_envelope(
     }
 
     // To the writer; full (it is behind) or gone: "later", the envelope stays with its sender. Never waits here.
+    let size = body.len();
+    let queued = &hub.queued_bytes;
+    if queued.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size > QUEUED_BYTES {
+        queued.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+        give_back(&hub, reserved);
+        return Err(refuse(StatusCode::SERVICE_UNAVAILABLE));
+    }
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
+    let envelope = if copies.is_some() { Bytes::new() } else { body.clone() };
     let sent = hub
         .deliveries
         .try_send(Delivery {
             user,
             devices_hash,
-            envelope: body.clone(),
+            from,
+            copies,
+            size,
+            envelope,
             urgent,
             from_bot,
             request: request.is_some(),
             stored,
             runtime,
         })
-        .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE));
+        .map_err(|_| {
+            queued.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
+            refuse(StatusCode::SERVICE_UNAVAILABLE)
+        });
     let outcome = match &sent {
         Ok(()) => outcome.await.ok().and_then(Result::ok),
         Err(_) => None,

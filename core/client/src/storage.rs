@@ -687,7 +687,7 @@ impl Client {
                     self.state.storage_saved_at = crate::wall_ms();
                     // Under this key now: the one of before opens nothing more.
                     self.state.legacy_storage_key = None;
-                    self.queue_seen(yo_wire::content::SyncMessage::StorageChanged)?;
+                    self.queue_sync(yo_wire::content::SyncMessage::StorageChanged)?;
                     self.persist()?;
                 }
                 // Another writer was first: its version, merged, goes up again.

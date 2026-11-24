@@ -132,7 +132,7 @@ fn the_largest_blob_goes_and_comes_and_a_larger_one_is_refused() {
     all_gone(&dir);
 }
 
-/// Concurrent GETs reserve the three-slot budget; a cut-off stream returns its slot.
+/// Concurrent GETs reserve the budget (the fetches and three more); a cut-off stream returns its slot.
 #[test]
 fn concurrent_gets_reserve_the_budget_and_cutoff_returns_a_slot() {
     let (hub, dir) = hub_with(|_| {});
@@ -141,9 +141,9 @@ fn concurrent_gets_reserve_the_budget_and_cutoff_returns_a_slot() {
     let (media, plain, sent) = upload(&mut alice, media::MAX_MEDIA_LEN, 1);
     sent.unwrap();
     let url = format!("{}{}", hub.url(), api::blob_path(&media.id));
-    let started: Vec<_> = (0..3).map(|_| reqwest::blocking::get(&url).unwrap()).collect();
+    let started: Vec<_> = (0..4).map(|_| reqwest::blocking::get(&url).unwrap()).collect();
     assert!(started.iter().all(|response| response.status().as_u16() == 200));
-    assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404, "all three GET slots are reserved");
+    assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404, "all four GET slots are reserved");
     drop(started);
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let stranger = Http::new(hub.url());
@@ -167,11 +167,11 @@ fn an_upload_must_be_signed_whole_and_once() {
     let (media, sealed) = media::seal(&noise(5000), 10, 10).unwrap();
     let path = api::blob_put_path(&media.id, 1);
     let hash = vec![(api::HEADER_BODY_HASH.to_string(), yo_wire::b64(&media.sha256))];
-    // Checked before anything else: a length (`411` without, sent chunked), a tag at least (`400`), fetches 1 to 320
-    // (a group's members), then the signature (`401` unsigned).
+    // Checked before anything else: a length (`411` without, sent chunked), a tag at least (`400`), fetches 1 to 64
+    // (a group's members while each has one device), then the signature (`401` unsigned).
     assert_eq!(refused_by_head(&hub, &path, &hash, None), 411);
     assert_eq!(refused_by_head(&hub, &path, &hash, Some(15)), 400);
-    for (n, refused) in [(0, 400), (321, 400), (320, 401)] {
+    for (n, refused) in [(0, 400), (65, 400), (64, 401)] {
         assert_eq!(refused_by_head(&hub, &api::blob_put_path(&media.id, n), &hash, Some(sealed.len())), refused);
     }
     // A body that is not the signed one: refused, nothing kept.
@@ -304,7 +304,7 @@ fn get_budget_does_not_consume_fetches_but_ack_does() {
     let (m, plain, sent) = upload(&mut sender, 100, 1);
     sent.unwrap();
     let http = Http::new(hub.url());
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(media::fetch_open(http.as_ref(), &m).unwrap(), Some(plain.clone()));
     }
     assert_eq!(media::fetch(http.as_ref(), &m).unwrap(), None, "GET budget exhausted");
@@ -321,7 +321,7 @@ fn raw_gets_never_consume_fetches_and_unacknowledged_blobs_expire() {
     let (m, _, sent) = upload(&mut sender, 100, 1);
     sent.unwrap();
     let url = format!("{}{}", hub.url(), api::blob_path(&m.id));
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(reqwest::blocking::get(&url).unwrap().bytes().unwrap().len(), m.size as usize);
     }
     assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404);

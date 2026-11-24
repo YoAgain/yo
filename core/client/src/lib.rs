@@ -47,7 +47,7 @@ use libsignal_protocol::{
     PreKeyBundle, PreKeySignalMessage, ProtocolAddress, SignalMessage, SignalProtocolError, Timestamp,
 };
 use signal::Records;
-use state::{hex, unhex, Contact, DecryptionError, Outgoing, Registering, Slot, State};
+use state::{hex, unhex, Contact, DecryptionError, DevicePayload, Outgoing, Registering, Slot, State};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +74,9 @@ const SIGN_AHEAD_MS: u64 = 60 * 1000;
 const SEEN: usize = 2000;
 /// Messages kept per contact to resend when a decryption error names one, and decryption errors due at most (4.6).
 const KEPT_FOR_RESEND: usize = 64;
+/// Saves from before multi-device (sent messages without their devices, received ids without the sending device)
+/// are read until 1 March 2027 (UTC); a device not opened since starts those afresh. Remove the fallbacks then.
+pub(crate) const LEGACY_UNTIL_MS: u64 = 1_803_859_200_000;
 /// A sender certificate holds a day at the hub (spec 6.1); used for an hour less by this device's own clock.
 const CERTIFICATE_USED_MS: u64 = 23 * 3600 * 1000;
 
@@ -148,6 +151,9 @@ pub enum Event {
     GroupMessage { group: String, user: String, sent_at_ms: u64, content: Content },
     /// A group came, changed (name, members) or was left: `groups()` has it as it is now.
     GroupChanged { group: String },
+    /// The hub lists a device more for `user` (this account's own id: a device of this account, as Signal tells of a
+    /// newly linked one), not one in place of another. For the app's log.
+    DeviceAdded { user: String },
 }
 
 /// What waits in the outbox for one recipient in one conversation (`Client::outbox_view`).
@@ -352,7 +358,6 @@ fn settled(status: u16, item: &Delivery) -> bool {
 pub struct Deliveries {
     transport: Arc<dyn Transport>,
     items: Vec<Delivery>,
-    preparation_error: Option<Error>,
     /// The user `send_begin` sent a message to.
     to: Option<String>,
 }
@@ -500,7 +505,7 @@ impl Deliveries {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.preparation_error.is_none()
+        self.items.is_empty()
     }
 }
 
@@ -739,6 +744,7 @@ impl Client {
         // A new account has this one device: no own roster to ask for until a day has passed (spec 4.7).
         if account_secret.is_none() {
             client.state.own_roster_at = (client.clock)().max(1);
+            client.state.own_roster_known = true;
         }
         client.state.legacy_storage_key = legacy_storage_key;
         Ok(client)
@@ -1239,8 +1245,13 @@ impl Client {
         if user.is_some_and(|u| self.probe_service(u)) {
             return;
         }
-        if matches!(event, Event::Message { .. } | Event::GroupMessage { .. }) {
-            self.state.unread = self.state.unread.saturating_add(1);
+        match &event {
+            Event::Message { user: thread, sent_at_ms, .. } | Event::GroupMessage { group: thread, sent_at_ms, .. } => {
+                self.state.unread = self.state.unread.saturating_add(1);
+                let (thread, at) = (thread.clone(), *sent_at_ms);
+                self.note_in(&thread, at);
+            }
+            _ => {}
         }
         self.state.events.push(event);
     }
@@ -1431,36 +1442,55 @@ impl Client {
             .map(|d| Slot { key: d.key, slot: d.id })
             .collect();
         devices.sort_unstable_by_key(|d| d.key);
-        if self.devices_of(user) != devices {
-            for old in self.devices_of(user).to_vec() {
-                if !devices.contains(&old) {
+        let known = self.devices_of(user).to_vec();
+        if known != devices {
+            for old in &known {
+                if !devices.contains(old) {
                     self.records.delete_session(&self.address(user, old.slot)?);
                 }
             }
+            let added: Vec<Key> =
+                devices.iter().filter(|d| !known.iter().any(|k| k.key == d.key)).map(|d| d.key).collect();
             if own {
-                self.state.siblings = devices;
-            } else {
-                let contact = self.state.contacts.get_mut(user).expect("pinned");
-                // Single-device saves predate the per-message audience. Bind their cached messages
-                // to the original device before replacing its roster.
-                for plain in contact.sent.iter() {
-                    if let Ok(message) = Message::decode(plain) {
-                        contact
-                            .sent_devices
-                            .entry(message.sent_at_ms)
-                            .or_insert_with(|| contact.devices.iter().map(|d| d.key).collect());
+                // The account as it was when this device joined is trusted; a device listed later gets no sync until
+                // it has written here (`receive_sibling`), and the app is told (Signal's "new device linked").
+                if self.state.own_roster_known {
+                    self.state.siblings_held.extend(added.iter().copied());
+                    if !added.is_empty() {
+                        self.push_event(Event::DeviceAdded { user: user.to_owned() });
                     }
                 }
-                if !contact.devices.is_empty() && devices.iter().any(|d| !contact.devices.contains(d)) {
+                self.state.siblings_held.retain(|held| devices.iter().any(|d| d.key == *held));
+                self.state.siblings = devices;
+            } else {
+                let wall = self.wall();
+                let contact = self.state.contacts.get_mut(user).expect("pinned");
+                // Saves from before multi-device keep no devices per sent message: theirs are the device known now.
+                // Until LEGACY_UNTIL_MS, after which no such save is left (remove then).
+                if wall < LEGACY_UNTIL_MS {
+                    for plain in contact.sent.iter() {
+                        if let Ok(message) = Message::decode(plain) {
+                            contact
+                                .sent_devices
+                                .entry(message.sent_at_ms)
+                                .or_insert_with(|| contact.devices.iter().map(|d| d.key).collect());
+                        }
+                    }
+                }
+                if !contact.devices.is_empty() && !added.is_empty() {
                     contact.key_due |= contact.accepted && !contact.blocked;
                     contact.profile_due |= contact.accepted && contact.chat && self.state.name.is_some();
                 }
+                let grew = !contact.devices.is_empty() && devices.len() > contact.devices.len();
                 contact.devices = devices;
+                if grew {
+                    self.push_event(Event::DeviceAdded { user: user.to_owned() });
+                }
             }
         }
         // What waits for the user is encrypted for its devices and sessions as they are now.
         for item in self.state.outbox.iter_mut().filter(|item| item.user == user) {
-            item.payload = None;
+            item.payloads.clear();
         }
         Ok(())
     }
@@ -1483,13 +1513,27 @@ impl Client {
         }
         let user = self.state.user_id.clone();
         let handle = Handle::user(&user_bytes(&user)?);
-        self.state.own_roster_at = (self.clock)().max(1);
+        // A save of the first multi-device build knew its siblings without saying so.
+        if self.state.own_roster_at > 0 && !self.state.siblings.is_empty() {
+            self.state.own_roster_known = true;
+        }
         let refresh = self.lookup(&handle, 0, Vec::new()).and_then(|(found, _)| {
             self.read_before_roster(&user, &found.devices)?;
             self.take_devices(&user, found.account_key, &found.devices, None)
         });
-        if let Err(error) = refresh {
-            self.note(format!("own roster: {error}"));
+        match refresh {
+            Ok(()) => {
+                self.state.own_roster_at = (self.clock)().max(1);
+                if !std::mem::replace(&mut self.state.own_roster_known, true) {
+                    // Joined an account with devices: they hold this one until it writes to them.
+                    self.queue_sync(yo_wire::content::SyncMessage::StorageChanged)?;
+                }
+            }
+            Err(error) => {
+                // Asked again in an hour, not at every turn.
+                self.state.own_roster_at = (self.clock)().saturating_sub(23 * HOUR_MS).max(1);
+                self.note(format!("own roster: {error}"));
+            }
         }
         self.persist()
     }
@@ -1605,20 +1649,30 @@ impl Client {
         }
     }
 
-    /// One encryption per addressed device, advanced together in the caller's transaction.
+    /// One encryption per addressed device, advanced together in the caller's transaction: a payload each, with its
+    /// one copy (spec 4.4, Signal's per-device message), and the roster they were made for.
     fn encrypt_for(
         &mut self,
         user: &str,
         plain: &[u8],
         plaintext: bool,
         audience: &[Key],
-    ) -> Result<(Vec<u8>, Vec<Key>)> {
+    ) -> Result<(Vec<DevicePayload>, Vec<Key>)> {
         let account_key = if user == self.state.user_id {
             self.my_account_key()
         } else {
             self.state.contacts.get(user).ok_or(Error::Protocol("user"))?.account_key
         };
-        let mut copies = Vec::new();
+        // The content's time, as Signal's envelope shows it: what a decryption error names (4.6).
+        let sent_at = match plaintext {
+            true => self.wall(),
+            false => decode::<Plain>(plain)
+                .ok()
+                .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+                .map_or(0, |m| m.sent_at_ms),
+        };
+        let mut payloads = Vec::new();
+        let mut keys = Vec::new();
         for device in self.devices_of(user).to_vec() {
             if !audience.is_empty() && !audience.contains(&device.key) {
                 continue;
@@ -1650,32 +1704,25 @@ impl Client {
                     message: message.serialize().to_vec().into(),
                 }
             };
-            copies.push(copy);
+            let payload = Payload {
+                account_key: self.my_account_key(),
+                device_key: self.state.device_key,
+                device_id: self.state.device_number,
+                sent_at,
+                copies: vec![copy],
+            };
+            keys.push(device.key);
+            payloads.push(DevicePayload { device: device.slot, payload: encode(&payload) });
         }
-        if copies.is_empty() {
+        if payloads.is_empty() {
             return Err(Error::Protocol("no devices"));
         }
-        // The content's time, as Signal's envelope shows it: what a decryption error names (4.6).
-        let sent_at = match plaintext {
-            true => self.wall(),
-            false => decode::<Plain>(plain)
-                .ok()
-                .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
-                .map_or(0, |m| m.sent_at_ms),
-        };
         if !plaintext && audience.is_empty() {
-            if let Some(keys) = self.state.contacts.get_mut(user).and_then(|c| c.sent_devices.get_mut(&sent_at)) {
-                *keys = copies.iter().map(|copy| copy.device_key).collect();
+            if let Some(sent) = self.state.contacts.get_mut(user).and_then(|c| c.sent_devices.get_mut(&sent_at)) {
+                *sent = keys;
             }
         }
-        let payload = Payload {
-            account_key: self.my_account_key(),
-            device_key: self.state.device_key,
-            device_id: self.state.device_number,
-            sent_at,
-            copies,
-        };
-        Ok((encode(&payload), self.roster_keys(user)))
+        Ok((payloads, self.roster_keys(user)))
     }
 
     /// Pins a contact's account key; another key is an identity change: its device and session go.
@@ -1880,7 +1927,6 @@ impl Client {
         if !shown(&content) {
             return Err(Error::Protocol("not content to send"));
         }
-        self.refresh_own_roster()?;
         let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
         let peer = match user.filter(|u| self.has_chat(u)) {
@@ -1942,7 +1988,7 @@ impl Client {
     /// `send_begin` (locked) encrypts and takes what can go, `Deliveries::send` (unlocked) posts, `send_end` (locked)
     /// takes the answers. Only to a sendable contact with a session; `None`, with nothing changed: `send` instead.
     pub fn send_begin(&mut self, to: &str, content: Content) -> Option<Deliveries> {
-        if self.own_roster_due() || self.replaced.get() {
+        if self.replaced.get() {
             return None;
         }
         let handle = Handle::parse(to).ok()?;
@@ -1977,7 +2023,7 @@ impl Client {
     }
 
     fn no_deliveries(&self) -> Deliveries {
-        Deliveries { transport: self.transport.clone(), items: Vec::new(), preparation_error: None, to: None }
+        Deliveries { transport: self.transport.clone(), items: Vec::new(), to: None }
     }
 
     /// The outbox without the client, like `send_begin` without a message. Ended with `send_end`.
@@ -2571,7 +2617,6 @@ mod handle_tests {
             let deliveries = Deliveries {
                 transport: Arc::new(Offline),
                 to: None,
-                preparation_error: None,
                 items: vec![Delivery {
                     access: None,
                     endorsed: false,

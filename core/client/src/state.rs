@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bytes in the stored JSON as base64url text, not as an array of numbers (a third of the size).
 mod compact {
-    use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
     use std::collections::VecDeque;
 
     fn bytes<'de, D: Deserializer<'de>>(text: String) -> Result<Vec<u8>, D::Error> {
@@ -20,16 +20,6 @@ mod compact {
         }
         pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
             super::bytes::<D>(String::deserialize(d)?)
-        }
-    }
-
-    pub mod optional {
-        use super::*;
-        pub fn serialize<S: Serializer>(value: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
-            value.as_deref().map(yo_wire::b64).serialize(s)
-        }
-        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
-            Option::<String>::deserialize(d)?.map(super::bytes::<D>).transpose()
         }
     }
 
@@ -206,20 +196,26 @@ pub struct Outgoing {
     /// A decryption-error resend: catch up silently even when its content was visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub non_urgent: bool,
-    /// Its encrypted payload and the device it was made for: made again if that changed (spec 6.1).
-    #[serde(default, with = "compact::optional")]
-    pub payload: Option<Vec<u8>>,
+    /// Its encrypted payloads, one per device (spec 4.4, 6.1), and the devices they were made for: made again if
+    /// those changed. A save from before keeps one payload for all (`payload`): not read, made again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payloads: Vec<DevicePayload>,
     #[serde(default, deserialize_with = "roster_list")]
     pub made_for: Vec<Key>,
     /// Only these keys get a copy (targeted repair or a sibling delivery).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audience: Vec<Key>,
-    /// Siblings known when a shown message was queued. Released on the first accepted leg.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sent_to_siblings: Vec<Key>,
     /// Refused (`403`) with the recipient's key: their new key may wait in the inbox, so it goes again after the
     /// next receive (spec 4.10).
     pub refused: bool,
+}
+
+/// One device's payload of a message: its number and the payload (`envelope::Payload` with its one copy).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevicePayload {
+    pub device: u8,
+    #[serde(with = "compact::bytes")]
+    pub payload: Vec<u8>,
 }
 
 /// This device's prekeys (spec 4.1).
@@ -277,13 +273,23 @@ pub struct State {
     pub registration_id: u32,
     pub name: Option<String>,
     pub contacts: BTreeMap<String, Contact>,
+    /// This account's other devices, as the hub lists them (spec 4.7).
     #[serde(default)]
     pub siblings: Vec<Slot>,
+    /// Siblings that joined after this device and have not written to it yet: no sync goes while one is (a device
+    /// the hub lists again after it was replaced gets nothing from here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub siblings_held: Vec<Key>,
+    /// When the own roster was last asked for, and whether it ever was: the first answer is the account as it was
+    /// when this device joined, its devices trusted.
     #[serde(default)]
     pub own_roster_at: u64,
-    /// Latest outgoing Yo from a sibling and read watermark, keyed by direct or group thread id.
-    #[serde(default)]
-    pub sibling_sent_at: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own_roster_known: bool,
+    /// The newest message received per direct or group thread (sent at, ms): what a read names (spec 5).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_in: BTreeMap<String, u64>,
+    /// Read through (sent at, ms) per thread, here or on a sibling.
     #[serde(default)]
     pub seen_through: BTreeMap<String, u64>,
     /// Threads a sibling showed, not yet handed to the app (`take_seen`).

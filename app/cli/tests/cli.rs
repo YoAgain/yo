@@ -197,17 +197,10 @@ fn the_bots_state_file_of_before_goes_on_as_the_same_device() {
     assert_eq!(yos_until_quiet(&mut bot, Duration::from_millis(300)).len(), 1);
     // One more for it waits at the hub.
     pal.send_yo(bot.user_id()).unwrap();
-    // The file as that build wrote it: a list of devices for each contact and outbox item.
+    // The file as that build wrote it: a list of devices for each contact and outbox item, as the state has them.
     let saved = bot.saved();
-    let mut json = serde_json::to_value(&saved.state).unwrap();
-    let listed =
-        |value: serde_json::Value| serde_json::Value::Array(value.is_null().then(Vec::new).unwrap_or(vec![value]));
-    for contact in json["contacts"].as_object_mut().unwrap().values_mut() {
-        contact["devices"] = listed(contact.as_object_mut().unwrap().remove("device").unwrap());
-    }
-    for item in json["outbox"].as_array_mut().unwrap() {
-        item["made_for"] = listed(item["made_for"].take());
-    }
+    let json = serde_json::to_value(&saved.state).unwrap();
+    assert!(json["contacts"].as_object().unwrap().values().all(|c| c["devices"].is_array()));
     let key = [9u8; 32];
     let yo = Yo::new(&hub);
     std::fs::create_dir_all(&yo.state).unwrap();

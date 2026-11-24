@@ -203,7 +203,15 @@ impl Transport for Http {
             ));
         }
         if self.record {
-            self.sent.lock().unwrap_or_else(PoisonError::into_inner).push((method.into(), path.into(), body.to_vec()));
+            // A delivery of one copy per device is kept as its envelopes, each as a body of its own (the
+            // single-envelope body the hub still takes), so tests look at and post again what one device got.
+            let copies = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(yo_wire::api::HEADER_COPIES));
+            let bodies = match copies.then(|| yo_wire::decode::<yo_wire::api::Copies>(body).ok()).flatten() {
+                Some(c) => c.copies.into_iter().map(|c| c.envelope.as_slice().to_vec()).collect(),
+                None => vec![body.to_vec()],
+            };
+            let mut sent = self.sent.lock().unwrap_or_else(PoisonError::into_inner);
+            sent.extend(bodies.into_iter().map(|b| (method.to_owned(), path.to_owned(), b)));
         }
         let fault = {
             let mut faults = self.faults.lock().unwrap_or_else(PoisonError::into_inner);

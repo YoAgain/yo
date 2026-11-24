@@ -460,7 +460,11 @@ impl Client {
                 if let (true, Ok(made)) = (rostered, made) {
                     let content = PlaintextContent::from(made).serialized().to_vec();
                     if user == self.state.user_id {
-                        self.enqueue_plaintext(&user, payload.device_key, content);
+                        // As many due as for a contact (`KEPT_FOR_RESEND`).
+                        let due = self.state.outbox.iter().filter(|o| o.user == user && o.device.is_some()).count();
+                        if due < KEPT_FOR_RESEND {
+                            self.enqueue_plaintext(&user, payload.device_key, content);
+                        }
                     } else if let Some(contact) = self.state.contacts.get_mut(&user) {
                         if contact.decryption_errors.len() < KEPT_FOR_RESEND {
                             contact.decryption_errors.push(DecryptionError { device: payload.device_key, content });
@@ -483,7 +487,7 @@ impl Client {
         let message = Message::decode(plain.content.as_slice())?;
         if user == self.state.user_id {
             if self.first_time(&user, &payload.device_key, &plaintext) {
-                self.receive_sibling(plain, message)?;
+                self.receive_sibling(payload.device_key, plain, message)?;
             }
             return Ok(());
         }
@@ -502,8 +506,9 @@ impl Client {
     /// Whether this plaintext from `user` comes for the first time (the last `SEEN` kept), noting it.
     pub(super) fn first_time(&mut self, user: &str, device: &Key, plaintext: &[u8]) -> bool {
         let id = sha256(&[user.as_bytes(), device, plaintext].concat());
-        let legacy = sha256(&[user.as_bytes(), plaintext].concat());
-        if self.state.received.contains(&id) || self.state.received.contains(&legacy) {
+        // Ids saved before multi-device name no device: read until `LEGACY_UNTIL_MS`.
+        let legacy = (self.wall() < crate::LEGACY_UNTIL_MS).then(|| sha256(&[user.as_bytes(), plaintext].concat()));
+        if self.state.received.contains(&id) || legacy.is_some_and(|legacy| self.state.received.contains(&legacy)) {
             return false;
         }
         self.state.received.push_back(id);
@@ -697,6 +702,13 @@ impl Client {
         }
         let archived = error.ratchet_key().is_some_and(|key| self.records.archive_if_current(address, key));
         let sent_at = error.timestamp().epoch_millis();
+        // A sibling's: syncs are not kept to resend; a receipt starts the new session, as for a contact.
+        if user == self.state.user_id {
+            if archived {
+                self.queue_own(Content::Receipt)?;
+            }
+            return Ok(());
+        }
         let Some(contact) = self.state.contacts.get(user) else { return Ok(()) };
         let intended = contact.sent_devices.get(&sent_at).is_none_or(|keys| keys.contains(&device));
         let kept = contact

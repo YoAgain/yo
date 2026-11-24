@@ -316,7 +316,9 @@ pub(crate) async fn put_blob(
     if size < 16 {
         return Err(bad());
     }
-    let fetches = query(&uri, "fetches").filter(|n| (1..=limits::MAX_BLOB_FETCHES).contains(n)).ok_or_else(bad)?;
+    // As many as the devices it can go to: while each account has one device, a group's and room (spec 6.8).
+    let most = if hub.config.add_devices { limits::MAX_BLOB_FETCHES } else { limits::MAX_BLOB_FETCHES_ONE_DEVICE };
+    let fetches = query(&uri, "fetches").filter(|n| (1..=most).contains(n)).ok_or_else(bad)?;
     let body_hash: [u8; 32] = header(&headers, HEADER_BODY_HASH).and_then(b64_array).ok_or_else(bad)?;
     let limits = &hub.config.limits;
     hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;

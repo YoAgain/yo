@@ -1,69 +1,86 @@
-//! Encrypted deliveries between devices of one account. None of their contents are app events.
+//! What one device of an account tells its other devices (spec 5, Signal's sync messages): the threads it showed
+//! and that the storage changed. A device that joined after this one gets nothing from here until it has written
+//! here itself (`siblings_held`): one the hub lists again after it was replaced, its keys gone, never does. (One
+//! whose keys someone has can write: against that, as in Signal, the app is told of every device added.) None of it
+//! is an app event.
 use super::*;
-use yo_wire::content::{Read, SyncMessage};
+use yo_wire::content::{Read, SyncMessage, MAX_READ};
+
+/// The most threads whose newest message is kept (`last_in`).
+const KEPT_THREADS: usize = 1000;
 
 impl Client {
-    fn enqueue_siblings(&mut self, plain: Plain, audience: Vec<Key>) {
-        if audience.is_empty() {
-            return;
-        }
-        let own = self.state.user_id.clone();
-        self.enqueue_with_urgency(&own, encode(&plain), true);
-        self.state.outbox.back_mut().expect("enqueued").audience = audience;
+    /// A sync to this account's other devices but the held ones; `false`: none to take it.
+    pub(super) fn queue_sync(&mut self, sync: SyncMessage) -> Result<bool> {
+        self.queue_own(Content::Sync(sync))
     }
 
-    /// The first accepted leg releases one transcript. The remaining group legs lose their intent
-    /// in the same state change, including when the app resumes with a partly delivered group Yo.
-    pub(super) fn release_sent_copy(&mut self, seq: u64) -> Result<bool> {
-        let Some(item) = self.state.outbox.iter_mut().find(|i| i.seq == seq && !i.sent_to_siblings.is_empty()) else {
+    /// Content for this account's other devices but the held ones (a sync, or a receipt that starts a new session).
+    pub(super) fn queue_own(&mut self, content: Content) -> Result<bool> {
+        let held = &self.state.siblings_held;
+        let audience: Vec<Key> = self.state.siblings.iter().map(|d| d.key).filter(|k| !held.contains(k)).collect();
+        if audience.is_empty() {
             return Ok(false);
-        };
-        let mut plain: Plain = decode(&item.plain)?;
-        let group = Message::decode(plain.content.as_slice())?.group;
-        if group.is_none() {
-            plain.to = Some(user_bytes(&item.user)?);
         }
-        let audience = std::mem::take(&mut item.sent_to_siblings);
-        if group.is_some() {
-            let original = item.plain.clone();
-            for leg in self.state.outbox.iter_mut().filter(|i| i.plain == original) {
-                leg.sent_to_siblings.clear();
-            }
-        }
-        self.enqueue_siblings(plain, audience);
+        let content = Message { sent_at_ms: self.next_sent_at(), group: None, content }.encode()?;
+        let own = self.state.user_id.clone();
+        self.enqueue_with_urgency(&own, encode(&Plain { to: None, content: content.into() }), true);
+        self.state.outbox.back_mut().expect("enqueued").audience = audience;
         Ok(true)
     }
 
-    pub(super) fn queue_seen(&mut self, seen: SyncMessage) -> Result<()> {
-        if self.state.siblings.is_empty() {
-            return Ok(());
+    /// Notes the newest message of a thread (user or group id), for what `mark_seen` names.
+    pub(super) fn note_in(&mut self, thread: &str, sent_at_ms: u64) {
+        let at = self.state.last_in.entry(thread.to_owned()).or_default();
+        *at = (*at).max(sent_at_ms);
+        while self.state.last_in.len() > KEPT_THREADS {
+            let Some(oldest) = self.state.last_in.iter().min_by_key(|(_, at)| **at).map(|(t, _)| t.clone()) else {
+                break;
+            };
+            self.state.last_in.remove(&oldest);
         }
-        let content =
-            Message { sent_at_ms: self.next_sent_at(), group: None, content: Content::Sync(seen) }.encode()?;
-        self.enqueue_siblings(Plain { to: None, content: content.into() }, self.roster_keys(&self.state.user_id));
-        Ok(())
     }
 
-    /// The user id (16 bytes in hex) or group id (32 bytes in hex) whose messages were read.
-    pub fn mark_seen(&mut self, user_or_group: &str, through_sent_at_ms: u64) -> Result<()> {
-        let id = unhex(user_or_group).ok_or(Error::Protocol("thread id"))?;
-        let (user, group) = match id.len() {
-            16 => (Some(id.try_into().expect("16 bytes")), None),
-            32 => (None, Some(id.try_into().expect("32 bytes"))),
-            _ => return Err(Error::Protocol("thread id")),
-        };
+    /// The threads the app showed (user ids, 16 bytes in hex, or group ids, 32): this account's other devices let
+    /// their notifications of them go, through the newest message received here (Signal's `SyncMessage.Read`).
+    pub fn mark_seen(&mut self, threads: &[String]) -> Result<()> {
         self.refresh_own_roster()?;
-        // No other device of this account: nothing to tell (one device per account, as the hub keeps it now).
+        // No other device of this account: nothing to tell.
         if self.state.siblings.is_empty() {
             return Ok(());
         }
-        self.queue_seen(SyncMessage::Read(Read { user, group, through_sent_at: through_sent_at_ms }))?;
+        let mut reads = Vec::new();
+        for thread in threads {
+            let thread = thread.to_ascii_lowercase();
+            let Some(&through) = self.state.last_in.get(&thread) else { continue };
+            let id = unhex(&thread).ok_or(Error::Protocol("thread id"))?;
+            let (user, group) = match id.len() {
+                16 => (Some(id.try_into().expect("16 bytes")), None),
+                32 => (None, Some(id.try_into().expect("32 bytes"))),
+                _ => return Err(Error::Protocol("thread id")),
+            };
+            if self.state.seen_through.get(&thread).is_none_or(|at| through > *at) {
+                reads.push((thread, Read { user, group, through_sent_at: through }));
+            }
+        }
+        if reads.is_empty() {
+            return Ok(());
+        }
+        for reads in reads.chunks(MAX_READ) {
+            // Noted as told only once it goes (none goes while every other device is held).
+            if !self.queue_sync(SyncMessage::Read(reads.iter().map(|(_, r)| r.clone()).collect()))? {
+                return Ok(());
+            }
+            for (thread, read) in reads {
+                self.state.seen_through.insert(thread.clone(), read.through_sent_at);
+            }
+        }
         self.persist()?;
         self.deliver_now()
     }
 
-    /// Threads another device of this account showed since the last call, with the time shown through (ms):
-    /// the app clears their notifications here. Taken once.
+    /// Threads another device of this account showed since the last call, with the message (sent at, ms) shown
+    /// through: the app clears their notifications here. Taken once.
     pub fn take_seen(&mut self) -> Result<Vec<(String, u64)>> {
         if self.state.seen_due.is_empty() {
             return Ok(Vec::new());
@@ -73,11 +90,20 @@ impl Client {
         Ok(due)
     }
 
-    pub(super) fn receive_sibling(&mut self, plain: Plain, message: Message) -> Result<()> {
-        match (plain.to, message.content) {
-            (None, Content::Sync(SyncMessage::Read(read))) => {
-                let thread = read.user.map(|u| hex(&u)).or_else(|| read.group.map(|g| hex(&g)));
-                if let Some(thread) = thread {
+    /// A message from another device of this account, opened in its session.
+    pub(super) fn receive_sibling(&mut self, device: Key, plain: Plain, message: Message) -> Result<()> {
+        // It wrote here with its keys: it gets this device's syncs from now on.
+        self.state.siblings_held.retain(|held| *held != device);
+        // A copy of what it sent to someone (Signal's sent transcript) is not taken yet.
+        if plain.to.is_some() {
+            return Ok(());
+        }
+        match message.content {
+            Content::Sync(SyncMessage::Read(reads)) => {
+                for read in reads {
+                    let Some(thread) = read.user.map(|u| hex(&u)).or_else(|| read.group.map(|g| hex(&g))) else {
+                        continue;
+                    };
                     let at = self.state.seen_through.entry(thread.clone()).or_default();
                     if read.through_sent_at > *at {
                         *at = read.through_sent_at;
@@ -86,19 +112,10 @@ impl Client {
                     }
                 }
             }
-            (None, Content::Sync(SyncMessage::StorageChanged)) => self.read_storage()?,
-            (to, Content::Yo | Content::Photo(_) | Content::Video { .. }) => {
-                let thread = match (to, message.group) {
-                    (Some(user), None) if hex(&user) != self.state.user_id => {
-                        let user = hex(&user);
-                        self.state.contacts.entry(user.clone()).or_default().chat = true;
-                        user
-                    }
-                    (None, Some(group)) => groups::group_id_of(&group.key),
-                    _ => return Ok(()),
-                };
-                let at = self.state.sibling_sent_at.entry(thread).or_default();
-                *at = (*at).max(message.sent_at_ms);
+            // Read once the inbox is (`after_sync`), as Signal's job fetches the latest storage.
+            Content::Sync(SyncMessage::StorageChanged) => {
+                self.state.storage_fetched = false;
+                self.after_due = true;
             }
             _ => {}
         }
