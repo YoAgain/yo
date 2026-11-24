@@ -50,18 +50,21 @@ func eventually(_ check: () -> Bool) {
   }
   preconditionFailure("queue did not reach expected state")
 }
-precondition(Noise.status(502, method: "GET", route: "/v1/inbox"))
-precondition(Noise.status(401, method: "GET", route: "/v1/inbox"))
+// Expected: the update asked for, a limit. Problems: a refused signature, the hub failing, a broken TLS handshake.
+precondition(Noise.status(426, method: "GET", route: "/v1/inbox") && Noise.status(429, method: "GET", route: "/v1/inbox"))
+precondition(!Noise.status(502, method: "GET", route: "/v1/inbox"))
+precondition(!Noise.status(401, method: "GET", route: "/v1/inbox"))
+precondition(!Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed, badDates: false))
 precondition(Noise.status(404, method: "POST", route: "/v1/lookup"))
 precondition(!Noise.status(404, method: "GET", route: "/v1/support"))
 precondition(!Noise.status(500, method: "GET", route: "/v1/inbox"))
 precondition(Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, badDates: false))
 precondition(!Noise.urlError(domain: "other", code: NSURLErrorTimedOut, badDates: true))
-precondition(Noise.fallback("network") && !Noise.fallback("decrypt"))
+precondition(Noise.fallback("network") && !Noise.fallback("decrypt") && !Noise.fallback("hubStatus/503"))
 let defaults = UserDefaults.standard
 Diagnostics.clear()
 defaults.set(false, forKey: "crashReports.on")
-Diagnostics.recordUnreported(YoError.Save(message: "Busy"))
+Diagnostics.recordUnreported(YoError.Network(message: "offline"))
 precondition(CountedErrors.calls.withLock { $0 } == 0)
 Diagnostics.record(NSError(domain: "test", code: 1))
 usleep(50_000)

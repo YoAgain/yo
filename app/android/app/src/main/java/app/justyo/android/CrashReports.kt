@@ -138,11 +138,11 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
     }
     companion object {
         private var installed=false
-        /** The one place deciding which push fallbacks are never reported. After a minute of tries the phone may
-         * have no signal or captive Wi-Fi, or the hub may be restarting or rate limiting. The notification still
-         * shows, but its count is discarded. */
+        /** The one place deciding which push fallbacks are expected, never reported (as iOS's Noise): the phone
+         * offline, the update the hub asks for (426), a limit (429). The notification still shows, its count is
+         * discarded. A problem, reported: the hub failing (5xx), a storage failure, one that does not decrypt. */
         internal fun noise(code: String): Boolean = when (code) {
-            "network", "hubStatus/429", "hubStatus/502", "hubStatus/503", "hubStatus/504" -> true
+            "network", "hubStatus/426", "hubStatus/429" -> true
             else -> false
         }
     }

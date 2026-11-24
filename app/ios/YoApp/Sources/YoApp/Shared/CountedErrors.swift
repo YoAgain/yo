@@ -31,11 +31,11 @@ enum NotifyFallback {
     }
   }
 
-  /// Skip network noise. Locked since a restart is counted as expected until the first unlock.
+  /// Skip network noise. Locked since a restart, iOS giving no time (busy) and a timeout are counted as expected.
   static func record(_ reason: Reason) {
     guard !Noise.fallback(reason.code) else { return }
     CountedErrors.record(domain: "NotificationFallback", place: "NotificationService", code: reason.code,
-      expected: reason == .lockedBeforeFirstUnlock)
+      expected: [.lockedBeforeFirstUnlock, .busy, .timeout].contains(reason))
   }
 }
 

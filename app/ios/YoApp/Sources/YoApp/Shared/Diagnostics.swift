@@ -7,13 +7,16 @@ import Glibc
 #endif
 import YoCore
 
-/// The one place that decides which network failures and hub answers are never reported: the phone's network or
-/// clock, the hub restarting or limiting requests, and answers the core takes as protocol outcomes.
+/// The one place that decides which network failures and hub answers are expected, never reported as problems: the
+/// phone offline or timing out, a request cancelled, the phone's clock, the update the hub asks for (426), a limit,
+/// the device replaced, and answers the core takes as protocol outcomes. A problem, reported: a refused signature
+/// (401), the hub failing (5xx), a broken TLS handshake (-1200), a storage failure, a message that does not decrypt.
+/// Android mirrors it (CrashReports.noise).
 enum Noise {
   static func status(_ status: UInt16, method: String, route: String) -> Bool {
-    // A 401: the core signs again. A 410: this device was replaced, which the app shows.
-    // A limit, the hub restarting behind its proxy, or no room now (inbox, blobs or disk): try later.
-    if [401, 410, 429, 502, 503, 504, 507].contains(status) { return true }
+    // A 410: this device was replaced, which the app shows. 426: the app asks for the update. A limit, or no room
+    // now (inbox, blobs or disk): try later.
+    if [410, 426, 429, 507].contains(status) { return true }
     switch method {
     case "GET":
       // A username checked while typed, no storage yet, or no backup behind the chosen passkey or key.
@@ -39,11 +42,12 @@ enum Noise {
     }
   }
 
-  // A "bad URL" for the fixed hub address can come from a proxy or VPN, a broken TLS handshake from a captive portal.
+  // A "bad URL" for the fixed hub address can come from a proxy or VPN. A broken TLS handshake is reported: the
+  // certificate or the proxy in front of the hub.
   private static let offline: Set<Int> = [
     NSURLErrorBadURL, NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
     NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet,
-    NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed, NSURLErrorSecureConnectionFailed,
+    NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed,
   ]
 
   static func urlError(domain: String, code: Int, badDates: Bool) -> Bool {
@@ -51,7 +55,7 @@ enum Noise {
   }
 
   static func fallback(_ code: String) -> Bool {
-    ["network", "hubStatus/429", "hubStatus/502", "hubStatus/503", "hubStatus/504"].contains(code)
+    ["network", "hubStatus/426", "hubStatus/429"].contains(code)
   }
 }
 
@@ -81,10 +85,6 @@ enum Diagnostics {
         // them, not a fault of the app.
         CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
           code: name(yo), expected: true)
-        return
-      case .Save:
-        // The database counts its own failures (StateFailureCounts). Otherwise iOS gave no background time
-        // ("Busy") or took the turn back. The step runs again.
         return
       default: break
       }
