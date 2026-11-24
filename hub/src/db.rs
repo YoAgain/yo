@@ -833,11 +833,11 @@ impl Db {
 
     // ---- groups (spec 4.9) ----
 
-    /// A new group at revision 1; false if its id is taken.
+    /// A new group at revision 1; false if its id is taken, or was a group that ended.
     pub fn create_group(&self, id: &[u8], params: &[u8], state: &[u8], now: u64) -> rusqlite::Result<bool> {
         self.one_changed(
             "INSERT OR IGNORE INTO zk_groups (id, params, revision, state, updated_at, created_at)
-             VALUES (?1, ?2, 1, ?3, ?4, ?4)",
+             SELECT ?1, ?2, 1, ?3, ?4, ?4 WHERE NOT EXISTS (SELECT 1 FROM zk_groups_gone WHERE id = ?1)",
             params![id, params, state, now as i64],
         )
     }
@@ -857,9 +857,16 @@ impl Db {
         )
     }
 
-    /// The group ends (its last member left), if it is still at `revision`.
-    pub fn end_group(&self, id: &[u8], revision: u32) -> rusqlite::Result<bool> {
-        self.one_changed("DELETE FROM zk_groups WHERE id = ?1 AND revision = ?2", params![id, revision])
+    /// The group ends (its last member left), if it is still at `revision`; its id is gone for good.
+    pub fn end_group(&self, id: &[u8], revision: u32, now: u64) -> rusqlite::Result<bool> {
+        self.write(|tx| {
+            let ended =
+                tx.execute("DELETE FROM zk_groups WHERE id = ?1 AND revision = ?2", params![id, revision])? == 1;
+            if ended {
+                tx.execute("INSERT OR IGNORE INTO zk_groups_gone (id, at) VALUES (?1, ?2)", params![id, now as i64])?;
+            }
+            Ok(ended)
+        })
     }
 
     // ---- reports, support and diagnostics ----

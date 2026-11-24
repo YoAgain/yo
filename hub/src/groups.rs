@@ -207,7 +207,7 @@ impl Hub {
         }
         state.revision = request.revision;
         let stored = match state.members.is_empty() {
-            true => self.db.end_group(id, before)?,
+            true => self.db.end_group(id, before, now_ms())?,
             false => self.db.update_group(id, before, &encode(&state), now_ms())?,
         };
         if !stored {
@@ -445,6 +445,16 @@ mod tests {
             assert!(hub.group_request(&id, &leave).unwrap().endorsements.as_slice().is_empty());
         }
         assert_eq!(hub.group_request(&id, &fetch(&ann)).unwrap_err().0, StatusCode::NOT_FOUND, "ended");
+        // Audit I5: an ended group's id is gone for good; whoever has its old key makes it no more.
+        assert_eq!(hub.create_group(&id, &new).unwrap_err().0, StatusCode::CONFLICT, "its id gone");
+        let other = GroupSecretParams::derive_from_master_key(GroupMasterKey::new([0x44; 32]));
+        let again = NewGroup {
+            public_params: zkgroup::serialize(&other.get_public_params()).into(),
+            auth: auth(&hub, &ann, &other),
+            title: other.encrypt_blob_with_padding(random(), b"T", 31).into(),
+            members: vec![keyed(&hub, &ann, [9; 32], &other)],
+        };
+        assert!(hub.create_group(&other.get_group_identifier(), &again).is_ok(), "another id: made");
     }
 
     /// Audit G1: a stranger names any user as an invited member (no profile key, no consent): the hub endorses no one

@@ -628,7 +628,7 @@ impl Client {
                 Ok(())
             }
             Content::Group(tag) => {
-                self.group_named(tag);
+                self.group_named(tag, user);
                 Ok(())
             }
             content if message.group.is_some() => {

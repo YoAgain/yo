@@ -244,6 +244,12 @@ CREATE TABLE IF NOT EXISTS zk_groups (
     -- When it was made (ms); NULL for groups made before hubs kept it.
     created_at INTEGER
 ) WITHOUT ROWID;
+-- Groups ended (their last member left), by identifier: never made again (whoever has an old key cannot bring one
+-- back under its members' eyes). Kept for good, 32 bytes and a time each.
+CREATE TABLE IF NOT EXISTS zk_groups_gone (
+    id BLOB PRIMARY KEY,
+    at INTEGER NOT NULL
+) WITHOUT ROWID;
 -- How many blobs, and bytes, each user uploaded on a day (days since the epoch, UTC); kept two days.
 CREATE TABLE IF NOT EXISTS blob_quota (
     user_id BLOB NOT NULL,

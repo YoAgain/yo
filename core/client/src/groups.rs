@@ -95,6 +95,8 @@ enum Intent {
     Rename(String),
     /// This account's own profile key into its entry (a yes to a request).
     Key,
+    /// Entries no member can open out (`Group::unreadable`).
+    Purge,
 }
 
 impl Client {
@@ -417,37 +419,49 @@ impl Client {
         let me = self.state.user_id.clone();
         let old = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
         let secret = secret(&key_of(&old)?);
-        let decrypt = |bytes: &[u8]| -> Result<String> {
-            let ciphertext: UuidCiphertext = zkgroup::deserialize(bytes).map_err(|_| bad_answer())?;
-            let service = secret.decrypt_service_id(ciphertext).map_err(|_| bad_answer())?;
-            let aci = Aci::try_from(service).map_err(|_| bad_answer())?;
-            Ok(hex(&aci.service_id_binary()))
+        let decrypt = |bytes: &[u8]| -> Option<String> {
+            let ciphertext: UuidCiphertext = zkgroup::deserialize(bytes).ok()?;
+            let service = secret.decrypt_service_id(ciphertext).ok()?;
+            let aci = Aci::try_from(service).ok()?;
+            Some(hex(&aci.service_id_binary()))
         };
+        // Each entry's user; one no member can open (a member added another group's ciphertext, the hub cannot tell)
+        // is skipped, kept by its bytes to be removed (`purge`), and the group stays usable for everyone.
+        let users: Vec<Option<String>> = answer.state.members.iter().map(|m| decrypt(m.user.as_slice())).collect();
         let mut members = Vec::new();
+        let mut unreadable = Vec::new();
         let (mut keyed, mut added_by) = (false, String::new());
-        for member in &answer.state.members {
-            let user = decrypt(member.user.as_slice())?;
+        for (member, user) in answer.state.members.iter().zip(&users) {
+            let Some(user) = user.clone() else {
+                unreadable.push(hex(member.user.as_slice()));
+                continue;
+            };
             if user == me {
                 keyed = !member.profile_key.as_slice().is_empty();
                 added_by = decrypt(member.added_by.as_slice()).unwrap_or_default();
             }
             members.push(user);
         }
+        if !unreadable.is_empty() {
+            self.note(format!("group: {} entries no member can open", unreadable.len()));
+        }
+        // Its name as a name may be (spec 4.9: 1 to 32 bytes, no control characters), else none.
         let name = secret
             .decrypt_blob_with_padding(answer.state.title.as_slice())
             .ok()
             .and_then(|t| String::from_utf8(t).ok())
+            .filter(|name| name.len() <= MAX_NAME_LEN && !name.chars().any(char::is_control))
             .unwrap_or_default();
         // Endorsements (spec 4.9): for the members with their key in, as Signal's full members; a hub of before
         // endorsed every member. Each is checked against the entries it is for, and kept by their user.
         let mut endorsements = std::collections::BTreeMap::new();
         let mut endorsed_until = 0;
         if !answer.endorsements.as_slice().is_empty() {
-            let entries: Vec<(String, UuidCiphertext, bool)> = answer
+            let entries: Vec<(Option<String>, UuidCiphertext, bool)> = answer
                 .state
                 .members
                 .iter()
-                .zip(&members)
+                .zip(&users)
                 .filter_map(|(member, user)| {
                     let ciphertext = zkgroup::deserialize(member.user.as_slice()).ok()?;
                     Some((user.clone(), ciphertext, !member.profile_key.as_slice().is_empty()))
@@ -459,7 +473,7 @@ impl Client {
                 .and_then(|response| {
                     let until = response.expiration().epoch_seconds();
                     let receive = |keyed_only: bool| {
-                        let users: Vec<&(String, UuidCiphertext, bool)> =
+                        let users: Vec<&(Option<String>, UuidCiphertext, bool)> =
                             entries.iter().filter(|(_, _, keyed)| *keyed || !keyed_only).collect();
                         let received = response
                             .clone()
@@ -473,7 +487,9 @@ impl Client {
                 Some((until, received)) => {
                     endorsed_until = until;
                     for (member, endorsement) in received {
-                        endorsements.insert(member, hex(&zkgroup::serialize(&endorsement.decompressed)));
+                        if let Some(member) = member {
+                            endorsements.insert(member, hex(&zkgroup::serialize(&endorsement.decompressed)));
+                        }
                     }
                 }
                 None => self.note("group send endorsements that do not verify".into()),
@@ -481,7 +497,9 @@ impl Client {
         }
         members.sort();
         let left = !members.contains(&me);
-        let accepted = old.accepted
+        // Joined (spec 4.10): once said yes to, until this account is out (leaving says no; added back by a stranger it
+        // is a request again), or with its key in its entry, or added by itself or an accepted contact.
+        let accepted = (old.accepted && !old.left && !left)
             || keyed
             || added_by == me
             || self.state.contacts.get(&added_by).is_some_and(|c| c.accepted && !c.blocked);
@@ -496,7 +514,9 @@ impl Client {
             left,
             accepted,
             keyed,
-            named: old.named.max(revision),
+            // What the hub has now: a tag naming more than there is never makes the group fetched again and again.
+            named: revision,
+            unreadable: if left { Vec::new() } else { unreadable },
             endorsed_until: if left { 0 } else { endorsed_until },
             endorsements: if left { Default::default() } else { endorsements },
         };
@@ -564,8 +584,10 @@ impl Client {
             self.state.groups.remove(id);
         } else {
             group.named = group.revision;
+            group.accepted = false;
             group.endorsed_until = 0;
             group.endorsements.clear();
+            group.unreadable.clear();
             if !std::mem::replace(&mut group.left, true) {
                 self.push_event(Event::GroupChanged { group: id.to_owned() });
             }
@@ -593,6 +615,7 @@ impl Client {
                 }
             }
         }
+        self.purge_groups()?;
         self.key_groups()
     }
 
@@ -641,6 +664,23 @@ impl Client {
         Ok(())
     }
 
+    /// Entries no member can open, removed from each group joined that has them (by their bytes: any member may
+    /// remove any, spec 4.9); tried again after each read while they are there.
+    fn purge_groups(&mut self) -> Result<()> {
+        let due: Vec<String> = (self.state.groups.iter())
+            .filter(|(_, g)| g.accepted && !g.left && g.revision > 0 && !g.unreadable.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            match self.change(&id, Intent::Purge) {
+                Err(error) if not_now(&error) => return Err(error),
+                Err(error) => self.note(format!("group purge: {error}")),
+                Ok(()) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// `refresh_groups`, whatever comes of it: noted, tried again after the next read.
     pub(crate) fn refresh_groups_quietly(&mut self) {
         if let Err(error) = self.refresh_groups() {
@@ -648,12 +688,18 @@ impl Client {
         }
     }
 
-    /// A group a message names: known from now on, its revision noted (fetched after the inbox, `refresh_groups`).
-    pub(crate) fn group_named(&mut self, tag: GroupTag) -> Option<String> {
+    /// A group a message from `from` names: known from now on, its revision noted (fetched after the inbox,
+    /// `refresh_groups`). One not a member as fetched names at most the next revision (a member added since may write
+    /// first): whatever it claims, it makes the group fetched once.
+    pub(crate) fn group_named(&mut self, tag: GroupTag, from: &str) -> Option<String> {
         let id = group_id_of(&tag.key);
         let full = self.state.groups.len() >= MAX_GROUPS;
         match self.state.groups.get_mut(&id) {
-            Some(group) => group.named = group.named.max(tag.revision),
+            Some(group) => {
+                let member = group.revision == 0 || group.members.iter().any(|m| m == from);
+                let named = if member { tag.revision } else { tag.revision.min(group.revision.saturating_add(1)) };
+                group.named = group.named.max(named);
+            }
             // A sender cannot fill this device with groups.
             None if full => {
                 self.note("a group past the most kept".into());
@@ -669,7 +715,7 @@ impl Client {
 
     /// A Yo from `from` to a group: shown if they are a member; held while the group is fetched.
     pub(crate) fn group_yo(&mut self, from: &str, tag: GroupTag, sent_at_ms: u64, content: Content) {
-        let Some(id) = self.group_named(tag) else { return };
+        let Some(id) = self.group_named(tag, from) else { return };
         let group = self.state.groups[&id].clone();
         let current = group.revision > 0 && group.revision >= tag.revision;
         if current && (group.left || !group.members.iter().any(|m| m == from)) {
@@ -708,7 +754,14 @@ impl Client {
             let secret = secret(&key_of(&group)?);
             let mut actions = Vec::new();
             let mut after = group.members.clone();
+            // Entries no member can open go with any change of a member who has the group joined.
+            if group.accepted {
+                for bytes in group.unreadable.iter().filter_map(|b| unhex(b)) {
+                    actions.push(GroupAction { kind: api::ACTION_REMOVE, data: bytes.into() });
+                }
+            }
             match &intent {
+                Intent::Purge => {}
                 Intent::Add(users) => {
                     for user in users.iter().filter(|u| !group.members.contains(u)) {
                         let member = self.new_member(&zk, &secret, user)?;

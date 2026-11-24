@@ -41,7 +41,8 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 - Every signed route acts on the signer's own user, device or inbox; a blob needs its 128-bit id.
 - SQL: bound parameters only. Bodies: 65 KiB, blobs `Content-Length` ≤ 10 MiB, counted as they come.
 - Refusals carry a status and no text; logs carry no user text and no push token.
-- Growing tables: `feedback` (10/user/day), `gone` (a year), `diagnostics` (8 MiB/IP/hour, `507` below the disk floor, 90 days).
+- Growing tables: `feedback` (10/user/day), `gone` (a year), `diagnostics` (8 MiB/IP/hour, `507` below the disk floor, 90 days),
+  `zk_groups_gone` (an ended group's id, 40 bytes, kept for good; bound by the groups made a day).
 - In-memory buckets: a delivery to a user that does not exist is `404` before any is made for it; a request's
   tokens are taken before it is stored and given back if it is not (requests sent at once share them).
 

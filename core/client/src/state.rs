@@ -226,6 +226,9 @@ pub struct Group {
     /// Group send endorsements (spec 4.9): until when (s), and each member's.
     pub endorsed_until: u64,
     pub endorsements: BTreeMap<String, String>,
+    /// Entries at the hub no member can open (hex of their bytes), to be removed (spec 4.9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
