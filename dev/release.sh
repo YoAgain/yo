@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # A release from this machine, as the Release workflow (.github/workflows/release.yml) does it in Actions:
-#   dev/release.sh 1.0.0-RC37
+#   dev/release.sh 1.0.0-RC37 notes.md
+# notes.md: the release text (a headline line, then a few user-facing bullets, as the earlier RCs); required, so no
+# release goes out with only GitHub's generated changelog.
 # Bumps app/android/version.properties (versionCode +1, versionName the version) in one signed commit on top of
 # origin/main, pushes it to main, publishes the GitHub release v<version> on it (pre-release for -RC), which runs the
 # release workflows, and sends the release card from the sibling yo-hub checkout (release-yo) when it is there.
 # YO_GH_USER picks the gh account that pushes and releases (default: gh's active one); YO_HUB_DIR the yo-hub checkout.
 # Only version.properties is committed; other changes in the checkout stay as they are.
 set -euo pipefail
-version=${1:?usage: dev/release.sh x.y.z[-RCn]}
+version=${1:?usage: dev/release.sh x.y.z[-RCn] NOTES.md}
+notes=${2:?usage: dev/release.sh x.y.z[-RCn] NOTES.md (the release text)}
+[ -s "$notes" ] || { echo "$notes is empty or missing" >&2; exit 1; }
+notes=$(cd "$(dirname "$notes")" && pwd)/$(basename "$notes")
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-RC[0-9]+)?$ ]] || { echo "version '$version' is not x.y.z or x.y.z-RCn" >&2; exit 1; }
 tag="v$version"
 cd "$(dirname "$0")/.."
@@ -31,7 +36,7 @@ git push origin HEAD:main
 sha=$(git rev-parse HEAD)
 prerelease=()
 [[ "$version" == *-RC* ]] && prerelease=(--prerelease)
-GH_TOKEN=$token gh release create "$tag" --repo YoAgain/yo --target "$sha" --title "$tag" --generate-notes "${prerelease[@]}"
+GH_TOKEN=$token gh release create "$tag" --repo YoAgain/yo --target "$sha" --title "$tag" --notes-file "$notes" --generate-notes "${prerelease[@]}"
 echo "released $tag (versionCode $code) on $sha"
 
 hub=${YO_HUB_DIR:-../yo-hub}
