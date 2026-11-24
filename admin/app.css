@@ -813,6 +813,7 @@ body.dash { max-width: 1400px; }
    hub's minimum reddish; the picked slot a thin line. */
 .hc-chart.rchart { cursor: pointer; }
 .hc-chart .rb { stroke: var(--card); stroke-width: .6; stroke-linejoin: round; }
+.hc-chart .rb.dim { opacity: .35; } .ctip .tr.on .tl { color: var(--text); font-weight: 700; }
 .hc-chart .rb.r-current { fill: var(--ok); } .hc-chart .rb.r-must { fill: #c0645a; } .hc-chart .rb.r-must.r-old { fill: #8e4f49; }
 .hc-chart .rb.r-older { fill: #5e5867; }
 .hc-chart .rmark { stroke: var(--text); stroke-width: 1; stroke-dasharray: 2 2; opacity: .7; }

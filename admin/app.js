@@ -2182,23 +2182,21 @@ if (document.body.classList.contains("login")) {
     return bands;
   };
   // @release-groups
-  // The App card's bands, newest first, the same in the chart and its hover: one per release (its version, iOS and
-  // Android together) for the newest 5; the builds of main among them as one "Dev builds" at the newest one's place;
-  // everything older the hub still takes as "Older"; builds without a date "Unknown"; then "Below minimum" (YO_MIN_APP:
-  // refused, must update), always last. The builds the hub takes go green (newest) to yellow, below the minimum red.
+  // The App card's bands, newest first, the same in the chart and its hover: one per release (its version; in All iOS
+  // and Android together); the builds of main as one "Dev builds" at the newest one's place; builds without a date
+  // "Unknown"; then "Below minimum" (YO_MIN_APP: refused, must update), always last. Each band its own shade: the
+  // builds the hub takes go green (newest) to yellow (oldest), below the minimum red.
   const releaseGroups = (apps, versionOf, below) => {
     const stamp = (app) => (app || "").split("/").pop(), dated = (app) => /^\d{12}$/.test(stamp(app));
     const groups = [], byVersion = new Map(), add = (name, kind) => { const g = { name, kind, apps: [] }; groups.push(g); return g; };
-    let releases = 0, dev = null, older = null, unknown = null;
+    let dev = null, unknown = null;
     const low = { name: "Below minimum", kind: "below", apps: [] };
     const sorted = apps.filter(dated).sort((a, b) => stamp(b).localeCompare(stamp(a)) || a.localeCompare(b));
     for (const app of sorted) {
       const v = versionOf(app);
       if (below(app)) low.apps.push(app);
-      else if (v && byVersion.has(v)) byVersion.get(v).apps.push(app);
-      else if (releases < 5 && v) { releases++; byVersion.set(v, add(v, "release")); byVersion.get(v).apps.push(app); }
-      else if (releases < 5) (dev ||= add("Dev builds", "dev")).apps.push(app);
-      else (older ||= add("Older", "older")).apps.push(app);
+      else if (v) { if (!byVersion.has(v)) byVersion.set(v, add(v, "release")); byVersion.get(v).apps.push(app); }
+      else (dev ||= add("Dev builds", "dev")).apps.push(app);
     }
     for (const app of apps.filter(a => !dated(a)).sort()) (unknown ||= add("Unknown", "unknown")).apps.push(app);
     groups.push(low);
@@ -2207,9 +2205,19 @@ if (document.body.classList.contains("login")) {
       : releaseColor(taken.indexOf(g), taken.length);
     return groups;
   };
+  // A hover's rows ({kind, …}, newest first): past `most` the oldest the hub still takes fold into one "Older" (their
+  // sum, the oldest's colour); "Below minimum" stays last.
+  const foldRows = (rows, most = 8) => {
+    const below = rows.filter(r => r.kind === "below"), rest = rows.filter(r => r.kind !== "below");
+    if (rest.length <= most) return [...rest, ...below];
+    const old = rest.slice(most - 1);
+    return [...rest.slice(0, most - 1), { kind: "older", name: "Older", color: old[old.length - 1].color,
+      n: old.reduce((a, r) => a + r.n, 0), ios: old.reduce((a, r) => a + (r.ios || 0), 0),
+      android: old.reduce((a, r) => a + (r.android || 0), 0) }, ...below];
+  };
   // @end
   const relData = (h, plat) => {
-    // Points by the hour: the hub's hourly `build:` levels first (devices seen within 24 hours; 30 days by the hour,
+    // Points by the hour: the hub's hourly `build:` levels first (devices seen within 48 hours, 24 before 2026-11-24; 30 days by the hour,
     // then the day's last), else the admin's own hours (48) and days (the day's at its next midnight, today's now).
     const t = today0(), h1 = Math.floor(Date.now() / 3600000), at = new Map();
     const days = { ...(h.build_days || {}) };
@@ -2265,6 +2273,7 @@ if (document.body.classList.contains("login")) {
     // The bands' edges at each kept slot (a lone slot drawn as a thin column), top band first.
     const pts = have.length > 1 ? have : [have[0], have[0]];
     const x = (k, i) => (have.length > 1 ? xs(i) : xs(i) + (k ? 3 : -3));
+    const polys = [];
     const tops = pts.map((i) => { const r = d.rows[i], all = r.reduce((a, v) => a + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
     d.bands.forEach((b, j) => {
       if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
@@ -2272,6 +2281,7 @@ if (document.body.classList.contains("login")) {
       const down = pts.map((i, k) => `${x(k, i).toFixed(1)},${(2 + (j ? tops[k][j - 1] : 0) * (B - 2)).toFixed(1)}`).reverse();
       const p = svg("polygon", { points: [...up, ...down].join(" "), class: "rb" });
       p.setAttribute("fill", b.color);
+      polys[j] = p;
       s.append(p);
     });
     const mark = svg("line", { y1: 0, y2: B, class: "rmark" });
@@ -2282,16 +2292,27 @@ if (document.body.classList.contains("login")) {
     const current = d.fresh[have[have.length - 1]];
     const share = `${Math.round(100 * current / pickAll)} % current`;
     if (f0) s.dataset.since = "true";
+    // One hover only, the grouped list (no copy of the chart in it), of the nearest slot with builds kept; the band
+    // under the pointer lit in the chart and in the list.
+    s.dataset.samples = "0";
+    let pointerY = null, lit = -1;
+    s.addEventListener("pointermove", (e) => { const r = s.getBoundingClientRect(); pointerY = r.height ? (e.clientY - r.top) / r.height : null; });
+    const light = (j) => { lit = j; polys.forEach((p, k) => p?.classList.toggle("dim", j >= 0 && k !== j)); };
+    s.addEventListener("pointerleave", () => light(-1));
     hoverTip(s, n - f0, (k) => {
-      const i = f0 + k, r = d.rows[i], all = r ? r.reduce((x, v) => x + v, 0) : 0;
+      const i = have.reduce((a, b) => Math.abs(b - f0 - k) < Math.abs(a - f0 - k) ? b : a, have[0]);
+      const r = d.rows[i], all = r.reduce((x, v) => x + v, 0), c = tops[Math.max(0, have.indexOf(i))];
+      const y = pointerY == null ? -1 : ((pointerY * (B + 1)) - 2) / (B - 2);
+      light(y < 0 ? -1 : c.findIndex((top, j) => r[j] > 0 && y <= top + 1e-9));
       const row = d.slots[i][2] || {}, pct = (v) => v ? `${Math.round(100 * v / all) || "<1"} %` : "0 %";
+      const on = (b, p) => b.apps.reduce((sum, app) => sum + (app.startsWith(`${p}/`) ? row[app] || 0 : 0), 0);
+      const rows = foldRows(d.bands.flatMap((b, j) => r[j] > 0 || b.kind === "below"
+        ? [{ kind: b.kind, name: b.name, color: b.color, n: r[j], ios: on(b, "ios"), android: on(b, "android"), lit: j === lit }] : []));
       // In All, each row's share per platform beneath it.
-      const split = (b) => plat !== "all" ? null : ["ios", "android"].map((p) => [p, b.apps.reduce((sum, app) =>
-        sum + (app.startsWith(`${p}/`) ? row[app] || 0 : 0), 0)]).filter(([, v]) => v > 0)
-        .map(([p, v]) => `${p === "ios" ? "iOS" : "Android"} ${pct(v)}`).join(" · ") || null;
-      return { head: d.slots[i][1], rows: r ? d.bands.flatMap((b, j) => r[j] > 0 || b.kind === "below"
-        ? [{ color: b.color, label: b.name, sub: split(b), value: pct(r[j]) }] : []) : [{ label: "Builds", value: "not recorded" }] };
-    });
+      const split = (x) => plat !== "all" ? null : [["iOS", x.ios], ["Android", x.android]].filter(([, v]) => v > 0)
+        .map(([p, v]) => `${p} ${pct(v)}`).join(" · ") || null;
+      return { head: d.slots[i][1], rows: rows.map((x) => ({ color: x.color, label: x.name, sub: split(x), value: pct(x.n), cls: x.lit ? "on" : "" })) };
+    }, (i) => { if (!(i >= 0)) light(-1); });
     const card = dcard(titleText, share, s, axis);
     return card;
   };

@@ -173,13 +173,13 @@ update is out, plain when unknown, with the builds in its tooltip. Builds below 
 versions card counts current, update and unknown per platform. App Store releases will be added the same way later.
 admin.py keeps, beside the state counts in `version-days.json`, the devices per build seen today (`apps_today`, the CLI
 left out; counts only): per UTC day for good and per hour for the last 48 hours. The hub itself samples the devices
-per build seen within 24 hours each hour (its `build:` levels: by the hour for 30 days, then the day's last); the page
+per build seen within 48 hours (24 before 2026-11-24) each hour (its `build:` levels: by the hour for 30 days, then the day's last); the page
 takes those first, so 1D and 7D are drawn by the hour, 30D every 4 hours and Total by the day. The Versions detail draws them as
-"Releases over time", 100 % stacked, the newest on top, the chart's bands and its hover's rows the same: one per
-release (its version, iOS and Android together, the hover adding "iOS x % · Android y %") for the newest 5, the builds
-of main among them as one "Dev builds" at the newest one's place, everything older the hub still takes as "Older",
-then "Below minimum" (builds below `YO_MIN_APP`), always last, 0 % too. Newest green through oldest yellow, below the
-minimum red.
+"Releases over time", 100 % stacked, the newest on top, one band per release (its version; in All iOS and Android
+together, the hover adding "iOS x % · Android y %"; in iOS or Android that platform's), the builds of main as one
+"Dev builds" at the newest one's place, then "Below minimum" (builds below `YO_MIN_APP`), always last, 0 % too. Each
+band its own shade, newest green through oldest yellow, below the minimum red. One hover, the list of the nearest
+kept hour, the band under the pointer lit in chart and list; past 8 rows its oldest fold into "Older".
 A release's build is named by its version and build, `1.0.0-RC36 (202611241344)` (`Android 1.0.0-RC36 (…)`), wherever
 builds are named; any other keeps its date (`Nov 24 07:54`). The version is what the app sends after its build in
 `Yo-App` (spec 6.3, `devices.version`), for older releases `RELEASES` in `users.py`, read once from the release runs'

@@ -19,7 +19,7 @@ const DAY_MS: u64 = 24 * 3600 * 1000;
 const HOUR_MS: u64 = 3600 * 1000;
 
 /// A time as the hub keeps when a device or an install was last heard from (spec 1): the start of its hour (UTC),
-/// fine enough for the hourly levels' 24-hour windows (`phones-24h`, `build:`), no finer.
+/// fine enough for the hourly levels' 24- and 48-hour windows (`phones-24h`, `build:`), no finer.
 pub fn to_the_hour(ms: u64) -> u64 {
     ms - ms % HOUR_MS
 }
@@ -1079,10 +1079,12 @@ impl Db {
                         put.execute(params![format!("{kind}{suffix}"), hour, value])?;
                     }
                 }
-                // The devices per build (`build:ios/202611191626`, `build:unknown` for none named) seen within 24
+                // The devices per build (`build:ios/202611191626`, `build:unknown` for none named) seen within 48
                 // hours, of the apps' (bots and the CLI left out): the operator's releases over time. Counts only.
+                // 48 hours, not 24: last seen is written once a day, so a phone used every day stays in the window
+                // and the hourly shares move smoothly instead of stepping each time a day-old touch ages out.
                 let mut builds = tx.prepare_cached(
-                    "SELECT 'build:' || coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at > ?1 - 86400000 \
+                    "SELECT 'build:' || coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at > ?1 - 172800000 \
                      AND (app IS NULL OR app LIKE 'ios/%' OR app LIKE 'android/%') GROUP BY 1",
                 )?;
                 let rows = builds
@@ -2168,7 +2170,7 @@ mod tests {
                 )
                 .unwrap()
         };
-        assert_eq!((level("phones-24h"), level("phones-24h:ios"), level("build:ios/1")), (1, 1, 1));
+        assert_eq!((level("phones-24h"), level("phones-24h:ios"), level("build:ios/1")), (1, 1, 2), "build: 48 hours");
         assert_eq!((level("active-24h"), level("active-48h")), (1, 2));
         assert_eq!(level("problem-installs-24h"), 1);
     }
@@ -2253,7 +2255,7 @@ mod tests {
             .query_row("SELECT value FROM levels WHERE kind = 'active-48h' AND hour = ?1", [h + 1], |r| r.get(0))
             .unwrap();
         assert_eq!(bots, 0);
-        // Devices per build seen within 24 hours, the apps' alone: bob on the CLI is no build, an iOS device is.
+        // Devices per build seen within 48 hours, the apps' alone: bob on the CLI is no build, an iOS device is.
         let build = |db: &Db, hour: i64| -> Vec<(String, i64)> {
             db.conn()
                 .prepare("SELECT kind, value FROM levels WHERE kind LIKE 'build:%' AND hour = ?1 ORDER BY kind")

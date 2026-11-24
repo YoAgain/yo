@@ -53,22 +53,25 @@ class BuildNameTests(unittest.TestCase):
         fn = "".join(re.search(rf"// @{k}\n(.*?)// @end", src, re.S).group(1) for k in ("release-color", "release-groups"))
         versions = {f"ios/202611{d}0000": f"1.0.0-RC{d}" for d in range(10, 18)}
         versions["android/202611170001"] = "1.0.0-RC17"
-        apps = list(versions) + ["ios/202611171200", "ios/202611160500", "ios/202611100100", "ios/202611010000", "unknown"]
+        apps = list(versions) + ["ios/202611171200", "ios/202611160500", "ios/202611010000", "unknown"]
         js = (fn + f"const v = {json.dumps(versions)};"
               f"const g = releaseGroups({json.dumps(apps)}, (a) => v[a], (a) => a.split('/')[1] < '202611050000');"
-              "console.log(JSON.stringify(g.map((x) => [x.name, x.apps.length, x.color])))")
-        out = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
-        names = [n for n, _, _ in out]
-        self.assertEqual(names, ["Dev builds", "1.0.0-RC17", "1.0.0-RC16", "1.0.0-RC15", "1.0.0-RC14",
-                                 "1.0.0-RC13", "Older", "Unknown", "Below minimum"])
+              "const rows = g.map((x) => ({ kind: x.kind, name: x.name, color: x.color, n: x.apps.length }));"
+              "console.log(JSON.stringify([g.map((x) => [x.name, x.apps.length, x.color]),"
+              " foldRows(rows, 8).map((x) => [x.name, x.n]), foldRows(rows, 20).length]))")
+        out, folded, unfolded = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual([n for n, _, _ in out], ["Dev builds"] + [f"1.0.0-RC{d}" for d in range(17, 9, -1)]
+                         + ["Unknown", "Below minimum"])
+        self.assertEqual(out[0][1], 2)  # the builds of main, one band
         self.assertEqual(out[1][1], 2)  # iOS and Android together
-        self.assertEqual(out[0][1], 2)  # both builds of main among the newest releases, one row
-        self.assertEqual(out[6][1], 4)  # RC12 to RC10 and the older build of main
         hue = [int(re.search(r"hsl\((\d+)", c).group(1)) for _, _, c in out if c.startswith("hsl")]
         self.assertEqual(hue[0], 135); self.assertEqual(hue[-1], 4)
-        self.assertTrue(all(a > b for a, b in zip(hue[:7], hue[1:7])))
-        self.assertEqual(out[-1][1], 1)
-
+        self.assertTrue(all(a > b for a, b in zip(hue[:9], hue[1:9])), hue)  # each band its own shade
+        # The hover: past 8 rows the oldest fold into "Older"; "Below minimum" stays last.
+        self.assertEqual([n for n, _ in folded], ["Dev builds"] + [f"1.0.0-RC{d}" for d in range(17, 11, -1)]
+                         + ["Older", "Below minimum"])
+        self.assertEqual(folded[-2][1], 1 + 1 + 1)  # RC11, RC10 and Unknown
+        self.assertEqual(unfolded, 11)
 
 if __name__ == "__main__":
     unittest.main()
