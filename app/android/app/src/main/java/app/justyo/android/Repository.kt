@@ -357,7 +357,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         c.setTrustRoots(Hub.roots.map(::decodeUrl))
         c.setZkParams(decodeUrl(Hub.groupParams))
     }
-    private suspend fun persist() {
+    /** Orders the saves of the UI vault by themselves, apart from `changes`: a save (~15-30 ms, encrypted) after a send
+     *  held an arriving Yo off its bar. Each writes the newest state when its turn comes. */
+    private val saving = Mutex()
+    private suspend fun persist() = saving.withLock {
         val s = state.value
         vault.write("ui", JSONObject().put("username", s.username).put("friends", JSONArray(s.friends.map { it.json() }))
             .put("byFriend",JSONObject(s.byFriend)).put("lastSent",JSONObject(s.lastSent)).put("lastReceived",JSONObject(s.lastReceived))
@@ -831,7 +834,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 if (c.waitingUnheld() > 0u) Problems.report(ProductProblem.WAITING, ::retryNow)
                 absorb(events, c)
                 recordStat(friend,true)
-                changes.withLock { persist() }
+                persist()
                 if (vault.read("first-yo") == null) {
                     vault.write("first-yo", byteArrayOf(1)); mutable.update { it.copy(firstYo = true) }
                 }
