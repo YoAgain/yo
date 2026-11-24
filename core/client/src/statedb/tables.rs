@@ -17,6 +17,10 @@ enum Shape {
     Map(&'static [Part]),
     /// One row; its own parts split beside it.
     One(&'static [Part]),
+    /// The whole list in one row, under its own kind (`<field>.all`): a list that drops its first item as it takes
+    /// one moved every per-position row, each save. A build that knows only those rows reads it as empty, which for
+    /// the guards against copies that use it is harmless.
+    Whole,
 }
 use Shape::*;
 
@@ -28,8 +32,8 @@ const STATE: &[Part] = &[
     ("events", List),
     ("handed", List),
     ("group_held", List),
-    ("seen", List),
-    ("received", List),
+    ("seen", Whole),
+    ("received", Whole),
     ("deferred", List),
     ("roster_asked", Map(&[])),
     ("contacts", Map(&[("handles", List), ("sent", List), ("decryption_errors", List)])),
@@ -68,11 +72,16 @@ fn put(rows: &mut Rows, kind: &str, owner: &str, entry: &str, value: Vec<u8>) {
     rows.insert((kind.into(), owner.into(), entry.into()), value);
 }
 
+fn whole(kind: &str) -> String {
+    format!("{kind}.all")
+}
+
 fn split(rows: &mut Rows, kind: &str, owner: &str, fields: &mut Object, parts: &[Part]) {
     for &(field, shape) in parts {
         let kind = path(kind, field);
         match (fields.remove(field), shape) {
             (None, _) => {}
+            (Some(value @ Value::Array(_)), Whole) => put(rows, &whole(&kind), owner, "", json(&value)),
             (Some(Value::Array(items)), List) => {
                 for (index, item) in items.iter().enumerate() {
                     put(rows, &kind, owner, &ordinal(index), json(item));
@@ -130,6 +139,11 @@ fn join(rows: &Rows, kind: &str, owner: &str, fields: &mut Object, parts: &[Part
     for &(field, shape) in parts {
         let kind = path(kind, field);
         let value = match shape {
+            // Written by a build of before: one row per item.
+            Whole if under(rows, &whole(&kind), owner).next().is_none() => {
+                Value::Array(under(rows, &kind, owner).map(|(_, v)| parse(v)).collect::<crate::Result<_>>()?)
+            }
+            Whole => parse(under(rows, &whole(&kind), owner).next().map(|(_, v)| v).ok_or(Error::State)?)?,
             List => Value::Array(under(rows, &kind, owner).map(|(_, v)| parse(v)).collect::<crate::Result<_>>()?),
             Map(children) => {
                 let mut entries = Object::new();
@@ -205,15 +219,31 @@ pub(super) fn write(
     };
     let mut remove =
         db.prepare_cached("DELETE FROM rows WHERE kind = ?1 AND owner = ?2 AND entry = ?3").map_err(sql)?;
-    for (kind, owner, entry) in before.keys().filter(|key| !rows.contains_key(*key)) {
-        remove.execute(params![kind, owner, entry]).map_err(sql)?;
-    }
     let mut upsert = db
         .prepare_cached("INSERT OR REPLACE INTO rows (kind, owner, entry, value) VALUES (?1, ?2, ?3, ?4)")
         .map_err(sql)?;
-    for (row, value) in &rows {
-        if before.get(row) != Some(value) {
-            let (kind, owner, entry) = row;
+    // Both in key order: one walk side by side instead of a lookup per row (most of a save with thousands of rows).
+    let (mut old, mut new) = (before.iter().peekable(), rows.iter().peekable());
+    loop {
+        let order = match (old.peek(), new.peek()) {
+            (None, None) => break,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some((was, _)), Some((is, _))) => was.cmp(is),
+        };
+        let changed = match order {
+            std::cmp::Ordering::Less => {
+                let ((kind, owner, entry), _) = old.next().expect("peeked");
+                remove.execute(params![kind, owner, entry]).map_err(sql)?;
+                None
+            }
+            std::cmp::Ordering::Greater => new.next(),
+            std::cmp::Ordering::Equal => {
+                let ((_, was), is) = (old.next().expect("peeked"), new.next().expect("peeked"));
+                (was != is.1).then_some(is)
+            }
+        };
+        if let Some(((kind, owner, entry), value)) = changed {
             let sealed = super::cipher::seal(key, aad(kind, owner, entry), value)?;
             upsert.execute(params![kind, owner, entry, sealed]).map_err(sql)?;
         }
@@ -291,5 +321,62 @@ mod tests {
         assert_eq!(loaded.outbox[0], queued);
         assert_eq!(sessions, records);
         assert!(loaded.siblings.is_empty());
+    }
+
+    const KEY: [u8; 32] = [9; 32];
+
+    fn db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("../../migrations/V0001__initial_state.sql")).unwrap();
+        db
+    }
+
+    fn full() -> State {
+        let mut state = State::default();
+        state.seen = (0..crate::SEEN as u32).map(|i| crate::sha256(&i.to_be_bytes())).collect();
+        state.received = state.seen.iter().rev().copied().collect();
+        state
+    }
+
+    /// A full guard list takes one hash and drops its first: one row changes, not one per position.
+    #[test]
+    fn a_full_guard_list_saves_as_one_row() {
+        let mut state = full();
+        let before = encode(&state, &Entries::new());
+        state.seen.pop_front();
+        state.seen.push_back(crate::sha256(b"new"));
+        let after = encode(&state, &Entries::new());
+        let changed: Vec<_> = after.iter().filter(|(row, value)| before.get(*row) != Some(*value)).collect();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0 .0, "seen.all");
+        assert!(after.keys().all(|(kind, _, _)| kind != "seen" && kind != "received"));
+    }
+
+    /// A state written by a build of before (a row per hash) reads the same, and its next save leaves one row each.
+    #[test]
+    fn guard_lists_of_before_read_and_move_to_one_row() {
+        let db = db();
+        let state = full();
+        let mut rows = encode(&state, &Entries::new());
+        for (field, list) in [("seen", &state.seen), ("received", &state.received)] {
+            rows.remove(&(whole(field), String::new(), String::new()));
+            for (index, hash) in list.iter().enumerate() {
+                put(&mut rows, field, "", &ordinal(index), json(&Value::String(yo_wire::b64(hash))));
+            }
+        }
+        for ((kind, owner, entry), value) in &rows {
+            let sealed = super::super::cipher::seal(&KEY, aad(kind, owner, entry), value).unwrap();
+            db.execute("INSERT INTO rows (kind, owner, entry, value) VALUES (?1, ?2, ?3, ?4)", params![kind, owner, entry, sealed])
+                .unwrap();
+        }
+        let (read_back, _, baseline) = read(&db, &KEY).unwrap();
+        assert_eq!((&read_back.seen, &read_back.received), (&state.seen, &state.received));
+        write(&db, &KEY, &read_back, &Entries::new(), Some(&baseline)).unwrap();
+        let count = |kind: &str| -> i64 {
+            db.query_row("SELECT count(*) FROM rows WHERE kind = ?1", [kind], |row| row.get(0)).unwrap()
+        };
+        assert_eq!((count("seen"), count("received"), count("seen.all"), count("received.all")), (0, 0, 1, 1));
+        let (again, _, _) = read(&db, &KEY).unwrap();
+        assert_eq!((&again.seen, &again.received), (&state.seen, &state.received));
     }
 }
