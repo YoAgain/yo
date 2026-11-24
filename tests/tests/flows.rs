@@ -443,6 +443,39 @@ fn a_crash_before_or_after_a_save_loses_nothing_and_shows_nothing_twice() {
     assert_eq!(yos(&b.drain(), &a.user()), 1);
 }
 
+/// Shown before it is saved (`sync_unsaved`, Android): nothing is acknowledged at the hub until the save. Died before
+/// any save, the Yo comes again, once; saved, the hub's copy sent again is skipped; saved and acknowledged, never again.
+#[test]
+fn a_yo_shown_before_its_save_comes_again_only_when_nothing_saved_it() {
+    let hub = TestHub::start();
+    let (a, b) = friends(&hub);
+    // Dies between showing and saving: the hub still has it.
+    a.send_yo(b.user()).unwrap();
+    assert_eq!(yos(&b.sync_unsaved(0).unwrap(), &a.user()), 1);
+    b.file.freeze();
+    b.save_received().unwrap();
+    let b = b.restart(&hub);
+    assert_eq!(yos(&b.drain(), &a.user()), 1, "never saved: fetched and shown again, once");
+    // Saved (here by the app's acknowledgement), then dies before the hub is told: the hub sends it again and the saved
+    // guard list skips the copy.
+    a.send_yo(b.user()).unwrap();
+    assert_eq!(yos(&b.sync_unsaved(0).unwrap(), &a.user()), 1);
+    b.acknowledge_events();
+    b.file.freeze();
+    let b = b.restart(&hub);
+    assert_eq!(yos(&b.drain(), &a.user()), 0, "saved: the hub's copy is skipped");
+    // Saved and acknowledged at the hub: never again; the sessions go on.
+    a.send_yo(b.user()).unwrap();
+    assert_eq!(yos(&b.sync_unsaved(0).unwrap(), &a.user()), 1);
+    b.save_received().unwrap();
+    b.acknowledge_events();
+    b.after_sync().unwrap();
+    let b = b.restart(&hub);
+    assert_eq!(yos(&b.drain(), &a.user()), 0);
+    b.send_yo(a.user()).unwrap();
+    assert_eq!(yos(&a.drain(), &b.user()), 1);
+}
+
 /// A new phone from the backup: opened by the words, registered with the account secret it holds, friends back from
 /// the storage; the old phone is out; the friend's sessions form with the new device on its next delivery, both ways.
 #[test]

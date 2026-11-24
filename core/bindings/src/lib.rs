@@ -1047,6 +1047,22 @@ impl YoClient {
     /// Waits up to `wait_s` seconds for mail without holding the client and processes it; the hub's ack and the work
     /// after it go first in the next `sync`.
     pub fn sync(&self, wait_s: u64) -> Result<Vec<YoEvent>, YoError> {
+        self.sync_with(wait_s, false)
+    }
+
+    /// `sync`, its events handed out before they are saved, so the app shows them first; `save_received` saves them
+    /// right after. Nothing is acknowledged at the hub before that save: an app that dies first fetches them again.
+    /// Only for an app whose database no other process writes (Android; never with iOS's notification service).
+    pub fn sync_unsaved(&self, wait_s: u64) -> Result<Vec<YoEvent>, YoError> {
+        self.sync_with(wait_s, true)
+    }
+
+    /// Saves what `sync_unsaved` handed out.
+    pub fn save_received(&self) -> Result<(), YoError> {
+        Ok(self.with(|c| c.save_handed())??)
+    }
+
+    fn sync_with(&self, wait_s: u64, unsaved: bool) -> Result<Vec<YoEvent>, YoError> {
         let (wait, deliveries) = self.with(|c| c.sync_begin_shared(wait_s))??;
         // The outbox goes as `deliver` does, without the turn: under it, a slow network kept the notification service
         // and every other step waiting as long as the envelopes took (past their 10 s, the push showed unread), and a
@@ -1068,7 +1084,8 @@ impl YoClient {
             };
             (delivered, wait.send())
         };
-        match self.with(|c| c.sync_end(&wait, response)).and_then(|received| Ok(received?)) {
+        let end = |c: &mut Client| if unsaved { c.sync_end_unsaved(&wait, response) } else { c.sync_end(&wait, response) };
+        match self.with(end).and_then(|received| Ok(received?)) {
             Ok(received) => {
                 delivered.extend(received);
                 events(Ok(delivered))

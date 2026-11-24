@@ -647,15 +647,18 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                     syncing.withLock {
                         absorb(c.savedEvents(), c)
                         Lat.mark("sync.wait")
-                        val events = c.sync(25u)
+                        // Shown first, saved right after (`saveReceived`); unsaved, nothing is acknowledged at the hub.
+                        val events = c.syncUnsaved(25u)
                         Lat.mark("sync.got ${events.size}")
                         val wake = if (events.isNotEmpty() && state.value.keepConnection && !inFront)
                             context.getSystemService(android.os.PowerManager::class.java)
                                 .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "yo:inbox")
                                 .apply { setReferenceCounted(false); acquire(5_000L) }
                         else null
-                        try { if (c === client) { absorb(events, c); clearSeen(c) } }
-                        finally { if (wake?.isHeld == true) wake.release() }
+                        try {
+                            try { if (c === client) { absorb(events, c) { c.saveReceived() }; clearSeen(c) } }
+                            finally { c.saveReceived() } // for an absorb that stopped early; a no-op after one
+                        } finally { if (wake?.isHeld == true) wake.release() }
                         Lat.mark("sync.absorbed")
                         // absorb refreshed the list for events; an empty answer may still have changed the core's lists
                         if (events.isEmpty()) refresh()
@@ -965,8 +968,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
         mutable.update { it.copy(friends = friends, requestsOpen = c.requestsOpen()) }; listFriends(); persist()
     }
-    suspend fun absorb(events: List<YoEvent>, source: YoClient? = client) {
-        if (events.isEmpty() || source == null || source !== client) return
+    /** `shown`: runs once the Yos are on their bars (and before the list's refresh), also when nothing arrived. */
+    suspend fun absorb(events: List<YoEvent>, source: YoClient? = client, shown: (() -> Unit)? = null) {
+        if (events.isEmpty() || source == null || source !== client) { shown?.invoke(); return }
         val c = source
         val profiles = events.filterIsInstance<YoEvent.Profile>().associate { it.user to it.name }
         changes.withLock {
@@ -983,6 +987,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 for (event in events) arrive(event, profiles, contacts)
             }
         }
+        shown?.invoke()
         Lat.mark("absorb.refresh")
         refresh()
         Lat.mark("absorb.refreshed")
