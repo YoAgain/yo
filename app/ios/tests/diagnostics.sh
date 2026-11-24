@@ -88,6 +88,18 @@ precondition(last["code"] == "Refused/429")
 precondition(Diagnostics.name(.Replaced) == "Replaced" && Diagnostics.name(.State) == "State")
 precondition(Diagnostics.name(.Protocol(message: "protocol: storage version")) == "Protocol/protocol: storage version")
 precondition(Diagnostics.name(.Protocol(message: "session: PRIVATE_SENTINEL.1")) == "Protocol/session")
+// A save by the core's fixed words: its class and SQLite's extended code, never another text.
+precondition(Diagnostics.name(.Save(message: "Io/5386")) == "Save/Io/5386")
+precondition(Diagnostics.name(.Save(message: "Busy")) == "Save/Busy" && Diagnostics.name(.Save(message: "Full")) == "Save/Full")
+precondition(Diagnostics.name(.Save(message: "the turn on the state ended")) == "Save/TurnEnded")
+precondition(Diagnostics.name(.Save(message: "an older state")) == "Save/Stale")
+precondition(Diagnostics.name(.Save(message: "Io/PRIVATE_SENTINEL")) == "Save/Io")
+precondition(Diagnostics.name(.Save(message: "PRIVATE_SENTINEL")) == "Save/Other")
+// iOS giving no time for a save is expected, counted; a database failure is a problem.
+let countedBefore = CountedErrors.calls.withLock { $0 }
+Diagnostics.recordUnreported(YoError.Save(message: "Busy"))
+Diagnostics.recordUnreported(YoError.Save(message: "the turn on the state ended"))
+precondition(CountedErrors.calls.withLock { $0 } == countedBefore + 2)
 // Replaced elsewhere is expected (signed out and shown), never a report.
 Diagnostics.recordUnreported(YoError.Replaced)
 usleep(50_000)

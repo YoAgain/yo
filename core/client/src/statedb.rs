@@ -588,4 +588,24 @@ mod tests {
             Err(Error::Save(kind)) if kind == "UnsupportedVersion"
         ));
     }
+
+    #[test]
+    fn a_failure_keeps_sqlites_extended_code_and_is_reported_by_its_class() {
+        let failure = |code| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), Some("/a/path".into()));
+        let kind = |error| match cipher::sqlite_error(error) {
+            Error::Save(kind) => kind,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(kind(failure(rusqlite::ffi::SQLITE_IOERR_SHMMAP)), "Io/5386");
+        assert_eq!(kind(failure(rusqlite::ffi::SQLITE_CANTOPEN)), "Io/14");
+        assert_eq!(kind(failure(rusqlite::ffi::SQLITE_BUSY)), "Busy");
+        assert_eq!(kind(failure(rusqlite::ffi::SQLITE_FULL)), "Full");
+        assert_eq!(kind(rusqlite::Error::QueryReturnedNoRows), "Sqlite");
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let into = reported.clone();
+        let report: Report = Arc::new(move |kind| into.lock().unwrap().push(kind));
+        cipher::report_failure(&report, &cipher::sqlite_error(failure(rusqlite::ffi::SQLITE_IOERR_SHMMAP)));
+        cipher::report_failure(&report, &Error::Save("something else".into()));
+        assert_eq!(*reported.lock().unwrap(), ["Io/5386", "Write"]);
+    }
 }

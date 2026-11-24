@@ -80,6 +80,13 @@ enum Diagnostics {
         CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
           code: "Replaced", expected: true)
         return
+      case .Save(let message) where ["Busy", "TurnEnded"].contains(saveKind(message)):
+        // iOS gave no background time for the database ("Busy") or took the turn back meanwhile: the receive loop's
+        // save as the app left the front. Nothing was written; the step runs again in front. The database's own
+        // failures ("Io/5386", "Full", "Stale", ...) stay problems.
+        CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)",
+          code: name(yo), expected: true)
+        return
       case .NotOnYo, .Blocked, .GroupEmpty, .Clock:
         // An answer the person is shown ("Not on Yo", blocked, the group empty, the phone's date and time): about
         // them, not a fault of the app.
@@ -234,8 +241,20 @@ enum Diagnostics {
     case .Protocol(let message):
       "Protocol/" + (message.hasPrefix("session") ? "session" : String(message.prefix(60)))
     case .State: "State"
-    case .Save: "Save"
+    case .Save(let message): "Save/" + saveKind(message)
     }
+  }
+
+  /// A save's failure by the core's fixed words only (statedb: its class, SQLite's extended code for an I/O or other
+  /// failure, "Io/5386"), never another text.
+  static func saveKind(_ message: String) -> String {
+    if message == "the turn on the state ended" { return "TurnEnded" }  // statedb::TURN_ENDED
+    if message == "an older state" { return "Stale" }  // statedb::STALE
+    let parts = message.split(separator: "/", maxSplits: 1)
+    let classes = ["Busy", "Full", "Io", "InvalidDatabase", "Constraint", "UnsupportedVersion", "Sqlite"]
+    guard let first = parts.first, classes.contains(String(first)) else { return "Other" }
+    guard parts.count == 2 else { return String(first) }
+    return Int(parts[1]).map { "\(first)/\($0)" } ?? String(first)
   }
 
   /// The hardware model: "iPhone17,1".

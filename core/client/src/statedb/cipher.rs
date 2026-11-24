@@ -33,7 +33,9 @@ pub(super) struct Cipher {
 
 pub(super) fn sqlite_error(error: rusqlite::Error) -> Error {
     use rusqlite::ErrorCode::*;
-    // SQLite's message can contain paths or data. Retain only the primary error class.
+    // SQLite's message can contain paths or data. Retain only the error class, and for the classes that do not say
+    // what failed (an I/O error, the file not opening, anything else) SQLite's extended result code: a number naming
+    // the cause (e.g. 5386 SQLITE_IOERR_SHMMAP, 14 SQLITE_CANTOPEN while the file is protected), "Io/5386".
     let kind = match error.sqlite_error_code() {
         Some(DatabaseBusy | DatabaseLocked) => "Busy",
         Some(DiskFull) => "Full",
@@ -42,7 +44,12 @@ pub(super) fn sqlite_error(error: rusqlite::Error) -> Error {
         Some(ConstraintViolation) => "Constraint",
         _ => "Sqlite",
     };
-    Error::Save(kind.into())
+    match &error {
+        rusqlite::Error::SqliteFailure(failure, _) if matches!(kind, "Io" | "Sqlite") => {
+            Error::Save(format!("{kind}/{}", failure.extended_code))
+        }
+        _ => Error::Save(kind.into()),
+    }
 }
 
 fn io_error(_: std::io::Error) -> Error {
@@ -56,7 +63,7 @@ pub(super) fn report_failure(report: &Report, error: &Error) {
     let kind = match error {
         Error::Save(kind) if kind == super::TURN_ENDED => return,
         Error::Save(kind) if kind == super::STALE => "Stale",
-        Error::Save(kind) if KINDS.contains(&kind.as_str()) => kind,
+        Error::Save(kind) if KINDS.contains(&kind.split('/').next().unwrap_or_default()) => kind,
         Error::Save(_) => "Write",
         Error::State => "InvalidState",
         _ => "Read",
