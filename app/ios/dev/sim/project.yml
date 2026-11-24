@@ -32,6 +32,7 @@ targets:
       - {path: ../../YoApp/Resources/Original.icon, buildPhase: resources}
       - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
       - {path: ../../YoApp/Resources/yo.caf, buildPhase: resources}
+      - {path: ../../YoApp/Resources/de.lproj, buildPhase: resources}  # German App Shortcut phrases
       - {path: ../../YoApp/Resources/Licenses.txt, buildPhase: resources}  # dev/licenses.sh, before the build
       - {path: ../../YoApp/Resources/IconLilac2015@2x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconLilac2015@3x.png, buildPhase: resources}

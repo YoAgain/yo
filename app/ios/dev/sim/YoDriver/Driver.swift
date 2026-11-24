@@ -138,6 +138,11 @@ import XCTest
       // The side button: the screen off and locked (no API names it; XCUIDevice answers to it).
       XCUIDevice.shared.perform(NSSelectorFromString("pressLockButton"))
       return [:]
+    case "siri":
+      // Siri as if spoken (text=…, in the Simulator's Siri language): App Shortcuts ("Yo Mia") and SiriKit
+      // messaging ("Send a message to Mia with Yo") end to end, without a voice.
+      XCUIDevice.shared.siriService.activate(voiceRecognitionText: c["text"] as? String ?? "")
+      return [:]
     case "tree":
       return ["tree": try tree(chosen(c))]
     case "tap", "press", "doubletap", "exists", "wait", "gone", "info", "swipe":

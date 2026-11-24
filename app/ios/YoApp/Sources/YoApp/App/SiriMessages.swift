@@ -53,8 +53,13 @@ final class SiriMessages: NSObject, INSendMessageIntentHandling, INSearchForMess
       for id in [recipient.customIdentifier, recipient.personHandle?.value].compactMap({ $0 }) {
         if let friend = list.friends.first(where: { $0.to == id }) { return .success(with: person(friend)) }
       }
-      let found = matches(recipient.displayName.isEmpty ? recipient.spokenPhrase : recipient.displayName, in: list.friends)
-      guard let first = found.friends.first else { return .unsupported(forReason: .noAccount) }
+      // Siri may hand over a contact ("Anna Berg" for "Anna"): its whole name first, then the given name, then the
+      // first word.
+      let names = [recipient.displayName, recipient.spokenPhrase, recipient.nameComponents?.givenName ?? "",
+        recipient.displayName.split(separator: " ").first.map(String.init) ?? ""]
+      guard let found = names.lazy.map({ self.matches($0, in: list.friends) }).first(where: { !$0.friends.isEmpty }),
+        let first = found.friends.first
+      else { return .unsupported(forReason: .noAccount) }
       if found.friends.count > 1 { return .disambiguation(with: found.friends.map(person)) }
       return found.exact ? .success(with: person(first)) : .confirmationRequired(with: person(first))
     }

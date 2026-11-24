@@ -181,9 +181,10 @@ final class Inbox {
   func askForNotifications() async {
     let center = UNUserNotificationCenter.current()
     ShareBridge.registerCategories()
-    let granted = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-    // Siri (SiriKit messaging, CarPlay) right after: only when the signature carries it (Yo Dev may be signed without).
-    if granted == true, Self.siriEntitled, INPreferences.siriAuthorizationStatus() == .notDetermined {
+    _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+    // Siri (SiriKit messaging, CarPlay) right after, whatever the answer: only when the signature carries it (Yo Dev
+    // may be signed without).
+    if Self.siriEntitled, INPreferences.siriAuthorizationStatus() == .notDetermined {
       await withCheckedContinuation { done in
         INPreferences.requestSiriAuthorization { _ in done.resume() }
       }

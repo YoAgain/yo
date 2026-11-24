@@ -85,7 +85,13 @@
 			</array>
 		</dict>
 	</array>
-	<!-- Siri routes these messaging requests to the app delegate. -->
+	<!-- Siri routes these messaging requests to the app delegate, and only does in an app with multiple scenes: without
+	     the manifest it looks for an Intents extension, finds none and answers that the app doesn't support this. -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
 	<key>INIntentsSupported</key>
 	<array>
 		<string>INSendMessageIntent</string>
