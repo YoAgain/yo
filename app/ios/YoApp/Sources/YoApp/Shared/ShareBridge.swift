@@ -109,7 +109,8 @@ enum ShareBridge {
 
   /// Set by the app and the service alike: after a restart the service may show a Yo before the app has run.
   static func registerCategories() {
-    let yoBack = UNNotificationAction(identifier: yoBackAction, title: "Yo Back", options: [])
+    let yoBack = UNNotificationAction(identifier: yoBackAction, title: "Yo Back", options: [],
+      icon: UNNotificationActionIcon(templateImageName: "yo.back"))
     UNUserNotificationCenter.current().setNotificationCategories([
       // Siri announces communication notifications automatically.
       UNNotificationCategory(identifier: yoCategory, actions: [yoBack], intentIdentifiers: [INSendMessageIntentIdentifier],

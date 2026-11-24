@@ -1,8 +1,27 @@
 import Foundation
 import Observation
+import Synchronization
 import WatchConnectivity
 import WatchKit
 import WidgetKit
+
+@MainActor protocol WatchSession {
+  associatedtype Transfer
+  var activationState: WCSessionActivationState { get }
+  var isReachable: Bool { get }
+  func sendMessage(_ message: [String: Any], replyHandler: (([String: Any]) -> Void)?,
+                   errorHandler: ((any Error) -> Void)?)
+  @discardableResult func transferUserInfo(_ userInfo: [String: Any]) -> Transfer
+}
+
+extension WCSession: WatchSession {}
+
+// A reply, an error or the deadline, whichever comes first.
+private final class Once: Sendable {
+  private let continuation: Mutex<CheckedContinuation<Bool?, Never>?>
+  init(_ continuation: CheckedContinuation<Bool?, Never>) { self.continuation = Mutex(continuation) }
+  func resume(_ value: Bool?) { continuation.withLock { $0.take() }?.resume(returning: value) }
+}
 
 // Preserve the session queue's delivery order when handing snapshots to the UI.
 private final class SessionDelegate: NSObject, WCSessionDelegate {
@@ -103,36 +122,38 @@ private final class SessionDelegate: NSObject, WCSessionDelegate {
     while session.activationState != .activated, activating, ContinuousClock.now < deadline {
       do { try await Task.sleep(for: .milliseconds(50)) } catch { return false }
     }
+    return await Self.deliver(to: to, back: back, over: session, reachableWait: .seconds(3), replyWait: .seconds(8))
+  }
+
+  static func deliver(to: String, back: Bool, over session: some WatchSession, reachableWait: Duration,
+                      replyWait: Duration) async -> Bool {
     // Just opened (a complication, a notification action, Siri), the session says unreachable for a moment, and a
     // queued transfer may wait long: a few seconds for a live link first.
-    let reachableDeadline = ContinuousClock.now + .seconds(3)
+    let reachableDeadline = ContinuousClock.now + reachableWait
     while session.activationState == .activated, !session.isReachable, ContinuousClock.now < reachableDeadline {
       do { try await Task.sleep(for: .milliseconds(50)) } catch { return false }
     }
     // WatchConnectivity accepts transfers only after activation.
     guard session.activationState == .activated else { return false }
-    let id = UUID().uuidString
-    let at = Date().timeIntervalSince1970
-    let message: @Sendable () -> [String: Any] = { ["yo": to, "back": back, "id": id, "at": at] }
-    guard session.isReachable else {
-      session.transferUserInfo(message())
-      return true
-    }
-    return await withCheckedContinuation { continuation in
-      session.sendMessage(message(), replyHandler: { @Sendable reply in
-        continuation.resume(returning: reply["ok"] as? Bool == true)
-      }, errorHandler: { @Sendable _ in
-        Task { @MainActor in
-          let session = WCSession.default
-          guard session.activationState == .activated else {
-            continuation.resume(returning: false)
-            return
-          }
-          session.transferUserInfo(message())
-          continuation.resume(returning: true)
+    let message: [String: Any] = ["yo": to, "back": back, "id": UUID().uuidString, "at": Date().timeIntervalSince1970]
+    if session.isReachable {
+      // A reachable phone that never answers would hold a notification action open: past the deadline the Yo is
+      // queued too, and the iPhone sends each id once.
+      let ok: Bool? = await withCheckedContinuation { continuation in
+        let once = Once(continuation)
+        session.sendMessage(message, replyHandler: { @Sendable reply in
+          once.resume(reply["ok"] as? Bool == true)
+        }, errorHandler: { @Sendable _ in once.resume(nil) })
+        Task {
+          try? await Task.sleep(for: replyWait)
+          once.resume(nil)
         }
-      })
+      }
+      if let ok { return ok }
+      guard session.activationState == .activated else { return false }
     }
+    session.transferUserInfo(message)
+    return true
   }
 
   func handle(_ task: WKWatchConnectivityRefreshBackgroundTask) {

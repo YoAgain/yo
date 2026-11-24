@@ -8,6 +8,7 @@
 #   dev/sim.sh notify NAME        a push as the hub sends it, through the notification service's code (YoNotifyProbe:
 #                                 the Simulator runs no notification service itself), shown as it made it
 #   dev/sim.sh watch-build        the watch app and widgets for Yo Dev
+#   dev/sim.sh watch-test WATCH   run the watch unit tests on the named watch Simulator
 #   dev/sim.sh watch-device IPHONE WATCH   create and boot WATCH, paired with the named iPhone
 #   dev/sim.sh watch-install IPHONE WATCH  embed the last watch build in Yo Dev and install both apps
 #   dev/sim.sh delete NAME        the Simulator gone again
@@ -33,12 +34,20 @@ case ${1:-} in
     xcodebuild build-for-testing -quiet -project "$here/sim/YoSim.xcodeproj" -scheme YoSim -configuration "$config" \
       -destination 'generic/platform=iOS Simulator' -derivedDataPath "$derived"
     ;;
-  watch-build)
+  watch-build|watch-test)
+    action=build
+    destination='generic/platform=watchOS Simulator'
+    if [ "$1" = watch-test ]; then
+      watch=$(udid "${2:?usage: sim.sh watch-test WATCH}")
+      [ -n "$watch" ] || { echo "No watch Simulator named $2" >&2; exit 1; }
+      action=test
+      destination="platform=watchOS Simulator,id=$watch"
+    fi
     project=$here/../YoWatch
     (cd "$project" && "${XCODEGEN:-xcodegen}" generate)
     xcodebuild -project "$project/YoWatch.xcodeproj" -scheme YoWatch -configuration Debug -sdk watchsimulator \
-      -destination 'generic/platform=watchOS Simulator' -derivedDataPath "$derived-watch" \
-      YO_COMPANION_BUNDLE=app.justyo.ios.dev YO_WATCH_BUNDLE=app.justyo.ios.dev.watchkitapp CODE_SIGN_IDENTITY=- build
+      -destination "$destination" -derivedDataPath "$derived-watch" \
+      YO_COMPANION_BUNDLE=app.justyo.ios.dev YO_WATCH_BUNDLE=app.justyo.ios.dev.watchkitapp CODE_SIGN_IDENTITY=- "$action"
     ;;
   watch-device)
     phone=$(udid "${2:?usage: sim.sh watch-device IPHONE WATCH}")

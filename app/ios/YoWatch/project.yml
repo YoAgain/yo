@@ -49,8 +49,19 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Yo
         CODE_SIGN_ENTITLEMENTS: YoWatchWidgets.entitlements
         SKIP_INSTALL: YES
+  YoWatchTests:
+    type: bundle.unit-test
+    platform: watchOS
+    sources: [Tests]
+    dependencies:
+      - {target: YoWatch}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(YO_WATCH_BUNDLE).tests
 schemes:
   YoWatch:
     build:
       targets:
         YoWatch: all
+    test:
+      targets: [YoWatchTests]

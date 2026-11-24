@@ -114,11 +114,13 @@ on iOS says "not supported" and gives the output when asked.
 
 Turn the Digital Crown to scroll the friend bars. Tap a bar to send a Yo through the iPhone. WatchConnectivity
 gets the list and last sender from the iPhone’s application context. A tap uses `sendMessage` when reachable.
-If the phone is unreachable or the message fails, `transferUserInfo` queues the same Yo for later.
+If the phone is unreachable, the message fails or no reply comes within 8 seconds, `transferUserInfo` queues the
+same Yo for later; the iPhone sends each Yo id once.
 
-On a Yo notification on the watch, **Yo Back** is the only action, so double tap does it: the watch app opens,
-sends it through the iPhone and says "Sent Yo!" on the sender's bar. A Yo queued by `transferUserInfo` that
-reaches the iPhone more than five minutes late is dropped.
+On a Yo notification on the watch, **Yo Back** is the only action. Double tap sends the Yo through the iPhone in
+the background without opening the watch app. The action carries the Yo-back symbol as its icon; watchOS 26 draws
+notification actions as text only. The iPhone drops queued Yos that arrive more than five minutes late.
+`transferUserInfo` does not reach a paired iPhone Simulator; test the queue on devices.
 Complications and the Smart Stack show just the symbol and name. The watch’s App Shortcut lets Siri send “Yo Lina”.
 
 xtool builds iOS only. On the macOS CI runner, `dev/watch.sh build` uses XcodeGen and Xcode for watchOS.
@@ -130,6 +132,7 @@ With Yo Dev installed on the iPhone Simulator (above), run on the Mac:
 ```sh
 app/ios/dev/sim.sh watch-build
 app/ios/dev/sim.sh watch-device "Yo Sim" "Yo Watch"
+app/ios/dev/sim.sh watch-test "Yo Watch"
 app/ios/dev/sim.sh watch-install "Yo Sim" "Yo Watch"
 app/ios/dev/sim.sh delete "Yo Watch"       # remove the watch Simulator when finished
 ```

@@ -5,8 +5,8 @@ import WatchKit
   func applicationDidFinishLaunching() {
     let center = UNUserNotificationCenter.current()
     center.delegate = self
-    let action = UNNotificationAction(identifier: "yo.back", title: "Yo Back", options: [.foreground],
-                                      icon: UNNotificationActionIcon(systemImageName: "arrowshape.turn.up.left.fill"))
+    let action = UNNotificationAction(identifier: "yo.back", title: "Yo Back", options: [],
+                                      icon: UNNotificationActionIcon(templateImageName: "yo.back"))
     center.setNotificationCategories([UNNotificationCategory(identifier: "yo", actions: [action],
                                                             intentIdentifiers: [], options: [])])
     WatchLink.shared.start()
@@ -15,11 +15,21 @@ import WatchKit
   nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                           didReceive response: UNNotificationResponse,
                                           withCompletionHandler completionHandler: @escaping @Sendable () -> Void) {
-    if response.actionIdentifier == "yo.back" {
-      let user = response.notification.request.content.userInfo["user"] as? String
-      Task { @MainActor in WatchLink.shared.requestYoBack(to: user) }
+    guard response.actionIdentifier == "yo.back" else {
+      completionHandler()
+      return
     }
-    completionHandler()
+    let user = response.notification.request.content.userInfo["user"] as? String
+    Task { @MainActor in
+      defer { completionHandler() }
+      let link = WatchLink.shared
+      guard let to = user ?? link.state.last?.to else {
+        WKInterfaceDevice.current().play(.failure)
+        return
+      }
+      let sent = await link.send(to: to, back: true)
+      WKInterfaceDevice.current().play(sent ? .success : .failure)
+    }
   }
 
   nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
