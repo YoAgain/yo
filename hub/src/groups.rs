@@ -642,6 +642,7 @@ mod tests {
             push_platform: 0,
             push_token: Vec::new(),
             app: None,
+            version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
         hub.db.register(b"ANN", "ANN", &ann, &[1; 32], &device, &prekeys, 10, 0).unwrap();

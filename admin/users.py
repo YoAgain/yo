@@ -627,6 +627,11 @@ def hub(name: str, path: str) -> dict:
             "apps_today": part("apps_today", lambda: db.execute(
                 "SELECT coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at >= ? GROUP BY 1 ORDER BY 2 DESC",
                 (midnight,)).fetchall() if has_app else [], []),
+            # The version each build named (Yo-App, spec 6.3; devices.version comes with a newer hub).
+            "app_versions": part("app_versions", lambda: dict(db.execute(
+                "SELECT app, max(version) FROM devices WHERE app IS NOT NULL AND version IS NOT NULL GROUP BY app")
+                .fetchall()) if has_app and one("SELECT count(*) FROM pragma_table_info('devices') WHERE name = 'version'")
+                else {}, {}),
             "size": part("size", lambda: os.path.getsize(path)),
         }
         # The hub's hourly levels as the page's histories (see levels); a hub without the table has none.
@@ -765,6 +770,34 @@ def updates(previous=None, now=None):
 # (single-user builds are then simply current). The team's own users count like any other. Each platform is judged
 # on its own builds. No network.
 STORE_BUILD = re.compile(r"\d{12}")
+# The releases' builds from before the apps named their version in Yo-App (spec 6.3: "ios/202611241344 1.0.0-RC36";
+# devices.version): each the TestFlight, Play or Android (floss APK) build of a GitHub release (event release, v1.0.0-RCn),
+# its stamp read once from the runs' logs. Builds that are no release are not here and keep their date.
+RELEASES = {
+    "ios/202611191626": "1.0.0-RC", "ios/202611192349": "1.0.0-RC2", "ios/202611200118": "1.0.0-RC3",
+    "ios/202611201341": "1.0.0-RC4", "ios/202611201522": "1.0.0-RC5", "ios/202611201742": "1.0.0-RC6",
+    "ios/202611202019": "1.0.0-RC7", "ios/202611202133": "1.0.0-RC8", "ios/202611202245": "1.0.0-RC9",
+    "android/202611202313": "1.0.0-RC10", "ios/202611202315": "1.0.0-RC10", "android/202611202317": "1.0.0-RC10",
+    "ios/202611202353": "1.0.0-RC11", "android/202611210651": "1.0.0-RC12", "ios/202611210652": "1.0.0-RC12",
+    "android/202611210716": "1.0.0-RC13", "ios/202611210719": "1.0.0-RC13", "android/202611210924": "1.0.0-RC14",
+    "ios/202611210927": "1.0.0-RC14", "android/202611210935": "1.0.0-RC14", "android/202611211145": "1.0.0-RC15",
+    "ios/202611211148": "1.0.0-RC15", "android/202611211152": "1.0.0-RC15", "android/202611211219": "1.0.0-RC16",
+    "ios/202611211223": "1.0.0-RC16", "android/202611211233": "1.0.0-RC16", "android/202611211414": "1.0.0-RC17",
+    "ios/202611211417": "1.0.0-RC17", "android/202611211421": "1.0.0-RC17", "android/202611211644": "1.0.0-RC18",
+    "ios/202611211645": "1.0.0-RC18", "android/202611211848": "1.0.0-RC19", "ios/202611211849": "1.0.0-RC19",
+    "android/202611212024": "1.0.0-RC20", "ios/202611212026": "1.0.0-RC20", "android/202611212030": "1.0.0-RC20",
+    "ios/202611212223": "1.0.0-RC21", "android/202611212224": "1.0.0-RC21", "android/202611220813": "1.0.0-RC22",
+    "ios/202611220814": "1.0.0-RC22", "ios/202611221337": "1.0.0-RC23", "android/202611221343": "1.0.0-RC23",
+    "android/202611221431": "1.0.0-RC24", "ios/202611221433": "1.0.0-RC24", "android/202611221709": "1.0.0-RC25",
+    "ios/202611221711": "1.0.0-RC25", "android/202611221959": "1.0.0-RC26", "android/202611222002": "1.0.0-RC26",
+    "ios/202611222002": "1.0.0-RC26", "android/202611222209": "1.0.0-RC27", "android/202611222210": "1.0.0-RC27",
+    "android/202611230132": "1.0.0-RC28", "android/202611230133": "1.0.0-RC28", "ios/202611230135": "1.0.0-RC28",
+    "android/202611230856": "1.0.0-RC29", "ios/202611230858": "1.0.0-RC29", "android/202611231355": "1.0.0-RC30",
+    "ios/202611231358": "1.0.0-RC30", "android/202611231450": "1.0.0-RC31", "android/202611231451": "1.0.0-RC31",
+    "ios/202611231452": "1.0.0-RC31", "android/202611232120": "1.0.0-RC32", "android/202611232225": "1.0.0-RC33",
+    "ios/202611232228": "1.0.0-RC33", "android/202611240752": "1.0.0-RC34", "ios/202611240754": "1.0.0-RC34",
+    "android/202611241341": "1.0.0-RC35", "ios/202611241344": "1.0.0-RC35", "android/202611241517": "1.0.0-RC36"
+}
 BUILD = {"ios": STORE_BUILD, "android": STORE_BUILD}
 
 
@@ -790,6 +823,14 @@ def classify(app, newest=None, bot_min=None) -> dict:
     return {"label": name, "state": state, "title": f"{store} build {b}" + note}
 
 
+def app_versions(out) -> dict:
+    """Each release build's version ("ios/202611241344": "1.0.0-RC36"): RELEASES, then what the devices named."""
+    found = dict(RELEASES)
+    for name in HUBS:
+        found.update((out.get(name) or {}).get("app_versions") or {})
+    return found
+
+
 def app_builds(out) -> dict:
     """Every reported app of both hubs ("ios/202611191257") with its label, state and details."""
     seen, users_of = set(), {}
@@ -811,7 +852,11 @@ def app_builds(out) -> dict:
         two = [b for b, ids in builds.items() if len(ids) >= 2]
         newest[p] = max(two or builds)
     bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
-    return {a: classify(a, newest.get(a.partition("/")[0]), bot) for a in seen}
+    builds = {a: classify(a, newest.get(a.partition("/")[0]), bot) for a in seen}
+    for a, version in app_versions(out).items():
+        if a in builds:
+            builds[a] = {**builds[a], "version": version, "title": f"{version} · {builds[a]['title']}"}
+    return builds
 
 
 def below_min(app, minimum) -> bool:
@@ -841,6 +886,7 @@ def version_day(apps, builds, minimum) -> dict:
 def finish(out):
     """What needs both hubs: every build's state, and each hub's versions of today."""
     out["app_builds"] = app_builds(out)
+    out["app_versions"] = app_versions(out)
     for name in HUBS:
         h = out.get(name)
         if isinstance(h, dict) and "apps_today" in h:

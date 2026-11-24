@@ -175,9 +175,13 @@ admin.py keeps, beside the state counts in `version-days.json`, the devices per 
 left out; counts only): per UTC day for good and per hour for the last 48 hours. The hub itself samples the devices
 per build seen within 24 hours each hour (its `build:` levels: by the hour for 30 days, then the day's last); the page
 takes those first, so 1D and 7D are drawn by the hour, 30D every 4 hours and Total by the day. The Versions detail draws them as
-"Releases over time", each build's share 100 % stacked, the newest on top (green when current), older builds greyer,
-builds below `YO_MIN_APP` reddish; a click names that slot's shares.
-Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
+"Releases over time", each build's share 100 % stacked, the newest on top: of the builds the hub still takes, the
+newest green through the oldest yellow; builds below `YO_MIN_APP` red ("below minimum" in the hover).
+A release's build is named by its version and build, `1.0.0-RC36 (202611241344)` (`Android 1.0.0-RC36 (…)`), wherever
+builds are named; any other keeps its date (`Nov 24 07:54`). The version is what the app sends after its build in
+`Yo-App` (spec 6.3, `devices.version`), for older releases `RELEASES` in `users.py`, read once from the release runs'
+logs; both go out as `app_versions` in `users.json`.
+Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`, `test_build_names.py`, `test_release_colors.py`.
 
 ## Support chat rollout
 

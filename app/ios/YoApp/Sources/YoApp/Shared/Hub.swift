@@ -118,6 +118,14 @@ final class AppUpdate {
 
   /// "ios/202611140619".
   nonisolated static let header = "ios/" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0")
+  /// What goes on the wire: the header and, for a release, its version ("ios/202611241344 1.0.0-RC36"). CI writes
+  /// YoVersion from the release tag into the app's Info.plist; an extension reads its app's. Builds of main have none.
+  nonisolated static let wire: String = {
+    let app = Bundle.main.bundleURL.pathExtension == "appex"
+      ? Bundle(url: Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()) : Bundle.main
+    guard let version = app?.object(forInfoDictionaryKey: "YoVersion") as? String, !version.isEmpty else { return header }
+    return header + " " + version
+  }()
 
   nonisolated static func tooOld() {
     Task { @MainActor in shared.needed = true }
@@ -201,7 +209,7 @@ final class HubTransport: HttpTransport {
     var request = URLRequest(url: url, timeoutInterval: timeout)
     request.httpMethod = method
     for header in headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
-    request.setValue(AppUpdate.header, forHTTPHeaderField: "Yo-App")
+    request.setValue(AppUpdate.wire, forHTTPHeaderField: "Yo-App")
     if !body.isEmpty || method != "GET" { request.httpBody = body }
     let done = DispatchSemaphore(value: 0)
     let answer = Answer()

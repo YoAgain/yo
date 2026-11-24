@@ -136,7 +136,7 @@ What the hub sees on every request, and what it keeps.
 
 | Field | Example | Purpose | Stored? | Linked to account? |
 |---|---|---|---|---|
-| `Yo-App` header | `ios/202611191257` | too old → `426`; on a signed request kept per device | `devices.app`, updated when it changes; anonymous requests: only checked | yes, per device |
+| `Yo-App` header | `ios/202611191257`, a release `ios/202611241344 1.0.0-RC36` | too old → `426`; on a signed request kept per device | `devices.app` and `devices.version`, updated when they change; anonymous requests: only checked | yes, per device |
 | `Yo-Device`, `Yo-Time`, signature | device id (b64), ms | authenticate the request; replay check | the signature only in an in-memory replay cache for the time window | yes (it is the device) |
 | last seen | ms of the first signed request after 24 h | active users, retention | `devices.last_seen_at`, written at most once a day | yes, per device |
 | push token and platform | APNs/FCM token, `1` | wake the phone | `devices.push_token`, `push_platform`; cleared when the service says it is dead | yes |

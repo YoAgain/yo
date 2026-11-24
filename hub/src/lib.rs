@@ -573,6 +573,7 @@ mod tests {
             push_platform: 0,
             push_token: Vec::new(),
             app: None,
+            version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
         assert!(matches!(
@@ -998,6 +999,7 @@ mod tests {
             push_platform: 0,
             push_token: Vec::new(),
             app: None,
+            version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
         hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
@@ -1038,6 +1040,7 @@ mod tests {
             push_platform: api::PUSH_APNS,
             push_token: b"a1b2c3".to_vec(),
             app: None,
+            version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
         hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
@@ -1149,6 +1152,7 @@ mod tests {
             push_platform: api::PUSH_APNS,
             push_token: b"a1b2c3".to_vec(),
             app: app.map(str::to_owned),
+            version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
         hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();

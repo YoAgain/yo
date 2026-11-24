@@ -290,6 +290,9 @@ jobs:
             || { echo "::error::release tag '$TAG' is not v<x.y.z> or v<x.y.z>-<suffix> (v1.0.0, v1.0.0-RC)"; exit 1; }
           plutil -replace CFBundleShortVersionString -string "${BASH_REMATCH[1]}" app/ios/YoApp/Info.plist
           echo "version ${BASH_REMATCH[1]} from $TAG"
+          # The whole tag's version (1.0.0-RC36) goes into YoVersion, which the app sends after its build in Yo-App
+          # (spec 6.3), so the admin names a release's build; builds of main have no key.
+          plutil -replace YoVersion -string "${TAG#v}" app/ios/YoApp/Info.plist
           # The suffix (RC19) goes into YoReleaseName, which About shows as "1.0.0 RC19"; builds of main have no key.
           if [ -n "${BASH_REMATCH[2]}" ]; then
             plutil -replace YoReleaseName -string "${BASH_REMATCH[2]#-}" app/ios/YoApp/Info.plist

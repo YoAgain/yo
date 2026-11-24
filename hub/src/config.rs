@@ -354,6 +354,19 @@ pub fn app(text: &str) -> Option<(String, u64)> {
     Some((platform.to_owned(), build.parse().ok()?))
 }
 
+/// A `Yo-App` header (spec 6.3): `PLATFORM/BUILD`, then optionally a space and the app's version ("ios/202611241344
+/// 1.0.0-RC36"): the app and the version, if it is one (1 to 32 of `0-9A-Za-z.+-`; another is left out).
+pub fn app_header(text: &str) -> Option<(&str, Option<&str>)> {
+    let (named, version) = match text.split_once(' ') {
+        Some((named, version)) => (named, Some(version)),
+        None => (text, None),
+    };
+    app(named)?;
+    let version = version
+        .filter(|v| (1..=32).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b)));
+    Some((named, version))
+}
+
 /// The hub key of `Config::for_tests`: tests pin its public half.
 pub const TEST_HUB_KEY: [u8; 32] = [0x48; 32];
 
@@ -430,6 +443,19 @@ mod tests {
         }
         assert_eq!(parse_min_app(" ios/5, android/7 ,").unwrap(), [("ios".into(), 5), ("android".into(), 7)]);
         assert!(parse_min_app("ios").is_err());
+    }
+
+    #[test]
+    fn a_header_may_name_the_version() {
+        assert_eq!(app_header("ios/202611241344"), Some(("ios/202611241344", None)));
+        assert_eq!(app_header("ios/202611241344 1.0.0-RC36"), Some(("ios/202611241344", Some("1.0.0-RC36"))));
+        assert_eq!(app_header("android/7 1.0.0"), Some(("android/7", Some("1.0.0"))));
+        // A version that is not one is left out; the app still counts.
+        for odd in ["ios/7 ", "ios/7 a b", "ios/7 <b>", &format!("ios/7 {}", "1".repeat(33))] {
+            assert_eq!(app_header(odd), Some(("ios/7", None)), "{odd:?}");
+        }
+        assert_eq!(app_header("ios/7a 1.0.0"), None);
+        assert_eq!(app_header(" 1.0.0"), None);
     }
 
     #[test]

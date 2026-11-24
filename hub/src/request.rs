@@ -43,7 +43,9 @@ pub(crate) async fn counted(State(hub): Hubs, request: Request, next: Next) -> R
 }
 
 pub(crate) async fn too_old(State(hub): Hubs, request: Request, next: Next) -> Response {
-    if let Some((platform, build)) = header(request.headers(), api::HEADER_APP).and_then(config::app) {
+    if let Some((platform, build)) =
+        header(request.headers(), api::HEADER_APP).and_then(config::app_header).and_then(|(app, _)| config::app(app))
+    {
         if hub.config.min_app.iter().any(|(p, min)| *p == platform && build < *min) {
             return StatusCode::UPGRADE_REQUIRED.into_response();
         }
@@ -171,7 +173,7 @@ impl Hub {
             .map_err(|_| error::limited("device", None))?;
         // Last seen is kept to the hour (spec 1) and written once a day; the app it names, when it changes.
         let app = named_app(headers);
-        let new_app = app.is_some_and(|a| device.app.as_deref() != Some(a));
+        let new_app = app.is_some_and(|(a, v)| device.app.as_deref() != Some(a) || device.version.as_deref() != v);
         if new_app || now.saturating_sub(device.last_seen_at) >= DAY_MS {
             self.db.touch(&device_id, now, app)?;
         }
@@ -336,9 +338,9 @@ pub(crate) fn query<T: std::str::FromStr>(uri: &Uri, name: &str) -> Option<T> {
     uri.query()?.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))?.parse().ok()
 }
 
-/// The app a request names (`Yo-App`, spec 6.3), if it is one.
-pub(crate) fn named_app(headers: &HeaderMap) -> Option<&str> {
-    header(headers, api::HEADER_APP).filter(|a| config::app(a).is_some())
+/// The app a request names (`Yo-App`, spec 6.3), if it is one, and its version, if it names one.
+pub(crate) fn named_app(headers: &HeaderMap) -> Option<(&str, Option<&str>)> {
+    header(headers, api::HEADER_APP).and_then(config::app_header)
 }
 
 /// A body of `len` bytes that streams.

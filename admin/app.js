@@ -1488,8 +1488,8 @@ if (document.body.classList.contains("login")) {
     const app = d.app || payload.app || "";
     const rc = [payload.release, payload.version, app].join(" ").match(/\bRC(?:[ -]?\d+)?\b/i);
     const stamp = build(app), dated = /^\d{12}$/.test(stamp);
-    const dateLabel = dated ? buildLabel(app) : "";
-    const label = rc && dated ? `${rc[0]} (${dateLabel})` : rc?.[0] || dateLabel || app;
+    const dateLabel = dated ? buildDate(app) : "";
+    const label = dated && versionOf(app) ? buildLabel(app) : rc && dated ? `${rc[0]} (${dateLabel})` : rc?.[0] || dateLabel || app;
     return { key: app || label, label, oldest: dated ? dateLabel.replace(/ \d\d:\d\d$/, "") : label,
       full: dated ? `${label} · ${app} UTC` : app || label,
       time: dated ? Date.UTC(+stamp.slice(0, 4), +stamp.slice(4, 6) - 1, +stamp.slice(6, 8),
@@ -2138,17 +2138,27 @@ if (document.body.classList.contains("login")) {
   // One bar of a platform's versions: current, update out, must update, unknown.
   const verBar = (p) => { const b = el("span", "hc-pbar dbar"); for (const k of VKEYS) if (p[k]) { const x = el("span", k); x.style.flexGrow = p[k]; b.append(x); } return b; };
   // Releases over time, stacked by build with the newest at the top.
-  const buildLabel = (app) => {
+  // @build-label
+  // A release's build by its version and build ("1.0.0-RC36 (202611241344)", "Android 1.0.0-RC36 (…)"): the version
+  // the app sent (Yo-App, spec 6.3) or users.py's RELEASES; any other dated build by its UTC minute ("Nov 24 07:54").
+  const buildDate = (app) => {
     const b = build(app), p = (app || "").split("/")[0], word = { ios: "", android: "Android ", yogpt: "Bot " }[p] ?? `${appInfo(app)?.label || p} `;
     if (!/^\d{12}$/.test(b)) return app === "unknown" ? "unknown" : `${word || "iOS "}${b}`.trim();
     const mon = new Date(Date.UTC(2000, +b.slice(4, 6) - 1, 1)).toLocaleDateString("en", { month: "short", timeZone: "UTC" });
     return `${word}${mon} ${+b.slice(6, 8)} ${b.slice(8, 10)}:${b.slice(10, 12)}`;
   };
+  const versionOf = (app) => last?.app_versions?.[app] || null;
+  const buildLabel = (app) => {
+    const b = build(app), v = /^\d{12}$/.test(b) && versionOf(app);
+    return v ? `${(app || "").startsWith("android/") ? "Android " : ""}${v} (${b})` : buildDate(app);
+  };
+  // @end
   // @release-color
-  // By build age: under 24 h green (fading lighter with age), 1 to 7 days green-yellow to orange, a week or older red.
+  // By support: of a platform's builds the hub still takes (YO_MIN_APP), the newest green through the oldest yellow
+  // (rank `i` of `n`, 0 the newest); below the minimum (refused with 426, must update) red.
   const buildAgeH = (b) => (Date.now() - Date.UTC(+b.slice(0, 4), +b.slice(4, 6) - 1, +b.slice(6, 8), +b.slice(8, 10), +b.slice(10, 12))) / 36e5;
-  const releaseColor = (h) => h < 24 ? `hsl(135 ${64 - h / 2}% ${34 + h / 2}%)`
-    : h < 168 ? `hsl(${Math.round(80 - 52 * (h - 24) / 144)} 80% 50%)` : "hsl(4 75% 50%)";
+  const releaseColor = (i, n, below) => below ? "hsl(4 75% 50%)"
+    : `hsl(${Math.round(135 - 85 * (n > 1 ? i / (n - 1) : 0))} 70% 42%)`;
   // @end
   const releaseBands = (h) => {
     const apps = new Set((h.users || []).map(u => u.app));
@@ -2162,9 +2172,10 @@ if (document.body.classList.contains("login")) {
     for (const platform of ["ios", "android"]) {
       const dated = [...apps].filter(app => app?.startsWith(platform + "/") && /^\d{12}$/.test(app.slice(platform.length + 1))).sort().reverse();
       // Colour by the build's age (builds are dated ids); behind = rank, newest first, for sorting.
+      const allowed = dated.filter(app => !belowMin(app));
       dated.forEach((app, behind) => {
         const ageH = Math.max(0, buildAgeH(app.slice(platform.length + 1)));
-        bands.set(app, { behind, ageH, color: belowMin(app) ? releaseColor(1e9) : releaseColor(ageH) });
+        bands.set(app, { behind, ageH, color: releaseColor(allowed.indexOf(app), allowed.length, belowMin(app)) });
       });
     }
     return bands;
@@ -2249,7 +2260,7 @@ if (document.body.classList.contains("login")) {
     if (f0) s.dataset.since = "true";
     hoverTip(s, n - f0, (k) => {
       const i = f0 + k, r = d.rows[i], all = r ? r.reduce((x, v) => x + v, 0) : 0;
-      return { head: d.slots[i][1], rows: r ? d.bands.flatMap((b, j) => r[j] > 0 ? [{ color: b.color, label: b.name, value: `${Math.round(100 * r[j] / all) || "<1"} %` }] : []) : [{ label: "Builds", value: "not recorded" }] };
+      return { head: d.slots[i][1], rows: r ? d.bands.flatMap((b, j) => r[j] > 0 ? [{ color: b.color, label: b.name + (belowMin(b.app) ? " · below minimum" : ""), value: `${Math.round(100 * r[j] / all) || "<1"} %` }] : []) : [{ label: "Builds", value: "not recorded" }] };
     });
     const card = dcard(titleText, share, s, axis);
     return card;

@@ -52,6 +52,8 @@ android {
         // Debug and QA builds say "android/dev<build>": not a Play build, so the admin never takes one as the newest.
         buildConfigField("String", "YO_APP", "\"android/dev$yoBuild\"")
         buildConfigField("String", "YO_BUILD", "\"$yoBuild\"")
+        // A release's version (the tag, "1.0.0-RC36"), sent after the build in Yo-App (spec 6.3); other builds: "".
+        buildConfigField("String", "YO_VERSION", "\"${providers.gradleProperty("yoVersionName").getOrElse("")}\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
     signingConfigs {

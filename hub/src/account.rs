@@ -97,7 +97,8 @@ pub(crate) async fn post_register(
         registration_id: device.registration_id,
         push_platform: device.push.platform,
         push_token: device.push.token.as_slice().to_vec(),
-        app: named_app(&headers).map(str::to_owned),
+        app: named_app(&headers).map(|(app, _)| app.to_owned()),
+        version: named_app(&headers).and_then(|(_, version)| version).map(str::to_owned),
     };
     let mut fresh: UserId = [0; 16];
     getrandom::fill(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;

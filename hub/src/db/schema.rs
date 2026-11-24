@@ -25,6 +25,9 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
             )
         })?;
     }
+    if !has_column(conn, "devices", "version")? {
+        conn.execute_batch("ALTER TABLE devices ADD COLUMN version TEXT")?;
+    }
     if !has_column(conn, "zk_groups", "created_at")? {
         conn.execute_batch("ALTER TABLE zk_groups ADD COLUMN created_at INTEGER")?;
     }
@@ -130,7 +133,9 @@ CREATE TABLE IF NOT EXISTS devices (
     number INTEGER NOT NULL DEFAULT 1,
     -- The highest one-time prekey id it uploaded: one not above it is one it uploaded before (a repeat), never taken
     -- again, so a key handed out once is not handed out again.
-    prekey_max INTEGER NOT NULL DEFAULT 0
+    prekey_max INTEGER NOT NULL DEFAULT 0,
+    -- The version its app named with it (`Yo-App`, spec 6.3: 1.0.0-RC36), if any.
+    version TEXT
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id);
 -- Devices that were replaced: their own requests answer 410.

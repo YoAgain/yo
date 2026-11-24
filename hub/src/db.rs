@@ -50,6 +50,8 @@ pub struct Device {
     pub last_seen_at: u64,
     /// The app it last named (`Yo-App`, "ios/202611140619"), if any.
     pub app: Option<String>,
+    /// The version that app named with it ("1.0.0-RC36"), if any.
+    pub version: Option<String>,
 }
 
 pub struct NewDevice {
@@ -61,6 +63,8 @@ pub struct NewDevice {
     pub push_token: Vec<u8>,
     /// The app it names (`Yo-App`), if any.
     pub app: Option<String>,
+    /// That app's version, if it names one.
+    pub version: Option<String>,
 }
 
 /// The keys that may sign a backup record's fetch (spec 7): the passkey's and the code's; neither for older records.
@@ -546,12 +550,14 @@ impl Db {
     // ---- users and devices ----
 
     pub fn device(&self, device: &DeviceId) -> rusqlite::Result<Option<Device>> {
-        row(&self.conn(), "SELECT user_id, auth_key, last_seen_at, app FROM devices WHERE id = ?1", [device], |row| {
+        let sql = "SELECT user_id, auth_key, last_seen_at, app, version FROM devices WHERE id = ?1";
+        row(&self.conn(), sql, [device], |row| {
             Ok(Device {
                 user_id: array(row.get(0)?)?,
                 auth_key: array(row.get(1)?)?,
                 last_seen_at: row.get::<_, i64>(2)? as u64,
                 app: row.get(3)?,
+                version: row.get(4)?,
             })
         })
     }
@@ -560,11 +566,14 @@ impl Db {
         self.conn().prepare_cached("SELECT 1 FROM gone WHERE id = ?1")?.exists([device])
     }
 
-    /// Seen at `now` (kept to the hour), with the app it names (none: the one it had stays).
-    pub fn touch(&self, device: &DeviceId, now: u64, app: Option<&str>) -> rusqlite::Result<()> {
+    /// Seen at `now` (kept to the hour), with the app it names and that app's version (no app: the one it had stays,
+    /// with its version).
+    pub fn touch(&self, device: &DeviceId, now: u64, app: Option<(&str, Option<&str>)>) -> rusqlite::Result<()> {
+        let (app, version) = (app.map(|(a, _)| a), app.and_then(|(_, v)| v));
         self.run(
-            "UPDATE devices SET last_seen_at = ?2, app = coalesce(?3, app) WHERE id = ?1",
-            params![device, to_the_hour(now), app],
+            "UPDATE devices SET last_seen_at = ?2, app = coalesce(?3, app),
+                 version = CASE WHEN ?3 IS NULL THEN version ELSE ?4 END WHERE id = ?1",
+            params![device, to_the_hour(now), app, version],
         )
     }
 
@@ -645,8 +654,8 @@ impl Db {
             tx.execute(
                 "INSERT INTO devices
                      (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app,
-                      registration_id, number)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?11, ?8, ?9, ?10)",
+                      registration_id, number, version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?11, ?8, ?9, ?10, ?12)",
                 params![
                     device.device_id,
                     user,
@@ -658,7 +667,8 @@ impl Db {
                     device.app,
                     device.registration_id,
                     number,
-                    to_the_hour(now)
+                    to_the_hour(now),
+                    device.version
                 ],
             )?;
             release_push_token(tx, &device.device_id, device.push_platform, &device.push_token)?;
@@ -1615,6 +1625,7 @@ mod tests {
             push_platform: 0,
             push_token: Vec::new(),
             app: None,
+            version: None,
         }
     }
 
@@ -2138,9 +2149,9 @@ mod tests {
         assert!(matches!(register(&db, b"bob", 2, 2, now - 25 * hour), Write::Done(_)));
         assert_eq!(seen(1), to_the_hour(now - 23 * hour));
         assert_eq!(seen(1) % hour, 0, "registered: to the hour");
-        db.touch(&[2; 16], now - 25 * hour + 59_999, Some("ios/1")).unwrap();
+        db.touch(&[2; 16], now - 25 * hour + 59_999, Some(("ios/1", None))).unwrap();
         assert_eq!(seen(2), to_the_hour(now - 25 * hour), "touched: to the hour");
-        db.touch(&[1; 16], now - 23 * hour + 1, Some("ios/1")).unwrap();
+        db.touch(&[1; 16], now - 23 * hour + 1, Some(("ios/1", None))).unwrap();
         let install = [7u8; 16];
         let payload =
             serde_json::json!({"app": "ios/1", "os": "26", "model": "x", "domain": "d", "code": "1", "place": "p"});
@@ -2857,10 +2868,23 @@ mod tests {
         assert!(!is_bot_app(Some("ios/202611191257")) && !is_bot_app(Some("android/3")) && !is_bot_app(None));
         let db = Db::open(":memory:").unwrap();
         let bot = user(register(&db, b"BOT", 1, 1, 0));
-        db.touch(&[1; 16], 0, Some("cli/7")).unwrap();
+        db.touch(&[1; 16], 0, Some(("cli/7", None))).unwrap();
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         let delivered = db.deliver(&[Incoming { user: bot, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
         assert!(matches!(&delivered[..], [Delivered::Stored(devices)] if devices.iter().all(|w| w.bot)));
+    }
+
+    #[test]
+    fn a_devices_version_follows_its_app() {
+        let db = Db::open(":memory:").unwrap();
+        register(&db, b"ANN", 1, 1, 0);
+        let version = || db.device(&[1; 16]).unwrap().map(|d| (d.app, d.version)).unwrap();
+        db.touch(&[1; 16], 0, Some(("ios/202611241344", Some("1.0.0-RC36")))).unwrap();
+        assert_eq!(version(), (Some("ios/202611241344".into()), Some("1.0.0-RC36".into())));
+        db.touch(&[1; 16], 0, None).unwrap();
+        assert_eq!(version().1.as_deref(), Some("1.0.0-RC36"), "no app named: both stay");
+        db.touch(&[1; 16], 0, Some(("ios/202611250000", None))).unwrap();
+        assert_eq!(version(), (Some("ios/202611250000".into()), None), "a build without one has none");
     }
 
     /// Exit without dropping SQLite (no close-time checkpoint): the committed WAL survives a process crash.

@@ -136,7 +136,8 @@ fn diagnostic(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, body: &[u8
     if !valid {
         return Err(bad());
     }
-    if !worth_keeping(kind, &payload, header(headers, api::HEADER_APP)) {
+    let sender = header(headers, api::HEADER_APP).and_then(crate::config::app_header).map(|(app, _)| app);
+    if !worth_keeping(kind, &payload, sender) {
         return Ok(StatusCode::NO_CONTENT); // taken: the phone forgets it
     }
     hub.db.diagnostic(kind, &payload, Some(&install), now_ms())?;
