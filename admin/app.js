@@ -532,11 +532,12 @@ if (document.body.classList.contains("login")) {
   tipBox.hidden = true;
   document.body.append(tipBox);
   // A popup row: the series' colour (a swatch) or a symbol, what it is, its value.
-  const tipRow = ({ ico, color, label, value, cls, section, line }) => {
+  const tipRow = ({ ico, color, label, sub, value, cls, section, line }) => {
     if (section) return el("div", "tsec", section);
-    const r = el("div", `tr${cls ? ` ${cls}` : ""}`), mark = el("span", "tm");
+    const r = el("div", `tr${cls ? ` ${cls}` : ""}`), mark = el("span", "tm"), l = el("span", "tl", label);
     if (color) { mark.classList.add("sw"); if (line) mark.classList.add("ln"); mark.style.background = color; } else if (ico) mark.append(icon(ico));
-    r.append(mark, el("span", "tl", label), el("b", "tv", value));
+    if (sub) l.append(el("small", "tsub", sub));
+    r.append(mark, l, el("b", "tv", value));
     return r;
   };
   const SERIES = { "": "var(--ok)", cool: "#5dade2", bad: "#e67e22", acc: "var(--amethyst-soft)" };
@@ -2180,6 +2181,33 @@ if (document.body.classList.contains("login")) {
     }
     return bands;
   };
+  // @release-groups
+  // The App card's bands, newest first, the same in the chart and its hover: one per release (its version, iOS and
+  // Android together) for the newest 5; the builds of main among them as one "Dev builds" at the newest one's place;
+  // everything older the hub still takes as "Older"; builds without a date "Unknown"; then "Below minimum" (YO_MIN_APP:
+  // refused, must update), always last. The builds the hub takes go green (newest) to yellow, below the minimum red.
+  const releaseGroups = (apps, versionOf, below) => {
+    const stamp = (app) => (app || "").split("/").pop(), dated = (app) => /^\d{12}$/.test(stamp(app));
+    const groups = [], byVersion = new Map(), add = (name, kind) => { const g = { name, kind, apps: [] }; groups.push(g); return g; };
+    let releases = 0, dev = null, older = null, unknown = null;
+    const low = { name: "Below minimum", kind: "below", apps: [] };
+    const sorted = apps.filter(dated).sort((a, b) => stamp(b).localeCompare(stamp(a)) || a.localeCompare(b));
+    for (const app of sorted) {
+      const v = versionOf(app);
+      if (below(app)) low.apps.push(app);
+      else if (v && byVersion.has(v)) byVersion.get(v).apps.push(app);
+      else if (releases < 5 && v) { releases++; byVersion.set(v, add(v, "release")); byVersion.get(v).apps.push(app); }
+      else if (releases < 5) (dev ||= add("Dev builds", "dev")).apps.push(app);
+      else (older ||= add("Older", "older")).apps.push(app);
+    }
+    for (const app of apps.filter(a => !dated(a)).sort()) (unknown ||= add("Unknown", "unknown")).apps.push(app);
+    groups.push(low);
+    const taken = groups.filter(g => g.kind !== "below" && g.kind !== "unknown");
+    for (const g of groups) g.color = g.kind === "below" ? releaseColor(0, 1, true) : g.kind === "unknown" ? "var(--muted)"
+      : releaseColor(taken.indexOf(g), taken.length);
+    return groups;
+  };
+  // @end
   const relData = (h, plat) => {
     // Points by the hour: the hub's hourly `build:` levels first (devices seen within 24 hours; 30 days by the hour,
     // then the day's last), else the admin's own hours (48) and days (the day's at its next midnight, today's now).
@@ -2216,19 +2244,16 @@ if (document.body.classList.contains("login")) {
     for (const [, , row] of slots) {
       for (const [app, count] of Object.entries(row || {})) if (count > 0 && mine(app)) apps.add(app);
     }
-    const dated = [...apps].filter(app => /^\d{12}$/.test(build(app)))
-      .sort((a, b) => build(b).localeCompare(build(a)) || a.localeCompare(b));
-    const datedSet = new Set(dated);
-    const unknown = [...apps].filter(app => !datedSet.has(app)).sort();
     const releases = releaseBands(h);
-    const bands = [...dated, ...unknown].map(app => ({
-      app, name: buildLabel(app), color: releases.get(app)?.color || "var(--muted)", ageH: releases.get(app)?.ageH
-    }));
+    const bands = releaseGroups([...apps], versionOf, belowMin);
     const rows = slots.map(([, , row]) => {
-      const counts = bands.map(b => row?.[b.app] || 0);
+      const counts = bands.map(b => b.apps.reduce((sum, app) => sum + (row?.[app] || 0), 0));
       return counts.some(v => v > 0) ? counts : null;
     });
-    return { slots, bands, rows };
+    // Per slot the devices on a build the hub still takes and under 24 hours old: the card's "current".
+    const fresh = slots.map(([, , row]) => Object.entries(row || {}).reduce((sum, [app, count]) =>
+      sum + (mine(app) && !belowMin(app) && releases.get(app)?.ageH < 24 ? count : 0), 0));
+    return { slots, bands, rows, fresh };
   };
   const relChart = (h, plat, titleText) => {
     const d = relData(h, plat), n = d.slots.length, W = 264, B = 96;
@@ -2254,13 +2279,18 @@ if (document.body.classList.contains("login")) {
     const axis = el("div", "chart-axis");
     axis.append(el("span", null, (f0 ? "since " : "") + d.slots[f0][1]), el("span", null, d.slots[n - 1][1]));
     const pick = d.rows[have[have.length - 1]], pickAll = pick.reduce((sum, count) => sum + count, 0);
-    const current = d.bands.reduce((sum, b, i) =>
-      sum + (!belowMin(b.app) && b.ageH < 24 ? pick[i] : 0), 0);
+    const current = d.fresh[have[have.length - 1]];
     const share = `${Math.round(100 * current / pickAll)} % current`;
     if (f0) s.dataset.since = "true";
     hoverTip(s, n - f0, (k) => {
       const i = f0 + k, r = d.rows[i], all = r ? r.reduce((x, v) => x + v, 0) : 0;
-      return { head: d.slots[i][1], rows: r ? d.bands.flatMap((b, j) => r[j] > 0 ? [{ color: b.color, label: b.name + (belowMin(b.app) ? " · below minimum" : ""), value: `${Math.round(100 * r[j] / all) || "<1"} %` }] : []) : [{ label: "Builds", value: "not recorded" }] };
+      const row = d.slots[i][2] || {}, pct = (v) => v ? `${Math.round(100 * v / all) || "<1"} %` : "0 %";
+      // In All, each row's share per platform beneath it.
+      const split = (b) => plat !== "all" ? null : ["ios", "android"].map((p) => [p, b.apps.reduce((sum, app) =>
+        sum + (app.startsWith(`${p}/`) ? row[app] || 0 : 0), 0)]).filter(([, v]) => v > 0)
+        .map(([p, v]) => `${p === "ios" ? "iOS" : "Android"} ${pct(v)}`).join(" · ") || null;
+      return { head: d.slots[i][1], rows: r ? d.bands.flatMap((b, j) => r[j] > 0 || b.kind === "below"
+        ? [{ color: b.color, label: b.name, sub: split(b), value: pct(r[j]) }] : []) : [{ label: "Builds", value: "not recorded" }] };
     });
     const card = dcard(titleText, share, s, axis);
     return card;

@@ -1170,6 +1170,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ctip .tm.sw { width: 9px; height: 9px; border-radius: 2px; justify-self: center; }
 .ctip .tm .ico { width: 13px; height: 13px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .ctip .tl { color: var(--muted); } .ctip .tv { font-weight: 700; text-align: right; }
+.ctip .tsub { display: block; font-size: 0.85em; opacity: 0.8; }
 
 /* Three numbers side by side (Retention). */
 .stat3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 6px; }
