@@ -75,12 +75,13 @@ data class AppState(
     val recoverySaved: Boolean = true, val recoveryPasskey: Boolean = false,
     /** `updating`: an old install signs in again ("Yo is updating…"). `googleBackup`: wanted in Google's cloud;
      *  `backedUp`: it is there, end-to-end encrypted (else the red dot on the menu). */
-    val updating: Boolean = false, val googleBackup: Boolean = true, val backedUp: Boolean = true,
+    val updating: Boolean = false, val googleBackup: Boolean = !BuildConfig.FLOSS, val backedUp: Boolean = !BuildConfig.FLOSS,
     /** Why it is not there: no screen lock, or Google's device backup is off (Block Store's cloud copy rides on it). */
     val backupMissingReason: CloudMissing? = null,
     val media: List<Received> = emptyList(),
     val leftHanded: Boolean = false, val requestsOpen: Boolean = true,
     val sent: Long = 0, val received: Long = 0, val pendingInvite: String? = null,
+    val keepConnection: Boolean = false,
     val lastSync: Long? = null, val firstYo: Boolean = false, val notice: String? = null, val appIcon: String? = null,
     /** A scanned or tapped invite, verified by the hub, waiting for "Add & Yo" (not saved). */
     val invitation: Invitation? = null,

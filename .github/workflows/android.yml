@@ -33,7 +33,8 @@ jobs:
           unset JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT
           export PATH="$HOME/.cargo/bin:$PATH"
           nice -n 10 app/android/dev/bootstrap.sh
-      # The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep build.gradle.kts's.
+      # Two flavors (app/android/README.md): play, the Google Play build, and floss, the F-Droid build (unsigned:
+      # F-Droid signs its own build). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep build.gradle.kts's.
       - name: Build, unit tests and lint
         env:
           TAG: ${{ github.event.release.tag_name }}
@@ -49,7 +50,31 @@ jobs:
           . app/android/dev/env.sh
           export YO_BUILD=$(date -u +%Y%m%d%H%M)  # the Yo-App build: the UTC minute, as iOS and the CLI
           cd app/android
-          nice -n 10 ./gradlew --max-workers=4 assembleDebug assembleRelease testDebugUnitTest lint "${version[@]}"
+          nice -n 10 ./gradlew --max-workers=4 assemblePlayDebug assemblePlayRelease assembleFlossDebug assembleFlossRelease \
+            testPlayDebugUnitTest testFlossDebugUnitTest lint "${version[@]}"
+      # F-Droid takes no Google or other proprietary library: the floss runtime classpath must have none.
+      - name: floss has no Google dependency
+        run: |
+          export JAVA_HOME="$HOME/Android/jdk" ANDROID_HOME="$HOME/Android/sdk" ANDROID_SDK_ROOT="$HOME/Android/sdk"
+          cd app/android
+          ./gradlew --max-workers=4 -q :app:dependencies --configuration flossReleaseRuntimeClasspath > "$RUNNER_TEMP/floss-deps.txt"
+          if grep -iE 'com\.google\.(firebase|android\.gms|android\.play|android\.libraries)|googleid' "$RUNNER_TEMP/floss-deps.txt"; then
+            echo "::error::the floss build pulls in a Google library"; exit 1
+          fi
+      - name: floss APK for the release
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/floss"
+          cd "$RUNNER_TEMP/floss"
+          cp "$GITHUB_WORKSPACE/app/android/app/build/outputs/apk/floss/release/app-floss-release-unsigned.apk" "yo-floss-$TAG-unsigned.apk"
+          sha256sum "yo-floss-$TAG-unsigned.apk" > "yo-floss-$TAG-unsigned.apk.sha256"
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'release'
+        with:
+          name: yo-floss
+          path: ${{ runner.temp }}/floss/
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -57,3 +82,21 @@ jobs:
           path: |
             app/android/app/build/reports/
             app/android/app/build/outputs/apk/
+
+  # A published release gets the F-Droid (floss) APK, unsigned as F-Droid builds it, and its checksum.
+  release:
+    if: github.event_name == 'release'
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: yo-floss
+          path: dist
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

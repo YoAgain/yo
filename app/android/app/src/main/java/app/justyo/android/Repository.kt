@@ -259,11 +259,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (restored == null && !finishMigration()) {
                 val unmarked = !settleSynced()
                 val item = runCatching { synced.read() }.getOrNull()
-                if (SyncedAccount.signsIn(item, vault.read("left"), unmarked)) runCatching { signIn(item!!) }
+                if (SyncedAccountRules.signsIn(item, vault.read("left"), unmarked)) runCatching { signIn(item!!) }
             }
             mutable.update { it.copy(loading = false) }
             if (foreground) {
-                if (client != null) YoWork.registerIfConfigured(context)
+                if (client != null) Push.register(context)
                 listen()
                 if (state.value.updating) keepResuming()
             }
@@ -334,7 +334,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private suspend fun resumeUpdate() {
         try { migrate() } catch (e: YoException.Network) { return }
         if (!finishMigration()) mutable.update { it.copy(updating = false) }
-        if (client != null) { listen(); YoWork.registerIfConfigured(context) }
+        if (client != null) { listen(); Push.register(context) }
     }
 
     /**
@@ -398,7 +398,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             // YoGPT is there from the start, stored with the account so a restore knows its name.
             runCatching { add("YoGPT", yo = false) }
             syncItem()
-            refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
+            refresh(); consumeInvite(); listen(); Push.register(context)
         } finally { mutable.update { it.copy(busy = false) } }
     }
     suspend fun restore(codeText: String) = accountTurn.withLock {
@@ -448,7 +448,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val recovered = if (same) sealed.stringOrNull("code") ?: typedCode else null
         if (recovered != null) vault.write("recovery", recovered.toByteArray())
         mutable.update { it.copy(username = c.username(), secured = same, recovery = recovered, recoverySaved = true, broken = false, friends = emptyList()) }
-        persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
+        persist(); refresh(); consumeInvite(); listen(); Push.register(context)
         syncItem()
     }
 
@@ -469,12 +469,13 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (code != null) vault.write("recovery", code.toByteArray()) else vault.delete("recovery")
         mutable.update { it.copy(username = c.username() ?: item.username, secured = code != null,
             recovery = code, recoverySaved = true, broken = false, friends = emptyList()) }
-        persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
+        persist(); refresh(); consumeInvite(); listen(); Push.register(context)
         syncItem()
     }
 
     /** The synced item for this account now: its key, the recovery key and how the backup opens. */
     private fun syncItem() {
+        if (BuildConfig.FLOSS) return
         val c = client ?: return
         val code = state.value.recovery.takeIf { state.value.secured }
         val item = SyncedItem(c.username() ?: state.value.username.orEmpty(), c.userId().hexBytes(), c.accountSecret(),
@@ -485,7 +486,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
 
     /** The person's "Back up to Google" choice: kept beside the account (`google-backup`), so it outlives a sign-out. */
-    private fun backupWanted() = vault.read("google-backup") == null
+    private fun backupWanted() = !BuildConfig.FLOSS && vault.read("google-backup") == null
 
     /** "Back up to Google": on only with end-to-end encryption (a screen lock); else it says why and stays off. */
     suspend fun googleBackup(on: Boolean) {
@@ -612,22 +613,30 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             notifications.clear()
             listen()
             client?.let { source ->
-                YoWork.registerIfConfigured(context)
+                Push.register(context)
                 absorb(source.maintenance(), source)
             }
             media.wake()
             // Back from Android Settings with a screen lock or Google's backup turned on: the cloud copy follows at once.
             if (state.value.backupMissing) syncItem()
-        } else {
+        } else listen()
+    }
+
+    internal fun keepConnection(on: Boolean) {
+        mutable.update { it.copy(keepConnection = on) }
+        listen()
+    }
+
+    @Synchronized private fun listen() {
+        if (!(foreground || state.value.keepConnection)) {
             listening?.cancel()
             listening = null
+            return
         }
-    }
-    private fun listen() {
-        if (!foreground || listening?.isActive == true || client == null || state.value.update) return
+        if (listening?.isActive == true || client == null || state.value.update) return
         listening = scope.launch(Dispatchers.IO) {
             var pause = 1000L
-            while (isActive && foreground && !state.value.update) {
+            while (isActive && (foreground || state.value.keepConnection) && !state.value.update) {
                 val c = client ?: break
                 try {
                     syncing.withLock {
@@ -635,7 +644,13 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                         Lat.mark("sync.wait")
                         val events = c.sync(25u)
                         Lat.mark("sync.got ${events.size}")
-                        if (c === client) absorb(events, c)
+                        val wake = if (events.isNotEmpty() && state.value.keepConnection && !inFront)
+                            context.getSystemService(android.os.PowerManager::class.java)
+                                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "yo:inbox")
+                                .apply { setReferenceCounted(false); acquire(5_000L) }
+                        else null
+                        try { if (c === client) absorb(events, c) }
+                        finally { if (wake?.isHeld == true) wake.release() }
                         Lat.mark("sync.absorbed")
                         // absorb refreshed the list for events; an empty answer may still have changed the core's lists
                         if (events.isEmpty()) refresh()
@@ -644,7 +659,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                     if (c.waitingUnheld() == 0u) Problems.resolve(ProductProblem.WAITING)
                     media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
-                catch (e: YoException.Replaced) { signOut(replaced = true); break }
+                catch (e: YoException.Replaced) { withContext(NonCancellable) { signOut(replaced = true) }; break }
                 catch (_: Exception) { withTimeoutOrNull(pause) { online.receive() }; pause = (pause * 2).coerceAtMost(30000) }
             }
         }
@@ -663,16 +678,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         pushSession.value = registration.first
     }
 
-    /** Settings › Status › Renew Push Registration (as Signal's): a new FCM token, sent to the hub even if it has the
-     *  old one. Throws what failed (Firebase, the connection, the hub) for the red banner. A token Google Play services
-     *  will not delete now (SERVICE_NOT_AVAILABLE, on a Galaxy A34 every time, while pushes came) does not stop it: the
-     *  token Firebase has is sent to the hub again; only no token at all or the hub's refusal fails. */
     suspend fun renewPush() = withContext(Dispatchers.IO) {
-        if (com.google.firebase.FirebaseApp.getApps(context).isEmpty()) error("no Firebase in this build")
-        val messaging = com.google.firebase.messaging.FirebaseMessaging.getInstance()
-        try { com.google.android.gms.tasks.Tasks.await(messaging.deleteToken(), 20, java.util.concurrent.TimeUnit.SECONDS) }
-        catch (_: java.util.concurrent.ExecutionException) {} catch (_: java.util.concurrent.TimeoutException) {}
-        registerPush(com.google.android.gms.tasks.Tasks.await(messaging.token, 20, java.util.concurrent.TimeUnit.SECONDS), again = true)
+        Push.token(context, renew = true)?.let { registerPush(it, again = true) }
     }
 
     suspend fun syncPush() {
@@ -1166,6 +1173,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
         notifications.clear()
         val old = client; client = null; sessionId++
+        Push.unregister(context)
         listening?.cancel(); listening = null; retrying?.cancel(); retrying = null; syncing = Mutex()
         synchronized(unsentYos) { unsentYos.clear(); mediaUnsent.clear() }; Problems.clear()
         if (registeredPush?.first == sessionId - 1) runCatching { old?.setPush(0u, "") }

@@ -635,6 +635,20 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
+    if (BuildConfig.FLOSS && !notificationInFlight && (notificationsEnabled || notificationAsked) &&
+        s.invitation == null && !s.firstYo && s.emptyGroup == null && s.keyChanged == null) {
+        var asked by remember { mutableStateOf(repo.crashes.asked) }
+        fun answer(send: Boolean) {
+            repo.crashes.enabled = send
+            asked = true
+            if (send) repo.command { crashes.flush() }
+        }
+        if (!asked) YoSystemTheme { AlertDialog(onDismissRequest = {},
+            title = { Text(stringResource(R.string.crash_consent_title)) },
+            text = { Text(stringResource(R.string.crash_consent_message)) },
+            confirmButton = { TextButton(onClick = { answer(true) }) { Text(stringResource(R.string.ui_send)) } },
+            dismissButton = { TextButton(onClick = { answer(false) }) { Text(stringResource(R.string.crash_consent_decline)) } }) }
+    }
     val showNotificationBar = uniffi.yo.productShowNotificationRow(
         denied = !notificationsEnabled && notificationAsked,
         askedThisLaunch = notificationInFlight || model.deniedThisLaunch,

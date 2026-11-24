@@ -16,11 +16,6 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
-import com.google.android.gms.tasks.Tasks
-import com.google.firebase.FirebaseApp
-import com.google.firebase.messaging.FirebaseMessaging
-import com.google.firebase.messaging.FirebaseMessagingService
-import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,7 +47,7 @@ class YoApplication : Application(), CameraXConfig.Provider {
     override fun onCreate() {
         super.onCreate()
         if (Build.VERSION.SDK_INT >= 35) appScope.launch { publishWidgetPreviews(this@YoApplication) }
-        if (com.google.firebase.FirebaseOptions.fromResource(this) != null) FirebaseApp.initializeApp(this)
+        Push.init(this)
     }
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -65,22 +60,6 @@ class YoApplication : Application(), CameraXConfig.Provider {
 internal val Context.repository: Repository
     get() = (applicationContext as YoApplication).repository
 
-class YoMessagingService : FirebaseMessagingService() {
-    override fun onNewToken(token: String) {
-        YoWork.enqueue(this, "token")
-    }
-
-    override fun onDeletedMessages() {
-        YoWork.enqueue(this, "inbox")
-    }
-
-    override fun onMessageReceived(message: RemoteMessage) {
-        if (message.data["yo"] != "1") return
-        YoWork.enqueue(this, "inbox", urgent = message.data["urgent"] == "true",
-            expedited = message.priority == RemoteMessage.PRIORITY_HIGH)
-    }
-}
-
 class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val repo = applicationContext.repository
@@ -92,12 +71,7 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
         if (state.username == null) return@withContext Result.success()
         try {
             when (inputData.getString("action")) {
-                "token" -> {
-                    if (FirebaseApp.getApps(applicationContext).isNotEmpty()) {
-                        val token = Tasks.await(FirebaseMessaging.getInstance().token, 20, TimeUnit.SECONDS)
-                        repo.registerPush(token)
-                    }
-                }
+                "token" -> Push.token(applicationContext)?.let { repo.registerPush(it) }
                 "inbox" -> syncWithRetries(repo)
                 "send" -> repo.sendWidgetYo(inputData.getString("friend"), inputData.getString("account"), inputData.getBoolean("latest", false))
                 else -> return@withContext Result.failure()
@@ -169,11 +143,5 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
         internal fun inboxPolicy(states: List<WorkInfo.State>?): ExistingWorkPolicy =
             if (states == null || WorkInfo.State.RUNNING in states) ExistingWorkPolicy.APPEND_OR_REPLACE
             else ExistingWorkPolicy.REPLACE
-
-        fun registerIfConfigured(context: Context) {
-            if (FirebaseApp.getApps(context).isEmpty()) return
-            FirebaseMessaging.getInstance().isAutoInitEnabled = true
-            enqueue(context, "token")
-        }
     }
 }

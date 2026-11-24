@@ -1,0 +1,4 @@
+<resources>
+    <string name="connection_channel">Background connection</string>
+    <string name="connection_notification">Connected, Yos arrive right away</string>
+</resources>

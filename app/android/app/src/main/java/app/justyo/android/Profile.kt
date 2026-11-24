@@ -433,7 +433,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                                 }
                             }),
                             // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
-                            Setting(stringResource(R.string.google_backup_row), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
+                            if (BuildConfig.FLOSS) null else Setting(stringResource(R.string.google_backup_row), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
                                 supporting = when {
                                     s.backedUp || !s.googleBackup -> null
                                     s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> stringResource(R.string.google_backup_turn_on_device_backup)
@@ -527,7 +527,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     if (turningOffKey) AlertDialog(
         onDismissRequest = { turningOffKey = false },
         title = { Text(stringResource(R.string.turn_off_recovery_key)) },
-        text = { Text(stringResource(if (passkeyConfigured || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
+        text = { Text(stringResource(if (BuildConfig.FLOSS || passkeyConfigured || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
         // A passkey door is made anew with the new key's new K: the passkey is asked once more (spec 7).
         confirmButton = { TextButton(onClick = {
             turningOffKey = false
@@ -724,7 +724,7 @@ private fun shareCode(context: Context, name: String) {
                     }
                 }
             }
-            item(Icons.Default.Cloud, stringResource(R.string.google_backup_row), stringResource(when {
+            if (!BuildConfig.FLOSS) item(Icons.Default.Cloud, stringResource(R.string.google_backup_row), stringResource(when {
                 s.backedUp -> R.string.google_backup_footer
                 s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
                 s.googleBackup -> R.string.google_backup_off
@@ -863,7 +863,7 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     var yosView by rememberSaveable { mutableIntStateOf(0) }
     val notifications by model.notificationsEnabled.collectAsStateWithLifecycle()
     val pushSession by repo.pushSession.collectAsStateWithLifecycle()
-    val pushToken = pushSession == repo.sessionId
+    val ready = if (BuildConfig.FLOSS) s.keepConnection else pushSession == repo.sessionId
     val top = s.byFriend.maxByOrNull { it.value }
     val mostYos = top?.let { most -> s.friends.firstOrNull { it.key == most.key }?.name } ?: "—"
     Section(stringResource(R.string.status_crashes), null,
@@ -880,12 +880,17 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     )
     Section(stringResource(R.string.status_server), null,
         Setting(stringResource(R.string.status_notifications), Icons.Default.Notifications,
-            stringResource(if (!notifications) R.string.status_not_allowed else if (pushToken) R.string.status_ready else R.string.status_no_token),
-            good = if (!notifications) false else if (pushToken) true else null,
+            stringResource(when {
+                !notifications -> R.string.status_not_allowed
+                ready -> R.string.status_ready
+                BuildConfig.FLOSS -> R.string.ui_waiting
+                else -> R.string.status_no_token
+            }),
+            good = if (!notifications) false else if (ready) true else null,
             onClick = if (notifications) null else { { openNotificationSettings(context) } }),
         // As Signal's: a new token to the hub. What failed is said on the row as well: the red banner is under this sheet.
         // The failure under the title: as the row's value it took the title's width ("Registrat-ion" broke in two).
-        Setting(copy(ProductText.RENEW_PUSH), supporting = renewFailed, good = renewFailed?.let { false },
+        if (BuildConfig.FLOSS) null else Setting(copy(ProductText.RENEW_PUSH), supporting = renewFailed, good = renewFailed?.let { false },
             enabled = !renewing && s.username != null, leading = {
             Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
                 if (renewing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Refresh, null)

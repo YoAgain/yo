@@ -1,7 +1,8 @@
 name: CLI
 
-# The `yo` CLI (app/cli) as a Linux x86_64 binary, like the server it runs on: every push → workflow artifact,
-# a published release → `yo-linux-x86_64` and `skills.tar.gz` attached to it.
+# The `yo` CLI (app/cli) for Linux x86_64 (like the server it runs on) and macOS arm64: every push → workflow
+# artifacts, a published release → `yo-linux-x86_64`, `yo-macos-arm64`, `skills.tar.gz` and a `.sha256` for each
+# attached to it.
 on:
   push:
     branches: ['**']  # not tags: a release runs once, by its release event
@@ -15,11 +16,18 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}  # every commit on main keeps its own result
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: yo-linux-x86_64 }
+          - { os: macos-latest, name: yo-macos-arm64 }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - name: protoc (libsignal builds its protobufs)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install protobuf
+          else sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler; fi
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain
       - uses: actions/cache@v6
@@ -28,18 +36,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-cli-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: cargo-cli-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       # YO_BUILD: the build's UTC minute, sent as the CLI's Yo-App (app/cli/README.md).
       - name: Build
         run: YO_BUILD=$(date -u +%Y%m%d%H%M) cargo build --release --locked -p yo-cli
       - name: Package
         run: |
           mkdir dist
-          cp target/release/yo dist/yo-linux-x86_64
-          tar -czf dist/skills.tar.gz skills
+          cp target/release/yo dist/${{ matrix.name }}
+          [ "$RUNNER_OS" = Linux ] && tar -czf dist/skills.tar.gz skills
+          cd dist && for f in *; do shasum -a 256 "$f" > "$f.sha256"; done
       - uses: actions/upload-artifact@v7
         with:
-          name: yo-cli
+          name: ${{ matrix.name }}
           path: dist/
 
   release:
@@ -51,10 +60,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: yo-cli
+          pattern: yo-*
+          merge-multiple: true
           path: dist
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/yo-linux-x86_64 dist/skills.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

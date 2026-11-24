@@ -41,8 +41,8 @@ android {
     compileSdk { version = release(37) { minorApiLevel = 2 } }
     buildToolsVersion = "37.0.0"
     defaultConfig {
-        applicationId = if (deviceSoak) "app.justyo.android.dev.soak" else "app.justyo.android.dev"
-        manifestPlaceholders["yoAppLabel"] = if (deviceSoak) "Yo Device QA" else "Yo Dev"
+        applicationId = "app.justyo.android"
+        manifestPlaceholders["yoAppLabel"] = "Yo"
         minSdk = 34
         targetSdk = 37
         versionCode = providers.gradleProperty("yoVersionCode").map(String::toInt).getOrElse(1)  // rising, from CI
@@ -67,11 +67,24 @@ android {
             keyPassword = setting("keyPassword")
         }
     }
+    flavorDimensions += "store"
+    productFlavors {
+        create("play") {
+            dimension = "store"
+            signingConfig = signingConfigs.findByName("upload")
+            buildConfigField("boolean", "FLOSS", "false")
+        }
+        create("floss") {
+            dimension = "store"
+            applicationIdSuffix = ".floss"
+            buildConfigField("boolean", "FLOSS", "true")
+        }
+    }
     buildTypes {
+        debug { applicationIdSuffix = ".dev" }
         release {
             optimization { enable = true }
             proguardFiles("proguard-rules.pro")
-            signingConfig = signingConfigs.findByName("upload")
             // The store app talks to the live hub, as the iOS App Store and TestFlight build; Hub.kt has its pins.
             if (!deviceSoak) buildConfigField("String", "HUB", "\"https://hub.justyo.app\"")
             if (!deviceSoak) buildConfigField("String", "YO_APP", "\"android/$yoBuild\"")
@@ -95,7 +108,7 @@ dependencies {
     implementation("androidx.heifwriter:heifwriter:1.2.0")
     implementation("androidx.glance:glance-appwidget:1.2.0")
     implementation("androidx.work:work-runtime-ktx:2.12.0")
-    implementation("com.google.firebase:firebase-messaging:26.0.2")
+    "playImplementation"("com.google.firebase:firebase-messaging:26.0.2")
     implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.material3:material3:1.5.0")
@@ -108,8 +121,8 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.19.1@aar")
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("androidx.credentials:credentials:1.6.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
-    implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
+    "playImplementation"("androidx.credentials:credentials-play-services-auth:1.6.0")
+    "playImplementation"("com.google.android.gms:play-services-auth-blockstore:16.4.0")
     implementation("androidx.camera:camera-camera2:1.7.0")
     implementation("androidx.camera:camera-lifecycle:1.7.0")
     implementation("androidx.camera:camera-view:1.7.0")
@@ -122,18 +135,22 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 androidComponents {
+    beforeVariants(selector().withFlavor("store" to "floss")) { if (deviceSoak) it.enable = false }
     onVariants { variant ->
-        // The store app (Google Play): its package can never change. Debug and the device QA build keep theirs.
-        val store = variant.buildType == "release" && !deviceSoak
-        if (store) {
-            variant.applicationId.set("app.justyo.android")
-            variant.manifestPlaceholders.put("yoAppLabel", "Yo")
+        val play = variant.flavorName == "play"
+        if (deviceSoak) {
+            variant.applicationId.set("app.justyo.android.dev.soak")
+            variant.manifestPlaceholders.put("yoAppLabel", "Yo Device QA")
+        } else if (variant.buildType == "debug") {
+            variant.manifestPlaceholders.put("yoAppLabel", if (play) "Yo Dev" else "Yo Dev FLOSS")
         }
         variant.resValues.put(variant.makeResValueKey("string", "shortcut_target_package"),
             variant.applicationId.map { com.android.build.api.variant.ResValue(it) })
-        firebaseResources(if (store) "app.justyo.android" else android.defaultConfig.applicationId!!).forEach { (key, value) ->
-            variant.resValues.put(variant.makeResValueKey("string", key), com.android.build.api.variant.ResValue(value))
-        }
+        if (play) variant.resValues.putAll(variant.applicationId.map { id ->
+            firebaseResources(id).map { (key, value) ->
+                variant.makeResValueKey("string", key) to com.android.build.api.variant.ResValue(value)
+            }.toMap()
+        })
         variant.sources.kotlin?.addStaticSourceDirectory("build/generated/yo")
     }
 }
@@ -153,21 +170,24 @@ android.sourceSets["main"].assets.directories.add("build/license-assets")
 tasks.named("preBuild") { dependsOn(licenseAssets) }
 
 // Package the actual resolved runtime inventory, inherited POM licenses and embedded notices.
-val runtimeCoordinates = providers.provider {
-    configurations.getByName("releaseRuntimeClasspath").incoming.resolutionResult.allComponents
-        .mapNotNull { it.id as? org.gradle.api.artifacts.component.ModuleComponentIdentifier }
-        .map { "${it.group}:${it.module}:${it.version}" }.distinct().sorted()
-}
-val mavenLicenseAssets = tasks.register<Exec>("mavenLicenseAssets") {
-    val coordinateFile = layout.buildDirectory.file("maven-runtime-coordinates.txt")
-    inputs.property("coordinates", runtimeCoordinates)
-    inputs.file(rootProject.file("dev/maven-licenses.py"))
-    outputs.dir(layout.buildDirectory.dir("maven-license-assets"))
-    doFirst {
-        coordinateFile.get().asFile.apply { parentFile.mkdirs();writeText(runtimeCoordinates.get().joinToString("\n")) }
+for (flavor in listOf("play", "floss")) {
+    val runtimeCoordinates = providers.provider {
+        configurations.getByName("${flavor}ReleaseRuntimeClasspath").incoming.resolutionResult.allComponents
+            .mapNotNull { it.id as? org.gradle.api.artifacts.component.ModuleComponentIdentifier }
+            .map { "${it.group}:${it.module}:${it.version}" }.distinct().sorted()
     }
-    commandLine("python3", rootProject.file("dev/maven-licenses.py"), gradle.gradleUserHomeDir,
-        coordinateFile.get().asFile, layout.buildDirectory.file("maven-license-assets/Maven-Licenses.txt").get().asFile)
+    val dir = "maven-license-assets/$flavor"
+    val notices = tasks.register<Exec>("${flavor}MavenLicenseAssets") {
+        val coordinates = layout.buildDirectory.file("$flavor-runtime-coordinates.txt").get().asFile
+        inputs.property("coordinates", runtimeCoordinates)
+        inputs.file(rootProject.file("dev/maven-licenses.py"))
+        outputs.dir(layout.buildDirectory.dir(dir))
+        doFirst { coordinates.writeText(runtimeCoordinates.get().joinToString("\n")) }
+        commandLine("python3", rootProject.file("dev/maven-licenses.py"), gradle.gradleUserHomeDir,
+            coordinates, layout.buildDirectory.file("$dir/Maven-Licenses.txt").get().asFile)
+    }
+    android.sourceSets[flavor].assets.directories.add("build/$dir")
+    androidComponents.onVariants(androidComponents.selector().withFlavor("store" to flavor)) {
+        it.lifecycleTasks.registerPreBuild(notices)
+    }
 }
-android.sourceSets["main"].assets.directories.add("build/maven-license-assets")
-tasks.named("preBuild") { dependsOn(mavenLicenseAssets) }

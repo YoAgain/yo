@@ -47,20 +47,20 @@ class AccountRulesTest {
     }
 
     @Test fun keyMaterialGoesToGooglesCloudOnlyEndToEndEncrypted() {
-        assertTrue(SyncedAccount.toCloud(wanted = true, endToEnd = true))
-        assertFalse(SyncedAccount.toCloud(wanted = true, endToEnd = false))
-        assertFalse(SyncedAccount.toCloud(wanted = false, endToEnd = true))
+        assertTrue(SyncedAccountRules.toCloud(wanted = true, endToEnd = true))
+        assertFalse(SyncedAccountRules.toCloud(wanted = true, endToEnd = false))
+        assertFalse(SyncedAccountRules.toCloud(wanted = false, endToEnd = true))
     }
 
     /** No automatic sign-in into a signed-out item, the account another phone took, or while a mark waits. */
     @Test fun theAutomaticSignInRespectsSignOutReplacementAndWaitingMarks() {
         val item = SyncedItem("Mia", byteArrayOf(1, 2), key, false, true, true, false, "code", null, syncedItemVersion(), null)
-        assertTrue(SyncedAccount.signsIn(item, null, false))
-        assertTrue(SyncedAccount.signsIn(item, byteArrayOf(9), false))
-        assertFalse(SyncedAccount.signsIn(item.copy(signedOut = true), null, false))
-        assertFalse(SyncedAccount.signsIn(item, byteArrayOf(1, 2), false))
-        assertFalse(SyncedAccount.signsIn(item, null, true))
-        assertFalse(SyncedAccount.signsIn(null, null, false))
+        assertTrue(SyncedAccountRules.signsIn(item, null, false))
+        assertTrue(SyncedAccountRules.signsIn(item, byteArrayOf(9), false))
+        assertFalse(SyncedAccountRules.signsIn(item.copy(signedOut = true), null, false))
+        assertFalse(SyncedAccountRules.signsIn(item, byteArrayOf(1, 2), false))
+        assertFalse(SyncedAccountRules.signsIn(item, null, true))
+        assertFalse(SyncedAccountRules.signsIn(null, null, false))
     }
 
     /** A safety code is binary: the scanner hands over the QR code's own bytes, not its text. */

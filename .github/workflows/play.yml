@@ -84,8 +84,8 @@ jobs:
           . app/android/dev/env.sh
           export YO_BUILD=$(date -u +%Y%m%d%H%M)  # the Yo-App build: the UTC minute, as iOS and the CLI
           cd app/android
-          nice -n 10 ./gradlew --max-workers=4 :app:bundleRelease "-PyoVersionCode=$(( $(date +%s) / 60 ))" "${version[@]}"
-          aab=app/build/outputs/bundle/release/app-release.aab
+          nice -n 10 ./gradlew --max-workers=4 :app:bundlePlayRelease "-PyoVersionCode=$(( $(date +%s) / 60 ))" "${version[@]}"
+          aab=app/build/outputs/bundle/playRelease/app-play-release.aab
           # Unsigned or signed with anything but the upload key: Play would refuse it, fail here.
           "$JAVA_HOME/bin/jarsigner" -verify "$aab" | grep -q "jar verified" || { echo "::error::$aab is not signed"; exit 1; }
 
@@ -95,4 +95,4 @@ jobs:
           tracks=internal
           [ "${{ github.event_name }}" = release ] && tracks=internal,alpha
           "$RUNNER_TEMP/play/venv/bin/python" -I app/android/dev/play.py "$RUNNER_TEMP/play/service-account.json" \
-            app/android/app/build/outputs/bundle/release/app-release.aab "$tracks"
+            app/android/app/build/outputs/bundle/playRelease/app-play-release.aab "$tracks"

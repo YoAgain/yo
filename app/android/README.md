@@ -5,9 +5,18 @@ coroutines and CameraX. API 34 (Android 14) minimum; compile/target API 37 (Andr
 Yo’s original Flat UI colors, 90 dp rows, 30 sp Montserrat Bold, Amethyst, and the bundled Yo sound.
 
 This is a development implementation, **not complete iOS parity**. [PARITY.md](PARITY.md) audits each iOS source file
-and records the remaining refinements. No server or Rust source changes. No FCM or passkey capability is pretended.
-This package is `app.justyo.android.dev`, permanently pointed at `https://dev.justyo.app`; the Play build talks to
-`https://hub.justyo.app` (below).
+and records the remaining refinements. No server or Rust source changes.
+Debug and device QA builds talk to the dev hub. Both release flavors talk to the live hub.
+
+## Flavors: play and floss
+
+Play uses Firebase Cloud Messaging for push and Google Block Store for account recovery. FLOSS keeps the signed
+inbox connection open in a foreground service with a quiet notification. Recovery keys and passkeys are available
+in both flavors. FLOSS asks before sending crash and error reports.
+
+Build with `assemblePlayDebug`, `assembleFlossDebug`, or `assembleFlossRelease`. The FLOSS release APK
+(`app.justyo.android.floss`) is unsigned for F-Droid. To inspect its runtime libraries, run
+`./gradlew :app:dependencies --configuration flossReleaseRuntimeClasspath` from this directory.
 
 ## Toolchain, without sudo
 
@@ -33,15 +42,16 @@ are required. Android Studio can also open this directory with the same JDK and 
 From the repository root:
 
 ```sh
-export CARGO_BUILD_JOBS=4 PATH=$HOME/.cargo/bin:$PATH
+export CARGO_BUILD_JOBS=2 PATH=$HOME/.cargo/bin:$PATH
 . app/android/dev/env.sh
 cd app/android
-nice -n 10 ./gradlew --max-workers=4 assembleDebug assembleRelease testDebugUnitTest lint
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+nice -n 19 ionice -c3 ./gradlew --max-workers=2 assemblePlayDebug assembleFlossDebug assembleFlossRelease \
+  testPlayDebugUnitTest testFlossDebugUnitTest lintPlayDebug lintFlossDebug
+adb install -r app/build/outputs/apk/play/debug/app-play-debug.apk
 adb shell am start -n app.justyo.android.dev/app.justyo.android.MainActivity
 ```
 
-`./gradlew assembleDebug` builds both Rust `.so`s, generates Kotlin bindings, and packages them with JNA’s Android
+`./gradlew assemblePlayDebug` builds both Rust `.so`s, generates Kotlin bindings, and packages them with JNA’s Android
 AAR. First builds are much slower than subsequent ones. `CARGO_BUILD_JOBS` defaults to 4 to bound libsignal’s build
 memory. No native binaries or generated bindings are checked in. `dev/core.sh` may also be run by itself.
 
@@ -117,14 +127,14 @@ Wait for `adb shell getprop sys.boot_completed` to return `1` before installing 
 Use a physical Android device for camera hardware, sound, and credential-provider checks.
 Keep captures synthetic and free of recovery keys.
 
-## Push
+## Push on Play
 
 FCM through the Firebase project **Yo Push** (`yo-push-97767`), with one Android client per package:
 `app.justyo.android` (release, Google Play) and `app.justyo.android.dev` (debug). Its `google-services.json` is never
 checked in (`app/google-services.json` is ignored): `play.yml` writes it from the secret `GOOGLE_SERVICES_JSON` of the
 environment `play` and fails without it; on a dev machine copy it from the secret store
 (`cp ~/.config/yo-secrets/google-services.json app/google-services.json`). `app/build.gradle.kts` turns it into the
-Firebase resources of each variant's own client. Without the file (pull-request CI, the device QA build) the app
+Firebase resources of each Play variant's own client. Without the file (pull-request CI, the device QA build) the app
 has no Firebase: it polls in the foreground only and Status says No Token.
 
 The app asks for notifications once when the friend list first shows, then fetches the FCM token and
@@ -134,9 +144,9 @@ data-only messages (`yo=1`, `urgent`, Android priority HIGH/NORMAL) that `YoMess
 
 ## Platform work still needed
 
-Android App Links and passkeys need
-`assetlinks.json` on the relevant domains with the package/signing certificate. `Passkeys.kt` contains a gated
-Credential Manager PRF assertion path and explicit TODO; it cannot secure or restore an account yet. `yo://NAME`
+Android App Links and passkeys need `assetlinks.json` on the relevant domains with each package and signing
+certificate. Both flavors use Android Credential Manager for passkey creation and account recovery with a provider
+that supports PRF. Only Play includes the Google Play services credential bridge. `yo://NAME`
 works; HTTPS invites are App Links (autoVerify) once justyo.co's assetlinks.json names the release certificate. Shares use ACTION_SEND/ACTION_SEND_MULTIPLE
 (up to ten images or one video) in this activity. See PARITY for all remaining gaps and validation limits.
 
@@ -148,12 +158,12 @@ and recovery backup round-trip, and deletes that account in `finally`:
 ```sh
 . app/android/dev/env.sh
 cd app/android
-YO_DEV_SMOKE=1 ./gradlew testDebugUnitTest --tests '*DevHubSmokeTest'
+YO_DEV_SMOKE=1 ./gradlew testPlayDebugUnitTest --tests '*DevHubSmokeTest'
 ```
 
 The normal run skips the live test. No live hub smoke test or account mutation was
-performed in this parity pass. Build heavy tasks sequentially, under `nice -n 10`,
-with four workers/jobs; do not overlap Gradle and a separate cargo build.
+performed in this parity pass. Build heavy tasks sequentially, under `nice -n 19 ionice -c3`,
+with two workers/jobs; do not overlap Gradle and a separate cargo build.
 
 ## Current parity work
 
@@ -191,7 +201,8 @@ For restricted build environments with short-lived temporary directories, disabl
 Kotlin incremental backup cache and use a single-use daemon:
 
 ```sh
-nice -n 10 ./gradlew --no-daemon --max-workers=4 -Pkotlin.incremental=false assembleDebug assembleRelease testDebugUnitTest lint
+nice -n 19 ionice -c3 ./gradlew --no-daemon --max-workers=2 -Pkotlin.incremental=false assemblePlayDebug assembleFlossDebug assembleFlossRelease \
+  testPlayDebugUnitTest testFlossDebugUnitTest lintPlayDebug lintFlossDebug
 ```
 
 
@@ -209,7 +220,7 @@ stays unsigned. The upload key and its passwords are in 1Password (Yo vault, "Yo
 needs a higher `-PyoVersionCode` (minutes since 1970):
 
 ```sh
-nice -n 10 ./gradlew :app:bundleRelease -PyoVersionCode=$(( $(date +%s) / 60 ))
+nice -n 19 ionice -c3 ./gradlew :app:bundlePlayRelease -PyoVersionCode=$(( $(date +%s) / 60 ))
 ```
 
 Generated bindings, native libraries, SDK paths, signing files and machine settings are not checked in.

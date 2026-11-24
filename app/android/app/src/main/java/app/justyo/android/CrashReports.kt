@@ -62,13 +62,21 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
     private val preferences = context.getSharedPreferences("crashes", Context.MODE_PRIVATE)
     private val manager = context.getSystemService(ActivityManager::class.java)
     /**
-     * Sent automatically; Settings › Status › Send Crashes turns it off (reports then stay on this phone) and forgets the
+     * When enabled, sent automatically; Settings › Status › Send Crashes turns it off (reports then stay on this phone) and forgets the
      * install id; turned on again, the next report makes a new one. Reports kept by an older build (`history` rows hold
      * only the report JSON, counted errors only their counts) are sent the same way, by the install id.
      */
     var enabled: Boolean
-        get() = preferences.getBoolean("enabled", true) && !TestLab.isRunning(context)
-        set(value) { preferences.edit { putBoolean("enabled", value) }; if (!value) InstallId.forget(context) }
+        get() = preferences.getBoolean("enabled", !BuildConfig.FLOSS) && !TestLab.isRunning(context)
+        set(value) {
+            val turningOff = !value && (!BuildConfig.FLOSS || enabled)
+            preferences.edit {
+                putBoolean("enabled", value)
+                if (BuildConfig.FLOSS) putBoolean("asked", true)
+            }
+            if (turningOff) InstallId.forget(context)
+        }
+    val asked: Boolean get() = preferences.getBoolean("asked", false)
     @Synchronized fun history(): List<String> = rows().map { it.getString("text") }.reversed()
     private fun rows(): List<JSONObject> = runCatching { val array=JSONArray(preferences.getString("history","[]"));(0 until array.length()).map { array.getJSONObject(it) } }.getOrDefault(emptyList())
     private fun payload(exception: String,termination: String,frames: String) = JSONObject()
@@ -111,6 +119,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
             if (status == 400) {
                 // Hubs predating counted diagnostics accept the count in details.
                 body.remove("count")
+                if (!enabled) return
                 status = upload()
             }
             if (status !in 200..299) return

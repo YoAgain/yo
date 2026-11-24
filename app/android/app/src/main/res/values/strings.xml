@@ -94,6 +94,9 @@
     <string name="ui_no_reply">No reply</string>
     <string name="ui_checking">Checking…</string>
     <string name="ui_anonymous_crash_reports_include_android_version_os_exit_reason_an">Anonymous crash and error reports: code details, build, Android version and model. No account, names, Yos or photos. While off, they stay on this phone.</string>
+    <string name="crash_consent_title">Send crash reports?</string>
+    <string name="crash_consent_message">Anonymous crash and error reports help fix Yo. You can change this in Settings › Status.</string>
+    <string name="crash_consent_decline">Don’t Send</string>
     <string name="ui_send_crashes">Send Crashes</string>
     <string name="ui_send">Send</string>
     <string name="ui_hub_connected">Hub Connected</string>
