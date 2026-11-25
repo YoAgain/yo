@@ -33,13 +33,30 @@ const BODY_DEADLINE: Duration = Duration::from_secs(20);
 
 /// An app older than `YO_MIN_APP` for its platform gets `426` on every request (spec 6.3).
 /// Every answer counted, and its class (4xx, 429, 5xx): counts only, nothing of the request (6.6).
+/// A `429` is also logged, with what the operator needs to find the limit and nothing of who: the method, the route's
+/// first two parts (`/v1/inbox/*`: never a name or id) and the refusal's scope (`device`, `bytes 12`).
 pub(crate) async fn counted(State(hub): Hubs, request: Request, next: Next) -> Response {
+    let (method, route) = (request.method().clone(), route(request.uri().path()));
     let response = next.run(request).await;
     hub.count(crate::Event::Http, 1);
     if let Some(class) = crate::Event::http(response.status().as_u16()) {
         hub.count(class, 1);
     }
-    response
+    if response.status() != StatusCode::TOO_MANY_REQUESTS {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let body = axum::body::to_bytes(body, 256).await.unwrap_or_default();
+    let scope: String = String::from_utf8_lossy(&body).chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect();
+    eprintln!("yo-hub: 429 {method} {route} {scope}");
+    Response::from_parts(parts, axum::body::Body::from(body))
+}
+
+/// A path as a 429's log line shows it: its first two parts, the rest `*`.
+fn route(path: &str) -> String {
+    let mut parts = path.trim_start_matches('/').splitn(3, '/');
+    let shown: Vec<&str> = parts.by_ref().take(2).collect();
+    format!("/{}{}", shown.join("/"), if parts.next().is_some() { "/*" } else { "" })
 }
 
 pub(crate) async fn too_old(State(hub): Hubs, request: Request, next: Next) -> Response {
@@ -369,4 +386,15 @@ pub(crate) fn held<G: Send + 'static>(body: Vec<u8>, guard: G) -> Response {
         chunk
     });
     octets(len, axum::body::Body::from_stream(guarded))
+}
+
+#[cfg(test)]
+mod log_tests {
+    #[test]
+    fn a_429s_route_hides_names_and_ids() {
+        assert_eq!(super::route("/v1/inbox/abc123"), "/v1/inbox/*");
+        assert_eq!(super::route("/v1/username/max"), "/v1/username/*");
+        assert_eq!(super::route("/v1/send"), "/v1/send");
+        assert_eq!(super::route("/"), "/");
+    }
 }
