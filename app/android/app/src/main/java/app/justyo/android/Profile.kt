@@ -3,10 +3,15 @@ package app.justyo.android
 
 import android.app.Activity
 import android.app.KeyguardManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.material.icons.outlined.Info
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -63,14 +69,19 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.Role
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
+import java.io.File
 import kotlinx.coroutines.*
 import uniffi.yo.*
 
@@ -608,37 +619,117 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     )
 }
 
-/** Your code (iOS YourCodePage): Amethyst, "X wants to Yo", the QR code, the link, and sharing it in the bar. */
+/** Your code (iOS YourCodePage): Amethyst, "X wants to Yo", the QR code (a tap shares it as a picture), the link,
+ * and Copy link and Share under it (Signal's QR code & link). */
 @Composable private fun YourCodeSheet(name: String, onClose: () -> Unit) {
     val context = LocalContext.current
-    val link = "https://justyo.co/${Uri.encode(name)}"
+    val link = inviteLink(name)
+    val pictureLabel = stringResource(R.string.code_share_picture)
+    val copyLabel = stringResource(R.string.code_copy_link)
+    val scope = rememberCoroutineScope()
+    var exporting by remember { mutableStateOf(false) }
     FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White,
         // The tall card, like iOS's large detent: people screenshot it, so no friend names show behind it.
         height = 1f) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally,
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween) {
-            Box(Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.ui_your_code), Modifier.align(Alignment.Center), style = MaterialTheme.typography.titleMedium)
-                IconButton(onClick = { shareCode(context, name) }, Modifier.align(Alignment.CenterEnd)) {
-                    Icon(Icons.Default.Share, stringResource(R.string.share_your_code))
-                }
-            }
+            Text(stringResource(R.string.ui_your_code), style = MaterialTheme.typography.titleMedium)
             BasicText(stringResource(R.string.code_wants_to_yo, name), Modifier.padding(top = 12.dp), maxLines = 1, softWrap = false,
                 style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White, textAlign = TextAlign.Center),
                 autoSize = TextAutoSize.StepBased(minFontSize = 9.sp, maxFontSize = 28.sp))
-            Qr(link, Modifier.padding(vertical = 24.dp).size(260.dp))
+            Qr(link, Modifier.padding(vertical = 12.dp).size(260.dp).clickable(
+                enabled = !exporting, onClickLabel = pictureLabel, role = Role.Button,
+            ) {
+                exporting = true
+                scope.launch {
+                    try { shareInviteCard(context, name) }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) { Toast.makeText(context, R.string.generic_failure, Toast.LENGTH_SHORT).show() }
+                    finally { exporting = false }
+                }
+            }, description = pictureLabel)
             BasicText(link, maxLines = 1, softWrap = false, style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White),
                 autoSize = TextAutoSize.StepBased(minFontSize = 6.sp, maxFontSize = 28.sp))
+            val colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
+            Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    // Android (13+, the app's least is 14) shows its own toast for the copy.
+                    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(copyLabel, link))
+                }, modifier = Modifier.weight(1f), colors = colors) {
+                    Icon(Icons.Default.ContentCopy, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.code_copy_link))
+                }
+                Button(onClick = { shareInvite(context, name) }, modifier = Modifier.weight(1f), colors = colors) {
+                    Icon(Icons.Default.Share, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.recovery_share))
+                }
+            }
         }
     }
 }
 
-/** The invite as iOS shares it: "Yo me on Yo: <link>". */
-private fun shareCode(context: Context, name: String) {
-    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-        .putExtra(Intent.EXTRA_TEXT, context.getString(R.string.code_share_text, "https://justyo.co/${Uri.encode(name)}"))
-        .putExtra(Intent.EXTRA_TITLE, context.getString(R.string.code_wants_to_yo, name))
+/** The card as a picture only (iOS InviteCard): no link, no text beside it. */
+private suspend fun shareInviteCard(context: Context, name: String) {
+    val uri = withContext(Dispatchers.IO) {
+        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val file = File(dir, "yo-code.png")
+        // A chooser still reading the previous export gets a complete picture.
+        val temp = File.createTempFile("yo-code-", ".png", dir)
+        try {
+            val bitmap = inviteCard(context, name)
+            try { temp.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
+            finally { bitmap.recycle() }
+            check(temp.renameTo(file))
+        } finally { temp.delete() }
+        FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    }
+    val send = Intent(Intent.ACTION_SEND).setType("image/png").apply {
+        putExtra(Intent.EXTRA_STREAM, uri)
+        clipData = ClipData.newUri(context.contentResolver, null, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
     context.startActivity(Intent.createChooser(send, context.getString(R.string.share_your_code)))
+}
+
+/** iOS ContactCodeCard at 3x: the name, white modules on amethyst with "Yo" in the centre (error correction H), the link. */
+private fun inviteCard(context: Context, name: String): Bitmap {
+    val link = inviteLink(name)
+    val matrix = QRCodeWriter().encode(link, BarcodeFormat.QR_CODE, 0, 0,
+        mapOf(EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.H, EncodeHintType.MARGIN to 4))
+    val bitmap = androidx.core.graphics.createBitmap(1080, 1350)
+    val canvas = Canvas(bitmap)
+    val background = Amethyst.toArgb()
+    canvas.drawColor(background)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = androidx.core.content.res.ResourcesCompat.getFont(context, R.font.montserrat_bold)
+        textAlign = Paint.Align.CENTER
+        color = android.graphics.Color.WHITE
+    }
+    fun drawLine(text: String, size: Float, baseline: Float) {
+        paint.textSize = size
+        paint.textSize *= minOf(1f, 936f / paint.measureText(text))
+        canvas.drawText(text, 540f, baseline, paint)
+    }
+    drawLine(context.getString(R.string.code_wants_to_yo, name), 96f, 180f)
+    val module = 900 / matrix.width
+    val left = (1080 - matrix.width * module) / 2
+    val top = (1350 - matrix.height * module) / 2
+    for (y in 0 until matrix.height) for (x in 0 until matrix.width) {
+        if (matrix[x, y]) {
+            val px = (left + x * module).toFloat()
+            val py = (top + y * module).toFloat()
+            canvas.drawRect(px, py, px + module, py + module, paint)
+        }
+    }
+    paint.color = background
+    canvas.drawRect(474f, 609f, 606f, 741f, paint)
+    paint.color = android.graphics.Color.WHITE
+    paint.textSize = 72f
+    canvas.drawText("Yo", 540f, 675f - (paint.ascent() + paint.descent()) / 2, paint)
+    drawLine(link, 120f, 1260f)
+    return bitmap
 }
 
 @Composable private fun KeyCard(key: String, copied: Boolean? = null, onCopy: () -> Unit = {}) {
@@ -1388,11 +1479,9 @@ fun qrBitmap(text: String,side: Int=512): Bitmap {
     val pixels=IntArray(side*side) { i -> if(matrix[i%side,i/side]) android.graphics.Color.BLACK else android.graphics.Color.WHITE }
     return androidx.core.graphics.createBitmap(side,side).apply { setPixels(pixels,0,side,0,0,side,side) }
 }
-@Composable fun Qr(text: String,modifier: Modifier=Modifier) {
-    val uiResources=androidx.compose.ui.platform.LocalResources.current
-
+@Composable fun Qr(text: String, modifier: Modifier = Modifier, description: String = stringResource(R.string.ui_qr_code)) {
     val bitmap by produceState<Bitmap?>(null,text) { value=withContext(Dispatchers.IO) { qrBitmap(text) } }
-    bitmap?.let { Image(it.asImageBitmap(),uiResources.getString(R.string.ui_qr_code),modifier.background(Color.White).padding(8.dp)) }
+    bitmap?.let { Image(it.asImageBitmap(),description,modifier.background(Color.White).padding(8.dp)) }
 }
 fun recoveryCard(context: Context,name: String,key: String): Bitmap {
     val bitmap=androidx.core.graphics.createBitmap(1170,1320)

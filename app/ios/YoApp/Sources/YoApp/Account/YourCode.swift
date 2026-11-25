@@ -3,7 +3,7 @@ import UIKit
 import UniformTypeIdentifiers
 import YoCore
 
-/// The invite: the link as text, the QR card as the share sheet's picture, drawn only when the sheet asks for it.
+/// Share the invite as a URL so the system offers Copy Link.
 @MainActor
 struct InviteShareLink<Label: View>: View {
   let name: String
@@ -11,8 +11,9 @@ struct InviteShareLink<Label: View>: View {
 
   var body: some View {
     ShareLink(
-      item: "Yo me on Yo: \(Invite.link(for: name).absoluteString)",
-      preview: SharePreview("\(name) wants to Yo", icon: InviteCard(name: name))
+      item: Invite.link(for: name),
+      subject: Text("\(name) wants to Yo"), message: Text("Yo me on Yo"),
+      preview: SharePreview("\(name) wants to Yo")
     ) { label() }
   }
 }
@@ -130,6 +131,8 @@ struct YourCodePage: View {
   let name: String
   @State private var image: UIImage?
   @State private var loaded = false
+  @State private var copyCount = 0
+  @State private var copied = false
 
   init(name: String) {
     self.name = name
@@ -142,7 +145,7 @@ struct YourCodePage: View {
 
   var body: some View {
     GeometryReader { proxy in
-      let side = max(1, min(260, proxy.size.height - 140))
+      let side = max(1, min(260, proxy.size.width - 40, proxy.size.height - 210))
       VStack(spacing: 0) {
         Text("\(name) wants to Yo")
           .font(.custom("Montserrat-Bold", size: 28))
@@ -150,19 +153,21 @@ struct YourCodePage: View {
           .minimumScaleFactor(0.3)
         Spacer(minLength: 8)
         if let code = image {
-          Image(uiImage: code)
-            .resizable()
-            .interpolation(.none)
-            .frame(width: side, height: side)
-            .overlay {
-              Text("Yo")
-                .font(.custom("Montserrat-Bold", size: side / 9))
-                .foregroundStyle(.white)
-                .frame(width: side / 5, height: side / 5)
-                .background(Color.amethyst)
-            }
-            .accessibilityLabel(
-              "Contact QR code for \(name). \(Invite.link(for: name).absoluteString)")
+          ShareLink(item: InviteCard(name: name), preview: SharePreview("\(name) wants to Yo", image: Image(uiImage: code))) {
+            Image(uiImage: code)
+              .resizable()
+              .interpolation(.none)
+              .frame(width: side, height: side)
+              .overlay {
+                Text("Yo")
+                  .font(.custom("Montserrat-Bold", size: side / 9))
+                  .foregroundStyle(.white)
+                  .frame(width: side / 5, height: side / 5)
+                  .background(Color.amethyst)
+              }
+          }
+          .buttonStyle(QRPressStyle())
+          .accessibilityLabel("Share QR code as picture")
         } else if !loaded {
           ProgressView().tint(.white).frame(width: side, height: side)
         } else {
@@ -175,6 +180,23 @@ struct YourCodePage: View {
           .font(.custom("Montserrat-Bold", size: 28))
           .lineLimit(1)
           .minimumScaleFactor(0.1)
+        HStack {
+          Button {
+            let url = Invite.link(for: name)
+            UIPasteboard.general.items = [[UTType.url.identifier: url, UTType.utf8PlainText.identifier: url.absoluteString]]
+            copied = true
+            copyCount += 1
+          } label: {
+            Label(copied ? "Copied" : "Copy Link", systemImage: copied ? "checkmark" : "doc.on.doc")
+              .frame(maxWidth: .infinity)
+          }
+          InviteShareLink(name: name) {
+            Label("Share", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
+          }
+        }
+        .buttonStyle(.glass)
+        .controlSize(.large)
+        .padding(.top, 12)
       }
       .foregroundStyle(.white)
       .padding(.horizontal, 20)
@@ -188,13 +210,11 @@ struct YourCodePage: View {
     .navigationTitle("Your Code")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar(.visible, for: .navigationBar)
-    .toolbar {
-      ToolbarItem(placement: .topBarTrailing) {
-        InviteShareLink(name: name) {
-          Label("Share Your Code", systemImage: "square.and.arrow.up")
-        }
-        .disabled(image == nil)
-      }
+    .sensoryFeedback(.success, trigger: copyCount)
+    .task(id: copyCount) {
+      guard copied else { return }
+      try? await Task.sleep(for: .milliseconds(1500))
+      if !Task.isCancelled { copied = false }
     }
     .tint(.white)
     .task(id: name) {
@@ -202,6 +222,12 @@ struct YourCodePage: View {
       image = card?.code
       loaded = true
     }
+  }
+}
+
+private struct QRPressStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label.scaleEffect(configuration.isPressed ? 0.96 : 1)
   }
 }
 

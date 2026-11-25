@@ -313,7 +313,8 @@
     <string name="clear_verification">Clear Verification</string>
     <string name="code_wants_to_yo">%1$s wants to Yo</string>
     <string name="share_your_code">Share Your Code</string>
-    <string name="code_share_text">Yo me on Yo: %1$s</string>
+    <string name="code_copy_link">Copy link</string>
+    <string name="code_share_picture">Share QR code as picture</string>
     <string name="record_video">Record Video</string>
     <string name="stop_and_send_video">Stop and Send Video</string>
     <string name="signin_as">Sign in as %1$s</string>

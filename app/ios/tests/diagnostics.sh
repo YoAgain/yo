@@ -51,13 +51,14 @@ func eventually(_ check: () -> Bool) {
   preconditionFailure("queue did not reach expected state")
 }
 // Expected: the update asked for, a limit. Problems: a refused signature, the hub failing, a broken TLS handshake.
-precondition(Noise.status(426, method: "GET", route: "/v1/inbox") && Noise.status(429, method: "GET", route: "/v1/inbox"))
-precondition(!Noise.status(502, method: "GET", route: "/v1/inbox"))
-precondition(!Noise.status(401, method: "GET", route: "/v1/inbox"))
+precondition(Noise.status(426, method: "GET", route: "/v1/inbox", signed: true) && Noise.status(429, method: "GET", route: "/v1/inbox", signed: true))
+precondition(!Noise.status(502, method: "GET", route: "/v1/inbox", signed: true))
+precondition(Noise.status(401, method: "GET", route: "/v1/inbox", signed: true))
+precondition(!Noise.status(401, method: "GET", route: "/v1/inbox", signed: false))
 precondition(!Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed, badDates: false))
-precondition(Noise.status(404, method: "POST", route: "/v1/lookup"))
-precondition(!Noise.status(404, method: "GET", route: "/v1/support"))
-precondition(!Noise.status(500, method: "GET", route: "/v1/inbox"))
+precondition(Noise.status(404, method: "POST", route: "/v1/lookup", signed: true))
+precondition(!Noise.status(404, method: "GET", route: "/v1/support", signed: true))
+precondition(!Noise.status(500, method: "GET", route: "/v1/inbox", signed: true))
 precondition(Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, badDates: false))
 precondition(!Noise.urlError(domain: "other", code: NSURLErrorTimedOut, badDates: true))
 precondition(Noise.fallback("network") && !Noise.fallback("decrypt") && !Noise.fallback("hubStatus/503"))
@@ -74,7 +75,8 @@ defaults.set(true, forKey: "crashReports.on")
 for _ in 0..<12 {
   Diagnostics.record(NSError(domain: "test", code: 17, userInfo: [NSLocalizedDescriptionKey: "PRIVATE_SENTINEL", "token": "PRIVATE_SENTINEL"]))
 }
-Diagnostics.record(YoError.Refused(status: 429))
+Diagnostics.recordUnreported(YoError.Refused(status: 429))
+Diagnostics.recordUnreported(YoError.Refused(status: 401))
 eventually { Transport.state.withLock { $0.bodies.count } == 14 }
 for body in Transport.state.withLock({ $0.bodies }) {
   precondition(!String(decoding: body, as: UTF8.self).contains("PRIVATE_SENTINEL"))
@@ -83,7 +85,7 @@ for body in Transport.state.withLock({ $0.bodies }) {
   precondition(payload["app"] == "ios/test")
 }
 let last = try! JSONSerialization.jsonObject(with: Transport.state.withLock { $0.bodies.last! }) as! [String: String]
-precondition(last["code"] == "Refused/429")
+precondition(last["code"] == "Refused/401")
 // Cases by name, not their NSError number ("9" was Replaced); a session's libsignal text never leaves.
 precondition(Diagnostics.name(.Replaced) == "Replaced" && Diagnostics.name(.State) == "State")
 precondition(Diagnostics.name(.Protocol(message: "protocol: storage version")) == "Protocol/protocol: storage version")

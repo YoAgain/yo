@@ -9,11 +9,13 @@ import YoCore
 
 /// The one place that decides which network failures and hub answers are expected, never reported as problems: the
 /// phone offline or timing out, a request cancelled, the phone's clock, the update the hub asks for (426), a limit,
-/// the device replaced, and answers the core takes as protocol outcomes. A problem, reported: a refused signature
-/// (401), the hub failing (5xx), a broken TLS handshake (-1200), a storage failure, a message that does not decrypt.
+/// the device replaced, a signed request's first 401 (the core signs again and retries), and answers the core takes as
+/// protocol outcomes. A problem, reported: a 401 left after that retry, the hub failing (5xx), a broken TLS handshake
+/// (-1200), a storage failure, a message that does not decrypt.
 /// Android mirrors it (CrashReports.noise).
 enum Noise {
-  static func status(_ status: UInt16, method: String, route: String) -> Bool {
+  static func status(_ status: UInt16, method: String, route: String, signed: Bool) -> Bool {
+    if signed && status == 401 { return true }
     // A 410: this device was replaced, which the app shows. 426: the app asks for the update. A limit, or no room
     // now (inbox, blobs or disk): try later.
     if [410, 426, 429, 507].contains(status) { return true }
@@ -74,6 +76,8 @@ enum Diagnostics {
     if error is Keychain.Failure { return }
     if let yo = error as? YoError {
       switch yo {
+      // The 401 left after the core signed again and retried: a problem (Android reports it the same way).
+      case .Refused(401): break
       case .Network, .Refused: return
       case .Replaced:
         // Another iPhone signed in to the account: every caller signs out and shows it; no change of the app helps.

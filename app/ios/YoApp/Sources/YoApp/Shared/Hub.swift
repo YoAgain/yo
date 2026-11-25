@@ -269,7 +269,7 @@ final class HubTransport: HttpTransport {
     }
     if attestation { return answer.result }
     let status = answer.result.status
-    if !diagnosticUpload, status >= 400, !Noise.status(status, method: method, route: route) {
+    if !diagnosticUpload, status >= 400, !Noise.status(status, method: method, route: route, signed: signed) {
       Diagnostics.record(NSError(domain: "HTTP", code: Int(status)), place: codePlace)
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500,
