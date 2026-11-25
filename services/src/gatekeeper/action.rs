@@ -31,6 +31,8 @@ pub enum Action {
     Drawn(Vec<u8>),
     /// `{"send": "picture", "file": NAME}`: one from the folder of its name.
     File(String),
+    /// `{"send": "picture", "url": URL}`: one the other side named, fetched by the executor.
+    Fetched(String),
     /// `{"send": "probe"}`: the round-trip probe, back.
     Probe,
     /// `{"wait_ms": N}`
@@ -53,6 +55,7 @@ struct Written {
     media: Option<String>,
     jpeg: Option<String>,
     file: Option<String>,
+    url: Option<String>,
     wait_ms: Option<u64>,
     remind: Option<i64>,
     forget: Option<bool>,
@@ -104,7 +107,10 @@ pub struct Asked<'a> {
 
 impl Action {
     fn sends(&self) -> bool {
-        matches!(self, Action::Yo | Action::Back | Action::Drawn(_) | Action::File(_) | Action::Probe)
+        matches!(
+            self,
+            Action::Yo | Action::Back | Action::Drawn(_) | Action::File(_) | Action::Fetched(_) | Action::Probe
+        )
     }
 }
 
@@ -130,7 +136,14 @@ pub fn parse(answer: &[u8], asked: &Asked) -> Result<Vec<Action>, &'static str> 
 
 fn one(written: Written, asked: &Asked) -> Result<Action, &'static str> {
     let may_remember = asked.remember_user && !asked.group;
-    let Written { send, media, jpeg, file, wait_ms, remind, forget, reply, status, call, body } = written;
+    let Written { send, media, jpeg, file, url, wait_ms, remind, forget, reply, status, call, body } = written;
+    if let Some(url) = url {
+        let alone = media.is_none() && jpeg.is_none() && file.is_none() && wait_ms.is_none() && remind.is_none();
+        let alone =
+            alone && forget.is_none() && reply.is_none() && status.is_none() && call.is_none() && body.is_none();
+        let may = send.as_deref() == Some("picture") && alone && asked.kind == "webhook" && asked.connected;
+        return (may && url.len() <= 2048).then_some(Action::Fetched(url)).ok_or("not a picture it may fetch");
+    }
     let nothing = send.is_none()
         && media.is_none()
         && jpeg.is_none()
@@ -252,6 +265,15 @@ mod tests {
         ] {
             assert!(all(bad, &Asked { remember_user: true, ..connected("webhook") }).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_picture_is_fetched_for_a_call_alone() {
+        let answer = r#"[{"send": "picture", "url": "https://a.com/x.jpg"}]"#;
+        let connected = |kind| Asked { connected: true, ..asked(kind) };
+        assert_eq!(all(answer, &connected("webhook")), Ok(vec![Action::Fetched("https://a.com/x.jpg".into())]));
+        assert!(all(answer, &connected("yo")).is_err() && all(answer, &asked("webhook")).is_err());
+        assert!(all(r#"[{"send": "yo", "url": "https://a.com/x.jpg"}]"#, &connected("webhook")).is_err());
     }
 
     #[test]

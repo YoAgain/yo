@@ -179,7 +179,7 @@ impl Executor {
             Ok(reply) => reply.ok_or(500),
             Err(failure) => {
                 count(&self.counts.failed);
-                Err(if failure.retryable { 503 } else { 500 })
+                Err(if failure.retryable { 503 } else { 400 })
             }
         }
     }
@@ -330,6 +330,10 @@ impl Executor {
             Action::Back => self.yo.send_media(&job.to, media()?)?,
             Action::Drawn(jpeg) => self.send_picture(&job.to, jpeg)?,
             Action::File(name) => self.send_picture(&job.to, &self.own_picture(name)?)?,
+            Action::Fetched(url) => {
+                let jpeg = crate::picture::fetch(url).ok_or(Failure { code: 1, retryable: false })?;
+                self.send_picture(&job.to, &jpeg)?;
+            }
             Action::Probe => return self.yo.echo_probe(&job.to, media()?),
             _ => self.yo.send(&job.to)?,
         }

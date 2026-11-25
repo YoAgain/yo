@@ -20,6 +20,8 @@ A script is taken as hostile, reviewed or not.
 - Each bot's scripts have their own memory and processes; together at most half a processor, so the hub is undisturbed.
 - HTTP is read by the entrance, a process and user of its own without account, keys or book: one taken over sees the
   calls that pass, and their secrets, and nothing else.
+- A picture a call names is fetched by the executor: from a public https name, its addresses checked and pinned, no
+  redirect, a JPEG of at most 512 KB, 10 s.
 - A connection is made by the user's own encrypted message; its code is good for 10 minutes, once, for the partner alone.
   Codes and keys are kept as SHA-256; the script sees neither. A call reaches the user of its key and nobody else.
 - Of a connected user, what they sent the service directly (when, which kind) is kept 7 days, for the other side to ask for.

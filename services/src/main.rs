@@ -18,6 +18,7 @@ mod entrance;
 mod executor;
 mod gatekeeper;
 mod partner;
+mod picture;
 mod script;
 mod yo;
 
