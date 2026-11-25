@@ -47,6 +47,18 @@ impl Client {
         self.profile_keys()
     }
 
+    /// Declares this account a bot, or no bot any more, for everyone who looks it up.
+    pub fn set_bot(&mut self, bot: bool) -> Result<()> {
+        expect(self.signed("PUT", api::BOT, &[u8::from(bot)])?, status::NO_CONTENT)?;
+        self.state.bot = bot;
+        self.persist()
+    }
+
+    /// Whether this device declared the account a bot.
+    pub fn is_bot(&self) -> bool {
+        self.state.bot
+    }
+
     pub fn requests_open(&self) -> bool {
         self.state.requests_open
     }
@@ -115,6 +127,7 @@ impl Client {
                 gone: c.gone,
                 outdated: c.outdated_at > 0,
                 accepted: c.accepted,
+                bot: self.state.bots.contains(user),
             })
             .collect()
     }
@@ -151,7 +164,7 @@ impl Client {
         if self.is_me(&handle) {
             return Err(Error::Protocol("oneself"));
         }
-        let body = encode(&api::Lookup { handle, flags: api::LOOKUP_USERNAME, except: Vec::new() });
+        let body = encode(&api::Lookup { handle, flags: api::LOOKUP_USERNAME | api::LOOKUP_BOT, except: Vec::new() });
         let (headers, _) = self.sign("POST", api::LOOKUP, &body);
         let nonce = self.hub_nonce();
         // The time signed saved before the request leaves: another process of this device signs later.

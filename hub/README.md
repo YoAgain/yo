@@ -75,7 +75,8 @@ registration on, written when they change) and answers `426` to every request of
 | POST | `/v1/register` | username + certificate + prekeys → device registered, user id (spec 6.4) | none, account-signed proof over username, device id, device key, auth key | 10/h (IP) | name, account key, device keys, push token |
 | PUT | `/v1/backup` | store the account's backup record with its doors' auth keys | signed | signed | the record (opaque, its sealed part padded to 1, 4, 16 or 60 KiB), its locator, the doors' public auth keys |
 | PUT | `/v1/prekeys` | add one-time prekeys, replace the signed and last resort (spec 6.5) | signed | signed; ≤ 32 per kind per upload, ≤ 64 held | – |
-| POST | `/v1/lookup` | handle → user id, account key, device keys, a bundle per device if asked, username if asked; signed by the hub key when asked with `Yo-Nonce` (spec 6.10) | signed | 50/day with prekeys, 1000/day without (device) | who looks up whom |
+| POST | `/v1/lookup` | handle → user id, account key, device keys, a bundle per device if asked, username and whether it is a bot if asked; signed by the hub key when asked with `Yo-Nonce` (spec 6.10) | signed | 50/day with prekeys, 1000/day without (device) | who looks up whom |
+| PUT | `/v1/bot` | declare the account a bot (one byte, 1) or not (0); told to whoever looks it up | signed | signed | that it is a bot |
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
 | GET | `/v1/group-auth` | the day's group auth credential (spec 4.9) | signed | signed | that the device asked |
 | GET | `/v1/attest/challenge` | challenge, or empty 204 when off | signed | 20/h (device) when on | that the device asked |

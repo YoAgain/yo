@@ -44,7 +44,7 @@ mod compact {
         }
     }
 }
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
 use zeroize::Zeroize;
@@ -362,6 +362,12 @@ pub struct State {
     /// Yos received (by the app or the notification service) since the app last showed them: the badge.
     #[serde(default)]
     pub unread: u32,
+    /// Users (hex) that declare themselves bots, as the hub said when they were last looked up.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub bots: BTreeSet<String>,
+    /// This account declared itself one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bot: bool,
 }
 
 impl Drop for State {

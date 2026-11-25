@@ -39,6 +39,8 @@ pub const STORAGE: &str = "/v1/storage";
 pub const BLOBS: &str = "/v1/blobs";
 /// `PUT`, signed: the check of the account's access key and whether strangers may send requests (spec 4.10).
 pub const ACCESS_KEY: &str = "/v1/access-key";
+/// `PUT`, signed, one byte: whether the account is a bot (1) or not (0), for everyone who looks it up.
+pub const BOT: &str = "/v1/bot";
 /// `GET`, signed: a sender certificate for the signing device (spec 6.1), libsignal's `SenderCertificate`.
 pub const CERTIFICATE: &str = "/v1/certificate";
 /// The public key of the hub's sender-certificate trust root, 32 bytes (spec 6.1): for tools; apps pin their own copy.
@@ -259,6 +261,8 @@ pub struct Bundle {
 pub const LOOKUP_PREKEYS: u8 = 1;
 /// `Lookup::flags`, bit 1: answer `LookupNamed`, with the user's username, instead of `LookupResult`.
 pub const LOOKUP_USERNAME: u8 = 2;
+/// `Lookup::flags`, bit 2, with `LOOKUP_USERNAME`: answer `LookupBot`.
+pub const LOOKUP_BOT: u8 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Lookup {
@@ -291,6 +295,20 @@ pub struct LookupResult {
 pub struct LookupNamed {
     pub found: LookupResult,
     pub username: Option<VLBytes>,
+}
+
+/// The answer to a lookup with `LOOKUP_BOT` too: whether the account declares itself a bot.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct LookupBot {
+    pub named: LookupNamed,
+    pub bot: u8,
+}
+
+impl LookupBot {
+    /// Also of a hub that does not know bots yet.
+    pub fn read(answer: &[u8]) -> Result<LookupBot, crate::Error> {
+        crate::decode(answer).or_else(|_| Ok(LookupBot { named: crate::decode(answer)?, bot: 0 }))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]

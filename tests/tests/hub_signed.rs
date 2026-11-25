@@ -121,9 +121,9 @@ impl Transport for DuplicateNumber {
         }
         let mut response = self.http.request(method, path, headers, body)?;
         if path == api::LOOKUP && response.status == 200 {
-            let mut named: api::LookupNamed = yo_wire::decode(&response.body).map_err(|e| e.to_string())?;
-            named.found.devices.insert(0, other);
-            response.body = yo_wire::encode(&named);
+            let mut answer: api::LookupBot = yo_wire::decode(&response.body).map_err(|e| e.to_string())?;
+            answer.named.found.devices.insert(0, other);
+            response.body = yo_wire::encode(&answer);
         }
         Ok(response)
     }

@@ -1502,8 +1502,8 @@ fn pick_peer(w: &World, a: &Acct, rng: &mut Rng) -> Option<Entry> {
 fn whois(w: &World, a: &mut Acct, peer: &Entry) -> bool {
     let Some(client) = a.client.as_mut() else { return false };
     match client.whois_begin(&peer.name).and_then(|whois| whois.send()) {
-        Ok((user, _)) if user == peer.user => true,
-        Ok((user, _)) => {
+        Ok((user, ..)) if user == peer.user => true,
+        Ok((user, ..)) => {
             if w.idx_of(&user).is_none() {
                 w.stats.violation(format!("whois {} answered {user}, not {}", peer.name, peer.user));
             }

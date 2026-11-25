@@ -695,8 +695,8 @@ fn whois(w: &World, a: &mut Acct, peer: &Entry) -> bool {
     let Some(client) = a.client.as_mut() else { return false };
     let asked = client.whois_begin(&peer.name).and_then(|whois| whois.send());
     match asked {
-        Ok((user, _)) if user == peer.user => true,
-        Ok((user, _)) => {
+        Ok((user, ..)) if user == peer.user => true,
+        Ok((user, ..)) => {
             // Taken again meanwhile (the directory lags a moment behind a re-registration): not a finding.
             let now = idx_of(w, &user).is_some();
             if !now {

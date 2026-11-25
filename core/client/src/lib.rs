@@ -3,7 +3,7 @@
 
 mod aead;
 pub mod backup;
-mod connect;
+pub mod connect;
 mod contacts;
 #[cfg(test)]
 mod device_tests;
@@ -155,6 +155,8 @@ pub enum Event {
     /// The hub lists a device more for `user` (this account's own id: a device of this account, as Signal tells of a
     /// newly linked one), not one in place of another. For the app's log.
     DeviceAdded { user: String },
+    /// A service (user id) answered: `connections()` has it.
+    ConnectionChanged { user: String },
 }
 
 /// What waits in the outbox for one recipient in one conversation (`Client::outbox_view`).
@@ -216,6 +218,8 @@ pub struct ContactInfo {
     pub outdated: bool,
     /// A contact said yes to, or one this account added or wrote to; else a request (spec 4.10).
     pub accepted: bool,
+    /// Declares itself a bot, as the hub said last.
+    pub bot: bool,
 }
 
 /// A session with one device of a contact, for the app to show (spec 4).
@@ -288,8 +292,8 @@ pub struct Whois {
 }
 
 impl Whois {
-    /// The user id and the username as its owner writes it; `NotOnYo`: nobody by that name.
-    pub fn send(&self) -> Result<(String, Option<String>)> {
+    /// The user id, the username as its owner writes it and whether it is a bot; `NotOnYo`: nobody by that name.
+    pub fn send(&self) -> Result<(String, Option<String>, bool)> {
         let response =
             self.transport.request("POST", api::LOOKUP, &self.headers, &self.body).map_err(Error::Network)?;
         match response.status {
@@ -298,12 +302,12 @@ impl Whois {
             _ => return Err(refused(&response)),
         }
         let answer = hub_signed(&self.hub_keys, self.nonce.as_ref(), api::LOOKUP, &self.body, &response.body)?;
-        let named: api::LookupNamed = decode(answer)?;
+        let api::LookupBot { named, bot } = api::LookupBot::read(answer)?;
         let user = hex(&named.found.user_id);
         if user == self.me {
             return Err(Error::Protocol("oneself"));
         }
-        Ok((user, spelled(named.username)))
+        Ok((user, spelled(named.username), bot == 1))
     }
 }
 
@@ -575,7 +579,7 @@ pub struct Client {
     /// Once a signed inbox response says this device is revoked, no further sends leave.
     replaced: std::cell::Cell<bool>,
     probe_requests: Vec<(String, [u8; 32])>,
-    connect_requests: Vec<(String, [u8; 32])>,
+    connect_requests: Vec<connect::ConnectRequest>,
     /// The hub's public keys the app ships (spec 6.10): answers that hand out keys must be signed by one of them.
     hub_keys: Vec<Key>,
     /// Sender-certificate trust roots (spec 6.1): none, nothing sealed opens or is sent.
@@ -711,7 +715,7 @@ fn shown(content: &Content) -> bool {
             | Content::ProfileKey(_)
             | Content::Probe(_)
             | Content::Sync(_)
-            | Content::Connect(_)
+            | Content::Connect { .. }
             | Content::ProbeReply(_)
             | Content::Unknown(_)
     )

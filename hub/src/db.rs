@@ -89,6 +89,8 @@ pub struct Found {
     pub bundles: Vec<api::Bundle>,
     /// The user's username as its owner writes it ("YoGPT"), if it has one.
     pub username: Option<String>,
+    /// It declares itself a bot.
+    pub bot: bool,
 }
 
 /// A username nobody may claim (spec 3.3), as the operator's list writes it.
@@ -783,6 +785,13 @@ impl Db {
 
     /// A user's profile key check (spec 4.10), at once: the one before does no more.
     /// Written as `device`, which must still be there (a replaced one is `410`).
+    pub fn set_bot(&self, device: &DeviceId, bot: bool) -> rusqlite::Result<Write<()>> {
+        self.as_device(device, |tx, user| {
+            tx.execute("UPDATE users SET bot = ?2 WHERE id = ?1", params![user, bot])?;
+            Ok(Write::Done(()))
+        })
+    }
+
     pub fn set_access_key(
         &self,
         device: &DeviceId,
@@ -895,7 +904,8 @@ impl Db {
                 }
             }
             let username = username_of(tx, &user)?;
-            Ok(Some(Found { user_id: user, account_key, devices: roster_devices, bundles, username }))
+            let bot = tx.query_row("SELECT bot FROM users WHERE id = ?1", [&user], |row| row.get(0))?;
+            Ok(Some(Found { user_id: user, account_key, devices: roster_devices, bundles, username, bot }))
         })
     }
 

@@ -33,8 +33,15 @@ pub const TYPE_PROFILE_KEY: u16 = 10;
 pub const TYPE_PROBE: u16 = 11;
 pub const TYPE_PROBE_REPLY: u16 = 12;
 pub const TYPE_SYNC: u16 = 13;
-/// Silent: the sender allowed a service to be connected with another one; a random 32-byte code of that connection.
+/// Silent, between a user and a service: a connection with another one, `uint8 kind` and its 32-byte code.
 pub const TYPE_CONNECT: u16 = 14;
+/// To the service: the code of a connect link the user allowed; and a connection to end, with a fresh code.
+pub const CONNECT: u8 = 0;
+pub const CONNECT_END: u8 = 1;
+/// From the service, with the code it answers: connected, refused, ended.
+pub const CONNECTED: u8 = 2;
+pub const CONNECT_REFUSED: u8 = 3;
+pub const CONNECT_ENDED: u8 = 4;
 
 /// A read watermark (Signal's `SyncMessage.Read`): one direct or group thread, read through the message sent then.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserializeBytes, TlsSize)]
@@ -165,8 +172,11 @@ pub enum Content {
     Probe([u8; 32]),
     ProbeReply([u8; 32]),
     Sync(SyncMessage),
-    /// To a service: the sender connects it, with this code. Never shown.
-    Connect([u8; 32]),
+    /// A connection of a service with another one (`CONNECT_…`) and its code. Never shown.
+    Connect {
+        kind: u8,
+        code: [u8; 32],
+    },
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -315,7 +325,7 @@ impl Message {
             Content::Profile { name } => (TYPE_PROFILE, text(name, MAX_NAME_LEN)?),
             Content::Probe(token) => (TYPE_PROBE, token.to_vec()),
             Content::ProbeReply(token) => (TYPE_PROBE_REPLY, token.to_vec()),
-            Content::Connect(code) => (TYPE_CONNECT, code.to_vec()),
+            Content::Connect { kind, code } => (TYPE_CONNECT, [&[*kind][..], code].concat()),
             Content::Sync(seen) => (TYPE_SYNC, seen.body()?),
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
             Content::Group(tag) => (TYPE_GROUP, crate::encode(tag)),
@@ -362,7 +372,10 @@ impl Message {
             TYPE_RECEIPT => Content::Receipt,
             TYPE_PROBE => Content::Probe(body.try_into().map_err(|_| Error::Format)?),
             TYPE_PROBE_REPLY => Content::ProbeReply(body.try_into().map_err(|_| Error::Format)?),
-            TYPE_CONNECT => Content::Connect(body.try_into().map_err(|_| Error::Format)?),
+            TYPE_CONNECT => {
+                let (kind, code) = body.split_first().ok_or(Error::Format)?;
+                Content::Connect { kind: *kind, code: code.try_into().map_err(|_| Error::Format)? }
+            }
             TYPE_GROUP => Content::Group(crate::decode::<GroupTag>(body)?),
             TYPE_PROFILE_KEY => Content::ProfileKey(crate::decode::<ProfileKeyBody>(body)?.key),
             other => Content::Unknown(other),

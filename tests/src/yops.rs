@@ -88,6 +88,8 @@ impl Device {
             group_held: Vec::new(),
             deferred: Default::default(),
             unread: 0,
+            bots: Default::default(),
+            bot: false,
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id).unwrap();
         Device { account: *account, user, state, records }

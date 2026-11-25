@@ -66,7 +66,7 @@ fn write_fuzz_corpus() {
         bundles: vec![],
     };
     let named = api::LookupNamed { found: lookup, username: Some(pa.as_bytes().to_vec().into()) };
-    write("seeds", "core_lookup.bin", &yo_wire::encode(&named));
+    write("seeds", "core_lookup.bin", &yo_wire::encode(&api::LookupBot { named, bot: 0 }));
     // A's first message (with its profile), then more.
     a.send_yo(&pb).unwrap();
     a.send_yo(&pb).unwrap();

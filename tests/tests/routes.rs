@@ -87,6 +87,7 @@ fn signed_routes(me: &str) -> Vec<(&'static str, String, Vec<u8>)> {
         ("POST", api::LOOKUP.into(), lookup_body(Handle::user(&user_id(me)), 0, Vec::new())),
         ("PUT", api::USERNAME.into(), encode(&api::SetUsername { username: None })),
         ("PUT", api::PUSH.into(), encode(&api::Push::none())),
+        ("PUT", api::BOT.into(), vec![1]),
         ("GET", api::inbox_path(0), Vec::new()),
         ("POST", api::INBOX_ACK.into(), encode(&api::Ack { ids: vec![1] })),
         ("PUT", api::BACKUP.into(), encode(&backup_record(Vec::new()))),

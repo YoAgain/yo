@@ -159,6 +159,21 @@ impl GroupEntry {
 /// The longest name kept for a friend, in bytes.
 pub const MAX_FRIEND_NAME: usize = 64;
 
+/// A service's connection (`Client::connections`): the codes (base64url) are of what it has not answered yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connection {
+    #[serde(rename = "n")]
+    pub name: String,
+    #[serde(default, rename = "c")]
+    pub connected: bool,
+    #[serde(default, rename = "w", skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+    #[serde(default, rename = "x")]
+    pub refused: bool,
+    #[serde(default, rename = "e", skip_serializing_if = "Option::is_none")]
+    pub ending: Option<String>,
+}
+
 /// What is sealed: JSON, so a later version adds fields that an older one keeps (`extra`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Storage {
@@ -189,6 +204,9 @@ pub struct Storage {
     /// The groups this account is or was in, by group id (hex), as Signal's storage keeps them.
     #[serde(default, rename = "g", skip_serializing_if = "BTreeMap::is_empty")]
     pub groups: BTreeMap<String, GroupEntry>,
+    /// Services connected with another one, by user id (hex).
+    #[serde(default, rename = "s", skip_serializing_if = "BTreeMap::is_empty")]
+    pub connections: BTreeMap<String, Field<Connection>>,
     /// What a later version keeps here, carried along unread.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -210,6 +228,9 @@ impl Storage {
         }
         for (id, group) in &other.groups {
             self.groups.entry(id.clone()).or_default().merge(group);
+        }
+        for (user, connection) in &other.connections {
+            self.connections.entry(user.clone()).or_default().merge(connection);
         }
         merge_extra(&mut self.extra, &other.extra);
         self.version = self.version.max(other.version);
@@ -399,6 +420,15 @@ impl Client {
             friend.blocked.set(blocked, crate::wall_ms());
             self.state.storage_dirty = true;
         }
+    }
+
+    /// A service's connection, changed; saved by the caller.
+    pub(crate) fn set_connection(&mut self, user: &str, change: impl FnOnce(&mut Connection)) {
+        let field = self.state.storage.connections.entry(user.to_owned()).or_default();
+        let mut connection = field.value.clone();
+        change(&mut connection);
+        field.set(connection, crate::wall_ms().max(field.at + 1));
+        self.state.storage_dirty = true;
     }
 
     /// The profile key into the storage, timed after the one there whatever the clock says, so a later key wins.

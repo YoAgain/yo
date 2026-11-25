@@ -188,10 +188,15 @@ pub(crate) async fn post_lookup(
         devices: found.devices.into_iter().take(MAX_DEVICES).collect(),
         bundles: found.bundles.into_iter().take(MAX_DEVICES).collect(),
     };
-    let answer = if request.flags & api::LOOKUP_USERNAME == 0 {
-        encode(&result)
-    } else {
-        encode(&api::LookupNamed { found: result, username: found.username.map(|name| name.into_bytes().into()) })
+    let named = |result| api::LookupNamed {
+        found: result,
+        username: found.username.clone().map(|name| name.into_bytes().into()),
+    };
+    let asked = |flag: u8| request.flags & flag != 0;
+    let answer = match (asked(api::LOOKUP_USERNAME), asked(api::LOOKUP_BOT)) {
+        (false, _) => encode(&result),
+        (true, false) => encode(&named(result)),
+        (true, true) => encode(&api::LookupBot { named: named(result), bot: found.bot.into() }),
     };
     Ok(hub.signed_answer(&headers, uri.path(), &body, answer))
 }
@@ -213,6 +218,17 @@ pub(crate) async fn put_push(State(hub): Hubs, Auth(device, body): Auth) -> Res<
         return Err(bad());
     }
     hub.db.set_push(&device.device_id, request.platform, request.token.as_slice())?.done()?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/bot` (spec 6.3): whether the account is a bot, for everyone who looks it up.
+pub(crate) async fn put_bot(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
+    let bot = match body[..] {
+        [0] => false,
+        [1] => true,
+        _ => return Err(bad()),
+    };
+    hub.db.set_bot(&device.device_id, bot)?.done()?;
     Ok(StatusCode::NO_CONTENT)
 }
 

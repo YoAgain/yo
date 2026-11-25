@@ -3,9 +3,11 @@
 use crate::{jpeg, Failure};
 use serde_json::{json, Value};
 use std::sync::{Mutex, MutexGuard};
+use yo_core::connect::ConnectRequest;
 use yo_core::media::{self, Media};
 use yo_core::shared::{self, Locked, Target, GROUP_PREFIX as GROUP};
 use yo_core::{Client, Content, Event};
+use yo_wire::content::{CONNECT, CONNECTED, CONNECT_ENDED, CONNECT_REFUSED};
 
 /// The largest photo read for `send --photo`, as a reply picture may be.
 const MAX_PHOTO: usize = 512 * 1024;
@@ -42,7 +44,9 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         ["status"] => whoami(context, true),
         ["friends"] => Ok(friends(&context.client())),
         ["contacts"] => Ok(contacts(&context.client())),
-        ["whois", name] => whois(context, name).map(|(user, username)| json!({ "user": user, "username": username })),
+        ["whois", name] => {
+            whois(context, name).map(|(user, username, bot)| json!({ "user": user, "username": username, "bot": bot }))
+        }
         ["add", name] => add(context, name),
         ["send", to, rest @ ..] => send(context, to, rest),
         ["requests"] => Ok(json!({ "requests_open": context.client().requests_open() })),
@@ -85,6 +89,31 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             let code = code.ok_or_else(|| Failure::usage("connect SERVICE CODE: the code of its connect link"))?;
             done(context, |c| c.connect_service(service, code))
         }
+        ["connections"] => Ok(connections(&context.client())),
+        ["disconnect", service] => {
+            let user = context
+                .client()
+                .connections()
+                .into_iter()
+                .find(|c| c.user == *service || c.name.eq_ignore_ascii_case(service));
+            let user = user.ok_or_else(|| Failure::new("not connected"))?.user;
+            done(context, |c| c.disconnect_service(&user))
+        }
+        ["service-answer", user, kind, code] => {
+            let kind = match *kind {
+                "connected" => CONNECTED,
+                "refused" => CONNECT_REFUSED,
+                "ended" => CONNECT_ENDED,
+                _ => return Err(Failure::usage("service-answer USER connected|refused|ended CODE")),
+            };
+            let code = yo_wire::unb64(code).ok().and_then(|c| c.try_into().ok());
+            let code = code.ok_or_else(|| Failure::usage("service-answer: a code of 32 bytes"))?;
+            done(context, |c| c.answer_connection(user, kind, code))
+        }
+        ["bot", switch @ ("on" | "off")] => {
+            context.client().set_bot(*switch == "on")?;
+            Ok(json!({ "bot": *switch == "on" }))
+        }
         ["probe", rest @ ..] => {
             let timeout_ms = match rest {
                 [] => 10_000,
@@ -111,6 +140,7 @@ pub fn whoami(context: &Context, status: bool) -> Outcome {
         "user": client.user_id(),
         "username": client.username(),
         "device": client.device_id(),
+        "bot": client.is_bot(),
         "hub": context.config.hub,
     });
     if status {
@@ -135,11 +165,25 @@ fn friends(client: &Client) -> Value {
     json!(list)
 }
 
+fn connections(client: &Client) -> Value {
+    let list: Vec<Value> = client
+        .connections()
+        .into_iter()
+        .map(|c| {
+            json!({
+                "user": c.user, "name": c.name, "connected": c.connected, "waiting": c.waiting, "refused": c.refused,
+                "ending": c.ending,
+            })
+        })
+        .collect();
+    json!(list)
+}
+
 fn contacts(client: &Client) -> Value {
     let list: Vec<Value> = client
         .contacts()
         .into_iter()
-        .map(|c| json!({ "user": c.user, "handles": c.handles, "name": c.name, "blocked": c.blocked, "gone": c.gone }))
+        .map(|c| json!({ "user": c.user, "handles": c.handles, "name": c.name, "blocked": c.blocked, "gone": c.gone, "bot": c.bot }))
         .collect();
     json!(list)
 }
@@ -154,7 +198,7 @@ fn groups(client: &Client) -> Value {
 }
 
 /// Who a name is: signed under the client, asked without it.
-fn whois(context: &Context, name: &str) -> Result<(String, Option<String>), Failure> {
+fn whois(context: &Context, name: &str) -> Result<(String, Option<String>, bool), Failure> {
     let lookup = context.client().whois_begin(name)?;
     Ok(lookup.send()?)
 }
@@ -166,7 +210,7 @@ fn users(context: &Context, names: &[&str]) -> Result<Vec<String>, Failure> {
 
 fn add(context: &Context, name: &str) -> Outcome {
     let name = name.trim_start_matches('@');
-    let (user, username) = whois(context, name)?;
+    let (user, username, _) = whois(context, name)?;
     let mut client = context.client();
     client.whois_end(name, &user, username.clone())?;
     client.set_friend(&user, username.clone(), None)?;
@@ -194,7 +238,7 @@ fn sync(context: &Context, args: &[&str]) -> Outcome {
     let events = client.sync(wait)?;
     let mut out: Vec<Value> = events.iter().map(|e| event(e, !drain_media)).collect();
     out.extend(client.take_probe_requests().into_iter().map(|(user, token)| probe(&user, &token)));
-    out.extend(client.take_connect_requests().into_iter().map(|(user, code)| connect(&user, &code)));
+    out.extend(client.take_connect_requests().into_iter().map(|request| connect(&request)));
     let _ = client.after_sync();
     client.acknowledge_only(|e| events.contains(e));
     if drain_media {
@@ -211,9 +255,10 @@ fn sync(context: &Context, args: &[&str]) -> Outcome {
     Ok(json!(out))
 }
 
-/// A user connects this service with another one.
-pub fn connect(user: &str, code: &[u8; 32]) -> Value {
-    json!({ "type": "connect", "from": user, "code": yo_wire::b64(code) })
+/// A user connects this service with another one, or ends that.
+pub fn connect((user, kind, code): &ConnectRequest) -> Value {
+    let kind = if *kind == CONNECT { "connect" } else { "disconnect" };
+    json!({ "type": kind, "from": user, "code": yo_wire::b64(code) })
 }
 
 /// A probe request for an echo service: answered with `echo-probe`.
@@ -245,6 +290,7 @@ pub fn event(event: &Event, refs: bool) -> Value {
         Event::IdentityChanged { user } => json!({ "type": "identity_changed", "user": user }),
         Event::GroupChanged { group } => json!({ "type": "group_changed", "group": group }),
         Event::DeviceAdded { user } => json!({ "type": "device_added", "user": user }),
+        Event::ConnectionChanged { user } => json!({ "type": "connection_changed", "user": user }),
     }
 }
 

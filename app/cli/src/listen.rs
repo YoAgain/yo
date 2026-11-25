@@ -220,8 +220,8 @@ fn receive(listener: &Listener) -> ! {
                 for (user, token) in probes {
                     listener.line(&commands::probe(&user, &token));
                 }
-                for (user, code) in connects {
-                    listener.line(&commands::connect(&user, &code));
+                for request in connects {
+                    listener.line(&commands::connect(&request));
                 }
                 if message || probed {
                     listener.give_way(begun);

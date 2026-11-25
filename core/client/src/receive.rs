@@ -589,10 +589,9 @@ impl Client {
             }
             return Ok(());
         }
-        if let Content::Connect(code) = message.content {
-            let taken = message.group.is_none() && !self.blocked(user) && self.first_time(user, device, plaintext);
-            if taken && self.connect_requests.len() < 256 {
-                self.connect_requests.push((user.to_owned(), code));
+        if let Content::Connect { kind, code } = message.content {
+            if message.group.is_none() && self.first_time(user, device, plaintext) {
+                self.connection_received(user, kind, code);
             }
             return Ok(());
         }

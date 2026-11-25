@@ -40,7 +40,7 @@ pub fn user_for<L: Locked>(locked: &L, to: &str) -> Result<String, L::Error> {
         return Ok(to.to_owned());
     }
     let whois = locked.step(|c| c.whois_begin(to))??;
-    let (user, username) = whois.send()?;
+    let (user, username, _) = whois.send()?;
     locked.step(|c| c.whois_end(to, &user, username))??;
     Ok(user)
 }

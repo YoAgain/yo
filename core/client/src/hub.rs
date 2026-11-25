@@ -131,7 +131,11 @@ impl Client {
         flags: u8,
         except: Vec<Key>,
     ) -> Result<(api::LookupResult, Option<String>)> {
-        let body = encode(&api::Lookup { handle: handle.clone(), flags: flags | api::LOOKUP_USERNAME, except });
+        let body = encode(&api::Lookup {
+            handle: handle.clone(),
+            flags: flags | api::LOOKUP_USERNAME | api::LOOKUP_BOT,
+            except,
+        });
         let nonce = self.hub_nonce();
         let (headers, _) = self.sign("POST", api::LOOKUP, &body);
         let response = self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?;
@@ -148,11 +152,16 @@ impl Client {
             _ => return Err(refused(&response)),
         }
         let answer = hub_signed(&self.hub_keys, nonce.as_ref(), api::LOOKUP, &body, &response.body)?;
-        let named: api::LookupNamed = decode(answer)?;
+        let api::LookupBot { named, bot } = api::LookupBot::read(answer)?;
         crate::validate_roster(&named.found.devices)?;
         if handle.kind == yo_wire::handle::KIND_USER && handle.value.as_slice() != named.found.user_id {
             return Err(Error::Protocol("the hub answered for another user"));
         }
+        let user = hex(&named.found.user_id);
+        match bot == 1 {
+            true => self.state.bots.insert(user),
+            false => self.state.bots.remove(&user),
+        };
         Ok((named.found, spelled(named.username)))
     }
 }

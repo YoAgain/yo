@@ -8,7 +8,7 @@ accept the device's signature (a `401`: a clock still off after a reboot, a hub 
 ```sh
 cargo build --release --locked -p yo-cli          # target/release/yo
 export YO_STATE=~/.yo YO_HUB=https://dev.justyo.app
-yo register Chris                                   # once
+yo register Chris                                   # once; a bot with --bot
 yo whoami | yo status | yo friends | yo contacts
 yo add lina                                         # a friend
 yo send lina                                        # a Yo; --photo F.jpg, or --media - (a media.ref on stdin)
@@ -31,7 +31,9 @@ directory itself (and waits up to 30 s for another command that has it).
 **Events.** `{"type":"ready","user":…}` first, then `message` (`from`, `group`, `reply_to`: the user or `group:ID` to
 answer, `content`: `yo`, `photo`, `video` or `other`, `media`: size, width, height, duration and `ref`), `new_chat`,
 `profile`, `identity_changed`, `group_changed`, `probe` (`from`, `token`: answer with `yo echo-probe`) and
-`connect` (`from`, `code`: a user connects this service). Printed
+`connect` or
+`disconnect` (`from`, `code`: a user connects this service or ends that; answered with `yo service-answer`), and
+`connection_changed` (`user`: a service answered, `yo connections` has it). Printed
 events are acknowledged at once; with `--manual-ack` only by `yo ack`, and the unacknowledged come again after a
 restart. A `media.ref` holds the blob's key: whoever has it can open the photo, so `send --media -` reads it from
 stdin, never from the arguments (which every local user sees). No video from a file: the CLI can neither check its
@@ -47,4 +49,4 @@ account's device. Only `register NAME --force` does it, the state set aside as `
 bot did (the admin page knows the bots by it).
 
 Exit 3 (the device gone for good) and 4 (nothing registered) are final: the units do not restart then. A bot never
-registers by itself; a new one is set up once by hand, `yo --state DIR register NAME`, before its unit first starts.
+registers by itself; a new one is set up once by hand, `yo --state DIR register NAME --bot`, before its unit first starts.

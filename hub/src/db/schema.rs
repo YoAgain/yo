@@ -28,6 +28,9 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "devices", "version")? {
         conn.execute_batch("ALTER TABLE devices ADD COLUMN version TEXT")?;
     }
+    if !has_column(conn, "users", "bot")? {
+        conn.execute_batch("ALTER TABLE users ADD COLUMN bot INTEGER NOT NULL DEFAULT 0")?;
+    }
     if !has_column(conn, "zk_groups", "created_at")? {
         conn.execute_batch("ALTER TABLE zk_groups ADD COLUMN created_at INTEGER")?;
     }

@@ -31,8 +31,8 @@ const BUSY_WAIT: Duration = Duration::from_secs(30);
 
 pub const HELP: &str =
     "usage: yo [--state DIR] [--hub URL] [--hub-key KEY]... [--trust-root KEY]... [--zk-params P] COMMAND
-  register NAME [--force]           register the account (once; again finishes an interrupted one); --force
-                                    only to replace this directory's device when its state is lost
+  register NAME [--bot] [--force]   register the account (once; again finishes an interrupted one); --bot: as a
+                                    bot, which everyone who looks it up is told; --force only to replace this directory's device when its state is lost
   whoami | status                   who this is; status adds counts and whether a listener runs
   friends | contacts                the friend list; everyone this account has a chat with
   whois NAME                        a username's user id
@@ -52,6 +52,11 @@ pub const HELP: &str =
   sync [--wait S] [--drain-media]   receive once (no listener running)
   ack                               acknowledge what `listen --manual-ack` handed out
   echo-probe USER TOKEN             answer a round-trip probe (the PING service)
+  bot on|off                        declare this account a bot, or no bot any more
+  connections                       the services connected with another one
+  disconnect SERVICE                end one
+  service-answer USER connected|refused|ended CODE
+                                    a service's answer to a connection event
   connect SERVICE CODE              connect a service with another one (its connect link's code)
   probe [--timeout-ms N]            measure the round trip to PING
 environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated),
@@ -169,9 +174,10 @@ fn run(config: &Config, command: &[String]) -> i32 {
     loop {
         let opened = match name.as_str() {
             "register" => match command {
-                [_, username] => account::register(config, username, false),
-                [_, username, force] if force == "--force" => account::register(config, username, true),
-                _ => return print(Err(Failure::usage("register NAME [--force]"))),
+                [_, username, flags @ ..] if flags.iter().all(|f| f == "--force" || f == "--bot") => {
+                    account::register(config, username, flags.iter().any(|f| f == "--force"))
+                }
+                _ => return print(Err(Failure::usage("register NAME [--bot] [--force]"))),
             },
             _ => account::open(config),
         };
@@ -181,6 +187,10 @@ fn run(config: &Config, command: &[String]) -> i32 {
                 let client = std::sync::Mutex::new(opened.client);
                 let context = commands::Context { client: &client, config, listening: false, emit: &|_| {} };
                 return print(match name.as_str() {
+                    "register" if command.iter().skip(2).any(|f| f == "--bot") => {
+                        commands::run(&context, &["bot".into(), "on".into()])
+                            .and_then(|_| commands::whoami(&context, false))
+                    }
                     "register" => commands::whoami(&context, false),
                     _ => commands::run(&context, command),
                 });

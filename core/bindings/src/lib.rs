@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use yo_core::backup::{Door, PasskeyDoor};
+use yo_core::connect::ConnectionInfo;
 use yo_core::groups::GroupView;
 use yo_core::security::SecurityStatus;
 use yo_core::shared;
@@ -398,7 +399,7 @@ impl From<Content> for MessageKind {
             | Content::ProfileKey(_)
             | Content::Probe(_)
             | Content::Sync(_)
-            | Content::Connect(_)
+            | Content::Connect { .. }
             | Content::ProbeReply(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
@@ -450,6 +451,10 @@ pub enum YoEvent {
     DeviceAdded {
         user: String,
     },
+    /// A service answered: read `connections()` again.
+    ConnectionChanged {
+        user: String,
+    },
 }
 
 impl From<Event> for YoEvent {
@@ -464,6 +469,7 @@ impl From<Event> for YoEvent {
             }
             Event::GroupChanged { group } => YoEvent::GroupChanged { group },
             Event::DeviceAdded { user } => YoEvent::DeviceAdded { user },
+            Event::ConnectionChanged { user } => YoEvent::ConnectionChanged { user },
         }
     }
 }
@@ -482,6 +488,18 @@ pub struct ContactInfo {
     pub gone: bool,
     pub outdated: bool,
     pub accepted: bool,
+    pub bot: bool,
+}
+
+#[uniffi::remote(Record)]
+#[uniffi(name = "YoConnection")]
+pub struct ConnectionInfo {
+    pub user: String,
+    pub name: String,
+    pub connected: bool,
+    pub waiting: bool,
+    pub refused: bool,
+    pub ending: bool,
 }
 
 #[uniffi::remote(Record)]
@@ -532,6 +550,8 @@ pub struct YoWhois {
     pub user: String,
     /// The username as its owner writes it ("YoGPT"); none from a hub before spellings.
     pub username: Option<String>,
+    /// The account declares itself a bot.
+    pub bot: bool,
 }
 
 fn events(result: yo_core::Result<Vec<Event>>) -> Result<Vec<YoEvent>, YoError> {
@@ -858,6 +878,17 @@ impl YoClient {
         Ok(())
     }
 
+    /// The services connected with another one, waiting, refused or ending.
+    pub fn connections(&self) -> Vec<ConnectionInfo> {
+        self.look(|c| c.connections()).unwrap_or_default()
+    }
+
+    /// Ends a service's connection (its user id).
+    pub fn disconnect_service(&self, user: String) -> Result<(), YoError> {
+        self.with(|c| c.disconnect_service(&user))??;
+        Ok(())
+    }
+
     /// Signed out: the client stops after the step under way and every later step fails with `State`.
     pub fn close(&self) {
         let mut client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1177,7 +1208,7 @@ impl YoClient {
             begun => begun?,
         };
         match whois.send() {
-            Ok((user, username)) => Ok(Some(YoWhois { user, username })),
+            Ok((user, username, bot)) => Ok(Some(YoWhois { user, username, bot })),
             Err(yo_core::Error::NotOnYo) => Ok(None),
             Err(error) => Err(error.into()),
         }

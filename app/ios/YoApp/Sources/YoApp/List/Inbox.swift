@@ -715,7 +715,7 @@ final class Inbox {
           _ = friend(user)
         case .identityChanged:
           break  // reconciled with the batch before publication
-        case .profile, .deviceAdded:
+        case .profile, .deviceAdded, .connectionChanged:
           break
         }
         kept.append(event)
