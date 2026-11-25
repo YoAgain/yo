@@ -12,6 +12,7 @@ enum ShareInbox {
   /// Nil when signed out. Written in order on one queue: an older list never lands after a newer one or a sign-out.
   static func publish(_ list: ShareBridge.List?) {
     WatchLink.shared.publish(list)
+    CarPlayList.shared.publish(list)
     guard let file = ShareBridge.friendsFile else { return }
     let data = list.flatMap { try? JSONEncoder().encode($0) }
     writing.async {

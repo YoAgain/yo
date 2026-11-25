@@ -91,6 +91,21 @@
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<true/>
+		<!-- CarPlay's screen: the list, a tap sends Yo (CarPlay.swift). The window stays SwiftUI's own. -->
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>CPTemplateApplicationSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>CPTemplateApplicationScene</string>
+					<key>UISceneConfigurationName</key>
+					<string>CarPlay</string>
+					<key>UISceneDelegateClassName</key>
+					<string>YoCarPlayScene</string>
+				</dict>
+			</array>
+		</dict>
 	</dict>
 	<key>INIntentsSupported</key>
 	<array>
