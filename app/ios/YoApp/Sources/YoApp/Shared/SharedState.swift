@@ -239,6 +239,12 @@ enum Guest {
         lock: SharedStateFile(wait: seconds))
     } catch YoError.Network {
       return .failure(.busy)
+    } catch YoError.Save(let message) where Diagnostics.saveKind(message) == "Io/6922" {
+      // SQLITE_IOERR_VNODE: the app replaced the file while this guest opened it. Passing: the next opening reads
+      // the new file. Counted as expected, not a problem.
+      CountedErrors.record(domain: String(reflecting: YoError.self), place: "SharedState.swift Guest.opened",
+        code: "Save/Io/6922", expected: true)
+      return .failure(.busy)
     } catch {
       Diagnostics.recordUnreported(error)
       return .failure(.restore(error))
