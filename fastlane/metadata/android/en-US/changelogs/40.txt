@@ -1,0 +1,4 @@
+Fortieth release candidate — Yo in CarPlay.
+
+• CarPlay shows your list: tap a name to send Yo, newest first
+• Before, Yo in CarPlay opened an empty screen
