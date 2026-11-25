@@ -1344,6 +1344,15 @@ if (document.body.classList.contains("login")) {
     });
     const body = $("all-users-body");
     body.replaceChildren();
+    // "newest": the newest release (RC) of the build's platform, or anything after it. A platform no release is known
+    // of goes by the newest release at all, whose builds are made within the hour.
+    const newestRelease = {};
+    const releasesKnown = Object.entries(last?.app_builds || {}).filter(([a, b]) => b.version && /^\d{12}$/.test(build(a)));
+    for (const p of ["ios", "android"]) {
+      const own = releasesKnown.filter(([a]) => a.startsWith(`${p}/`)).map(([a]) => build(a)).sort().at(-1);
+      const any = releasesKnown.map(([a]) => build(a)).sort().at(-1);
+      newestRelease[p] = any && (!own || own.slice(0, 8) < any.slice(0, 8)) ? String(+any - 100) : own;
+    }
     for (const u of list) {
       // No click: a name opens nothing (the support chat is reached from its own table).
       const tr = body.insertRow();
@@ -1362,7 +1371,7 @@ if (document.body.classList.contains("login")) {
       // its hover names the build (label, version, state, below the hub's minimum).
       const platform = (u.app || "").split("/")[0], band = releases.get(u.app), info = appInfo(u.app);
       const age = band && (band.ageH < 24 ? `${Math.floor(band.ageH)} h` : `${Math.floor(band.ageH / 24)} d`);
-      const newest = ["current", "fresh"].includes(appState(u.app, u.id));
+      const newest = !!band && !belowMin(u.app) && build(u.app) >= (newestRelease[platform] ?? Infinity);
       const app = tag(band ? (newest ? "newest" : age) : info?.label ?? "–", `app-pill ${band ? "release" : { update: "warn", current: "ok", fresh: "ok" }[appState(u.app, u.id)] || "muted"}`);
       if (band) app.style.setProperty("--release-color", band.color);
       const known = ["ios", "android", "yogpt", "cli"].includes(platform), plat = el("span", known ? "uicons" : "muted", known ? null : "–");
