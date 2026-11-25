@@ -194,10 +194,11 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
 /// The long poll, without holding the client while it waits; until the hub no longer knows the device.
 fn receive(listener: &Listener) -> ! {
     let mut failures = 0u32;
-    let mut maintained = Instant::now();
+    // A fresh account needs its profile key before the first event can trigger a reply on the socket.
+    let mut maintained: Option<Instant> = None;
     loop {
-        let result = if maintained.elapsed() >= MAINTENANCE {
-            maintained = Instant::now();
+        let result = if maintained.is_none_or(|at| at.elapsed() >= MAINTENANCE) {
+            maintained = Some(Instant::now());
             listener.client().maintenance()
         } else {
             let wait = listener.client().sync_begin(WAIT_S);

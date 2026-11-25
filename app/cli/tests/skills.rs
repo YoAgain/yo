@@ -379,6 +379,79 @@ fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
 }
 
 #[test]
+fn the_next_yo_after_pings_echo_is_admitted_sealed() {
+    check_ping_echo(false);
+}
+
+#[test]
+fn the_next_yo_after_pings_echo_is_admitted_sealed_with_an_empty_request_bucket() {
+    check_ping_echo(true);
+}
+
+fn check_ping_echo(published_key: bool) {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.requests_per_pair = 2;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let yo = Yo::new(&hub);
+    yo.registered_as("PING");
+    if published_key {
+        yo.ok(&["requests", "on"]); // publishes the check, so the first key and Yo spend both tokens
+    }
+    let http = Http::new(hub.url());
+    let mut alice = register(http.clone(), &username(random_u64() % 1_000_000_000), None);
+    alice.maintenance().unwrap();
+    // Leave mail waiting so the first fetch can immediately trigger a reply on the control socket.
+    alice.send_yo("PING").unwrap();
+    if published_key {
+        let user = &alice.contacts()[0].user;
+        let delivery = alice.send_begin(user, Content::Yo).unwrap();
+        let answers = delivery.send();
+        assert!(matches!(&answers[..], [Some(Ok(r))] if r.status == 429 && r.body.starts_with(b"pair ")));
+        assert!(matches!(alice.send_end(&delivery, answers), yo_core::Sent::Done(Ok(_))));
+        assert!(alice.request_held(user));
+        assert_eq!((alice.waiting(), alice.waiting_unheld()), (1, 0));
+    }
+    let bot = ping(&yo, &[], &[]);
+    let start = Instant::now();
+    let ping_id = loop {
+        if let Some(user) = alice.sync(1).unwrap().into_iter().find_map(|e| match e {
+            Event::Message { user, content: Content::Yo, .. } => Some(user),
+            _ => None,
+        }) {
+            break user;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "PING never echoed");
+    };
+    alice.acknowledge_events();
+    http.recorded.lock().unwrap().clear();
+    alice.send_yo(&ping_id).unwrap();
+    let path = yo_wire::api::deliver_path(&yo_tests::user_id(&ping_id));
+    let recorded = http.recorded.lock().unwrap();
+    let deliveries: Vec<_> = recorded.iter().filter(|(_, p, _, _)| *p == path).collect();
+    assert!(!deliveries.is_empty());
+    for (_, _, headers, _) in deliveries {
+        assert!(headers.iter().any(|(h, _)| h == yo_wire::api::HEADER_ACCESS), "missing PING access key");
+        assert!(!headers.iter().any(|(h, _)| h == yo_wire::request::HEADER_DEVICE), "signed as a request");
+    }
+    assert_eq!((alice.waiting(), alice.dropped()), (0, 0));
+    drop(recorded);
+    assert_eq!(first_yo(&mut alice), ping_id);
+    drop(bot);
+    // Check the first echo itself even if a later key arrived in the same inbox fetch.
+    let key = std::fs::read(yo.state.join("key")).unwrap().try_into().unwrap();
+    let db =
+        yo_core::statedb::StateDb::open_fresh(yo.state.join("state.sqlite"), key, std::sync::Arc::new(|_| {})).unwrap();
+    let yo_core::statedb::Loaded::Newer { state, .. } = db.load(None, &key).unwrap() else {
+        panic!("missing saved PING account");
+    };
+    let contact = &state.contacts[alice.user_id()];
+    assert!(contact.accepted && contact.key_given && state.access_key_told);
+    assert!(yo_wire::content::Message::profile_key_of(&contact.sent[0]).is_some());
+    drop(db);
+    std::fs::remove_dir_all(yo.state).unwrap();
+}
+
+#[test]
 fn ping_answers_normal_yos_and_pingtest_answers_token_probes() {
     let hub = TestHub::start();
     let (ping_dir, probe_dir) = (Yo::new(&hub), Yo::new(&hub));
