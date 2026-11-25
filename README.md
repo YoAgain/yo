@@ -69,13 +69,12 @@ Not synced: sessions, messages, media, list order.
 
 The relay between phones. It holds encrypted Yos until the recipient fetches them and cannot read them.
 
-Three programs on one server, each deployed on its own:
+Two programs on one server, each deployed on its own:
 
 | | | URL |
 |---|---|---|
 | [hub](hub) | Passes Yos on, holds no keys of users | `hub.justyo.app` |
 | [admin](admin) | The dashboard | not public |
-| [services](services) | Runs the bots (PING, YoGPT) | `api.justyo.app` (planned, for webhooks) |
 
 | | Yos/s | |
 |---|---:|---|
@@ -133,6 +132,32 @@ DB: the local database, sealed per column.
 </details>
 
 <details>
+<summary><h2>Services</h2></summary>
+
+Bots such as PING and YoGPT, and bridges to other services such as IFTTT. Each is a folder with a TOML and one script in
+[yo-services](https://github.com/YoAgain/yo-services); everything else is here and the same for all.
+
+| | | URL |
+|---|---|---|
+| [yo-services](https://github.com/YoAgain/yo-services) | The services: a TOML, a script, a logo. No keys, no network | |
+| [executor](services) | One per service: holds its Yo account, runs its script | not public |
+| [entrance](services/src/entrance.rs) | HTTP for the bridges, and the list of services. No account, no database | `api.justyo.app` |
+| website | The catalog, and the page that connects a bridge | `justyo.co/services` |
+
+```text
+Yo         phone ◄─encrypted─► hub ◄─► executor ◄─► script
+Bridge     IFTTT ──► api.justyo.app/ifttt/… ──► entrance ──► executor ──► script
+Catalog    yo-services ──► api.justyo.app/services ──► justyo.co/services
+Connect    IFTTT ──► justyo.co/services/ifttt?state=… ──► Allow in Yo ──► executor
+```
+
+`api.justyo.app` itself leads to `justyo.co/services`. In progress: bridges and their page are not live yet.
+
+Limits and details: [services README](services/README.md), [SECURITY.md](services/SECURITY.md).
+
+</details>
+
+<details>
 <summary><h2>Development</h2></summary>
 
 <!-- loc -->
@@ -150,7 +175,7 @@ DB: the local database, sealed per column.
   - [bindings](core/bindings): Swift and Kotlin through UniFFI
 - [hub](hub): the Rust server, with its [routes](hub/README.md) and [threat model](hub/SECURITY.md)
 - [admin](admin): the admin page
-- [services](services): the executor that runs the bots
+- [services](services): the executor and the entrance
 - [spec](spec): the YoIP protocol, [v1.md](spec/v1.md)
 - [tests](tests): integration, chaos and load tests, with [fixtures](tests/fixtures)
 - [fuzz](fuzz): fuzz targets
