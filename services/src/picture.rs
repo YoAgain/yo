@@ -6,8 +6,9 @@ use reqwest::blocking::Client;
 use reqwest::Url;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+/// The name's lookup, and all that follows.
 const TIME: Duration = Duration::from_secs(10);
 
 /// Or whether trying again may help.
@@ -16,12 +17,14 @@ pub fn fetch(url: &str) -> Result<Vec<u8>, bool> {
     let url = url.ok_or(false)?;
     // A name, not an address written out: those end in a digit or a bracket.
     let host = url.host_str().filter(|h| h.ends_with(|c: char| c.is_ascii_alphabetic())).ok_or(false)?.to_owned();
-    let addresses: Vec<SocketAddr> = (host.as_str(), 443).to_socket_addrs().map_err(|_| true)?.collect();
+    let end = Instant::now() + TIME;
+    let addresses = within(TIME, host.clone(), |host| (host.as_str(), 443).to_socket_addrs().ok().map(Vec::from_iter));
+    let addresses: Vec<SocketAddr> = addresses.flatten().ok_or(true)?;
     if addresses.is_empty() || !addresses.iter().all(|a| public(a.ip())) {
         return Err(false);
     }
     let client = Client::builder()
-        .timeout(TIME)
+        .timeout(end.saturating_duration_since(Instant::now()))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(&host, &addresses)
@@ -35,6 +38,13 @@ pub fn fetch(url: &str) -> Result<Vec<u8>, bool> {
     let mut jpeg = Vec::new();
     answer.take(MAX_PICTURE as u64 + 1).read_to_end(&mut jpeg).map_err(|_| true)?;
     (jpeg.len() <= MAX_PICTURE && jpeg.starts_with(b"\xff\xd8\xff")).then_some(jpeg).ok_or(false)
+}
+
+/// A lookup has no time of its own: one too slow ends by itself, unheard.
+fn within<A: Send + 'static, B: Send + 'static>(time: Duration, of: A, ask: fn(A) -> B) -> Option<B> {
+    let (tell, told) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tell.send(ask(of)));
+    told.recv_timeout(time).ok()
 }
 
 fn public(ip: IpAddr) -> bool {
@@ -67,6 +77,13 @@ fn public_v4(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slow_lookup_is_not_waited_for() {
+        assert_eq!(within(Duration::from_secs(5), 1, |n| n + 1), Some(2));
+        let slow = |()| std::thread::sleep(Duration::from_secs(5));
+        assert_eq!(within(Duration::from_millis(10), (), slow), None);
+    }
 
     #[test]
     fn only_public_https_names() {

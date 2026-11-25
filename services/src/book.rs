@@ -136,6 +136,16 @@ impl Book {
         if old {
             db.execute_batch("ALTER TABLE services_secrets RENAME TO services_secrets_old")?;
         }
+        // Requests of before they could be declined.
+        let old_requests: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('services_requests'))
+                AND NOT EXISTS (SELECT 1 FROM pragma_table_info('services_requests') WHERE name = 'declined')",
+            [],
+            |r| r.get(0),
+        )?;
+        if old_requests {
+            db.execute_batch("ALTER TABLE services_requests ADD COLUMN declined INTEGER NOT NULL DEFAULT 0")?;
+        }
         db.execute_batch(INDEXES)?;
         if old {
             db.execute_batch(
@@ -571,6 +581,8 @@ mod tests {
             CREATE TABLE services_secrets (bot TEXT NOT NULL, user TEXT NOT NULL, code BLOB, code_at INTEGER,
             key BLOB UNIQUE, out TEXT, PRIMARY KEY (bot, user)) STRICT;
             INSERT INTO services_secrets VALUES ('DST', 'a', NULL, NULL, zeroblob(32), 'o'), ('DST', 'b', x'01', 1, NULL, NULL);
+            CREATE TABLE services_requests (bot TEXT NOT NULL, link TEXT PRIMARY KEY, poll BLOB NOT NULL UNIQUE,
+            salt BLOB NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, user TEXT, code BLOB UNIQUE, code_at INTEGER) STRICT;
             CREATE UNIQUE INDEX services_yos_waiting ON services_yos (bot, user)
                 WHERE user IS NOT NULL AND cron_done IS NULL;
             INSERT INTO services_yos VALUES (7, 'DST', 'received', 1, 'a', 50, NULL);";
@@ -580,6 +592,9 @@ mod tests {
             assert_eq!(book.due(60).unwrap(), [Reminder { id: 7, user: "a".into() }]);
             assert_eq!(book.connected_by(&[0; 32]).unwrap(), Some(("a".into(), "o".into())));
             assert_eq!(book.out("b").unwrap(), None);
+            let _ = book.request("l", &Sha256::digest("p").into(), "s", 1);
+            book.decline("l", 2).unwrap();
+            assert_eq!(book.asked("p", 3).unwrap(), Request::Declined("s".into()));
             let row = book.received(2).unwrap();
             book.keep(row, "a", "yo").unwrap();
         }

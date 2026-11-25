@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Semaphore;
@@ -29,8 +29,10 @@ pub const MAX_LINE: u64 = 256 * 1024;
 const AT_ONCE: usize = 32;
 /// For a call's body to come, once it has a place.
 const BODY_TIME: Duration = Duration::from_secs(5);
-/// The connect pages that wait (`partner.rs`), in places of their own, and whose they are.
-const WAITS: usize = 8;
+/// The connect pages that wait, in places of their own, for how long, and whose they are.
+const WAITS: usize = 128;
+const WAIT: Duration = Duration::from_secs(20);
+const AGAIN: Duration = Duration::from_secs(1);
 const PAGE: &str = "https://justyo.co";
 const TIME: Duration = Duration::from_secs(30);
 
@@ -83,14 +85,17 @@ pub fn serve(address: &str, sockets: PathBuf, services: &std::path::Path) -> std
             waits: Semaphore::new(WAITS),
             sources: Sources::default(),
         });
-        let routes = Router::new()
-            .route("/", get(page))
-            .route("/services", get(services_json))
-            .route("/services/{logo}", get(logo))
-            .route("/{name}/allowed", any(allowed))
-            .route("/{name}/{*path}", any(called));
-        axum::serve(listener, routes.with_state(entrance)).await
+        axum::serve(listener, routes(entrance)).await
     })
+}
+
+fn routes(entrance: Arc<Entrance>) -> Router {
+    Router::new()
+        .route("/", get(page))
+        .route("/services", get(services_json))
+        .route("/services/{logo}", get(logo))
+        .route("/{name}/{*path}", any(called))
+        .with_state(entrance)
 }
 
 /// For people the list is the website's.
@@ -119,7 +124,7 @@ fn refused(status: StatusCode, why: &str) -> Response {
 }
 
 /// The connect page's question: the one path a browser may ask, and only that page.
-async fn allowed(State(entrance): State<Arc<Entrance>>, Path(name): Path<String>, request: Request) -> Response {
+async fn allowed(entrance: &Entrance, name: String, request: Request) -> Response {
     let mut answer = if request.method() == Method::OPTIONS {
         let asks = [
             (header::ACCESS_CONTROL_ALLOW_METHODS, "POST"),
@@ -129,7 +134,7 @@ async fn allowed(State(entrance): State<Arc<Entrance>>, Path(name): Path<String>
         (StatusCode::NO_CONTENT, asks).into_response()
     } else {
         match entrance.sources.wait(source(request.headers())) {
-            Some(_waits) => hand(&entrance, &entrance.waits, name, "allowed".into(), request).await,
+            Some(_waits) => hand(entrance, &entrance.waits, name, "allowed".into(), request).await,
             None => refused(StatusCode::TOO_MANY_REQUESTS, "Try again later"),
         }
     };
@@ -137,11 +142,15 @@ async fn allowed(State(entrance): State<Arc<Entrance>>, Path(name): Path<String>
     answer
 }
 
+/// By the decoded path, as the executor has it: no spelling passes a limit.
 async fn called(
     State(entrance): State<Arc<Entrance>>,
     Path((name, path)): Path<(String, String)>,
     request: Request,
 ) -> Response {
+    if path == "allowed" {
+        return allowed(&entrance, name, request).await;
+    }
     if path == "connect" && !entrance.sources.connect(source(request.headers())) {
         return refused(StatusCode::TOO_MANY_REQUESTS, "Try again later");
     }
@@ -178,7 +187,20 @@ async fn hand(entrance: &Entrance, places: &Semaphore, name: String, path: Strin
     let headers = headers.iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_owned()))).collect();
     let asked = Asked { method: method.to_string(), path, headers, body, form };
     let socket = entrance.sockets.join(format!("{name}.sock"));
-    match tokio::time::timeout(TIME, hand_on(&socket, &asked)).await {
+    // Who waits for an answer holds no more than its place here.
+    let end = Instant::now() + WAIT;
+    let answer = loop {
+        let answer = tokio::time::timeout(TIME, hand_on(&socket, &asked)).await;
+        let again = match &answer {
+            Ok(Ok(answer)) => answer.status == 503 || answer.body["request"] == "waiting",
+            _ => false,
+        };
+        if asked.path != "allowed" || !again || Instant::now() + AGAIN > end {
+            break answer;
+        }
+        tokio::time::sleep(AGAIN).await;
+    };
+    match answer {
         Ok(Ok(Answer { status, body, location })) => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let headers = [
@@ -206,4 +228,53 @@ async fn hand_on(socket: &std::path::Path, asked: &Asked) -> std::io::Result<Ans
     let mut line = String::new();
     BufReader::new(stream.take(MAX_LINE)).read_line(&mut line).await?;
     Ok(serde_json::from_str(&line)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every spelling of an operation is that operation.
+    #[test]
+    fn no_spelling_passes_the_limits() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let entrance = Arc::new(Entrance {
+                sockets: std::env::temp_dir().join("none"),
+                list: List::default(),
+                at_once: Semaphore::new(AT_ONCE),
+                waits: Semaphore::new(WAITS),
+                sources: Sources::default(),
+            });
+            let address = serve_on(entrance.clone()).await;
+            let http = reqwest::Client::new();
+            let ask = async |path: &str| {
+                let url = format!("http://{address}/a/{path}");
+                http.post(url).header("cf-connecting-ip", "192.0.2.1").send().await.unwrap().status().as_u16()
+            };
+            for path in ["%63onnect", "connec%74", "connect"].iter().cycle().take(10) {
+                assert_eq!(ask(path).await, 404);
+            }
+            for path in ["connect", "%63onnect", "connec%74", "%63%6f%6e%6e%65%63%74"] {
+                assert_eq!(ask(path).await, 429, "{path}");
+            }
+            assert_eq!(ask("%2563onnect").await, 404, "another name, to the executor too");
+            let waits: Vec<_> = std::iter::from_fn(|| {
+                entrance.sources.wait(u128::from(std::net::Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped()))
+            })
+            .collect();
+            for path in ["allowed", "%61llowed", "allowe%64"] {
+                assert_eq!(ask(path).await, 429, "{path}");
+            }
+            drop(waits);
+            assert_eq!(ask("%61llowed").await, 404);
+        });
+    }
+
+    async fn serve_on(entrance: Arc<Entrance>) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, routes(entrance)).await });
+        address
+    }
 }

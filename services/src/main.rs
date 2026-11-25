@@ -83,6 +83,7 @@ fn main() {
         script: script::Script::new(PathBuf::from(env("SCRIPT_SOCKET"))),
         book,
         limits: Mutex::new(Limits::new(per_hour, sent, Instant::now())),
+        connects: Mutex::new(Limits::new(0, 0, Instant::now())),
         pictures: service.join("assets"),
         spool: state.clone(),
         bots: Mutex::new(HashSet::new()),

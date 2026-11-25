@@ -2,7 +2,7 @@
 //! connects, calls of it for the script to answer, and calls to it. Its keys are here alone, the script sees none.
 //!
 //!   GET  connect  a request to connect (RFC 6749, 4.1.1): on to the connect page
-//!   POST allowed  what became of it, for that page (it waits a while): where it goes back to
+//!   POST allowed  what became of it, for that page: where it goes back to
 //!   POST token    the code it brought there becomes a key (4.1.3)
 //!   *    …        with a key, for its user; or with the partner's own, for nobody
 
@@ -19,7 +19,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const AT_ONCE: usize = 16;
 const CALL_TIME: Duration = Duration::from_secs(10);
@@ -27,9 +27,7 @@ const CALL_TIME: Duration = Duration::from_secs(10);
 const PAGE: &str = "https://justyo.co/services/";
 const MAX_STATE: usize = 512;
 
-/// The connect page asks again after this: below the entrance's time.
-const ALLOWED_WAIT: Duration = Duration::from_secs(20);
-/// Few of `AT_ONCE`: pages that wait take no place from the calls.
+/// Few of `AT_ONCE`: pages that ask take no place from the calls. The entrance does the waiting.
 const WAITS: usize = 8;
 static WAITING: AtomicUsize = AtomicUsize::new(0);
 
@@ -169,13 +167,7 @@ fn allowed(executor: &Executor, partner: &Partner, asked: &Asked) -> Answer {
         WAITING.fetch_sub(1, Ordering::SeqCst);
         return refused(503, "Try again later");
     }
-    let until = Instant::now() + ALLOWED_WAIT;
-    let request = loop {
-        match executor.book.asked(poll, now()) {
-            Ok(Request::Waits) if Instant::now() < until => std::thread::sleep(Duration::from_millis(500)),
-            result => break result,
-        }
-    };
+    let request = executor.book.asked(poll, now());
     WAITING.fetch_sub(1, Ordering::SeqCst);
     let said = match request {
         Ok(Request::Waits) => json!({ "request": "waiting" }),

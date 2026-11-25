@@ -11,12 +11,16 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A reminder whose Yo could not go is tried again after this long.
 const AGAIN: Duration = Duration::from_secs(600);
+/// A decision the book did not take is tried again after this long; so many at once.
+const RETRY: Duration = Duration::from_secs(2);
+const MAX_RETRIES: usize = 16;
+static RETRIES: AtomicUsize = AtomicUsize::new(0);
 
 pub struct Executor {
     pub header: Header,
@@ -26,6 +30,8 @@ pub struct Executor {
     pub script: Script,
     pub book: Book,
     pub limits: Mutex<Limits>,
+    /// What a user answered a request to connect: apart from their Yos.
+    pub connects: Mutex<Limits>,
     /// The bot's own pictures.
     pub pictures: PathBuf,
     /// Where a picture lies while it is sent.
@@ -95,6 +101,26 @@ fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Done at once; or, when the book fails, beside the events a few times more.
+fn until_kept(mut keep: impl FnMut() -> rusqlite::Result<()> + Send + 'static) {
+    if keep().is_ok() {
+        return;
+    }
+    if RETRIES.fetch_add(1, Ordering::SeqCst) >= MAX_RETRIES {
+        RETRIES.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..10 {
+            std::thread::sleep(RETRY);
+            if keep().is_ok() {
+                break;
+            }
+        }
+        RETRIES.fetch_sub(1, Ordering::SeqCst);
+    });
+}
+
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -143,21 +169,27 @@ impl Executor {
     /// A user allowed a request to connect, or they are told it is refused.
     pub fn connect(self: &Arc<Self>, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
-        let taken = self.partner.is_some()
-            && locked(&self.limits).take(user, None, Instant::now())
-            && self.book.allow(user, code, now()).unwrap_or(false);
-        if !taken {
+        if self.partner.is_none() || !locked(&self.connects).take(user, None, Instant::now()) {
             count(&self.counts.limited);
-            self.tell(user, "refused", code);
+            return self.tell(user, "refused", code);
         }
+        let (executor, user, code) = (self.clone(), user.to_owned(), code.to_owned());
+        until_kept(move || {
+            if !executor.book.allow(&user, &code, now())? {
+                executor.tell(&user, "refused", &code);
+            }
+            Ok(())
+        });
     }
 
-    /// A user declined a request to connect: whoever waits is told. Within the limits.
-    pub fn decline(&self, event: &Value) {
+    /// A user declined a request to connect: whoever waits is told.
+    pub fn decline(self: &Arc<Self>, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
-        if self.partner.is_some() && locked(&self.limits).take(user, None, Instant::now()) {
-            let _ = self.book.decline(code, now());
+        if self.partner.is_none() || !locked(&self.connects).take(user, None, Instant::now()) {
+            return count(&self.counts.limited);
         }
+        let (executor, code) = (self.clone(), code.to_owned());
+        until_kept(move || executor.book.decline(&code, now()));
     }
 
     /// A user ends their connection: forgotten, whatever the limits say, and told so.
@@ -442,5 +474,25 @@ impl Executor {
             .map(|(word, n)| format!("{n} {word}"))
             .collect();
         (!words.is_empty()).then(|| words.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decision_the_book_did_not_take_is_tried_again() {
+        let (told, kept) = std::sync::mpsc::channel();
+        let mut failures = 1;
+        until_kept(move || {
+            if failures > 0 {
+                failures -= 1;
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            told.send(()).unwrap();
+            Ok(())
+        });
+        assert!(kept.recv_timeout(RETRY * 5).is_ok());
     }
 }
