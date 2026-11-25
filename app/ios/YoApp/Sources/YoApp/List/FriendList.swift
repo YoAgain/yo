@@ -55,6 +55,8 @@ struct FriendList: View {
   }
 
   @State private var listViewport = CGSize.zero
+  /// The list's height above the floating controls (`listViewport` runs on behind them).
+  @State private var heightAboveControls: CGFloat = 0
   @State private var notificationsDenied = false
   @State var adding = false
   @State var newGroup = false
@@ -405,7 +407,8 @@ struct FriendList: View {
     // Each request has a choice bar. Before the first friend, Group and Invite always show below “+”.
     let count = rows.reduce(1) { $0 + ($1.friend.request ? 2 : 1) }
     // Measured below the status bar (the top safe area) down to the window's bottom edge.
-    let room = listViewport.height - (noFriendYet ? base : 0)
+    // Before the first friend it ends above the controls, which would cover Group and Invite.
+    let room = noFriendYet ? heightAboveControls - base : listViewport.height
     let height = max(base, (room - (notificationsDenied ? base : 0)) / CGFloat(count))
     // A short list keeps its place as the camera replaces the notifications button.
     let cameraSpace = cameraOn && notificationsDenied ? min(base, max(0, room - CGFloat(count) * height)) : 0
@@ -446,6 +449,11 @@ struct FriendList: View {
         Color.clear
           .onGeometryChange(for: CGSize.self) { $0.size } action: { listViewport = $0 }
           .ignoresSafeArea(.all, edges: [.horizontal, .bottom])
+      }
+      .background {
+        Color.clear
+          .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { heightAboveControls = $0 }
+          .ignoresSafeArea(.keyboard)
       }
       // In camera mode the last bar scrolls up out from under the controls (their row and its margin).
       .contentMargins(.bottom, cameraOn && hintShown ? 54 : 0, for: .scrollContent)
