@@ -69,6 +69,14 @@ Not synced: sessions, messages, media, list order.
 
 The relay between phones. It holds encrypted Yos until the recipient fetches them and cannot read them.
 
+Three programs on one server, each deployed on its own:
+
+| | |
+|---|---|
+| [hub](hub) | Passes Yos on, holds no keys of users |
+| [admin](admin) | The dashboard |
+| [services](services) | Runs the bots (planned; today in [skills](skills)) |
+
 | | Yos/s | |
 |---|---:|---|
 | Hub alone | 10,431 | 1 CPU core · p50 2.1 ms · p99 130 ms |
@@ -143,6 +151,7 @@ DB: the local database, sealed per column.
   - [bindings](core/bindings): Swift and Kotlin through UniFFI
 - [hub](hub): the Rust server, with its [routes](hub/README.md) and [threat model](hub/SECURITY.md)
 - [admin](admin): the admin page
+- [services](services): the gatekeeper that will run the bots (a shell so far)
 - [spec](spec): the YoIP protocol, [v1.md](spec/v1.md)
 - [tests](tests): integration, chaos and load tests, with [fixtures](tests/fixtures)
 - [fuzz](fuzz): fuzz targets
