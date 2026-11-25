@@ -22,3 +22,5 @@ services/
 ├─ src/script.rs     the lines to and from the script
 └─ systemd/          the sandbox, a user of its own for the script
 ```
+
+How a script is kept from doing harm: [SECURITY.md](SECURITY.md).
