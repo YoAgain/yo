@@ -1,0 +1,6 @@
+Forty-second release candidate — Your Code, polished.
+
+• Your Code and its picture show your address under the code, so a screenshot is enough to find you
+• Your name looks like its bar in the list, and the page sits centred
+• iPhone: Group and Invite no longer hide behind the buttons of a new account
+• Android: "Got Yo? Sign In" is centred
