@@ -6,16 +6,18 @@ import com.google.android.gms.tasks.Tasks
 import com.google.android.play.core.integrity.IntegrityManagerFactory
 import com.google.android.play.core.integrity.IntegrityTokenRequest
 import com.google.firebase.FirebaseOptions
+import java.lang.ref.WeakReference
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import uniffi.yo.YoClient
 
 internal object Attestation {
-    private val started = AtomicBoolean(false)
+    /** Once per client, not per process: a second account made in the same run is attested too. */
+    private val started = AtomicReference<WeakReference<YoClient>?>(null)
     private fun now() = System.currentTimeMillis().toULong()
 
     fun check(context: Context, client: YoClient) {
-        if (!started.compareAndSet(false, true)) return
+        if (started.getAndSet(WeakReference(client))?.get() === client) return
         val project = FirebaseOptions.fromResource(context)?.gcmSenderId?.toLongOrNull() ?: return
         if (!client.attestDue(now())) return
         val token = try {

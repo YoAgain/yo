@@ -5,11 +5,12 @@ import Security
 import YoCore
 
 enum Attestation {
-  @MainActor private static var started = false
+  /// Once per client, not per launch: a second account made in the same run is attested too.
+  @MainActor private static weak var started: YoClient?
 
   @MainActor static func start(_ client: YoClient) {
-    guard !started else { return }
-    started = true
+    guard started !== client else { return }
+    started = client
     Task.detached(priority: .background) {
       guard client.attestDue(nowMs: now()) else { return }
       do {
