@@ -9,6 +9,9 @@ struct FriendList: View {
   }
   @State private var feedback: [String: Feedback] = [:]
   @State private var overlayTarget: String?
+  /// How far the list is scrolled (the crown turns it), 0 at the top to 1 at the end: it picks the underlined row,
+  /// the first at the top, the last at the end, the others in between.
+  @State private var scrolled = 0.0
 
   var body: some View {
     NavigationStack {
@@ -18,14 +21,17 @@ struct FriendList: View {
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
+          let friends = link.state.friends
+          let selected = min(max(Int((scrolled * Double(friends.count - 1)).rounded()), 0), friends.count - 1)
           GeometryReader { geometry in
             ScrollView {
               LazyVStack(spacing: 0) {
-                ForEach(link.state.friends, id: \.to) { friend in
+                ForEach(Array(friends.enumerated()), id: \.element.to) { index, friend in
                   Button { send(to: friend.to, back: false) } label: {
                     Text(feedback[friend.to]?.text ?? friend.title)
                       .font(.yo(20))
                       .foregroundStyle(.white)
+                      .underline(index == selected, color: .white)
                       .lineLimit(1)
                       .minimumScaleFactor(0.6)
                       .padding(.horizontal, 4)
@@ -35,8 +41,18 @@ struct FriendList: View {
                       .contentShape(Rectangle())
                   }
                   .buttonStyle(.plain)
+                  // Double tap (thumb and finger, Series 9 and Ultra 2 on) sends to the underlined row.
+                  .handGestureShortcut(.primaryAction, isEnabled: index == selected)
                 }
               }
+            }
+            .onScrollGeometryChange(for: Double.self) { geometry in
+              let top = geometry.contentOffset.y + geometry.contentInsets.top
+              // watchOS: the offset runs from -inset at the top to content less container less inset at the end.
+              let range = geometry.contentSize.height - geometry.containerSize.height
+              return range > 0 ? min(max(top / range, 0), 1) : 0
+            } action: { _, now in
+              scrolled = now
             }
           }
           .ignoresSafeArea(edges: .horizontal)
@@ -53,8 +69,9 @@ struct FriendList: View {
             .allowsHitTesting(false)
         }
       }
-      // The system's title: on the clock's line, in the app's tint (amethyst).
+      // The system's title, inline: on the clock's line from the start, in the app's tint (amethyst).
       .navigationTitle("Yo")
+      .toolbarTitleDisplayMode(.inline)
     }
     .onOpenURL { url in
       guard url.scheme == "yo", url.host == "back" else { return }
