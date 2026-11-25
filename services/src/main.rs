@@ -78,7 +78,9 @@ fn main() {
     };
     let sent = book.sent_since(now() - 3600).unwrap_or_else(|e| fail(1, &format!("the book: {e}")));
     tidy_spool(&state);
+    let (answers, to_answer) = sync_channel(executor::ANSWERS);
     let executor = Arc::new(Executor {
+        answers,
         yo: yo::Yo::new(&state),
         script: script::Script::new(PathBuf::from(env("SCRIPT_SOCKET"))),
         book,
@@ -102,6 +104,8 @@ fn main() {
         name,
     });
 
+    let answering = executor.clone();
+    std::thread::spawn(move || answering.answer_all(to_answer));
     if executor.partner.is_some() {
         let listener = partner::listen(Path::new(&env("SERVICES_SOCKET")))
             .unwrap_or_else(|e| fail(1, &format!("SERVICES_SOCKET: {e}")));

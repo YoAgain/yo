@@ -17,7 +17,8 @@ A script is taken as hostile, reviewed or not.
 - One answer to a Yo, one reminder for it, and none out of a reminder: no bot writes on after the user stops.
 - A photo goes back by a word; its key never reaches the script.
 - Per sender 1 a second (3 at once), per group one in 30 s, per bot 2000 an hour, also over a restart.
-  Apart from that: one answer for each connection made or ended (any other counts, 1 a second per sender). A call nobody waits for any more sends nothing.
+  Apart from that: one answer for each connection made or ended (any other counts, 1 a second per sender;
+  a restart forgets how many of those went). A call nobody waits for any more sends nothing.
 - Each bot's scripts have their own memory and processes; together at most half a processor, so the hub is undisturbed.
 - HTTP is read by the entrance, a process and user of its own without account, keys or book: one taken over sees the
   calls that pass, and their secrets, and nothing else.

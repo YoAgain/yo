@@ -12,7 +12,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A reminder whose Yo could not go is tried again after this long.
@@ -28,6 +29,8 @@ const ANSWER_WAITS: &[Duration] = &[
     Duration::from_secs(8),
     Duration::from_secs(16),
 ];
+/// Answers that wait.
+pub const ANSWERS: usize = 256;
 /// What a call still needs to be answered in time.
 const MARGIN_MS: i64 = 5_000;
 
@@ -41,6 +44,7 @@ pub struct Executor {
     pub limits: Mutex<Limits>,
     /// Answers to decisions that changed nothing: apart from Yos.
     pub connects: Mutex<Limits>,
+    pub answers: SyncSender<Answer>,
     /// The bot's own pictures.
     pub pictures: PathBuf,
     /// Where a picture lies while it is sent.
@@ -56,6 +60,15 @@ pub struct Executor {
     pub partner: Option<Partner>,
     /// What a user who is not connected gets back.
     pub help: Option<Vec<u8>>,
+}
+
+/// An answer to a decision.
+pub struct Answer {
+    user: String,
+    kind: &'static str,
+    code: String,
+    /// Of a connection made or ended.
+    matters: bool,
 }
 
 #[derive(Default)]
@@ -183,7 +196,7 @@ impl Executor {
 
     /// A user allowed a request to connect, or they are told it is refused. In order with what they decide next: what
     /// failed is not done later.
-    pub fn connect(self: &Arc<Self>, event: &Value) {
+    pub fn connect(&self, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
         let taken = self.partner.is_some() && self.keep(|| self.book.allow(user, code, now())).unwrap_or(false);
         if !taken {
@@ -200,7 +213,7 @@ impl Executor {
     }
 
     /// A user ends their connection: forgotten, with what they allowed before, whatever the limits say, and told so.
-    pub fn disconnect(self: &Arc<Self>, event: &Value) {
+    pub fn disconnect(&self, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
         match self.keep(|| self.book.disconnect(user)) {
             Ok(true) => self.tell(user, "ended", code),
@@ -221,24 +234,32 @@ impl Executor {
         Some((user, event["code"].as_str()?))
     }
 
-    /// Answers what changed nothing: a flood of that is answered a little.
-    fn tell_nothing(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
+    /// Answers what changed nothing: a flood of that is answered a little, or not.
+    fn tell_nothing(&self, user: &str, kind: &'static str, code: &str) {
         let now = Instant::now();
-        if locked(&self.connects).take(user, None, now) && locked(&self.limits).send(now) {
-            return self.tell(user, kind, code);
+        let may = locked(&self.connects).take(user, None, now) && locked(&self.limits).send(now);
+        let answer = Answer { user: user.into(), kind, code: code.into(), matters: false };
+        if !may || self.answers.try_send(answer).is_err() {
+            count(&self.counts.limited);
         }
-        count(&self.counts.limited);
     }
 
-    /// Answers a connection, beside the events: the account must not wait for itself. Whatever the limits say: one answer
-    /// for a connection made or ended.
-    pub fn tell(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
-        let (executor, user, code) = (self.clone(), user.to_owned(), code.to_owned());
-        std::thread::spawn(move || {
-            if answered(ANSWER_WAITS, || executor.yo.answer(&user, kind, &code)).is_err() {
-                count(&executor.counts.failed);
+    /// Answers a connection made or ended, whatever the limits say. Beside the events: the account must not wait for
+    /// itself; only where very many wait, this does.
+    pub fn tell(&self, user: &str, kind: &'static str, code: &str) {
+        if self.answers.send(Answer { user: user.into(), kind, code: code.into(), matters: true }).is_err() {
+            count(&self.counts.failed);
+        }
+    }
+
+    /// Sends the answers, one after the other, until the process ends.
+    pub fn answer_all(&self, answers: Receiver<Answer>) {
+        for Answer { user, kind, code, matters } in answers {
+            let waits = if matters { ANSWER_WAITS } else { &[] };
+            if answered(waits, || self.yo.answer(&user, kind, &code)).is_err() {
+                count(&self.counts.failed);
             }
-        });
+        }
     }
 
     /// The other side called, for `user` or for nobody: what it gets back.

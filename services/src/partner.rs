@@ -118,7 +118,7 @@ pub fn listen(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-fn one(executor: &Arc<Executor>, mut stream: UnixStream) -> io::Result<()> {
+fn one(executor: &Executor, mut stream: UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(CALL_TIME))?;
     stream.set_write_timeout(Some(CALL_TIME))?;
     let mut line = String::new();
@@ -221,7 +221,7 @@ fn back(partner: &Partner, request: &str, with: [(&str, String); 2]) -> Value {
 }
 
 /// The code of a request becomes a key, for the partner alone.
-fn token(executor: &Arc<Executor>, partner: &Partner, asked: &Asked) -> Answer {
+fn token(executor: &Executor, partner: &Partner, asked: &Asked) -> Answer {
     let wrong = |status: u16, why: &str| Answer::new(status, json!({ "error": why }));
     let field = |name: &str| asked.form.get(name).map(String::as_str).unwrap_or_default();
     let basic = asked.headers.get("authorization").and_then(|value| basic(value));
