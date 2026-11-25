@@ -18,7 +18,8 @@ A script is taken as hostile, reviewed or not.
 - A photo goes back by a word; its key never reaches the script.
 - Per sender 1 a second (3 at once), per group one in 30 s, per bot 2000 an hour, also over a restart.
   Apart from that: one answer for each connection made or ended (any other counts, 1 a second per sender;
-  a restart forgets how many of those went). A call nobody waits for any more sends nothing.
+  a restart forgets how many of those went). Answers wait in a queue of 256: more, or those queued at a restart, are lost; the app
+  then lets the user ask again. A call nobody waits for any more sends nothing.
 - Each bot's scripts have their own memory and processes; together at most half a processor, so the hub is undisturbed.
 - HTTP is read by the entrance, a process and user of its own without account, keys or book: one taken over sees the
   calls that pass, and their secrets, and nothing else.

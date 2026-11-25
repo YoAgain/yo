@@ -244,10 +244,10 @@ impl Executor {
         }
     }
 
-    /// Answers a connection made or ended, whatever the limits say. Beside the events: the account must not wait for
-    /// itself; only where very many wait, this does.
+    /// Answers a connection made or ended, whatever the limits say. Beside the events, never waited for: with very
+    /// many waiting it is dropped, and the app asks again.
     pub fn tell(&self, user: &str, kind: &'static str, code: &str) {
-        if self.answers.send(Answer { user: user.into(), kind, code: code.into(), matters: true }).is_err() {
+        if self.answers.try_send(Answer { user: user.into(), kind, code: code.into(), matters: true }).is_err() {
             count(&self.counts.failed);
         }
     }
