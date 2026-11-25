@@ -58,6 +58,7 @@ pub const HELP: &str =
   service-answer USER connected|refused|ended CODE
                                     a service's answer to a connection event
   connect SERVICE CODE              connect a service with another one (its connect link's code)
+  decline SERVICE CODE              or not: whoever waits is told
   probe [--timeout-ms N]            measure the round trip to PING
 environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated),
   YO_RECOVERY_LOOKUPS (roster lookups a day for messages from replaced phones; default 10, a bot raises it)";

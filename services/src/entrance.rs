@@ -3,9 +3,11 @@
 //! reads HTTP and hands `/NAME/…` to that service's executor, one JSON line each way over its socket.
 
 use crate::list::List;
+use crate::sources::{source, Sources};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, FromRequest, Path, Query, State};
-use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::extract::{FromRequest, Path, Query, Request, State};
+use axum::http::request::Parts;
+use axum::http::{header, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
     routing::{any, get},
@@ -25,6 +27,8 @@ const MAX_BODY: usize = 16 * 1024;
 /// One call, or one answer.
 pub const MAX_LINE: u64 = 256 * 1024;
 const AT_ONCE: usize = 32;
+/// For a call's body to come, once it has a place.
+const BODY_TIME: Duration = Duration::from_secs(5);
 /// The connect pages that wait (`partner.rs`), in places of their own, and whose they are.
 const WAITS: usize = 8;
 const PAGE: &str = "https://justyo.co";
@@ -60,6 +64,7 @@ struct Entrance {
     list: List,
     at_once: Semaphore,
     waits: Semaphore,
+    sources: Sources,
 }
 
 /// Serves until the process ends.
@@ -71,15 +76,20 @@ pub fn serve(address: &str, sockets: PathBuf, services: &std::path::Path) -> std
         if !listener.local_addr()?.ip().is_loopback() {
             return Err(std::io::ErrorKind::AddrNotAvailable.into());
         }
-        let entrance =
-            Arc::new(Entrance { sockets, list, at_once: Semaphore::new(AT_ONCE), waits: Semaphore::new(WAITS) });
+        let entrance = Arc::new(Entrance {
+            sockets,
+            list,
+            at_once: Semaphore::new(AT_ONCE),
+            waits: Semaphore::new(WAITS),
+            sources: Sources::default(),
+        });
         let routes = Router::new()
             .route("/", get(page))
             .route("/services", get(services_json))
             .route("/services/{logo}", get(logo))
             .route("/{name}/allowed", any(allowed))
             .route("/{name}/{*path}", any(called));
-        axum::serve(listener, routes.layer(DefaultBodyLimit::max(MAX_BODY)).with_state(entrance)).await
+        axum::serve(listener, routes.with_state(entrance)).await
     })
 }
 
@@ -109,15 +119,8 @@ fn refused(status: StatusCode, why: &str) -> Response {
 }
 
 /// The connect page's question: the one path a browser may ask, and only that page.
-async fn allowed(
-    State(entrance): State<Arc<Entrance>>,
-    Path(name): Path<String>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let mut answer = if method == Method::OPTIONS {
+async fn allowed(State(entrance): State<Arc<Entrance>>, Path(name): Path<String>, request: Request) -> Response {
+    let mut answer = if request.method() == Method::OPTIONS {
         let asks = [
             (header::ACCESS_CONTROL_ALLOW_METHODS, "POST"),
             (header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type"),
@@ -125,7 +128,10 @@ async fn allowed(
         ];
         (StatusCode::NO_CONTENT, asks).into_response()
     } else {
-        hand(&entrance, &entrance.waits, (name, "allowed".into()), method, uri, headers, body).await
+        match entrance.sources.wait(source(request.headers())) {
+            Some(_waits) => hand(&entrance, &entrance.waits, name, "allowed".into(), request).await,
+            None => refused(StatusCode::TOO_MANY_REQUESTS, "Try again later"),
+        }
     };
     answer.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, header::HeaderValue::from_static(PAGE));
     answer
@@ -134,28 +140,27 @@ async fn allowed(
 async fn called(
     State(entrance): State<Arc<Entrance>>,
     Path((name, path)): Path<(String, String)>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Response {
-    hand(&entrance, &entrance.at_once, (name, path), method, uri, headers, body).await
+    if path == "connect" && !entrance.sources.connect(source(request.headers())) {
+        return refused(StatusCode::TOO_MANY_REQUESTS, "Try again later");
+    }
+    hand(&entrance, &entrance.at_once, name, path, request).await
 }
 
-async fn hand(
-    entrance: &Entrance,
-    places: &Semaphore,
-    (name, path): (String, String),
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+/// A place first, then the body is read.
+async fn hand(entrance: &Entrance, places: &Semaphore, name: String, path: String, request: Request) -> Response {
     if name.is_empty() || name.len() > 32 || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) {
         return refused(StatusCode::NOT_FOUND, "Not found");
     }
     let Ok(_place) = places.try_acquire() else {
         return refused(StatusCode::SERVICE_UNAVAILABLE, "Try again later");
+    };
+    let (Parts { method, uri, headers, .. }, body) = request.into_parts();
+    let body = match tokio::time::timeout(BODY_TIME, axum::body::to_bytes(body, MAX_BODY)).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return refused(StatusCode::PAYLOAD_TOO_LARGE, "Too long"),
+        Err(_) => return refused(StatusCode::REQUEST_TIMEOUT, "Too slow"),
     };
     let form = match headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) {
         Some(kind) if kind.starts_with("application/x-www-form-urlencoded") => {

@@ -64,9 +64,10 @@ const INDEXES: &str = "
     state TEXT NOT NULL,
     at INTEGER NOT NULL,
     user TEXT,
+    declined INTEGER NOT NULL DEFAULT 0,
     code BLOB UNIQUE,
     code_at INTEGER,
-    CHECK ((code IS NULL) = (code_at IS NULL) AND (code IS NULL OR user IS NOT NULL))
+    CHECK ((code IS NULL) = (code_at IS NULL) AND (code IS NULL OR user IS NOT NULL) AND (declined = 0 OR user IS NULL))
  ) STRICT;
  CREATE INDEX IF NOT EXISTS services_requests_at ON services_requests (bot, at);
  CREATE TABLE IF NOT EXISTS services_salts (bot TEXT PRIMARY KEY, salt BLOB NOT NULL) STRICT;";
@@ -82,6 +83,8 @@ pub enum Request {
     Waits,
     /// The code for the other side, and its state.
     Allowed(String, String),
+    /// Its state.
+    Declined(String),
     /// Or never there.
     Over,
 }
@@ -201,12 +204,19 @@ impl Book {
     pub fn allow(&self, user: &str, link: &str, now: i64) -> rusqlite::Result<bool> {
         let changed = self.db().execute(
             "UPDATE services_requests SET user = ?2
-             WHERE bot = ?1 AND link = ?3 AND at > ?4 AND (user IS NULL OR user = ?2)
+             WHERE bot = ?1 AND link = ?3 AND at > ?4 AND declined = 0 AND (user IS NULL OR user = ?2)
                AND ((SELECT count(*) FROM services_secrets WHERE bot = ?1) < ?5
                  OR EXISTS (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?2))",
             params![self.bot, user, link, now - REQUEST_S, MAX_CONNECTED],
         )?;
         Ok(changed == 1)
+    }
+
+    /// A request was declined, by whoever opened its link first: nobody allows it any more.
+    pub fn decline(&self, link: &str, now: i64) -> rusqlite::Result<()> {
+        let query =
+            "UPDATE services_requests SET declined = 1 WHERE bot = ?1 AND link = ?2 AND at > ?3 AND user IS NULL";
+        self.db().execute(query, params![self.bot, link, now - REQUEST_S]).map(drop)
     }
 
     /// What became of a request, by what the connect page asks with. Once allowed its code, the same each time: an answer
@@ -217,13 +227,19 @@ impl Book {
         let hash: [u8; 32] = Sha256::digest(poll).into();
         let found = tx
             .query_row(
-                "SELECT user IS NOT NULL, salt, state, coalesce(code_at + ?4 > ?3, at + ?5 > ?3)
+                "SELECT declined, user IS NOT NULL, salt, state, coalesce(code_at + ?4 > ?3, at + ?5 > ?3)
                  FROM services_requests WHERE bot = ?1 AND poll = ?2",
                 params![self.bot, hash, now, CODE_S, REQUEST_S],
-                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?)),
+                |r| {
+                    let (declined, allowed): (bool, bool) = (r.get(0)?, r.get(1)?);
+                    Ok((declined, allowed, r.get::<_, Vec<u8>>(2)?, r.get::<_, String>(3)?, r.get::<_, bool>(4)?))
+                },
             )
             .optional()?;
-        let Some((allowed, salt, state, true)) = found else { return Ok(Request::Over) };
+        let Some((declined, allowed, salt, state, true)) = found else { return Ok(Request::Over) };
+        if declined {
+            return Ok(Request::Declined(state));
+        }
         if !allowed {
             return Ok(Request::Waits);
         }
@@ -267,11 +283,17 @@ impl Book {
             let query = "SELECT salt FROM services_salts WHERE bot = ?1";
             let salt: Vec<u8> = tx.query_row(query, [&self.bot], |r| r.get(0))?;
             let out = URL_SAFE_NO_PAD.encode(Sha256::new().chain_update(salt).chain_update(user).finalize());
-            tx.execute(
-                "INSERT INTO services_secrets (bot, user, key, out) VALUES (?1, ?2, ?3, ?4)
+            let made = tx.execute(
+                "INSERT INTO services_secrets (bot, user, key, out) SELECT ?1, ?2, ?3, ?4
+                 WHERE (SELECT count(*) FROM services_secrets WHERE bot = ?1) < ?5
+                    OR EXISTS (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?2)
                  ON CONFLICT (bot, user) DO UPDATE SET key = excluded.key, out = excluded.out",
-                params![self.bot, user, key, out],
+                params![self.bot, user, key, out, MAX_CONNECTED],
             )?;
+            // Too many meanwhile: nothing of it is done.
+            if made == 0 {
+                return Ok(None);
+            }
         }
         tx.commit()?;
         Ok(found)
@@ -495,6 +517,28 @@ mod tests {
         let third = code("r", 302);
         book.disconnect("b").unwrap();
         assert_eq!(book.exchange(&third, &[5; 32], 303).unwrap(), None, "ended");
+        request("u", "v", 400);
+        book.decline("u", 401).unwrap();
+        assert_eq!(book.asked("v", 402).unwrap(), Request::Declined("s".into()));
+        assert!(!book.allow("a", "u", 402).unwrap(), "declined stays");
+        request("w", "y", 400);
+        book.allow("a", "w", 401).unwrap();
+        book.decline("w", 402).unwrap();
+        code("y", 403);
+        {
+            let db = book.db();
+            db.execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
+                INSERT INTO services_secrets SELECT 'DST', 'n' || i, randomblob(32), 'o' FROM n",
+            )
+            .unwrap();
+        }
+        request("full", "full", 400);
+        assert!(!book.allow("new", "full", 401).unwrap(), "as many as there may be");
+        book.db().execute("UPDATE services_requests SET user = 'new' WHERE link = 'full'", []).unwrap();
+        let late = code("full", 402);
+        assert_eq!(book.exchange(&late, &[8; 32], 403).unwrap(), None, "nor at the exchange");
+        book.db().execute("DELETE FROM services_secrets WHERE user LIKE 'n%'", []).unwrap();
         request("o", "t", 400);
         book.tidy(400 + REQUEST_S).unwrap();
         let left: i64 = book.db().query_row("SELECT count(*) FROM services_requests", [], |r| r.get(0)).unwrap();

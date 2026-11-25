@@ -22,6 +22,7 @@ mod list;
 mod partner;
 mod picture;
 mod script;
+mod sources;
 mod yo;
 
 use executor::{now, Executor, Job};
@@ -131,6 +132,10 @@ fn main() {
             executor.connect(&event);
             Ok(())
         }
+        Some("decline") => {
+            executor.decline(&event);
+            Ok(())
+        }
         Some("disconnect") => {
             executor.disconnect(&event);
             Ok(())
@@ -155,7 +160,12 @@ fn partner(bridge: &gatekeeper::header::Bridge) -> partner::Partner {
     let secret = |key: &str| {
         Some(env(key)).filter(|s| s.len() >= 16).unwrap_or_else(|| fail(USAGE, &format!("{key}: too short")))
     };
-    let test = std::env::var("SERVICES_TEST_USER").ok().map(|user| (user, secret("SERVICES_TEST_KEY")));
+    let test = std::env::var("SERVICES_TEST_USER").ok().map(|user| {
+        if !executor::user_id(&user) {
+            fail(USAGE, "SERVICES_TEST_USER: not a user id");
+        }
+        (user, secret("SERVICES_TEST_KEY"))
+    });
     partner::Partner {
         header: bridge.key_header.to_ascii_lowercase(),
         return_url: bridge.return_url.clone(),

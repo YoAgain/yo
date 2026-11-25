@@ -27,11 +27,14 @@ A script is taken as hostile, reviewed or not.
   A request is one user's, the first to allow it by their own encrypted message, within 10 minutes; no other code makes one.
 - `POST /NAME/allowed` takes no key but what the page alone was told (kept hashed, in the fragment); the QR code's own code
   tells nothing. justyo.co alone may ask from a browser, in 8 places of its own. A lost answer may be asked for again.
+- A link declined is nobody's any more, and the partner is told (`error=access_denied`).
+- From one address (`CF-Connecting-IP`, by the tunnel alone; IPv6 by its /64) 10 requests at once, then one in 10 s, and 3
+  waits at once; kept in memory, never logged. A body is read once the call has a place, for 5 s.
 - The OAuth 2 code is good for 5 minutes, once, with the client's secret, which is not the key of the calls.
 - What the other side knows a user by is made of their id and a secret of the service: the same after a reconnect.
 - The user ends it by such a message too: the key is void and what was kept of them is forgotten at once.
   Codes and keys are kept as SHA-256 (the app's code as it is, with its request); the script sees none. A call reaches the user of its key and nobody else.
-- Of a connected user, what they sent the service directly (when, which kind) is kept 7 days, for the other side to ask for.
+- Of a connected user, what they sent the service directly (when, which kind): the newest 50 are told, kept at most 7 days, for the other side to ask for.
 - Kept of anyone else: a user id on a reminder, one per service with `"cron"`; 7 days after it ended, or at once
   on `forget`, it is gone.
 

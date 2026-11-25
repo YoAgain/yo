@@ -878,6 +878,13 @@ impl YoClient {
         Ok(())
     }
 
+    /// Declines it instead: the code of its connect link, so whoever waits is told.
+    pub fn decline_service(&self, service: String, code: String) -> Result<(), YoError> {
+        let code = yo_core::unb64(&code).ok().and_then(|c| c.try_into().ok()).ok_or(YoError::State)?;
+        self.with(|c| c.decline_service(&service, code))??;
+        Ok(())
+    }
+
     /// The services connected with another one, waiting, refused or ending.
     pub fn connections(&self) -> Vec<ConnectionInfo> {
         self.look(|c| c.connections()).unwrap_or_default()

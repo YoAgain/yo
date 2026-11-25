@@ -35,7 +35,7 @@ A bridge's environment: `SERVICES_KEY` (calls) and `SERVICES_CLIENT_SECRET` (OAu
 partner's site ─► GET /NAME/connect      client_id, redirect_uri, state: a request, 10 minutes
                ─► justyo.co/services/NAME#code=…&poll=…      draws the code, as a link and a QR code
 app            ─► Connect with the code, encrypted      the first Allow is the one
-page           ─► POST /NAME/allowed {"poll"}      {"request": "waiting" | "over" | "allowed", "url": return_url?code&state}
+page           ─► POST /NAME/allowed {"poll"}      {"request": "waiting" | "over" | "allowed" | "declined", "url": return_url?code&state, or ?error&state}
 partner        ─► POST /NAME/token      the code, once, 5 minutes: a key
 ```
 

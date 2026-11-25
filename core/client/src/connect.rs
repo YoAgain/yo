@@ -1,6 +1,6 @@
 use super::*;
 use crate::storage::Connection;
-use yo_wire::content::{CONNECT, CONNECTED, CONNECT_END, CONNECT_ENDED, CONNECT_REFUSED};
+use yo_wire::content::{CONNECT, CONNECTED, CONNECT_DECLINED, CONNECT_END, CONNECT_ENDED, CONNECT_REFUSED};
 
 /// How long a connect link's code is good (the service's own time for it).
 const WAIT_MS: u64 = 10 * 60 * 1000;
@@ -20,7 +20,7 @@ pub struct ConnectionInfo {
     pub ending: bool,
 }
 
-/// A connection as it came to a service: the user, `CONNECT` or `CONNECT_END`, the code.
+/// A connection as it came to a service: the user, `CONNECT`, `CONNECT_END` or `CONNECT_DECLINED`, the code.
 pub type ConnectRequest = (String, u8, [u8; 32]);
 
 impl Client {
@@ -61,6 +61,27 @@ impl Client {
     }
 
     fn connect_inner(&mut self, service: &str, code: [u8; 32]) -> Result<()> {
+        let (user, name) = self.service(service)?;
+        self.check_sendable(Some(&user))?;
+        if !self.has_chat(&user) {
+            let id = Handle::parse(&user)?;
+            self.start_chat(&id)?;
+        }
+        self.atomic(|c| {
+            c.keep_friend(&user);
+            c.set_connection(&user, |connection| {
+                connection.name = name;
+                connection.waiting = Some(yo_wire::b64(&code));
+                connection.refused = false;
+                connection.ending = None;
+            });
+            c.queue_connect(&user, CONNECT, code)
+        })?;
+        self.deliver_now()
+    }
+
+    /// Who a service is, and that it is a bot, as the hub says now: its user id and name.
+    fn service(&mut self, service: &str) -> Result<(String, String)> {
         if self.replaced.get() {
             return Err(Error::Replaced);
         }
@@ -68,7 +89,6 @@ impl Client {
         if self.is_me(&handle) {
             return Err(Error::Protocol("sending to oneself"));
         }
-        // Who it is and that it is a bot, as the hub says now.
         let (found, username) = self.lookup(&handle, 0, Vec::new())?;
         let user = hex(&found.user_id);
         if user == self.state.user_id {
@@ -80,21 +100,31 @@ impl Client {
         if self.state.contacts.contains_key(&user) && handle.kind != KIND_USER {
             self.take_handle(&user, username.clone().unwrap_or_else(|| handle.display()));
         }
-        self.check_sendable(Some(&user))?;
-        if !self.has_chat(&user) {
-            let id = Handle::user(&found.user_id);
-            self.start_chat(&id)?;
-        }
         let name = username.unwrap_or_else(|| handle.display());
+        Ok((user, name))
+    }
+
+    /// Declines to connect `service`: it is told the code of its connect link, so whoever waits for it is told. Who was
+    /// no contact is none after it, and gets no key or name of this account.
+    pub fn decline_service(&mut self, service: &str, code: [u8; 32]) -> Result<Vec<Event>> {
+        let result = self.decline_inner(service, code);
+        self.finish_sent(result)
+    }
+
+    fn decline_inner(&mut self, service: &str, code: [u8; 32]) -> Result<()> {
+        let (user, _) = self.service(service)?;
+        self.check_sendable(Some(&user))?;
+        let accepted = self.state.contacts.get(&user).is_some_and(|c| c.accepted);
+        if !self.has_chat(&user) {
+            self.start_chat(&Handle::parse(&user)?)?;
+        }
         self.atomic(|c| {
-            c.keep_friend(&user);
-            c.set_connection(&user, |connection| {
-                connection.name = name;
-                connection.waiting = Some(yo_wire::b64(&code));
-                connection.refused = false;
-                connection.ending = None;
-            });
-            c.queue_connect(&user, CONNECT, code)
+            if let Some(contact) = c.state.contacts.get_mut(&user).filter(|_| !accepted) {
+                (contact.accepted, contact.key_due, contact.profile_due) = (false, false, false);
+            }
+            c.send_message(&user, Content::Connect { kind: CONNECT_DECLINED, code })?;
+            c.encrypt_waiting(&user);
+            c.persist()
         })?;
         self.deliver_now()
     }
@@ -152,7 +182,7 @@ impl Client {
 
     /// A connection message of `user`: a service's answer counts only with the code it was asked by.
     pub(crate) fn connection_received(&mut self, user: &str, kind: u8, code: [u8; 32]) {
-        if matches!(kind, CONNECT | CONNECT_END) {
+        if matches!(kind, CONNECT | CONNECT_END | CONNECT_DECLINED) {
             if !self.blocked(user) && self.connect_requests.len() < 256 {
                 self.connect_requests.push((user.to_owned(), kind, code));
             }

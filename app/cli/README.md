@@ -31,8 +31,9 @@ directory itself (and waits up to 30 s for another command that has it).
 **Events.** `{"type":"ready","user":…}` first, then `message` (`from`, `group`, `reply_to`: the user or `group:ID` to
 answer, `content`: `yo`, `photo`, `video` or `other`, `media`: size, width, height, duration and `ref`), `new_chat`,
 `profile`, `identity_changed`, `group_changed`, `probe` (`from`, `token`: answer with `yo echo-probe`) and
-`connect` or
-`disconnect` (`from`, `code`: a user connects this service or ends that; answered with `yo service-answer`), and
+`connect`,
+`decline` or `disconnect` (`from`, `code`: a user connects this service, declines to or ends that; answered with
+`yo service-answer`, but not a `decline`), and
 `connection_changed` (`user`: a service answered, `yo connections` has it). Printed
 events are acknowledged at once; with `--manual-ack` only by `yo ack`, and the unacknowledged come again after a
 restart. A `media.ref` holds the blob's key: whoever has it can open the photo, so `send --media -` reads it from

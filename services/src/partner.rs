@@ -180,11 +180,9 @@ fn allowed(executor: &Executor, partner: &Partner, asked: &Asked) -> Answer {
     let said = match request {
         Ok(Request::Waits) => json!({ "request": "waiting" }),
         Ok(Request::Over) => json!({ "request": "over" }),
-        Ok(Request::Allowed(code, state)) => {
-            match reqwest::Url::parse_with_params(&partner.return_url, [("code", code), ("state", state)]) {
-                Ok(url) => json!({ "request": "allowed", "url": url.as_str() }),
-                Err(_) => return refused(500, "Failed"),
-            }
+        Ok(Request::Allowed(code, state)) => back(partner, "allowed", [("code", code), ("state", state)]),
+        Ok(Request::Declined(state)) => {
+            back(partner, "declined", [("error", "access_denied".into()), ("state", state)])
         }
         Err(_) => return refused(503, "Try again later"),
     };
@@ -220,6 +218,12 @@ fn called(executor: &Executor, partner: &Partner, asked: Asked) -> Answer {
     }
 }
 
+/// Where the page goes back to.
+fn back(partner: &Partner, request: &str, with: [(&str, String); 2]) -> Value {
+    let url = reqwest::Url::parse_with_params(&partner.return_url, with).map(String::from).unwrap_or_default();
+    json!({ "request": request, "url": url })
+}
+
 /// The code of a request becomes a key, for the partner alone.
 fn token(executor: &Arc<Executor>, partner: &Partner, asked: &Asked) -> Answer {
     let wrong = |status: u16, why: &str| Answer::new(status, json!({ "error": why }));
@@ -232,7 +236,7 @@ fn token(executor: &Arc<Executor>, partner: &Partner, asked: &Asked) -> Answer {
     if field("grant_type") != "authorization_code" {
         return wrong(400, "unsupported_grant_type");
     }
-    if asked.form.get("redirect_uri").is_some_and(|uri| *uri != partner.return_url) {
+    if field("redirect_uri") != partner.return_url {
         return wrong(400, "invalid_grant");
     }
     let Some(key) = random() else { return wrong(500, "server_error") };

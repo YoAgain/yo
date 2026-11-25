@@ -42,6 +42,8 @@ pub const CONNECT_END: u8 = 1;
 pub const CONNECTED: u8 = 2;
 pub const CONNECT_REFUSED: u8 = 3;
 pub const CONNECT_ENDED: u8 = 4;
+/// To the service: the code of a connect link the user declined. No answer.
+pub const CONNECT_DECLINED: u8 = 5;
 
 /// A read watermark (Signal's `SyncMessage.Read`): one direct or group thread, read through the message sent then.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserializeBytes, TlsSize)]

@@ -428,12 +428,23 @@ fn a_connection_both_ways() {
     assert!(alice.connections().is_empty(), "ended");
     assert_eq!(call("yo", &key).0, 401);
     assert_eq!(bot.book("SELECT count(*) FROM services_yos WHERE user IS NOT NULL"), "[(0,)]");
+    // Declined: whoever waits is told, and she has no contact of it.
+    let (_, code, poll) = begin("no");
+    bob.decline_service(&bot.name, code.clone().try_into().unwrap()).unwrap();
+    let said = asked(&poll);
+    assert_eq!(said, r#"{"request":"declined","url":"https://other.invalid/back?error=access_denied&state=no"}"#);
+    let mut carol = someone(&hub);
+    let (_, code, poll) = begin("no2");
+    carol.decline_service(&bot.name, code.try_into().unwrap()).unwrap();
+    assert!(asked(&poll).contains("access_denied&state=no2"));
+    assert!(carol.connections().is_empty() && carol.contacts().iter().all(|c| !c.accepted));
     // Again: what she is known by outside is the same.
     let (_, code, poll) = begin("again");
     alice.connect_service(&bot.name, code.try_into().unwrap()).unwrap();
     let said = asked(&poll);
     let code = said.split("code=").nth(1).unwrap().split('&').next().unwrap().to_owned();
-    assert_eq!(exchange(&code, secret, "", true).0, 200);
+    assert_eq!(exchange(&code, secret, "", true).0, 400, "where it goes back to is asked for");
+    assert_eq!(exchange(&code, secret, back, true).0, 200);
     let out = bot.book("SELECT out FROM services_secrets");
     assert!(out.len() > 43 && secrets.contains(out.split('\'').nth(1).unwrap()), "{out} {secrets}");
     let _ = entrance.kill();

@@ -7,7 +7,7 @@ use yo_core::connect::ConnectRequest;
 use yo_core::media::{self, Media};
 use yo_core::shared::{self, Locked, Target, GROUP_PREFIX as GROUP};
 use yo_core::{Client, Content, Event};
-use yo_wire::content::{CONNECT, CONNECTED, CONNECT_ENDED, CONNECT_REFUSED};
+use yo_wire::content::{CONNECT, CONNECTED, CONNECT_DECLINED, CONNECT_ENDED, CONNECT_REFUSED};
 
 /// The largest photo read for `send --photo`, as a reply picture may be.
 const MAX_PHOTO: usize = 512 * 1024;
@@ -84,10 +84,14 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             let token = token.ok_or_else(|| Failure::usage("echo-probe USER TOKEN: a token of 32 bytes"))?;
             done(context, |c| c.echo_probe(user, token))
         }
-        ["connect", service, code] => {
+        [word @ ("connect" | "decline"), service, code] => {
             let code = yo_wire::unb64(code).ok().and_then(|c| c.try_into().ok());
-            let code = code.ok_or_else(|| Failure::usage("connect SERVICE CODE: the code of its connect link"))?;
-            done(context, |c| c.connect_service(service, code))
+            let code =
+                code.ok_or_else(|| Failure::usage("connect|decline SERVICE CODE: the code of its connect link"))?;
+            done(context, |c| match *word {
+                "connect" => c.connect_service(service, code),
+                _ => c.decline_service(service, code),
+            })
         }
         ["connections"] => Ok(connections(&context.client())),
         ["disconnect", service] => {
@@ -257,7 +261,11 @@ fn sync(context: &Context, args: &[&str]) -> Outcome {
 
 /// A user connects this service with another one, or ends that.
 pub fn connect((user, kind, code): &ConnectRequest) -> Value {
-    let kind = if *kind == CONNECT { "connect" } else { "disconnect" };
+    let kind = match *kind {
+        CONNECT => "connect",
+        CONNECT_DECLINED => "decline",
+        _ => "disconnect",
+    };
     json!({ "type": kind, "from": user, "code": yo_wire::b64(code) })
 }
 

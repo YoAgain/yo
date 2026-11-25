@@ -99,7 +99,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn user_id(text: &str) -> bool {
+pub fn user_id(text: &str) -> bool {
     text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -149,6 +149,14 @@ impl Executor {
         if !taken {
             count(&self.counts.limited);
             self.tell(user, "refused", code);
+        }
+    }
+
+    /// A user declined a request to connect: whoever waits is told. Within the limits.
+    pub fn decline(&self, event: &Value) {
+        let Some((user, code)) = self.connecting(event) else { return };
+        if self.partner.is_some() && locked(&self.limits).take(user, None, Instant::now()) {
+            let _ = self.book.decline(code, now());
         }
     }
 
@@ -297,7 +305,8 @@ impl Executor {
             "keyed": false,
         });
         if let (Some(call), Some(partner)) = (&job.call, &self.partner) {
-            let setup = call.keyed && out.is_none() && call.path.ends_with("test/setup");
+            let setup =
+                call.keyed && out.is_none() && (call.method.as_str(), call.path.as_str()) == ("POST", "v1/test/setup");
             let connected = out.is_some() && partner.test_out(&job.user).is_none();
             let yos = if connected { self.book.kept(&job.user, job.at).unwrap_or_default() } else { Vec::new() };
             event["id"] = json!(call.id);
