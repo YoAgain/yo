@@ -29,6 +29,62 @@ import os
   static var outbox: MediaOutbox?
 }
 
+/// "Offline", a problem (tap: again) or a deletion's undo, in a glass capsule floating over the content at the bottom
+/// edge: no room of its own, so no bar moves as it comes and goes.
+struct NoticeBar: View {
+  private var notice: DeleteNotice { .shared }
+  private func retry() {
+    if notice.deletion == nil && !Availability.shared.offline { Problems.shared.retry?() }
+  }
+
+  var body: some View {
+    ZStack {
+      if notice.deletion != nil || notice.banner != nil {
+        HStack(spacing: 8) {
+          if let deletion = notice.deletion {
+            TimelineView(.animation) { _ in
+              Circle().trim(from: 0, to: max(0, min(1, (Double(deletion.deadline) - Double(DeleteNotice.now)) / 3000)))
+                .stroke(.white, lineWidth: 2).rotationEffect(.degrees(-90))
+                .frame(width: 14, height: 14)
+            }
+            Text("\(deletion.name) deleted").font(.custom("Montserrat-Bold", size: 16))
+              .lineLimit(1).minimumScaleFactor(0.5)
+            Button("Undo") { notice.undo?() }.font(.system(size: 16, weight: .bold))
+          } else {
+            HStack(spacing: 8) {
+              Circle().fill(.red).frame(width: 7, height: 7)
+              Text(notice.banner ?? "").font(.custom("Montserrat-Bold", size: 16))
+                .lineLimit(1).minimumScaleFactor(0.5)
+              if notice.banner == "Offline" {
+                TimelineView(.periodic(from: .now, by: 0.45)) { context in
+                  let n = Int(context.date.timeIntervalSinceReferenceDate / 0.45) % 4
+                  Text(String(repeating: ".", count: n) + String(repeating: " ", count: 3 - n))
+                    .font(.custom("Montserrat-Bold", size: 16)).monospaced()
+                }
+                .padding(.leading, -6)
+              }
+            }
+            // One element, the words alone: VoiceOver read the moving dots as an element of their own.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(notice.banner ?? "")
+            .accessibilityAddTraits(Problems.shared.retry == nil ? [] : [.isButton])
+            .accessibilityAction { retry() }
+          }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 18).frame(minHeight: 44)
+        .contentShape(.capsule)
+        .glassEffect(.regular, in: .capsule)
+        .onTapGesture { retry() }
+        .padding(.horizontal, 16)
+        .transition(.opacity)
+      }
+    }
+    .animation(.easeInOut(duration: 0.2), value: notice.banner)
+    .animation(.easeInOut(duration: 0.2), value: notice.deletion?.id)
+  }
+}
+
 extension View {
   /// The app's objects again, on a sheet's content (`AppObjects`).
   func appObjects() -> some View {
@@ -125,64 +181,24 @@ struct YoApp: App {
 
   var body: some Scene {
     WindowGroup {
-      // The top bar takes its own room above the screen. As a safe-area inset it was not kept by the list's scroll
-      // view, whose first bar stayed under it half covered. Its amethyst still reaches up behind the status bar.
-      VStack(spacing: 0) {
-        if DeleteNotice.shared.deletion != nil || DeleteNotice.shared.banner != nil {
-          HStack(spacing: 8) {
-            if let deletion = DeleteNotice.shared.deletion {
-              TimelineView(.animation) { _ in
-                Circle().trim(from: 0, to: max(0, min(1,
-                  (Double(deletion.deadline) - Double(DeleteNotice.now)) / 3000)))
-                  .stroke(.white, lineWidth: 2).rotationEffect(.degrees(-90))
-                  .frame(width: 14, height: 14)
-              }
-              Text("\(deletion.name) deleted").font(.custom("Montserrat-Bold", size: 16))
-                .lineLimit(1).minimumScaleFactor(0.5)
-              Button("Undo") { DeleteNotice.shared.undo?() }.font(.system(size: 16, weight: .bold))
-            } else {
-              HStack(spacing: 8) {
-                Circle().fill(.red).frame(width: 7, height: 7)
-                Text(DeleteNotice.shared.banner ?? "").font(.custom("Montserrat-Bold", size: 16))
-                if DeleteNotice.shared.banner == "Offline" {
-                  TimelineView(.periodic(from: .now, by: 0.45)) { context in
-                    let n = Int(context.date.timeIntervalSinceReferenceDate / 0.45) % 4
-                    Text(String(repeating: ".", count: n) + String(repeating: " ", count: 3 - n))
-                      .font(.custom("Montserrat-Bold", size: 16)).monospaced()
-                  }
-                  .padding(.leading, -6)
-                }
-              }
-              // One element, the words alone: VoiceOver read the moving dots as an element of their own.
-              .accessibilityElement(children: .ignore)
-              .accessibilityLabel(DeleteNotice.shared.banner ?? "")
-            }
-          }
-          .foregroundStyle(.white)
-          .frame(maxWidth: .infinity).frame(height: 36)
-          .background(Color.amethyst)
-          .onTapGesture { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { Problems.shared.retry?() } }
-          .accessibilityAddTraits(Problems.shared.retry == nil ? [] : [.isButton])
-          .accessibilityAction { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { Problems.shared.retry?() } }
-          .transition(.opacity)
+      // A build the hub no longer takes (426): only the update screen, nothing behind it (VoiceOver included).
+      Group {
+        if AppUpdate.shared.needed {
+          UpdateScreen().transition(.opacity)
+        } else if accounts.account == nil {
+          Onboarding().transition(.opacity)
+        } else if accounts.updating {
+          ProgressView("Yo is updating…").transition(.opacity)
+        } else {
+          FriendList().transition(.opacity)
         }
-        // A build the hub no longer takes (426): only the update screen, nothing behind it (VoiceOver included).
-        Group {
-          if AppUpdate.shared.needed {
-            UpdateScreen().transition(.opacity)
-          } else if accounts.account == nil {
-            Onboarding().transition(.opacity)
-          } else if accounts.updating {
-            ProgressView("Yo is updating…").transition(.opacity)
-          } else {
-            FriendList().transition(.opacity)
-          }
-        }
+      }
+      // The list shows it over its own controls (FriendList).
+      .overlay(alignment: .bottom) {
+        if accounts.account == nil || accounts.updating { NoticeBar().padding(.bottom, 10) }
       }
       // A scene means Yo opens for the screen: open the core now (a background launch opens it only on demand).
       .onAppear { accounts.openNow() }
-      .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.banner)
-      .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.deletion?.id)
       .onChange(of: Availability.shared.offline, initial: true) { _, _ in updateBanner() }
       .onChange(of: Availability.shared.wrongClock) { _, _ in updateBanner() }
       .onChange(of: Problems.shared.text) { _, _ in updateBanner() }

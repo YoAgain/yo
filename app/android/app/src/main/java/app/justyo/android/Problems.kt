@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import uniffi.yo.*
 
 /**
- * Why a user action did not happen, said in the one banner above the list (the "Offline" line; offline wins, as the
+ * Why a user action did not happen, said in the one banner floating over the list (the "Offline" line; offline wins, as the
  * core decides). Every action that needs the hub reports its failure here, never nowhere. The same problem shows once
  * (again: its clock starts over). One that goes by itself (no connection, the hub busy, waiting to send) stays until
  * the hub answers again or what waits went; any other hides after 6 s. A tap on the banner tries the newest one again.

@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// The one way a user action tells that it did not happen: the red banner at the top (DeleteNotice's, under
+/// The one way a user action tells that it did not happen: the banner over the list's bottom edge (`NoticeBar`, under
 /// "Offline", which the core puts first). Every send, add, group, block, sync and upload reports here; nothing fails
 /// silently. The words are the core's (`ProductProblem`), the same on Android. One problem shows at a time (the
 /// newest); the same again only restarts its time. No connection and the server go when the hub answers again, the

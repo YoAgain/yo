@@ -530,6 +530,7 @@ struct FriendList: View {
       // In camera mode what to do, in glass just over the controls (at the top it would cover a bar's name).
       .overlay(alignment: .bottom) {
         VStack(spacing: 10) {
+          NoticeBar()
           if cameraOn && hintShown { title }
         }
         // Only after 3 s idle in camera mode, and not again once a photo or video went out.

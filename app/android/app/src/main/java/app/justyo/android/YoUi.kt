@@ -1015,15 +1015,6 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
         Box(Modifier.fillMaxSize().safeDrawingPadding().then(edgeGesture)) {
         Column(Modifier.fillMaxSize()) {
-        // "Offline" or a failed send (tap: again) above the list, never over its first bar (iOS's top inset).
-        androidx.compose.animation.AnimatedVisibility(s.banner != null && s.deletion == null) {
-            // "Check Your Phone's Date & Time": the system's date settings, in Yo's task (Back comes back here).
-            val clockText = remember { productProblemText(ProductProblem.WRONG_CLOCK, Words) }
-            ConnectionBanner(s.banner.orEmpty(), onRetry = {
-                if (s.banner == clockText) runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_DATE_SETTINGS)) }
-                else repo.bannerTapped()
-            })
-        }
         LazyColumn(Modifier.fillMaxWidth().weight(1f),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
             if (showNotificationBar && !cameraOn) item(key = "notification-settings") {
                 NotificationSettingsRow { openNotificationSettings(context) }
@@ -1099,10 +1090,22 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             }
         }
         }
-        if (!keyboardVisible) Column(
+        Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // "Offline" or a failed send (tap: again) floats over the bars at the bottom edge (iOS's NoticeBar): no row
+            // moves as it comes and goes.
+            androidx.compose.animation.AnimatedVisibility(s.banner != null && s.deletion == null,
+                enter = androidx.compose.animation.fadeIn(), exit = androidx.compose.animation.fadeOut()) {
+                // "Check Your Phone's Date & Time": the system's date settings, in Yo's task (Back comes back here).
+                val clockText = remember { productProblemText(ProductProblem.WRONG_CLOCK, Words) }
+                ConnectionBanner(s.banner.orEmpty(), onRetry = {
+                    if (s.banner == clockText) runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_DATE_SETTINGS)) }
+                    else repo.bannerTapped()
+                })
+            }
+            if (!keyboardVisible) {
             val glassTint = Color.White.copy(alpha = 0.2f)
             val prompt = when {
                 importingShares -> stringResource(R.string.preparing_shared_media)
@@ -1208,6 +1211,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     if (!mirrored) cameraButton()
                 }
 
+            }
             }
         }
     }
@@ -1411,19 +1415,22 @@ internal class RowActions {
 @Composable private fun ConnectionBanner(text: String, onRetry: () -> Unit) {
     val offline = text == "Offline"
     val dots by produceState(0, offline) { while (offline) { delay(450); value = (value + 1) % 4 } }
+    Surface(Modifier.padding(bottom = 10.dp), shape = CircleShape, color = Color.White, contentColor = Color.Black, shadowElevation = 6.dp) {
     Row(
         // TalkBack says it when it comes or changes ("No Connection", "Waiting to Send"), as a sighted user sees it.
-        Modifier.fillMaxWidth().height(36.dp).background(Amethyst)
+        Modifier.heightIn(min = 44.dp)
             .then(if (offline) Modifier else Modifier.clickable(onClick = onRetry))
+            .padding(horizontal = 18.dp)
             .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(7.dp).background(Color.Red, CircleShape))
-        val style = TextStyle(fontFamily = YoFont, fontSize = 16.sp, color = Color.White)
+        val style = TextStyle(fontFamily = YoFont, fontSize = 16.sp, color = Color.Black)
         Text(text, maxLines = 1, style = style)
         // The dots in a box of their own width: the word stays where it is while they come and go.
         if (offline) Box(Modifier.padding(start = 0.dp).width(18.dp).offset(x = (-6).dp).clearAndSetSemantics {}) { Text(".".repeat(dots), maxLines = 1, style = style) }
+    }
     }
 }
 

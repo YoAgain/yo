@@ -48,7 +48,7 @@ Bar titles, send and arrival lines, notification lines, widget selection and tex
 Done since: the long-press menu, report follow-up, group members sheet, confirmation titles, Group Is Empty, direct
 decline, key-change dialog, first-Yo notifications offer, Offline / Failed to Send line, Add Friend's lookup hint and
 "No Connection", invite problems in the dialog, multi-pick of photos and videos, camera zoom choices (core), haptics,
-Yo Back on notifications, yo://camera, the widget's "Sent Yo!", the settings pages' copy (recovery, sign out, delete,
+the notice capsule floating at the bottom edge, Yo Back on notifications, yo://camera, the widget's "Sent Yo!", the settings pages' copy (recovery, sign out, delete,
 blocked, contacts, verification, Your Code, Status order).
 
 Still different, by decision or not yet done:
