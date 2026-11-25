@@ -137,6 +137,8 @@ DB: the local database, sealed per column.
 Bots such as PING and YoGPT, and bridges to other services such as IFTTT. Each is a folder with a TOML and one script in
 [yo-services](https://github.com/YoAgain/yo-services); everything else is here and the same for all.
 
+Services run separately from the hub: to the hub each is an account like any other, and it never sees their keys or scripts.
+
 | | | URL |
 |---|---|---|
 | [yo-services](https://github.com/YoAgain/yo-services) | The services: a TOML, a script, a logo. No keys, no network | |
@@ -148,10 +150,20 @@ Bots such as PING and YoGPT, and bridges to other services such as IFTTT. Each i
 Yo         phone ◄─encrypted─► hub ◄─► executor ◄─► script
 Bridge     IFTTT ──► api.justyo.app/ifttt/… ──► entrance ──► executor ──► script
 Catalog    yo-services ──► api.justyo.app/services ──► justyo.co/services
-Connect    IFTTT ──► justyo.co/services/ifttt?state=… ──► Allow in Yo ──► executor
+Connect    IFTTT ──► api.justyo.app/ifttt/connect ──► justyo.co/services/ifttt ──► Allow in Yo ──► executor
 ```
 
-`api.justyo.app` itself leads to `justyo.co/services`. In progress: bridges and their page are not live yet.
+| `api.justyo.app` | | For |
+|---|---|---|
+| `GET /` | leads to `justyo.co/services` | people |
+| `GET /services` | the list of services, JSON | apps, website |
+| `GET /services/NAME.png` | the logo of a service | apps, website |
+| `GET /NAME/connect` | starts connecting (OAuth 2), leads to `justyo.co/services/NAME` | the partner |
+| `POST /NAME/allowed` | waits for Allow in the app, then says where to go back | that page |
+| `POST /NAME/token` | the code for a token (OAuth 2) | the partner |
+| `/NAME/…` | everything else goes to the script of the service | the partner |
+
+In progress: only `/` and `/services` are live.
 
 Limits and details: [services README](services/README.md), [SECURITY.md](services/SECURITY.md).
 
