@@ -1356,8 +1356,6 @@ if (document.body.classList.contains("login")) {
         who.append(many);
       }
       cell(tr, who, "name", u.id);
-      cell(tr, rel(u.created), null, date(u.created));
-      cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
       // App: one pill, the platform's icon and "newest" or the build's age (its id is its time), coloured as in the App card;
       // its hover names the build (label, version, state, below the hub's minimum).
       const platform = (u.app || "").split("/")[0], band = releases.get(u.app), info = appInfo(u.app);
@@ -1368,7 +1366,6 @@ if (document.body.classList.contains("login")) {
       if (ICONS[platform] && platform !== "lock") app.prepend(icon(platform));
       hint(app, info ? [info.label, appTitle(u.app, u.id), band && `${age} old`, band?.behind && !newest ? `${num(band.behind)} builds behind the newest` : ""].filter(Boolean).join(" · ") : "Unknown build");
       cell(tr, app);
-      cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       // Secured: the lock (a backup), then the shield (attestation, spec 6.11, measured, never enforced): checked green
       // when attested, grey when failed (the reason in its hover), none when not measured yet.
       const sec = el("span", "uicons");
@@ -1376,9 +1373,12 @@ if (document.body.classList.contains("login")) {
       if (u.attest === "attested") sec.append(icon("shield-check", "secured", `attested${u.attest_at ? " " + date(u.attest_at) : ""}`));
       else if (u.attest === "failed") sec.append(icon("shield", "", `attestation failed${u.attest_reason ? ": " + u.attest_reason : ""}${u.attest_at ? " " + date(u.attest_at) : ""}`));
       cell(tr, sec.childElementCount ? sec : el("span", "muted", "–"));
+      cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.queued ? num(u.queued) : "–", "num muted");
       // Signed requests to strangers in 24 h (spec 4.10): a flood by a stranger stands out; contacts' are never counted.
       cell(tr, u.requests_24h ? num(u.requests_24h) : "–", u.requests_24h >= 100 ? "num bad" : "num muted");
+      cell(tr, rel(u.created), null, date(u.created));
+      cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
     }
     if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 8;
   };

@@ -47,7 +47,8 @@ pub(crate) async fn counted(State(hub): Hubs, request: Request, next: Next) -> R
     }
     let (parts, body) = response.into_parts();
     let body = axum::body::to_bytes(body, 256).await.unwrap_or_default();
-    let scope: String = String::from_utf8_lossy(&body).chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect();
+    let scope: String =
+        String::from_utf8_lossy(&body).chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect();
     eprintln!("yo-hub: 429 {method} {route} {scope}");
     Response::from_parts(parts, axum::body::Body::from(body))
 }
