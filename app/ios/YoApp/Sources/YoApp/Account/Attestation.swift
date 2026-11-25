@@ -11,7 +11,7 @@ enum Attestation {
   @MainActor static func start(_ client: YoClient) {
     guard started !== client else { return }
     started = client
-    Task.detached(priority: .background) {
+    Task.detached(priority: .userInitiated) {
       guard client.attestDue(nowMs: now()) else { return }
       do {
         guard let challenge = try client.attestChallenge() else { return }
