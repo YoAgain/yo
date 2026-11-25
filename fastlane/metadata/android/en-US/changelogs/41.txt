@@ -1,0 +1,7 @@
+Forty-first release candidate — Your Code, new.
+
+• Your Code looks like your invite page: your name, the code with Yo in it, Link and Share
+• Share sends the picture with "Yo me on Yo" and your link; sharing an invite to X sends the link cleanly
+• Offline and Waiting to Send float over the list instead of pushing it down
+• Waiting to Send only for Yos of yours that really wait
+• Apple Watch: turn the crown to pick a name, double tap to send Yo
