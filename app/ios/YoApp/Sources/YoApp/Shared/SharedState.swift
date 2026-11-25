@@ -213,6 +213,13 @@ enum Guest {
     try? opened(within: seconds, timeout: timeout).get()
   }
 
+  /// SQLITE_IOERR_VNODE: the app replaced the file while this guest opened it. Passing: the next opening reads the new
+  /// file. Counted as expected, not a problem.
+  private static func recordReplaced() {
+    CountedErrors.record(domain: String(reflecting: YoError.self), place: "SharedState.swift Guest.opened",
+      code: "Save/Io/6922", expected: true)
+  }
+
   /// `seconds`: how long each step that may write waits for the turn.
   static func opened(within seconds: Double, timeout: TimeInterval = 70) -> Result<YoClient, Failure> {
     guard let folder = SharedStateFile.folder else { return .failure(.noGroup) }
@@ -228,6 +235,9 @@ enum Guest {
     do {
       db = try SharedStateFile.database()
       guard try db.hasState() else { return .failure(.noAccount) }
+    } catch YoError.Save(let message) where Diagnostics.saveKind(message) == "Io/6922" {
+      recordReplaced()
+      return .failure(.busy)
     } catch {
       Diagnostics.recordUnreported(error)
       return .failure(.busy)
@@ -240,10 +250,7 @@ enum Guest {
     } catch YoError.Network {
       return .failure(.busy)
     } catch YoError.Save(let message) where Diagnostics.saveKind(message) == "Io/6922" {
-      // SQLITE_IOERR_VNODE: the app replaced the file while this guest opened it. Passing: the next opening reads
-      // the new file. Counted as expected, not a problem.
-      CountedErrors.record(domain: String(reflecting: YoError.self), place: "SharedState.swift Guest.opened",
-        code: "Save/Io/6922", expected: true)
+      recordReplaced()
       return .failure(.busy)
     } catch {
       Diagnostics.recordUnreported(error)
