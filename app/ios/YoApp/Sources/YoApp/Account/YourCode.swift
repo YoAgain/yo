@@ -1,20 +1,52 @@
+import LinkPresentation
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import YoCore
 
-/// Share the invite as a URL so the system offers Copy Link.
+/// Share the invite as a URL so the system offers Copy Link. Through UIActivityViewController with the URL itself:
+/// SwiftUI's ShareLink hands a URL over as its archived property list too, which some apps (X) posted as text
+/// ("bplist00…https://justyo.co/NAME…").
 @MainActor
 struct InviteShareLink<Label: View>: View {
   let name: String
   @ViewBuilder var label: () -> Label
 
   var body: some View {
-    ShareLink(
-      item: Invite.link(for: name),
-      subject: Text("\(name) wants to Yo"), message: Text("Yo me on Yo"),
-      preview: SharePreview("\(name) wants to Yo")
-    ) { label() }
+    Button {
+      Share.present([InviteItem(name: name)]) { _ in }
+    } label: {
+      label()
+    }
+  }
+}
+
+/// The invite link for the share sheet: the URL, the mail subject, and the preview's title ("NAME wants to Yo").
+private final class InviteItem: NSObject, UIActivityItemSource {
+  let name: String
+  let url: URL
+
+  init(name: String) {
+    self.name = name
+    url = Invite.link(for: name)
+  }
+
+  func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any { url }
+
+  func activityViewController(_ controller: UIActivityViewController, itemForActivityType type: UIActivity.ActivityType?)
+    -> Any?
+  { url }
+
+  func activityViewController(_ controller: UIActivityViewController, subjectForActivityType type: UIActivity.ActivityType?)
+    -> String
+  { "\(name) wants to Yo" }
+
+  func activityViewControllerLinkMetadata(_ controller: UIActivityViewController) -> LPLinkMetadata? {
+    let metadata = LPLinkMetadata()
+    metadata.originalURL = url
+    metadata.url = url
+    metadata.title = "\(name) wants to Yo"
+    return metadata
   }
 }
 
