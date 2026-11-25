@@ -16,6 +16,8 @@ pub struct Header {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bridge {
+    /// Who the other side says it is (OAuth 2).
+    pub client_id: String,
     /// Where a connected user goes back to.
     pub return_url: String,
     /// Where a user who is not connected reads how to.
@@ -102,6 +104,8 @@ impl Bridge {
             && self.call_urls.iter().all(|url| url.ends_with('/') && host(url) == Some(true))
             && (1..=64).contains(&self.key_header.len())
             && self.key_header.bytes().all(header)
+            && (1..=64).contains(&self.client_id.len())
+            && self.client_id.bytes().all(|b| header(b) || b == b'_')
     }
 }
 
@@ -146,7 +150,7 @@ mod tests {
         assert!(Header::parse("", "").is_err());
         let with = |back: &str, call: &str| {
             let connect =
-                format!("[bridge]\nreturn_url = \"{back}\"\ncall_urls = [\"{call}\"]\nkey_header = \"X-Key\"\nhelp_url = \"{back}\"\n");
+                format!("[bridge]\nclient_id = \"c\"\nreturn_url = \"{back}\"\ncall_urls = [\"{call}\"]\nkey_header = \"X-Key\"\nhelp_url = \"{back}\"\n");
             Header::parse(&(GOOD.to_owned() + &connect), "yogpt")
         };
         assert!(Header::parse(&(GOOD.to_owned() + "[bridge]\nkey_header = \"X\"\n"), "yogpt").is_err());

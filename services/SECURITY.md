@@ -23,9 +23,14 @@ A script is taken as hostile, reviewed or not.
 - A picture a call names is fetched by the executor: from a public https name, its addresses checked and pinned, no
   redirect, a JPEG of at most 512 KB, 10 s.
 - A user of a bridge who is not connected gets a picture drawn at the start, the same for all; the script is not asked.
-- A connection is made by the user's own encrypted message; its code is good for 10 minutes, once, for the partner alone.
+- A connection begins at `GET /NAME/connect`, for the one `client_id` and `redirect_uri` of the TOML; wrong ones lead nowhere.
+  A request is one user's, the first to allow it by their own encrypted message, within 10 minutes; no other code makes one.
+- `POST /NAME/allowed` takes no key but what the page alone was told (kept hashed, in the fragment); the QR code's own code
+  tells nothing. justyo.co alone may ask from a browser, in 8 places of its own. A lost answer may be asked for again.
+- The OAuth 2 code is good for 5 minutes, once, with the client's secret, which is not the key of the calls.
+- What the other side knows a user by is made of their id and a secret of the service: the same after a reconnect.
 - The user ends it by such a message too: the key is void and what was kept of them is forgotten at once.
-  Codes and keys are kept as SHA-256; the script sees neither. A call reaches the user of its key and nobody else.
+  Codes and keys are kept as SHA-256 (the app's code as it is, with its request); the script sees none. A call reaches the user of its key and nobody else.
 - Of a connected user, what they sent the service directly (when, which kind) is kept 7 days, for the other side to ask for.
 - Kept of anyone else: a user id on a reminder, one per service with `"cron"`; 7 days after it ended, or at once
   on `forget`, it is gone.

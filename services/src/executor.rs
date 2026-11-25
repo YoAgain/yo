@@ -3,7 +3,7 @@
 
 use crate::book::{Book, Reminder};
 use crate::gatekeeper::{action, Action, Asked, Header, Limits, Trigger};
-use crate::partner::{hash, Call, Partner};
+use crate::partner::{Call, Partner};
 use crate::script::Script;
 use crate::yo::{Failure, Yo};
 use serde_json::{json, Value};
@@ -140,12 +140,12 @@ impl Executor {
         })
     }
 
-    /// A user allowed a connection: their code is kept; or they are told it is refused.
+    /// A user allowed a request to connect, or they are told it is refused.
     pub fn connect(self: &Arc<Self>, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
         let taken = self.partner.is_some()
             && locked(&self.limits).take(user, None, Instant::now())
-            && self.book.connect(user, &hash(code), now()).unwrap_or(false);
+            && self.book.allow(user, code, now()).unwrap_or(false);
         if !taken {
             count(&self.counts.limited);
             self.tell(user, "refused", code);
@@ -294,8 +294,10 @@ impl Executor {
             "name": self.name, "trigger": job.trigger.word(), "kind": job.kind, "media": media, "group": job.group(),
             "remembered": remembered, "now": job.at,
             "out": out, "id": null, "method": null, "path": null, "body": null, "yos": null, "test": null,
+            "keyed": false,
         });
         if let (Some(call), Some(partner)) = (&job.call, &self.partner) {
+            let setup = call.keyed && out.is_none() && call.path.ends_with("test/setup");
             let connected = out.is_some() && partner.test_out(&job.user).is_none();
             let yos = if connected { self.book.kept(&job.user, job.at).unwrap_or_default() } else { Vec::new() };
             event["id"] = json!(call.id);
@@ -303,7 +305,8 @@ impl Executor {
             event["path"] = json!(call.path);
             event["body"] = json!(call.body);
             event["yos"] = json!(yos);
-            event["test"] = json!(call.keyed.then(|| partner.test_key()).flatten());
+            event["test"] = json!(setup.then(|| partner.test_key()).flatten());
+            event["keyed"] = json!(call.keyed);
         }
         let answer = self.script.call(format!("{event}\n").as_bytes());
         let answer = answer.map_err(|_| Failure { code: 1, retryable: true })?;
@@ -371,7 +374,7 @@ impl Executor {
             Action::Drawn(jpeg) => self.send_picture(&job.to, jpeg)?,
             Action::File(name) => self.send_picture(&job.to, &self.own_picture(name)?)?,
             Action::Fetched(url) => {
-                let jpeg = crate::picture::fetch(url).ok_or(Failure { code: 1, retryable: false })?;
+                let jpeg = crate::picture::fetch(url).map_err(|retryable| Failure { code: 1, retryable })?;
                 self.send_picture(&job.to, &jpeg)?;
             }
             Action::Probe => return self.yo.echo_probe(&job.to, media()?),

@@ -2,7 +2,10 @@
 //! time; who it was only on one with a reminder, for a service that remembers users, or of a connected user. And
 //! who connected what: a second table, of hashes.
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,8 +16,11 @@ const KEPT_S: i64 = 7 * 86_400;
 const TOO_LATE_S: i64 = 86_400;
 /// What a connected user sent, for the other side to ask for.
 const ASKED: i64 = 50;
-/// How long a connect link's code may be turned into a key.
-const CODE_S: i64 = 600;
+/// How long a request to connect may be allowed, and then its code turned into a key.
+pub const REQUEST_S: i64 = 600;
+pub const CODE_S: i64 = 300;
+/// Requests of one service that wait.
+const MAX_REQUESTS: i64 = 50_000;
 /// Connections of one service.
 const MAX_CONNECTED: i64 = 100_000;
 /// Waiting reminders of one service.
@@ -33,8 +39,9 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS NAME (
     CHECK (cron_due IS NOT NULL OR cron_done IS NULL),
     CHECK (user IS NULL OR cron_due IS NOT NULL OR kind IS NOT NULL)
  ) STRICT;";
-/// A connection: `key` is the hash of what a call for the user carries, `out` what the other side knows them by; both
-/// once `code` (a hash too) was turned into them.
+/// A connection: `key` is the hash of what a call for the user carries, `out` what the other side knows them by. A
+/// request: `link` is the code the app sends, `poll` the hash of what the connect page asks with, `code` that of the
+/// OAuth 2 code (made of `salt` and what it asks with). `salt` of a service makes `out`.
 const INDEXES: &str = "
  CREATE UNIQUE INDEX IF NOT EXISTS services_yos_waiting ON services_yos (bot, user)
     WHERE user IS NOT NULL AND cron_due IS NOT NULL AND cron_done IS NULL;
@@ -45,17 +52,38 @@ const INDEXES: &str = "
  CREATE TABLE IF NOT EXISTS services_secrets (
     bot TEXT NOT NULL,
     user TEXT NOT NULL,
-    code BLOB,
-    code_at INTEGER,
-    key BLOB UNIQUE,
-    out TEXT,
-    CHECK ((code IS NULL) = (code_at IS NULL) AND (key IS NULL) = (out IS NULL)),
+    key BLOB NOT NULL UNIQUE,
+    out TEXT NOT NULL,
     PRIMARY KEY (bot, user)
- ) STRICT;";
+ ) STRICT;
+ CREATE TABLE IF NOT EXISTS services_requests (
+    bot TEXT NOT NULL,
+    link TEXT PRIMARY KEY,
+    poll BLOB NOT NULL UNIQUE,
+    salt BLOB NOT NULL,
+    state TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    user TEXT,
+    code BLOB UNIQUE,
+    code_at INTEGER,
+    CHECK ((code IS NULL) = (code_at IS NULL) AND (code IS NULL OR user IS NOT NULL))
+ ) STRICT;
+ CREATE INDEX IF NOT EXISTS services_requests_at ON services_requests (bot, at);
+ CREATE TABLE IF NOT EXISTS services_salts (bot TEXT PRIMARY KEY, salt BLOB NOT NULL) STRICT;";
 
 pub struct Book {
     db: Mutex<Connection>,
     bot: String,
+}
+
+/// What became of a request to connect.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Request {
+    Waits,
+    /// The code for the other side, and its state.
+    Allowed(String, String),
+    /// Or never there.
+    Over,
 }
 
 /// A Yo of a connected user.
@@ -96,7 +124,24 @@ impl Book {
                 TABLE.replace("NAME", "services_yos_new")
             ))?;
         }
+        // Connections of before 11/2026 had their code in the same row.
+        let old: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('services_secrets') WHERE name = 'code')",
+            [],
+            |r| r.get(0),
+        )?;
+        if old {
+            db.execute_batch("ALTER TABLE services_secrets RENAME TO services_secrets_old")?;
+        }
         db.execute_batch(INDEXES)?;
+        if old {
+            db.execute_batch(
+                "INSERT INTO services_secrets (bot, user, key, out)
+                    SELECT bot, user, key, out FROM services_secrets_old WHERE key IS NOT NULL;
+                 DROP TABLE services_secrets_old;",
+            )?;
+        }
+        db.execute("INSERT INTO services_salts (bot, salt) VALUES (?1, randomblob(32)) ON CONFLICT DO NOTHING", [bot])?;
         db.execute_batch("COMMIT")?;
         Ok(Book { db: Mutex::new(db), bot: bot.to_owned() })
     }
@@ -124,7 +169,7 @@ impl Book {
     /// A Yo that came is a connected user's: it is kept with them.
     pub fn keep(&self, row: i64, user: &str, kind: &str) -> rusqlite::Result<()> {
         let query = "UPDATE services_yos SET user = ?3, kind = ?4 WHERE id = ?2 AND bot = ?1 AND EXISTS
-            (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?3 AND out IS NOT NULL)";
+            (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?3)";
         self.db().execute(query, params![self.bot, row, user, kind]).map(drop)
     }
 
@@ -133,7 +178,7 @@ impl Book {
         let db = self.db();
         let mut rows = db.prepare_cached(
             "SELECT id, kind, at FROM services_yos WHERE bot = ?1 AND user = ?2 AND kind IS NOT NULL AND at > ?3
-             ORDER BY id DESC LIMIT ?4",
+             ORDER BY at DESC, id DESC LIMIT ?4",
         )?;
         let kept = rows.query_map(params![self.bot, user, now - KEPT_S, ASKED], |r| {
             Ok(Kept { id: r.get::<_, i64>(0)?.to_string(), kind: r.get(1)?, at: r.get(2)? })
@@ -141,17 +186,54 @@ impl Book {
         kept.collect()
     }
 
-    /// `user` allowed a connection: its code, instead of one that waits. A connection there is goes on until the code
-    /// is turned into a new one.
-    pub fn connect(&self, user: &str, code: &[u8; 32], now: i64) -> rusqlite::Result<bool> {
+    /// A request to connect: the code the app will send, the hash of what the connect page asks with, the other side's
+    /// state. False: too many wait.
+    pub fn request(&self, link: &str, poll: &[u8; 32], state: &str, now: i64) -> rusqlite::Result<bool> {
         let changed = self.db().execute(
-            "INSERT INTO services_secrets (bot, user, code, code_at) SELECT ?1, ?2, ?3, ?4
-             WHERE (SELECT count(*) FROM services_secrets WHERE bot = ?1) < ?5
-                OR EXISTS (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?2)
-             ON CONFLICT (bot, user) DO UPDATE SET code = excluded.code, code_at = excluded.code_at",
-            params![self.bot, user, code, now, MAX_CONNECTED],
+            "INSERT INTO services_requests (bot, link, poll, salt, state, at) SELECT ?1, ?2, ?3, randomblob(32), ?4, ?5
+             WHERE (SELECT count(*) FROM services_requests WHERE bot = ?1) < ?6",
+            params![self.bot, link, poll, state, now, MAX_REQUESTS],
         )?;
         Ok(changed == 1)
+    }
+
+    /// `user` allowed a request: theirs from now on, whoever allows it too. Not one there is not, or that is over.
+    pub fn allow(&self, user: &str, link: &str, now: i64) -> rusqlite::Result<bool> {
+        let changed = self.db().execute(
+            "UPDATE services_requests SET user = ?2
+             WHERE bot = ?1 AND link = ?3 AND at > ?4 AND (user IS NULL OR user = ?2)
+               AND ((SELECT count(*) FROM services_secrets WHERE bot = ?1) < ?5
+                 OR EXISTS (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?2))",
+            params![self.bot, user, link, now - REQUEST_S, MAX_CONNECTED],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// What became of a request, by what the connect page asks with. Once allowed its code, the same each time: an answer
+    /// lost, or asked for twice, is no harm, and it becomes a key once.
+    pub fn asked(&self, poll: &str, now: i64) -> rusqlite::Result<Request> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let hash: [u8; 32] = Sha256::digest(poll).into();
+        let found = tx
+            .query_row(
+                "SELECT user IS NOT NULL, salt, state, coalesce(code_at + ?4 > ?3, at + ?5 > ?3)
+                 FROM services_requests WHERE bot = ?1 AND poll = ?2",
+                params![self.bot, hash, now, CODE_S, REQUEST_S],
+                |r| Ok((r.get::<_, bool>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?)),
+            )
+            .optional()?;
+        let Some((allowed, salt, state, true)) = found else { return Ok(Request::Over) };
+        if !allowed {
+            return Ok(Request::Waits);
+        }
+        let code = URL_SAFE_NO_PAD.encode(Sha256::new().chain_update(salt).chain_update(poll).finalize());
+        tx.execute(
+            "UPDATE services_requests SET code = ?3, code_at = ?4 WHERE bot = ?1 AND poll = ?2 AND code IS NULL",
+            params![self.bot, hash, Sha256::digest(&code).as_slice(), now],
+        )?;
+        tx.commit()?;
+        Ok(Request::Allowed(code, state))
     }
 
     /// `user` is connected no more, and nothing is kept of theirs but a reminder.
@@ -160,6 +242,7 @@ impl Book {
         let tx = db.transaction()?;
         let who = params![self.bot, user];
         tx.execute("DELETE FROM services_secrets WHERE bot = ?1 AND user = ?2", who)?;
+        tx.execute("DELETE FROM services_requests WHERE bot = ?1 AND user = ?2", who)?;
         tx.execute(
             "UPDATE services_yos SET kind = NULL, user = iif(cron_due IS NULL, NULL, user)
              WHERE bot = ?1 AND user = ?2 AND kind IS NOT NULL",
@@ -168,14 +251,30 @@ impl Book {
         tx.commit()
     }
 
-    /// The code of a connection becomes its key, once.
-    pub fn exchange(&self, code: &[u8; 32], key: &[u8; 32], out: &str, now: i64) -> rusqlite::Result<bool> {
-        let changed = self.db().execute(
-            "UPDATE services_secrets SET code = NULL, code_at = NULL, key = ?3, out = ?4
-             WHERE bot = ?1 AND code = ?2 AND code_at > ?5",
-            params![self.bot, code, key, out, now - CODE_S],
-        )?;
-        Ok(changed == 1)
+    /// The code of a request becomes its user's key, once: the user, and the code the app sent. What the other side
+    /// knows them by stays the same, also after an end.
+    pub fn exchange(&self, code: &str, key: &[u8; 32], now: i64) -> rusqlite::Result<Option<(String, String)>> {
+        let mut db = self.db();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let found: Option<(String, String)> = tx
+            .query_row(
+                "DELETE FROM services_requests WHERE bot = ?1 AND code = ?2 AND code_at > ?3 RETURNING user, link",
+                params![self.bot, Sha256::digest(code).as_slice(), now - CODE_S],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((user, _)) = &found {
+            let query = "SELECT salt FROM services_salts WHERE bot = ?1";
+            let salt: Vec<u8> = tx.query_row(query, [&self.bot], |r| r.get(0))?;
+            let out = URL_SAFE_NO_PAD.encode(Sha256::new().chain_update(salt).chain_update(user).finalize());
+            tx.execute(
+                "INSERT INTO services_secrets (bot, user, key, out) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (bot, user) DO UPDATE SET key = excluded.key, out = excluded.out",
+                params![self.bot, user, key, out],
+            )?;
+        }
+        tx.commit()?;
+        Ok(found)
     }
 
     /// Whom a call with this key is for, and what the other side knows them by.
@@ -186,7 +285,7 @@ impl Book {
 
     /// What the other side knows `user` by, if connected.
     pub fn out(&self, user: &str) -> rusqlite::Result<Option<String>> {
-        let query = "SELECT out FROM services_secrets WHERE bot = ?1 AND user = ?2 AND out IS NOT NULL";
+        let query = "SELECT out FROM services_secrets WHERE bot = ?1 AND user = ?2";
         self.db().query_row(query, params![self.bot, user], |r| r.get(0)).optional()
     }
 
@@ -263,12 +362,9 @@ impl Book {
              WHERE bot = ?1 AND user IS NOT NULL AND coalesce(cron_done, cron_due + ?3, at) < ?2",
             params![self.bot, now - KEPT_S, TOO_LATE_S],
         )?;
-        // A connect link's code not used in time is none any more.
-        let late = params![self.bot, now - CODE_S];
-        self.db().execute("DELETE FROM services_secrets WHERE bot = ?1 AND code_at <= ?2 AND key IS NULL", late)?;
         self.db().execute(
-            "UPDATE services_secrets SET code = NULL, code_at = NULL WHERE bot = ?1 AND code_at <= ?2",
-            late,
+            "DELETE FROM services_requests WHERE bot = ?1 AND coalesce(code_at + ?3, at + ?4) <= ?2",
+            params![self.bot, now, CODE_S, REQUEST_S],
         )?;
         Ok(())
     }
@@ -356,22 +452,53 @@ mod tests {
 
     #[test]
     fn a_connection_is_made_once_and_its_yos_are_kept() {
-        let (book, code) = (book(), [1; 32]);
-        book.connect("a", &code, 100).unwrap();
+        let book = book();
+        let code = |poll: &str, now| match book.asked(poll, now).unwrap() {
+            Request::Allowed(code, state) => {
+                assert_eq!(state, "s");
+                code
+            }
+            other => panic!("{other:?}"),
+        };
+        let request = |link: &str, poll: &str, now| {
+            assert!(book.request(link, &Sha256::digest(poll).into(), "s", now).unwrap());
+        };
+        assert!(!book.allow("a", "l", 100).unwrap(), "no request, nothing allowed");
+        request("l", "p", 100);
+        assert_eq!((book.asked("p", 101).unwrap(), book.asked("x", 101).unwrap()), (Request::Waits, Request::Over));
+        assert_eq!(book.asked("p", 100 + REQUEST_S).unwrap(), Request::Over);
+        assert!(!book.allow("a", "l", 100 + REQUEST_S).unwrap(), "too late");
+        assert!(book.allow("a", "l", 101).unwrap() && book.allow("a", "l", 102).unwrap());
+        assert!(!book.allow("b", "l", 102).unwrap(), "the first is the one");
         assert_eq!(book.out("a").unwrap(), None);
-        assert!(!book.exchange(&[9; 32], &[2; 32], "o", 101).unwrap());
-        assert!(!book.exchange(&code, &[2; 32], "o", 100 + CODE_S).unwrap(), "too late");
-        assert!(book.exchange(&code, &[2; 32], "o", 101).unwrap());
-        assert!(!book.exchange(&code, &[3; 32], "p", 102).unwrap(), "once");
-        assert_eq!(book.connected_by(&[2; 32]).unwrap(), Some(("a".into(), "o".into())));
-        assert_eq!((book.connected_by(&[3; 32]).unwrap(), book.out("a").unwrap()), (None, Some("o".into())));
-        book.connect("a", &[4; 32], 200).unwrap();
+        let first = code("p", 110);
+        assert_eq!(code("p", 111), first);
+        assert_eq!(book.asked("p", 110 + CODE_S).unwrap(), Request::Over);
+        assert_eq!(book.exchange("p", &[2; 32], 111).unwrap(), None);
+        assert_eq!(book.exchange(&first, &[2; 32], 110 + CODE_S).unwrap(), None, "too late");
+        assert_eq!(book.exchange(&first, &[2; 32], 111).unwrap(), Some(("a".into(), "l".into())));
+        assert_eq!(book.exchange(&first, &[3; 32], 112).unwrap(), None, "once");
+        assert_eq!(book.asked("p", 112).unwrap(), Request::Over);
+        assert!(!book.allow("a", "l", 112).unwrap(), "no second time");
+        let out = book.out("a").unwrap().unwrap();
+        assert_eq!(book.connected_by(&[2; 32]).unwrap(), Some(("a".into(), out.clone())));
+        assert_eq!(book.connected_by(&[3; 32]).unwrap(), None);
+        request("m", "q", 200);
+        book.allow("a", "m", 201).unwrap();
+        let second = code("q", 202);
         assert!(book.connected_by(&[2; 32]).unwrap().is_some(), "until the new one is made");
-        book.tidy(200 + CODE_S).unwrap();
-        assert!(!book.exchange(&[4; 32], &[5; 32], "q", 201).unwrap() && book.out("a").unwrap().is_some());
-        book.connect("b", &[6; 32], 1).unwrap();
-        book.tidy(1 + CODE_S).unwrap();
-        assert!(!book.exchange(&[6; 32], &[7; 32], "q", 2).unwrap(), "a row of a code alone is gone");
+        book.exchange(&second, &[4; 32], 203).unwrap().unwrap();
+        assert_eq!(book.connected_by(&[2; 32]).unwrap(), None);
+        assert_eq!(book.out("a").unwrap(), Some(out.clone()), "the same as before");
+        request("n", "r", 300);
+        book.allow("b", "n", 301).unwrap();
+        let third = code("r", 302);
+        book.disconnect("b").unwrap();
+        assert_eq!(book.exchange(&third, &[5; 32], 303).unwrap(), None, "ended");
+        request("o", "t", 400);
+        book.tidy(400 + REQUEST_S).unwrap();
+        let left: i64 = book.db().query_row("SELECT count(*) FROM services_requests", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
 
         let (first, second) = (book.received(10).unwrap(), book.received(20).unwrap());
         book.keep(first, "a", "yo").unwrap();
@@ -397,6 +524,9 @@ mod tests {
         let old = "CREATE TABLE services_yos (id INTEGER PRIMARY KEY, bot TEXT NOT NULL, way TEXT NOT NULL,
             at INTEGER NOT NULL, user TEXT, cron_due INTEGER, cron_done INTEGER,
             CHECK (cron_due IS NOT NULL OR (user IS NULL AND cron_done IS NULL))) STRICT;
+            CREATE TABLE services_secrets (bot TEXT NOT NULL, user TEXT NOT NULL, code BLOB, code_at INTEGER,
+            key BLOB UNIQUE, out TEXT, PRIMARY KEY (bot, user)) STRICT;
+            INSERT INTO services_secrets VALUES ('DST', 'a', NULL, NULL, zeroblob(32), 'o'), ('DST', 'b', x'01', 1, NULL, NULL);
             CREATE UNIQUE INDEX services_yos_waiting ON services_yos (bot, user)
                 WHERE user IS NOT NULL AND cron_done IS NULL;
             INSERT INTO services_yos VALUES (7, 'DST', 'received', 1, 'a', 50, NULL);";
@@ -404,6 +534,8 @@ mod tests {
         for _ in 0..2 {
             let book = Book::open(&path, "DST").unwrap();
             assert_eq!(book.due(60).unwrap(), [Reminder { id: 7, user: "a".into() }]);
+            assert_eq!(book.connected_by(&[0; 32]).unwrap(), Some(("a".into(), "o".into())));
+            assert_eq!(book.out("b").unwrap(), None);
             let row = book.received(2).unwrap();
             book.keep(row, "a", "yo").unwrap();
         }

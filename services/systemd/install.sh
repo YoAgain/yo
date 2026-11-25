@@ -22,7 +22,7 @@ for bot; do
     sed "s#@SCRIPT@#$script#" "$here/script.service" > "$dir/yo-script-$bot@.service"
 done
 # /var/lib/yo-services/accounts/BOT: its keys, its own user's alone. db: one per hub, written by all executors.
-# /etc/yo-services/hub.env: the hub; BOT.env: of a bridge, its SERVICES_KEY. Both root's.
+# /etc/yo-services/hub.env: the hub; BOT.env: of a bridge, its SERVICES_KEY and SERVICES_CLIENT_SECRET. Both root's.
 getent group yo-services > /dev/null || groupadd -r yo-services
 install -m 644 "$here/yo-services.conf" /etc/tmpfiles.d/
 systemd-tmpfiles --create yo-services.conf

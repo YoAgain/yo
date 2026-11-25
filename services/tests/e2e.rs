@@ -291,13 +291,14 @@ fn a_connection_both_ways() {
     let mut bot = Bot::new(&hub, code, false);
     let toml = std::fs::read_to_string(bot.file("toml")).unwrap();
     let connect =
-        "[bridge]\nreturn_url = \"https://other.invalid/back\"\ncall_urls = [\"https://localhost.invalid/\"]\n\
+        "[bridge]\nclient_id = \"other-client\"\nreturn_url = \"https://other.invalid/back\"\ncall_urls = [\"https://localhost.invalid/\"]\n\
                    key_header = \"X-Partner-Key\"\nhelp_url = \"https://other.invalid/help\"\n";
     std::fs::write(bot.file("toml"), toml + connect).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     for (key, value) in [
         ("SERVICES_SOCKET", bot.dir.join(format!("{}.sock", bot.name.to_lowercase())).display().to_string()),
         ("SERVICES_KEY", "the-partners-own-key".into()),
+        ("SERVICES_CLIENT_SECRET", "the-clients-own-secret".into()),
     ] {
         bot.env.push((key, value));
     }
@@ -311,33 +312,91 @@ fn a_connection_both_ways() {
         .unwrap();
     std::thread::sleep(Duration::from_secs(1));
     let base = format!("http://127.0.0.1:{port}/{}", bot.name.to_lowercase());
-    let http = reqwest::blocking::Client::new();
-    let exchange = |code: &str, secret: &str| {
-        let form = format!(
-            "grant_type=authorization_code&client_id={}&client_secret={secret}&code={code}&\
-             redirect_uri=https%3A%2F%2Fother.invalid%2Fback",
-            bot.name.to_lowercase()
-        );
+    let http = reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let exchange = |code: &str, secret: &str, back: &str, basic: bool| {
+        let mut form = format!("grant_type=authorization_code&code={code}{back}");
+        if !basic {
+            form += &format!("&client_id=other-client&client_secret={secret}");
+        }
         let request = http.post(format!("{base}/token")).header("content-type", "application/x-www-form-urlencoded");
+        let request = if basic { request.basic_auth("other-client", Some(secret)) } else { request };
         let answer = request.body(form).send().unwrap();
         (answer.status().as_u16(), answer.text().unwrap())
+    };
+    let connect = |more: &str| {
+        let url = format!("{base}/connect?redirect_uri=https%3A%2F%2Fother.invalid%2Fback&response_type=code{more}");
+        let answer = http.get(url).send().unwrap();
+        let header = |name: &str| answer.headers().get(name).map(|v| v.to_str().unwrap().to_owned());
+        let to = header("location").unwrap_or_default();
+        if answer.status() == 303 {
+            assert_eq!(
+                (header("cache-control").unwrap(), header("referrer-policy").unwrap()),
+                ("no-store".into(), "no-referrer".into())
+            );
+        }
+        (answer.status().as_u16(), to)
+    };
+    let asked = |poll: &str| {
+        let answer = http.post(format!("{base}/allowed")).body(format!(r#"{{"poll":"{poll}"}}"#)).send().unwrap();
+        assert_eq!(&answer.headers()["access-control-allow-origin"], "https://justyo.co");
+        answer.text().unwrap()
     };
     let call = |path: &str, key: &str| {
         let answer = http.post(format!("{base}/{path}")).bearer_auth(key).body("{}").send().unwrap();
         (answer.status().as_u16(), answer.text().unwrap())
     };
-    let (mut alice, code) = (someone(&hub), "the-state-of-the-other-side");
-    alice
-        .connect_service(
-            &bot.name,
-            sha2::Digest::finalize(sha2::Digest::chain_update(sha2::Sha256::default(), code)).into(),
-        )
-        .unwrap();
-    assert_eq!(exchange(code, "wrong").0, 401);
-    let (status, token) = exchange(code, "the-partners-own-key");
+    for bad in [
+        "&client_id=x&state=s",
+        "&client_id=other-client",
+        "&client_id=other-client&state=s&redirect_uri=https%3A%2F%2Fevil.invalid%2F",
+    ] {
+        assert_eq!(connect(bad), (400, String::new()), "{bad}");
+    }
+    let begin = |state: &str| {
+        let (status, to) = connect(&format!("&client_id=other-client&state={state}"));
+        assert_eq!(status, 303);
+        let told = to.split_once('#').unwrap();
+        assert_eq!(told.0, format!("https://justyo.co/services/{}", bot.name.to_lowercase()));
+        let (code, poll) = told.1.strip_prefix("code=").unwrap().split_once("&poll=").unwrap();
+        (code.to_owned(), yo_wire::unb64(code).unwrap(), poll.to_owned())
+    };
+    let (mut alice, mut bob) = (someone(&hub), someone(&hub));
+    let (link, code, poll) = begin("a%26b");
+    assert!(link.len() == 43 && poll.len() == 43 && link != poll);
+    assert_eq!(asked(&link), r#"{"request":"over"}"#, "the link tells nothing");
+    let page = http.request(reqwest::Method::OPTIONS, format!("{base}/allowed")).send().unwrap();
+    assert_eq!(
+        (page.status(), &page.headers()["access-control-allow-origin"] == "https://justyo.co"),
+        (reqwest::StatusCode::NO_CONTENT, true)
+    );
+    let wrong = http.post(format!("{base}/allowed")).body(r#"{"poll":"x"}"#).send().unwrap();
+    assert_eq!((wrong.status().as_u16(), call("connect", "x").0), (400, 405));
+    // A code nobody asked for makes nothing: refused, as the app then shows.
+    bob.connect_service(&bot.name, [7; 32]).unwrap();
+    for _ in 0..20 {
+        bob.sync(1).unwrap();
+        if bob.connections()[0].refused {
+            break;
+        }
+    }
+    assert!(bob.connections()[0].refused && !bob.connections()[0].connected);
+    alice.connect_service(&bot.name, code.try_into().unwrap()).unwrap();
+    let said = asked(&poll);
+    assert_eq!(asked(&poll), said, "a lost answer is no harm");
+    assert!(said.contains(r#""request":"allowed""#) && said.contains("https://other.invalid/back?code="), "{said}");
+    let code = said.split("code=").nth(1).unwrap().split('&').next().unwrap().to_owned();
+    assert!(said.contains("&state=a%26b\""), "{said}");
+    let back = "&redirect_uri=https%3A%2F%2Fother.invalid%2Fback";
+    let secret = "the-clients-own-secret";
+    assert_eq!(exchange(&code, "wrong", back, false).0, 401);
+    assert_eq!(exchange(&code, "the-partners-own-key", back, true).0, 401, "the key is no secret of the client");
+    assert_eq!(exchange(&code, secret, "&redirect_uri=https%3A%2F%2Fevil.invalid%2F", false).0, 400);
+    assert_eq!(exchange(&link, secret, back, false).0, 400);
+    let (status, token) = exchange(&code, secret, back, false);
     assert_eq!(status, 200, "{token}");
     let key = token.split('"').find(|part| part.len() == 43).unwrap().to_owned();
-    assert_eq!(exchange(code, "the-partners-own-key").0, 400, "once");
+    assert_eq!(exchange(&code, secret, back, false).0, 400, "once");
+    assert_eq!(asked(&poll), r#"{"request":"over"}"#);
 
     let (status, reply) = call("yo", &key);
     assert!(status == 200 && reply.contains("id"), "{reply}");
@@ -369,6 +428,14 @@ fn a_connection_both_ways() {
     assert!(alice.connections().is_empty(), "ended");
     assert_eq!(call("yo", &key).0, 401);
     assert_eq!(bot.book("SELECT count(*) FROM services_yos WHERE user IS NOT NULL"), "[(0,)]");
+    // Again: what she is known by outside is the same.
+    let (_, code, poll) = begin("again");
+    alice.connect_service(&bot.name, code.try_into().unwrap()).unwrap();
+    let said = asked(&poll);
+    let code = said.split("code=").nth(1).unwrap().split('&').next().unwrap().to_owned();
+    assert_eq!(exchange(&code, secret, "", true).0, 200);
+    let out = bot.book("SELECT out FROM services_secrets");
+    assert!(out.len() > 43 && secrets.contains(out.split('\'').nth(1).unwrap()), "{out} {secrets}");
     let _ = entrance.kill();
     let _ = entrance.wait();
 }

@@ -29,4 +29,17 @@ Hub <-> executor (account, keys, book) <-> script (no keys, no network)
 
 The account of a service declares itself a bot (`yo register NAME --bot`, or `yo bot on`): apps connect only those.
 
+A bridge's environment: `SERVICES_KEY` (calls) and `SERVICES_CLIENT_SECRET` (OAuth 2), two different ones. Connecting:
+
+```text
+partner's site ─► GET /NAME/connect      client_id, redirect_uri, state: a request, 10 minutes
+               ─► justyo.co/services/NAME#code=…&poll=…      draws the code, as a link and a QR code
+app            ─► Connect with the code, encrypted      the first Allow is the one
+page           ─► POST /NAME/allowed {"poll"}      {"request": "waiting" | "over" | "allowed", "url": return_url?code&state}
+partner        ─► POST /NAME/token      the code, once, 5 minutes: a key
+```
+
+A request shows a compare code (nothing shows it yet): the first 20 bits of the SHA-256 of its code's 43 characters, as 4
+of `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (43 times `A`: `1W07`).
+
 Security: [SECURITY.md](SECURITY.md). Tests: `cargo build -p yo-cli && cargo test -p yo-services`.

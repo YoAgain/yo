@@ -10,7 +10,7 @@
 //! SERVICES_ONLY_USER (a user id: nobody else is served), SERVICES_DRAIN=1 (media is fetched into nothing),
 //! SERVICES_BOTS (names of other bots, comma separated, never answered).
 //! Of a service with a `[bridge]`: SERVICES_SOCKET (the entrance's way to it), and
-//! SERVICES_KEY (the partner's own key, the OAuth 2 client's secret too; its id is the service's folder). Optional:
+//! SERVICES_KEY (the partner's own key), SERVICES_CLIENT_SECRET (OAuth 2, for the TOML's client_id). Optional:
 //! SERVICES_TEST_USER and SERVICES_TEST_KEY (the account of the partner's tests, a user id, and a key for it).
 
 mod book;
@@ -95,7 +95,7 @@ fn main() {
             }
             drawn
         }),
-        partner: header.bridge.as_ref().map(|bridge| partner(folder, bridge)),
+        partner: header.bridge.as_ref().map(partner),
         header,
         name,
     });
@@ -151,7 +151,7 @@ fn main() {
 }
 
 /// The other side of its connections, from the environment.
-fn partner(folder: &str, bridge: &gatekeeper::header::Bridge) -> partner::Partner {
+fn partner(bridge: &gatekeeper::header::Bridge) -> partner::Partner {
     let secret = |key: &str| {
         Some(env(key)).filter(|s| s.len() >= 16).unwrap_or_else(|| fail(USAGE, &format!("{key}: too short")))
     };
@@ -160,7 +160,8 @@ fn partner(folder: &str, bridge: &gatekeeper::header::Bridge) -> partner::Partne
         header: bridge.key_header.to_ascii_lowercase(),
         return_url: bridge.return_url.clone(),
         key: secret("SERVICES_KEY"),
-        client_id: folder.to_owned(),
+        client_id: bridge.client_id.clone(),
+        client_secret: secret("SERVICES_CLIENT_SECRET"),
         test,
         client: partner::Partner::client().unwrap_or_else(|_| fail(1, "no HTTP client")),
     }

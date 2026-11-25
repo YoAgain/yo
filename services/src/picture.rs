@@ -10,14 +10,15 @@ use std::time::Duration;
 
 const TIME: Duration = Duration::from_secs(10);
 
-pub fn fetch(url: &str) -> Option<Vec<u8>> {
-    let url =
-        Url::parse(url).ok().filter(|u| u.scheme() == "https" && u.username().is_empty() && u.port().is_none())?;
+/// Or whether trying again may help.
+pub fn fetch(url: &str) -> Result<Vec<u8>, bool> {
+    let url = Url::parse(url).ok().filter(|u| u.scheme() == "https" && u.username().is_empty() && u.port().is_none());
+    let url = url.ok_or(false)?;
     // A name, not an address written out: those end in a digit or a bracket.
-    let host = url.host_str().filter(|h| h.ends_with(|c: char| c.is_ascii_alphabetic()))?.to_owned();
-    let addresses: Vec<SocketAddr> = (host.as_str(), 443).to_socket_addrs().ok()?.collect();
+    let host = url.host_str().filter(|h| h.ends_with(|c: char| c.is_ascii_alphabetic())).ok_or(false)?.to_owned();
+    let addresses: Vec<SocketAddr> = (host.as_str(), 443).to_socket_addrs().map_err(|_| true)?.collect();
     if addresses.is_empty() || !addresses.iter().all(|a| public(a.ip())) {
-        return None;
+        return Err(false);
     }
     let client = Client::builder()
         .timeout(TIME)
@@ -25,11 +26,15 @@ pub fn fetch(url: &str) -> Option<Vec<u8>> {
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(&host, &addresses)
         .build()
-        .ok()?;
-    let answer = client.get(url).send().ok().filter(|a| a.status().is_success())?;
+        .map_err(|_| true)?;
+    let answer = client.get(url).send().map_err(|_| true)?;
+    let status = answer.status();
+    if !status.is_success() {
+        return Err(status.is_server_error() || matches!(status.as_u16(), 408 | 429));
+    }
     let mut jpeg = Vec::new();
-    answer.take(MAX_PICTURE as u64 + 1).read_to_end(&mut jpeg).ok()?;
-    (jpeg.len() <= MAX_PICTURE && jpeg.starts_with(b"\xff\xd8\xff")).then_some(jpeg)
+    answer.take(MAX_PICTURE as u64 + 1).read_to_end(&mut jpeg).map_err(|_| true)?;
+    (jpeg.len() <= MAX_PICTURE && jpeg.starts_with(b"\xff\xd8\xff")).then_some(jpeg).ok_or(false)
 }
 
 fn public(ip: IpAddr) -> bool {
@@ -75,7 +80,7 @@ mod tests {
         for url in
             ["http://a.com/x", "https://127.0.0.1/x", "https://[::1]/x", "https://localhost/x", "https://u@a.com/x"]
         {
-            assert!(fetch(url).is_none(), "{url}");
+            assert_eq!(fetch(url), Err(false), "{url}");
         }
     }
 }
