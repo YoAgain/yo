@@ -1358,14 +1358,15 @@ if (document.body.classList.contains("login")) {
       cell(tr, who, "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
-      // App: one pill, the platform's icon and the build's age (its id is its time), coloured as in the App card;
+      // App: one pill, the platform's icon and "newest" or the build's age (its id is its time), coloured as in the App card;
       // its hover names the build (label, version, state, below the hub's minimum).
       const platform = (u.app || "").split("/")[0], band = releases.get(u.app), info = appInfo(u.app);
       const age = band && (band.ageH < 24 ? `${Math.floor(band.ageH)} h` : `${Math.floor(band.ageH / 24)} d`);
-      const app = tag(band ? age : info?.label ?? "–", `app-pill ${band ? "release" : { update: "warn", current: "ok", fresh: "ok" }[appState(u.app, u.id)] || "muted"}`);
+      const newest = ["current", "fresh"].includes(appState(u.app, u.id));
+      const app = tag(band ? (newest ? "newest" : age) : info?.label ?? "–", `app-pill ${band ? "release" : { update: "warn", current: "ok", fresh: "ok" }[appState(u.app, u.id)] || "muted"}`);
       if (band) app.style.setProperty("--release-color", band.color);
       if (ICONS[platform] && platform !== "lock") app.prepend(icon(platform));
-      hint(app, info ? [info.label, appTitle(u.app, u.id), band?.behind ? `${num(band.behind)} builds behind the newest` : ""].filter(Boolean).join(" · ") : "Unknown build");
+      hint(app, info ? [info.label, appTitle(u.app, u.id), band && `${age} old`, band?.behind && !newest ? `${num(band.behind)} builds behind the newest` : ""].filter(Boolean).join(" · ") : "Unknown build");
       cell(tr, app);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       // Secured: the lock (a backup), then the shield (attestation, spec 6.11, measured, never enforced): checked green
