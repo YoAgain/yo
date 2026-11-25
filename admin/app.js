@@ -1318,6 +1318,7 @@ if (document.body.classList.contains("login")) {
   let allSort = { key: "created", dir: -1 };  // newest sign-ups first
   const allValue = (u, key, releases) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? -(releases.get(u.app)?.ageH ?? Infinity)
     : key === "secured" ? Number(!!u.secured)
+    : key === "platform" ? (u.app || "").split("/")[0]
     : key === "attested" ? ({ attested: 2, failed: 1 }[u.attest] ?? 0)
     : key === "push" ? Number(!!u[key]) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
@@ -1357,35 +1358,37 @@ if (document.body.classList.contains("login")) {
         who.append(many);
       }
       cell(tr, who, "name", u.id);
-      // App: one pill, the platform's icon and "newest" or the build's age (its id is its time), coloured as in the App card;
+      // Platform: its icon alone. Release: a pill with "newest" or the build's age (its id is its time), coloured as in the App card;
       // its hover names the build (label, version, state, below the hub's minimum).
       const platform = (u.app || "").split("/")[0], band = releases.get(u.app), info = appInfo(u.app);
       const age = band && (band.ageH < 24 ? `${Math.floor(band.ageH)} h` : `${Math.floor(band.ageH / 24)} d`);
       const newest = ["current", "fresh"].includes(appState(u.app, u.id));
       const app = tag(band ? (newest ? "newest" : age) : info?.label ?? "–", `app-pill ${band ? "release" : { update: "warn", current: "ok", fresh: "ok" }[appState(u.app, u.id)] || "muted"}`);
       if (band) app.style.setProperty("--release-color", band.color);
-      if (ICONS[platform] && platform !== "lock") app.prepend(icon(platform));
+      const known = ["ios", "android", "yogpt", "cli"].includes(platform), plat = el("span", known ? "uicons" : "muted", known ? null : "–");
+      if (known) plat.append(icon(platform, "", { ios: "iOS", android: "Android", yogpt: "Bot", cli: "CLI" }[platform]));
+      cell(tr, plat, "group");
       hint(app, info ? [info.label, appTitle(u.app, u.id), band && `${age} old`, band?.behind && !newest ? `${num(band.behind)} builds behind the newest` : ""].filter(Boolean).join(" · ") : "Unknown build");
       cell(tr, app);
       // The lock (a backup), then the shield (attestation, spec 6.11, measured, never enforced): checked green when
       // attested, grey when failed (the reason in its hover), none when not measured yet.
-      const iconCell = (ico) => {
+      const iconCell = (ico, cls) => {
         const holder = el("span", ico ? "uicons" : "muted", ico ? null : "–");
         if (ico) holder.append(ico);
-        cell(tr, holder);
+        cell(tr, holder, cls);
       };
-      iconCell(u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : null);
+      iconCell(u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : null, "group");
       const at = u.attest_at ? " " + date(u.attest_at) : "";
       iconCell(u.attest === "attested" ? icon("shield-check", "secured", `attested${at}`)
         : u.attest === "failed" ? icon("shield", "", `attestation failed${u.attest_reason ? ": " + u.attest_reason : ""}${at}`) : null);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
-      cell(tr, u.queued ? num(u.queued) : "–", "num muted");
+      cell(tr, u.queued ? num(u.queued) : "–", "num muted group");
       // Signed requests to strangers in 24 h (spec 4.10): a flood by a stranger stands out; contacts' are never counted.
       cell(tr, u.requests_24h ? num(u.requests_24h) : "–", u.requests_24h >= 100 ? "num bad" : "num muted");
-      cell(tr, rel(u.created), null, date(u.created));
+      cell(tr, rel(u.created), "group", date(u.created));
       cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
     }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 9;
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 10;
   };
 
   // ---- reports: handled is kept by the admin page (done.json); ticked in a user's details
@@ -2871,7 +2874,7 @@ if (document.body.classList.contains("login")) {
       // days back or, `tracked`, from the first one recorded (by the hour in its first three days; `levels`, the hub's own
       // counts per hour, go before what is derived); the bars the share per sign-up day, the last
       // 14 (`days`: [made, of them with it now]); today's value and the last 7 days' new accounts.
-      const shareRow = ({ ico, label, head, n, days, at, tracked, levels = {} }) => {
+      const shareRow = ({ ico, label, head, n, days, at, tracked, levels = {}, more = [] }) => {
         const us = h.users || [], HOUR = 3600000, DAY = 86400000, wall = Date.now();
         const since = !tracked ? (t - 29) * DAY : [...us.map(at).filter((v) => v != null), ...Object.keys(levels).map((x) => x * HOUR)].reduce((a, b) => Math.min(a, b), wall);
         const step = wall - since < 3 * DAY ? HOUR : DAY, last = Math.floor(wall / step), end = (d) => (d + 1) * step;
@@ -2884,15 +2887,20 @@ if (document.body.classList.contains("login")) {
         const wk = (days || []).slice(-7).filter(Boolean), made = wk.reduce((s, d) => s + d[0], 0), withIt = wk.reduce((s, d) => s + d[1], 0);
         const bars = days ? historyPlot(days.map((d) => (d?.[0] ? Math.round((100 * d[1]) / d[0]) : null)), days14().map(dayName), "") : null;
         return { ico, label, value: pctText(now), bar: (now || 0) / 100,
-          title: { cap: 1, head, nodes: [historyPlot(share, dd.map(name), "", true), bars], rows: [{ label: `${name(dd[0])} – today`, value: pctText(now) }, { section: "New accounts, the bars above" },
+          title: { cap: 1, head, nodes: [historyPlot(share, dd.map(name), "", true), bars], rows: [{ label: `${name(dd[0])} – today`, value: pctText(now) }, ...more, { section: "New accounts, the bars above" },
             { label: `${label}, last 7 days`, value: made ? pctText((100 * withIt) / made) : "–" }] } };
       };
+      // Per platform: attested of its accounts, and the failed ones.
+      const attestedBy = !h.attestation ? [] : [{ section: "Attested per platform" }, ...[["ios", "iOS"], ["android", "Android"]].map(([key, label]) => {
+        const a = h.attestation[key] || {}, all = (h.users || []).filter((u) => (u.app || "").startsWith(`${key}/`)).length;
+        return { ico: key, label, value: `${num(a.attested || 0)} of ${num(all)}${a.failed ? ` · ${num(a.failed)} failed` : ""}` };
+      })];
       return [
           { ico: "chart", label: "Active", value: pctText(mau ? (100 * dau) / mau : null), bar: mau ? dau / mau : 0,
             title: { cap: 1, head: "Active users", nodes: [historyPlot(days14().map(d => d === t || kept[d] != null ? activeOn(d) : null), days14().map(dayName), "")], note: "Bars: users seen per day, the last 14 days", rows: [{ label: "DAU (last 24 h)", value: num(dau) }, { label: "MAU (last 30 days)", value: num(mau) }, { label: "Stickiness DAU / MAU", value: pctText(mau ? (100 * dau) / mau : null) },
               { label: "Deleted in range", value: num(rangeCount("account-gone", gone)) }, { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: ret[k] ?? "–" }))] } },
           shareRow({ ico: "lock", label: "Secured", head: "Secured, all accounts", n: h.secured, days: h.secured_days, at: (u) => u.backup_at }),
-          shareRow({ ico: "shield", label: "Attested", head: "Attested, all accounts", n: h.attested, days: h.attested_days, at: (u) => u.attest === "attested" ? u.attest_at : null, tracked: true, levels: h.attested_levels }),
+          shareRow({ ico: "shield", label: "Attested", head: "Attested, all accounts", n: h.attested, days: h.attested_days, at: (u) => u.attest === "attested" ? u.attest_at : null, tracked: true, more: attestedBy, levels: h.attested_levels }),
           { ico: "user", label: "Yos / user", keepValueColumn: true, value: mean(yoN, usersInRange), values: per.some(v => v != null) ? per : null,
             title: { ...meanTip(spanWord(), yoN, usersInRange), note: !range ? "The hub has no all-time count of distinct active accounts." :
               daily ? "Accepted Yos divided by distinct active accounts in the range. Each bar uses that day’s counts." :

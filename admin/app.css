@@ -585,6 +585,8 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .list.data td[data-col="text"] { white-space: normal; font-family: var(--font); font-size: 13px; color: var(--text); max-width: 520px; min-width: 220px; overflow-wrap: anywhere; }
 #all-users-table th:first-child, #all-users-table td:first-child { position: sticky; left: 0; z-index: 1; background: var(--card); }
 #all-users-table th:first-child { z-index: 2; }
+/* Faint lines between the groups: name, app, security, traffic, dates. */
+#all-users-table :is(th, td).group { border-left: 1px solid color-mix(in srgb, var(--muted) 18%, transparent); padding-left: 14px; }
 #all-users-table th .ico { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
 @media (max-width: 640px) {
   header { grid-template-columns: minmax(0, 1fr); gap: 6px; margin-bottom: 12px; padding: 6px 0; }
