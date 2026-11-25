@@ -48,7 +48,13 @@ rand = "=0.9.5"
 lto = "thin"
 codegen-units = 1
 
-# Tests: the dependencies optimised (libsignal, the ciphers), the workspace's own crates not.
+# Debug builds and tests: line numbers only (backtraces keep file:line), no full debug info. Full debug info made each
+# test binary about 1 GB to link, and parallel links filled the RAM and swapped.
+[profile.dev]
+debug = "line-tables-only"
+
+# Tests: the dependencies optimised (libsignal, the ciphers), the workspace's own crates not; no debug info for them.
 [profile.dev.package."*"]
 opt-level = 2
 debug-assertions = false
+debug = false
