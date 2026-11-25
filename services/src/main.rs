@@ -2,7 +2,7 @@
 //!
 //!   yo-services SERVICE      a folder, e.g. /opt/yo-services/yo/ping: its ping.toml, ping.py, assets/
 //!
-//!   yo-services entrance     HTTP for all of them (entrance.rs): ENTRANCE_LISTEN, ENTRANCE_SOCKETS
+//!   yo-services entrance     HTTP for all of them (entrance.rs): ENTRANCE_LISTEN, ENTRANCE_SOCKETS, ENTRANCE_SERVICES
 //!
 //! Environment: YO_STATE (the account's directory, registered by hand once), YO_BIN, the hub's pins (app/cli/README.md),
 //! SCRIPT_SOCKET (where a connection starts the script), SERVICES_DB (the book, one for all services).
@@ -17,6 +17,8 @@ mod book;
 mod entrance;
 mod executor;
 mod gatekeeper;
+mod help;
+mod list;
 mod partner;
 mod picture;
 mod script;
@@ -50,7 +52,11 @@ fn main() {
     let service =
         PathBuf::from(std::env::args_os().nth(1).unwrap_or_else(|| fail(USAGE, "usage: yo-services SERVICE")));
     if service.as_os_str() == "entrance" {
-        let why = entrance::serve(&env("ENTRANCE_LISTEN"), PathBuf::from(env("ENTRANCE_SOCKETS")));
+        let why = entrance::serve(
+            &env("ENTRANCE_LISTEN"),
+            PathBuf::from(env("ENTRANCE_SOCKETS")),
+            Path::new(&env("ENTRANCE_SERVICES")),
+        );
         fail(1, &format!("the entrance: {why:?}"));
     }
     let folder = service.file_name().and_then(|n| n.to_str()).unwrap_or_else(|| fail(USAGE, "not a service's folder"));
@@ -82,6 +88,13 @@ fn main() {
         only: std::env::var("SERVICES_ONLY_USER").ok(),
         under_way: Mutex::default(),
         counts: executor::Counts::default(),
+        help: header.bridge.as_ref().and_then(|bridge| {
+            let drawn = help::draw(&name, &bridge.help_url, std::fs::read(service.join("logo.png")).ok().as_deref());
+            if drawn.is_none() {
+                eprintln!("no help picture");
+            }
+            drawn
+        }),
         partner: header.bridge.as_ref().map(|bridge| partner(folder, bridge)),
         header,
         name,
@@ -116,6 +129,10 @@ fn main() {
         }
         Some("connect") => {
             executor.connect(&event);
+            Ok(())
+        }
+        Some("disconnect") => {
+            executor.disconnect(&event);
             Ok(())
         }
         Some("group_changed") => {
@@ -171,7 +188,7 @@ fn work(executor: &Executor, queue: &Mutex<Receiver<Job>>) {
 }
 
 fn leave_empty_groups(executor: &Executor) {
-    if let Ok((me, _)) = executor.yo.whoami() {
+    if let Ok((me, ..)) = executor.yo.whoami() {
         let _ = executor.yo.leave_empty_groups(&me);
     }
 }
@@ -179,7 +196,12 @@ fn leave_empty_groups(executor: &Executor) {
 /// Is it the account it should be? Asked before the first Yo is taken.
 fn check_account(executor: &Executor) -> Result<(), i32> {
     match executor.yo.whoami() {
-        Ok((_, username)) if username.eq_ignore_ascii_case(&executor.name) => return Ok(()),
+        Ok((_, username, bot)) if username.eq_ignore_ascii_case(&executor.name) => {
+            if !bot {
+                eprintln!("the account is not declared a bot (yo bot on): no app connects it");
+            }
+            return Ok(());
+        }
         Ok(_) => eprintln!("stopped: the account is not the one named"),
         Err(_) => {
             eprintln!("stopped: the account did not answer");

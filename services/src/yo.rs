@@ -43,11 +43,16 @@ impl Yo {
         self.run(&["echo-probe", to, token]).map(drop)
     }
 
-    /// Its own user id and username.
-    pub fn whoami(&self) -> Result<(String, String), Failure> {
+    /// Answers a connection event by its code: "connected", "refused" or "ended".
+    pub fn answer(&self, to: &str, kind: &str, code: &str) -> Result<(), Failure> {
+        self.run(&["service-answer", to, kind, code]).map(drop)
+    }
+
+    /// Its own user id and username, and whether it declared itself a bot.
+    pub fn whoami(&self) -> Result<(String, String, bool), Failure> {
         let out = self.run(&["whoami"])?;
         let text = |key: &str| out[key].as_str().unwrap_or_default().to_owned();
-        Ok((text("user"), text("username")))
+        Ok((text("user"), text("username"), out["bot"] == true))
     }
 
     /// The user id of a name; None when nobody has it, or it is the account's own.

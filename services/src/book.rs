@@ -123,7 +123,8 @@ impl Book {
 
     /// A Yo that came is a connected user's: it is kept with them.
     pub fn keep(&self, row: i64, user: &str, kind: &str) -> rusqlite::Result<()> {
-        let query = "UPDATE services_yos SET user = ?3, kind = ?4 WHERE id = ?2 AND bot = ?1";
+        let query = "UPDATE services_yos SET user = ?3, kind = ?4 WHERE id = ?2 AND bot = ?1 AND EXISTS
+            (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?3 AND out IS NOT NULL)";
         self.db().execute(query, params![self.bot, row, user, kind]).map(drop)
     }
 
@@ -142,15 +143,29 @@ impl Book {
 
     /// `user` allowed a connection: its code, instead of one that waits. A connection there is goes on until the code
     /// is turned into a new one.
-    pub fn connect(&self, user: &str, code: &[u8; 32], now: i64) -> rusqlite::Result<()> {
-        self.db().execute(
+    pub fn connect(&self, user: &str, code: &[u8; 32], now: i64) -> rusqlite::Result<bool> {
+        let changed = self.db().execute(
             "INSERT INTO services_secrets (bot, user, code, code_at) SELECT ?1, ?2, ?3, ?4
              WHERE (SELECT count(*) FROM services_secrets WHERE bot = ?1) < ?5
                 OR EXISTS (SELECT 1 FROM services_secrets WHERE bot = ?1 AND user = ?2)
              ON CONFLICT (bot, user) DO UPDATE SET code = excluded.code, code_at = excluded.code_at",
             params![self.bot, user, code, now, MAX_CONNECTED],
         )?;
-        Ok(())
+        Ok(changed == 1)
+    }
+
+    /// `user` is connected no more, and nothing is kept of theirs but a reminder.
+    pub fn disconnect(&self, user: &str) -> rusqlite::Result<()> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let who = params![self.bot, user];
+        tx.execute("DELETE FROM services_secrets WHERE bot = ?1 AND user = ?2", who)?;
+        tx.execute(
+            "UPDATE services_yos SET kind = NULL, user = iif(cron_due IS NULL, NULL, user)
+             WHERE bot = ?1 AND user = ?2 AND kind IS NOT NULL",
+            who,
+        )?;
+        tx.commit()
     }
 
     /// The code of a connection becomes its key, once.
@@ -367,6 +382,11 @@ mod tests {
         book.remind(first, "a", 100).unwrap();
         assert_eq!(book.kept("a", 30).unwrap().len(), 2, "another reminder takes none of them away");
         assert!(book.kept("b", 30).unwrap().is_empty());
+        book.keep(first, "b", "yo").unwrap();
+        assert!(book.kept("b", 30).unwrap().is_empty(), "not connected");
+        book.disconnect("a").unwrap();
+        assert!(book.kept("a", 30).unwrap().is_empty() && book.out("a").unwrap().is_none());
+        assert_eq!(count(&book, "user IS NOT NULL"), 1, "the reminder stays");
         book.tidy(30 + KEPT_S + TOO_LATE_S + 100).unwrap();
         assert_eq!(count(&book, "user IS NOT NULL"), 0);
     }

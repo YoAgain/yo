@@ -66,7 +66,7 @@ impl Bot {
             }
         });
         let bot = Bot { dir, name, child: None, hub: hub.url(), env: Vec::new(), service: None };
-        let registered = bot.command(&yo()).args(["register", &bot.name]).output().unwrap();
+        let registered = bot.command(&yo()).args(["register", &bot.name, "--bot"]).output().unwrap();
         assert!(registered.status.success(), "{}", String::from_utf8_lossy(&registered.stderr));
         bot
     }
@@ -292,7 +292,7 @@ fn a_connection_both_ways() {
     let toml = std::fs::read_to_string(bot.file("toml")).unwrap();
     let connect =
         "[bridge]\nreturn_url = \"https://other.invalid/back\"\ncall_urls = [\"https://localhost.invalid/\"]\n\
-                   key_header = \"X-Partner-Key\"\n";
+                   key_header = \"X-Partner-Key\"\nhelp_url = \"https://other.invalid/help\"\n";
     std::fs::write(bot.file("toml"), toml + connect).unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     for (key, value) in [
@@ -306,6 +306,7 @@ fn a_connection_both_ways() {
         .arg("entrance")
         .env("ENTRANCE_LISTEN", format!("127.0.0.1:{port}"))
         .env("ENTRANCE_SOCKETS", &bot.dir)
+        .env("ENTRANCE_SERVICES", &bot.dir)
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_secs(1));
@@ -354,6 +355,20 @@ fn a_connection_both_ways() {
     assert_eq!(bot.book("SELECT count(*) FROM services_yos WHERE user IS NOT NULL"), "[(1,)]");
     let secrets = bot.book("SELECT hex(key), out FROM services_secrets");
     assert!(!secrets.contains(&key), "only its hash");
+    alice.sync(0).unwrap();
+    let told = alice.connections();
+    assert!(told.len() == 1 && told[0].connected && !told[0].waiting, "{told:?}");
+    let service = told[0].user.clone();
+    alice.disconnect_service(&service).unwrap();
+    for _ in 0..20 {
+        alice.sync(1).unwrap();
+        if alice.connections().is_empty() {
+            break;
+        }
+    }
+    assert!(alice.connections().is_empty(), "ended");
+    assert_eq!(call("yo", &key).0, 401);
+    assert_eq!(bot.book("SELECT count(*) FROM services_yos WHERE user IS NOT NULL"), "[(0,)]");
     let _ = entrance.kill();
     let _ = entrance.wait();
 }

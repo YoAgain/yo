@@ -211,7 +211,7 @@ mod tests {
 
     fn header() -> &'static Header {
         let text = "names = [\"A\"]\nabout = \"a\"\ntriggers = [\"yo\"]\n[bridge]\n\
-                    return_url = \"https://a.com/b\"\ncall_urls = [\"https://a.com/\"]\nkey_header = \"X\"\n";
+                    return_url = \"https://a.com/b\"\ncall_urls = [\"https://a.com/\"]\nkey_header = \"X\"\nhelp_url = \"https://a.com/h\"\n";
         Box::leak(Box::new(Header::parse(text, "a").unwrap()))
     }
 

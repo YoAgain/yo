@@ -7,8 +7,11 @@ license.workspace = true
 description = "yo-services: the gatekeeper that runs one service (a bot) of the yo-services repository."
 
 [dependencies]
+ab_glyph = "0.2"
 axum = { workspace = true }
 base64 = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+qrcode = { version = "0.15", default-features = false }
 getrandom = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 rusqlite = { workspace = true }

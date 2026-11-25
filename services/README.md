@@ -20,9 +20,13 @@ Hub <-> executor (account, keys, book) <-> script (no keys, no network)
 | [gatekeeper](src/gatekeeper) | TOML, actions, limits: rules only, no I/O |
 | [book.rs](src/book.rs) | One SQLite for all bots: a row per Yo, its time, its reminder; who only with a reminder or connected; and the connections, hashed |
 | [entrance.rs](src/entrance.rs) | api.justyo.app: a process of its own, HTTP in, to the executors' sockets |
+| [list.rs](src/list.rs) | `api.justyo.app/services` (JSON): the services, shown by justyo.co/services, with a folder's `logo.png` |
+| [help.rs](src/help.rs) | The picture a user of a bridge gets who is not connected: its `help_url` |
 | [partner.rs](src/partner.rs) | The other side of a service with a `[bridge]`: OAuth 2, its calls, calls to it |
 | [script.rs](src/script.rs) | A connection starts a script |
 | [yo.rs](src/yo.rs) | `yo listen` and its control socket |
 | [systemd](systemd) | The sandbox; `install.sh` |
+
+The account of a service declares itself a bot (`yo register NAME --bot`, or `yo bot on`): apps connect only those.
 
 Security: [SECURITY.md](SECURITY.md). Tests: `cargo build -p yo-cli && cargo test -p yo-services`.

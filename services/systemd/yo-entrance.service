@@ -6,7 +6,7 @@ After=network.target
 [Service]
 Slice=yo-services.slice
 DynamicUser=yes
-Environment=ENTRANCE_LISTEN=127.0.0.1:8095 ENTRANCE_SOCKETS=/run/yo-services
+Environment=ENTRANCE_LISTEN=127.0.0.1:8095 ENTRANCE_SOCKETS=/run/yo-services ENTRANCE_SERVICES=/opt/yo-services
 ExecStart=/opt/yo/yo-services entrance
 Restart=on-failure
 RestartSec=3

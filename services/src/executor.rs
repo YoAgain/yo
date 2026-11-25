@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A reminder whose Yo could not go is tried again after this long.
@@ -39,6 +39,8 @@ pub struct Executor {
     pub counts: Counts,
     /// The other side of its connections, for a service that has one.
     pub partner: Option<Partner>,
+    /// What a user who is not connected gets back.
+    pub help: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -138,15 +140,43 @@ impl Executor {
         })
     }
 
-    /// A user allowed a connection: their code is kept.
-    pub fn connect(&self, event: &Value) {
-        let user = event["from"].as_str().filter(|u| user_id(u) && self.serves(u));
-        let (Some(_), Some(user), Some(code)) = (&self.partner, user, event["code"].as_str()) else { return };
-        if !locked(&self.limits).take(user, None, Instant::now())
-            || self.book.connect(user, &hash(code), now()).is_err()
-        {
+    /// A user allowed a connection: their code is kept; or they are told it is refused.
+    pub fn connect(self: &Arc<Self>, event: &Value) {
+        let Some((user, code)) = self.connecting(event) else { return };
+        let taken = self.partner.is_some()
+            && locked(&self.limits).take(user, None, Instant::now())
+            && self.book.connect(user, &hash(code), now()).unwrap_or(false);
+        if !taken {
             count(&self.counts.limited);
+            self.tell(user, "refused", code);
         }
+    }
+
+    /// A user ends their connection: forgotten, whatever the limits say, and told so.
+    pub fn disconnect(self: &Arc<Self>, event: &Value) {
+        let Some((user, code)) = self.connecting(event) else { return };
+        if self.book.disconnect(user).is_ok() {
+            self.tell(user, "ended", code);
+        }
+    }
+
+    fn connecting<'a>(&self, event: &'a Value) -> Option<(&'a str, &'a str)> {
+        let user = event["from"].as_str().filter(|u| user_id(u) && self.serves(u))?;
+        Some((user, event["code"].as_str()?))
+    }
+
+    /// Answers a connection, beside the events: the account must not wait for itself. Within the limits.
+    pub fn tell(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
+        if !locked(&self.limits).send(Instant::now()) {
+            count(&self.counts.limited);
+            return;
+        }
+        let (executor, user, code) = (self.clone(), user.to_owned(), code.to_owned());
+        std::thread::spawn(move || {
+            if executor.yo.answer(&user, kind, &code).is_err() {
+                count(&executor.counts.failed);
+            }
+        });
     }
 
     /// The other side called, for `user` or for nobody: what it gets back.
@@ -244,9 +274,19 @@ impl Executor {
         partner.test_out(&job.user).or_else(|| self.book.out(&job.user).ok().flatten())
     }
 
+    /// A message of one user alone, not connected; not when the book cannot tell.
+    fn unconnected(&self, job: &Job) -> bool {
+        let written = matches!(job.kind.as_str(), "yo" | "picture" | "video");
+        let partner = self.partner.as_ref().filter(|_| written && !job.group());
+        partner.is_some_and(|p| p.test_out(&job.user).is_none() && matches!(self.book.out(&job.user), Ok(None)))
+    }
+
     fn answer(&self, job: &Job) -> Result<Vec<Action>, Failure> {
         let private = !job.group() && job.kind != "probe";
         let remembered = private && self.header.remembers() && self.book.remembers(&job.user, job.at).unwrap_or(false);
+        if let Some(jpeg) = self.help.as_ref().filter(|_| self.unconnected(job)) {
+            return Ok(vec![Action::Drawn(jpeg.clone())]);
+        }
         // The reference itself holds the blob's key: the script gets a word for it.
         let media = job.media.as_ref().filter(|_| job.kind != "probe").map(|_| "it");
         let out = self.out(job);

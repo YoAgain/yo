@@ -1,11 +1,16 @@
-//! The entrance of api.justyo.app, behind the tunnel: one process for all services, no account, no keys, no book. It
+//! The entrance of api.justyo.app, behind the tunnel: one process for all services, no account, no keys, no book. `/` and
+//! `/services` list them; it
 //! reads HTTP and hands `/NAME/…` to that service's executor, one JSON line each way over its socket.
 
+use crate::list::List;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, FromRequest, Path, State};
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::any, Form, Json, Router};
+use axum::{
+    routing::{any, get},
+    Form, Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -39,21 +44,48 @@ pub struct Answer {
 
 struct Entrance {
     sockets: PathBuf,
+    list: List,
     at_once: Semaphore,
 }
 
 /// Serves until the process ends.
-pub fn serve(address: &str, sockets: PathBuf) -> std::io::Result<()> {
+pub fn serve(address: &str, sockets: PathBuf, services: &std::path::Path) -> std::io::Result<()> {
+    let list = List::read(services);
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind(address).await?;
         if !listener.local_addr()?.ip().is_loopback() {
             return Err(std::io::ErrorKind::AddrNotAvailable.into());
         }
-        let entrance = Arc::new(Entrance { sockets, at_once: Semaphore::new(AT_ONCE) });
-        let routes = Router::new().route("/{name}/{*path}", any(called));
+        let entrance = Arc::new(Entrance { sockets, list, at_once: Semaphore::new(AT_ONCE) });
+        let routes = Router::new()
+            .route("/", get(page))
+            .route("/services", get(services_json))
+            .route("/services/{logo}", get(logo))
+            .route("/{name}/{*path}", any(called));
         axum::serve(listener, routes.layer(DefaultBodyLimit::max(MAX_BODY)).with_state(entrance)).await
     })
+}
+
+/// For people the list is the website's.
+async fn page() -> Response {
+    axum::response::Redirect::temporary("https://justyo.co/services").into_response()
+}
+
+async fn services_json(State(entrance): State<Arc<Entrance>>) -> Response {
+    let any = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    listed("application/json; charset=utf-8", any, entrance.list.json.clone().into())
+}
+
+async fn logo(State(entrance): State<Arc<Entrance>>, Path(file): Path<String>) -> Response {
+    match file.strip_suffix(".png").and_then(|name| entrance.list.logos.get(name)) {
+        Some(png) => listed("image/png", [(header::X_CONTENT_TYPE_OPTIONS, "nosniff")], png.clone().into()),
+        None => refused(StatusCode::NOT_FOUND, "Not found"),
+    }
+}
+
+fn listed(kind: &'static str, more: [(header::HeaderName, &'static str); 1], body: Bytes) -> Response {
+    ([(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, "public, max-age=3600")], more, body).into_response()
 }
 
 fn refused(status: StatusCode, why: &str) -> Response {

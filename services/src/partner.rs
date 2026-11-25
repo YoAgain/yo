@@ -107,7 +107,7 @@ pub fn listen(path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-fn one(executor: &Executor, mut stream: UnixStream) -> io::Result<()> {
+fn one(executor: &Arc<Executor>, mut stream: UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(CALL_TIME))?;
     stream.set_write_timeout(Some(CALL_TIME))?;
     let mut line = String::new();
@@ -154,7 +154,7 @@ fn called(executor: &Executor, partner: &Partner, asked: Asked) -> Answer {
 }
 
 /// The code of a connect link becomes a key, for the partner alone.
-fn token(executor: &Executor, partner: &Partner, asked: &Asked) -> Answer {
+fn token(executor: &Arc<Executor>, partner: &Partner, asked: &Asked) -> Answer {
     let wrong = |status: u16, why: &str| Answer { status, body: json!({ "error": why }) };
     let field = |name: &str| asked.form.get(name).map(String::as_str).unwrap_or_default();
     if !same(field("client_id"), &partner.client_id) | !same(field("client_secret"), &partner.key) {
@@ -168,11 +168,17 @@ fn token(executor: &Executor, partner: &Partner, asked: &Asked) -> Answer {
     }
     let (Some(key), Some(out)) = (random(), random()) else { return wrong(500, "server_error") };
     // The app told the hash of the code (the connect page), and that is kept hashed.
-    let code = hash(&URL_SAFE_NO_PAD.encode(hash(field("code"))));
+    let told = URL_SAFE_NO_PAD.encode(hash(field("code")));
+    let code = hash(&told);
     let end = Instant::now() + CODE_WAIT;
     loop {
         match executor.book.exchange(&code, &hash(&key), &out, now()) {
-            Ok(true) => return Answer { status: 200, body: json!({ "access_token": key, "token_type": "Bearer" }) },
+            Ok(true) => {
+                if let Ok(Some((user, _))) = executor.book.connected_by(&hash(&key)) {
+                    executor.tell(&user, "connected", &told);
+                }
+                return Answer { status: 200, body: json!({ "access_token": key, "token_type": "Bearer" }) };
+            }
             Ok(false) if Instant::now() < end => std::thread::sleep(Duration::from_millis(250)),
             Ok(false) => return wrong(400, "invalid_grant"),
             Err(_) => return wrong(500, "server_error"),

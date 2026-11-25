@@ -18,6 +18,8 @@ pub struct Header {
 pub struct Bridge {
     /// Where a connected user goes back to.
     pub return_url: String,
+    /// Where a user who is not connected reads how to.
+    pub help_url: String,
     /// What it may call, anything below.
     pub call_urls: Vec<String>,
     /// The header with the other side's key.
@@ -60,6 +62,8 @@ impl Header {
             () if !self.names.iter().all(name) => Err("names: letters, digits, . and _".into()),
             () if self.names.iter().any(twice) => Err("names: one twice".into()),
             () if first.to_ascii_lowercase() != folder => Err("the folder is not named after it".into()),
+            // The list's place at the API's address.
+            () if folder == "services" => Err("names: not services".into()),
             () if self.triggers.is_empty() => Err("triggers: none".into()),
             () if self.has(Trigger::Webhook) => Err("triggers: a webhook comes with a bridge".into()),
             () if self.bridge.as_ref().is_some_and(|c| !c.good()) => Err("bridge: plain https addresses".into()),
@@ -93,6 +97,8 @@ impl Bridge {
         let host =
             |url: &str| below("https://", url).filter(|rest| !rest.starts_with('/')).map(|rest| rest.contains('/'));
         host(&self.return_url) == Some(true)
+            && host(&self.help_url) == Some(true)
+            && self.help_url.len() <= 128
             && self.call_urls.iter().all(|url| url.ends_with('/') && host(url) == Some(true))
             && (1..=64).contains(&self.key_header.len())
             && self.key_header.bytes().all(header)
@@ -140,7 +146,7 @@ mod tests {
         assert!(Header::parse("", "").is_err());
         let with = |back: &str, call: &str| {
             let connect =
-                format!("[bridge]\nreturn_url = \"{back}\"\ncall_urls = [\"{call}\"]\nkey_header = \"X-Key\"\n");
+                format!("[bridge]\nreturn_url = \"{back}\"\ncall_urls = [\"{call}\"]\nkey_header = \"X-Key\"\nhelp_url = \"{back}\"\n");
             Header::parse(&(GOOD.to_owned() + &connect), "yogpt")
         };
         assert!(Header::parse(&(GOOD.to_owned() + "[bridge]\nkey_header = \"X\"\n"), "yogpt").is_err());
