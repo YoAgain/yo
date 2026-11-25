@@ -656,7 +656,9 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
             val padding = invitePadding(side)
             val cardWidth = side + 2 * padding
             fun Float.fixedSp() = with(density) { dp.toSp() }
-            Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(Modifier.fillMaxSize().padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                // The buttons at the bottom, the rest free-standing above them.
+                Spacer(Modifier.weight(1f))
                 BasicText(name, Modifier.fillMaxWidth().height(BarHeight).background(inviteColor(name)).padding(horizontal = 16.dp).wrapContentHeight(),
                     maxLines = 1, softWrap = false,
                     style = TextStyle(fontFamily = YoFont, fontSize = nameSize.fixedSp(), color = Color.White, textAlign = TextAlign.Center),
@@ -677,6 +679,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                     maxLines = 1, softWrap = false,
                     style = TextStyle(fontFamily = YoFont, fontSize = 18f.fixedSp(), color = Color.White, textAlign = TextAlign.Center),
                     autoSize = TextAutoSize.StepBased(minFontSize = 9f.fixedSp(), maxFontSize = 18f.fixedSp()))
+                Spacer(Modifier.weight(1f))
                 val colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
                 Row(Modifier.width(cardWidth.dp).padding(top = (gap * 0.7f).dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {

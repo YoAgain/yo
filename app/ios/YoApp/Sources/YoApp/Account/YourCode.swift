@@ -309,31 +309,36 @@ struct YourCodePage: View {
       let around = RowMetrics.base.height + gap * 0.5 + wantsSize * 1.22 + gap * 0.8 + gap * 0.5 + 22 + gap * 0.7 + 50 + 16
       let side = max(120, min(260, (width - 40) * 260 / 296, (height - around) * 260 / 296))
       let cardWidth = side + 2 * InviteLayout.padding(side: side)
-      // Centred in the whole sheet, not below its bar, as far as the bar's button leaves room.
+      // The buttons at the bottom, the rest free-standing above them: centred from the sheet's top edge, not from below
+      // its bar, as far as the bar's button leaves room.
       let spare = max(0, (height - around - cardWidth) / 2)
-      let lift = min(spare, max(0, (proxy.safeAreaInsets.top - proxy.safeAreaInsets.bottom) / 2))
+      let lift = min(spare, proxy.safeAreaInsets.top / 2)
       VStack(spacing: 0) {
-        InviteNameRow(name: name, size: nameSize, height: RowMetrics.base.height)
-        InviteWants(size: wantsSize).padding(.top, gap * 0.5)
-        Group {
-          if let code {
-            Button(action: share) {
-              QRCard(code: code, side: side)
+        VStack(spacing: 0) {
+          InviteNameRow(name: name, size: nameSize, height: RowMetrics.base.height)
+          InviteWants(size: wantsSize).padding(.top, gap * 0.5)
+          Group {
+            if let code {
+              Button(action: share) {
+                QRCard(code: code, side: side)
+              }
+              .buttonStyle(QRPressStyle())
+              .disabled(sharing)
+              .accessibilityLabel("Share QR code as picture")
+            } else if !loaded {
+              ProgressView().tint(.white).frame(width: cardWidth, height: cardWidth)
+            } else {
+              ContentUnavailableView(
+                "Unable to Create Code", systemImage: "qrcode",
+                description: Text("Go back and try again."))
+              .frame(height: cardWidth)
             }
-            .buttonStyle(QRPressStyle())
-            .disabled(sharing)
-            .accessibilityLabel("Share QR code as picture")
-          } else if !loaded {
-            ProgressView().tint(.white).frame(width: cardWidth, height: cardWidth)
-          } else {
-            ContentUnavailableView(
-              "Unable to Create Code", systemImage: "qrcode",
-              description: Text("Go back and try again."))
-            .frame(height: cardWidth)
           }
+          .padding(.top, gap * 0.8)
+          InviteAddress(name: name, size: 18).frame(width: cardWidth, height: 22).padding(.top, gap * 0.5)
         }
-        .padding(.top, gap * 0.8)
-        InviteAddress(name: name, size: 18).frame(width: cardWidth, height: 22).padding(.top, gap * 0.5)
+        .frame(maxHeight: .infinity)
+        .offset(y: -lift)
         HStack {
           Button {
             let url = Invite.link(for: name)
@@ -360,7 +365,6 @@ struct YourCodePage: View {
       .foregroundStyle(.white)
       .padding(.vertical, 8)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .offset(y: -lift)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.amethyst.ignoresSafeArea())
