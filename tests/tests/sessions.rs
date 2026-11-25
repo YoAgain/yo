@@ -539,6 +539,8 @@ fn first_yos_crossing_at_once_all_arrive() {
                     }
                     seen.extend(texts(&c.sync(0).unwrap_or_default()));
                     std::thread::sleep(std::time::Duration::from_millis(100));
+                    // A `429` holds what waits for its time (5 s, none named): passed here, not slept.
+                    c.pass_time_for_tests(5_000);
                 }
                 assert_eq!(c.waiting(), 0, "first send {i} still waiting");
                 (c, seen)

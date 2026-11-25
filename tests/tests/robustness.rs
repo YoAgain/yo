@@ -304,13 +304,56 @@ fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
     ha.fault(&path, Fault::Answer(429));
     a.send_yo(&pb).expect("queued and saved: sent");
     assert_eq!(a.waiting(), 1, "it waits in the outbox");
-    // Two faults: the first Yo's next try (before the second goes) and the second's own delivery.
+    // Held for the 429's time (none named: 5 s): the next send is queued, nothing posted again at once.
+    let posts = |ha: &yo_tests::Http| ha.sent.lock().unwrap().iter().filter(|r| r.1 == path).count();
+    let before = posts(&ha);
+    a.send_yo(&pb).expect("queued behind the limit");
+    a.sync(0).unwrap();
+    assert_eq!((posts(&ha), a.waiting_unheld()), (before, 2), "never retried into the limit, the banner says so");
+    a.pass_time_for_tests(5_000);
+    // Two faults: the first Yo's next try (before the second goes) and the next round's.
     ha.fault(&path, Fault::Answer(503));
     ha.fault(&path, Fault::Answer(507));
-    a.send_yo(&pb).expect("also on a passing 503 or a full inbox");
+    a.sync(0).unwrap();
+    assert!(a.waiting() >= 2, "also on a passing 503 or a full inbox");
+    a.sync(0).unwrap();
     a.sync(0).unwrap();
     assert_eq!(a.waiting(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 2, "each once");
+}
+
+/// A contact's delivery past the recipient's inbound bytes (`429 recipient SECONDS`, spec 6.6) waits for the seconds
+/// the hub named, for that contact alone: never posted again at once, and the next send to someone else goes.
+#[test]
+fn a_contacts_rate_limit_waits_its_time_and_holds_no_one_else() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, _, _, pb) = chat(&hub);
+    let n = random_u64() % 1_000_000_000;
+    let pc = username(n + 7);
+    let mut c = register(Http::new(hub.url()), &pc, None);
+    a.send_yo(&pc).unwrap();
+    c.sync(0).unwrap();
+    let path = api::deliver_path(&yo_tests::user_id(b.user_id()));
+    // Contacts with each other's key, so what goes is no request (4.10); nothing left to send.
+    for _ in 0..3 {
+        b.maintenance().unwrap();
+        a.maintenance().unwrap();
+    }
+    ha.fault(&path, Fault::Body(429, b"recipient 120"));
+    a.send_yo(&pb).unwrap();
+    let posts = |ha: &yo_tests::Http| ha.sent.lock().unwrap().iter().filter(|r| r.1 == path).count();
+    let before = posts(&ha);
+    a.send_yo(&pb).unwrap();
+    a.send_yo(&pc).unwrap();
+    a.sync(0).unwrap();
+    assert_eq!(posts(&ha), before, "B's wait its time");
+    assert_eq!(yos(&c.sync(0).unwrap()), 1, "C's went");
+    assert_eq!(a.waiting_unheld(), 0, "no banner: B's row says it");
+    assert!(a.request_held(b.user_id()));
+    a.pass_time_for_tests(120_000);
+    a.sync(0).unwrap();
+    assert_eq!(a.waiting(), 0);
+    assert_eq!(yos(&b.sync(0).unwrap()), 2);
 }
 
 /// No delivery answer: the persisted outbox survives a client restart and retries; the recipient skips the copy.

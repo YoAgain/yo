@@ -347,6 +347,12 @@ fn gone_for_good(status: u16) -> bool {
     matches!(status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE)
 }
 
+/// How long a `429` that names no time holds the deliveries sharing its limit (spec 6.6; the hub's bucket refills
+/// evenly): not tried again with the next send or sync.
+const LIMIT_WAIT_MS: u64 = 5_000;
+/// How long a `429` to one of the outbox's session lookups holds them (a day's allowance, 6.6).
+const LOOKUP_LIMIT_WAIT_MS: u64 = 60_000;
+
 /// A delivery's answer that ends it: taken, refused for good, or a request the recipient refuses (spec 4.10).
 fn settled(status: u16, item: &Delivery) -> bool {
     status == status::ACCEPTED
@@ -408,14 +414,14 @@ fn urgent(plain: &[u8], control_or_own: bool) -> bool {
 /// What a `429` holds back (spec 6.6), by the limit the hub names in its body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Limit {
-    /// A request's bucket (4.10): this recipient only, for the ms named.
+    /// A request's bucket (4.10), or a recipient's inbound bytes (6.6): this recipient only, for the ms named.
     Recipient(u64),
-    /// The sender's address (or bytes): every delivery.
-    Address,
-    /// This device's signed requests: what goes signed.
-    Device,
-    /// Not named (an older hub): everything, this round.
-    All,
+    /// The sender's address (or bytes): every delivery, for the ms named (else `LIMIT_WAIT_MS`).
+    Address(u64),
+    /// This device's signed requests: what goes signed, as long.
+    Device(u64),
+    /// Not named (an older hub, a limit without a body): everything, as long.
+    All(u64),
 }
 
 fn limit_of(response: &Response) -> Option<Limit> {
@@ -424,13 +430,24 @@ fn limit_of(response: &Response) -> Option<Limit> {
     }
     let body = std::str::from_utf8(&response.body).unwrap_or("");
     let mut words = body.split_whitespace();
-    let seconds = |w: Option<&str>| w.and_then(|s| s.parse::<u64>().ok()).unwrap_or(60).clamp(1, 24 * 3600) * 1000;
+    let named = |w: Option<&str>| w.and_then(|s| s.parse::<u64>().ok()).map(|s| s.clamp(1, 24 * 3600) * 1000);
     Some(match words.next() {
-        Some("pair" | "new" | "recipient") => Limit::Recipient(seconds(words.next())),
-        Some("ip" | "bytes") => Limit::Address,
-        Some("device") => Limit::Device,
-        _ => Limit::All,
+        Some("pair" | "new" | "recipient") => Limit::Recipient(named(words.next()).unwrap_or(60_000)),
+        Some("ip" | "bytes") => Limit::Address(named(words.next()).unwrap_or(LIMIT_WAIT_MS)),
+        Some("device") => Limit::Device(named(words.next()).unwrap_or(LIMIT_WAIT_MS)),
+        _ => Limit::All(LIMIT_WAIT_MS),
     })
+}
+
+/// What a `429` holds back until when (`Client::monotonic`, ms; 0: nothing), by the limit it named (spec 6.6).
+#[derive(Default, Clone, Copy)]
+struct Held {
+    /// Every delivery: the sender's address (`ip`, `bytes`) or a limit not named.
+    deliveries: u64,
+    /// What goes signed: this device's requests (`device`).
+    signed: u64,
+    /// The outbox's session lookups (`429` to a lookup: the device's day of them).
+    lookups: u64,
 }
 
 /// The limits a `429` of a round named so far, shared by its users' chains (`Deliveries::send`): a bit per limit.
@@ -444,9 +461,9 @@ impl Limits {
 
     fn hit(&self, limit: Limit) {
         let bit = match limit {
-            Limit::All => Self::ALL,
-            Limit::Address => Self::ADDRESS,
-            Limit::Device => Self::DEVICE,
+            Limit::All(_) => Self::ALL,
+            Limit::Address(_) => Self::ADDRESS,
+            Limit::Device(_) => Self::DEVICE,
             Limit::Recipient(_) => return,
         };
         self.0.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
@@ -528,6 +545,14 @@ pub struct Client {
     last_answer: BTreeMap<String, u16>,
     /// Users whose requests the hub limits (`429`, 4.10), until when, and whether their key was refused too. Not saved.
     request_wait: BTreeMap<String, (u64, bool)>,
+    /// A contact's deliveries the hub limits (`429 recipient`, their inbound bytes, 6.6), until when. Not saved.
+    contact_wait: BTreeMap<String, u64>,
+    /// Users whose session the hub had no answer for that will do, until when they are not looked up again: a lookup
+    /// with every send and sync would spend the day's. Not saved.
+    lookup_wait: BTreeMap<String, u64>,
+    /// Until when (`monotonic`) a `429` holds every delivery (the address's limit), and what goes signed (the
+    /// device's), and the session lookups the outbox makes (spec 6.6). Not saved: a restart tries once more.
+    held_until: Held,
     /// An envelope was made (and its ratchet moved) since the state was last saved: saved before anything leaves.
     envelopes_unsaved: std::cell::Cell<bool>,
     /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
@@ -922,6 +947,9 @@ impl Client {
             refused_until_read: BTreeSet::new(),
             last_answer: BTreeMap::new(),
             request_wait: BTreeMap::new(),
+            contact_wait: BTreeMap::new(),
+            lookup_wait: BTreeMap::new(),
+            held_until: Held::default(),
             envelopes_unsaved: std::cell::Cell::new(false),
             media_keys_forgotten: false,
             guest_events: None,
@@ -1143,6 +1171,8 @@ impl Client {
         let mono = self.monotonic();
         let wait = (self.request_wait.get(user).map(|(until, _)| *until))
             .filter(|_| self.request_holds(user, mono))
+            .or_else(|| self.contact_wait.get(user).copied().filter(|until| *until > mono))
+            .or_else(|| Some(self.held_until.deliveries).filter(|until| *until > mono))
             .map(|until| now + until.saturating_sub(mono));
         let contact = |flag: fn(&Contact) -> bool| self.state.contacts.get(user).is_some_and(flag);
         let reason = match self.last_answer.get(user).copied() {
@@ -1176,20 +1206,36 @@ impl Client {
         self.state.outbox.iter().filter(|item| !self.blocked(&item.user)).count()
     }
 
-    /// Whether what waits for `user` is a request past its bucket (`429`, spec 4.10): it goes by itself at the hub's
-    /// time, or at once when their key comes (a yes). Nothing went wrong: the app says it waits, quietly.
+    /// Whether what waits for `user` waits for this recipient alone: a request past its bucket (`429`, spec 4.10: it
+    /// goes by itself at the hub's time, or at once when their key comes, a yes), their inbox full (`507`) or limited,
+    /// no session to be had. The app says it on their row ("Waiting to Send"), never in the banner.
     pub fn request_held(&self, user: &str) -> bool {
-        self.request_holds(user, self.monotonic()) && self.state.outbox.iter().any(|item| item.user == user)
+        self.recipient_holds(user, self.monotonic()) && self.state.outbox.iter().any(|item| item.user == user)
     }
 
-    /// `waiting` but for requests past their bucket (`request_held`): what the hub should have taken by now.
+    /// What of `waiting` the "Waiting to Send" banner is about: what the user sent and the hub should have taken by
+    /// now. Not what is on its way, what the app sends by itself (receipts, keys, names), nor what one recipient's
+    /// own state holds: their row says that.
     pub fn waiting_unheld(&self) -> usize {
         let now = self.monotonic();
+        let contact_holds =
+            |user: &str| self.state.contacts.get(user).is_some_and(|c| c.blocked || c.unconfirmed || c.outdated_at > 0);
         self.state
             .outbox
             .iter()
-            .filter(|item| !self.blocked(&item.user) && !self.request_holds(&item.user, now))
+            .filter(|item| urgent(&item.plain, item.non_urgent || item.device.is_some()))
+            .filter(|item| !self.delivering.contains(&item.user))
+            .filter(|item| !contact_holds(&item.user) && !self.recipient_holds(&item.user, now))
             .count()
+    }
+
+    /// `user` alone is held now (`monotonic`), not by the network or a limit on every delivery.
+    fn recipient_holds(&self, user: &str, now: u64) -> bool {
+        let until = |waits: &BTreeMap<String, u64>| waits.get(user).is_some_and(|until| *until > now);
+        self.request_holds(user, now)
+            || until(&self.contact_wait)
+            || until(&self.lookup_wait)
+            || self.last_answer.get(user) == Some(&status::INSUFFICIENT_STORAGE)
     }
 
     /// A request's `429` holds `user` now (`monotonic`): until its time, and only while their key is not here.
@@ -2675,6 +2721,164 @@ mod handle_tests {
             client.delivered(&deliveries, vec![Some(Ok(Response { status, body: vec![] }))]).unwrap();
             assert_eq!(client.state.outbox.is_empty(), matches!(status, 202 | 400 | 403 | 404 | 413), "{status}");
         }
+    }
+
+    fn one_delivery(client: &Client, user: &str, access: Option<[u8; 32]>) -> Deliveries {
+        let seq = client.state.outbox.iter().rev().find(|o| o.user == user).unwrap().seq;
+        Deliveries {
+            transport: Arc::new(Offline),
+            to: None,
+            items: vec![Delivery {
+                access,
+                endorsed: false,
+                sealed: access.is_some(),
+                seq,
+                user: user.into(),
+                path: String::new(),
+                headers: vec![],
+                envelope: vec![],
+                nonce: None,
+            }],
+        }
+    }
+
+    fn yo() -> Vec<u8> {
+        let message = Message { sent_at_ms: 1, group: None, content: Content::Yo }.encode().unwrap();
+        encode(&yo_wire::envelope::Plain { to: None, content: message.into() })
+    }
+
+    /// The banner stayed on though every Yo went: a bot's echo queues a receipt, on its way (or waiting) just as the
+    /// next send asked whether something waits.
+    #[test]
+    fn a_receipt_or_a_yo_on_its_way_is_no_waiting_banner() {
+        let mut client = Client::registering(Arc::new(Offline), "INFLIGHT", None, None, None, Push::none()).unwrap();
+        let receipt = Message { sent_at_ms: 1, group: None, content: Content::Receipt }.encode().unwrap();
+        client.enqueue("bot", encode(&yo_wire::envelope::Plain { to: None, content: receipt.into() }));
+        assert_eq!((client.waiting(), client.waiting_unheld()), (1, 0), "a receipt is nothing the user sent");
+        client.enqueue("friend", yo());
+        client.delivering.insert("friend".into());
+        assert_eq!((client.waiting(), client.waiting_unheld()), (2, 0), "on its way");
+        client.delivering.clear();
+        assert_eq!(client.waiting_unheld(), 1, "not taken: the banner");
+    }
+
+    /// One friend's full inbox (`507`, a phone off for weeks) is said on their row, not with every send to others.
+    #[test]
+    fn a_full_inbox_waits_on_its_row() {
+        let mut client = Client::registering(Arc::new(Offline), "FULL", None, None, None, Push::none()).unwrap();
+        client.enqueue("full", yo());
+        for status in [507, 503] {
+            let deliveries = one_delivery(&client, "full", None);
+            client.delivered(&deliveries, vec![Some(Ok(Response { status, body: vec![] }))]).unwrap();
+            assert_eq!(client.waiting(), 1, "kept");
+            assert_eq!(client.request_held("full"), status == 507, "{status}");
+            assert_eq!(client.waiting_unheld(), usize::from(status != 507), "{status}");
+        }
+    }
+
+    /// A recipient whose session cannot be had: not looked up again with every send and sync (each a lookup of the
+    /// day's, then a `429`), and no banner for everyone else's Yos. Nothing is lost.
+    #[test]
+    fn a_session_that_cannot_be_had_is_not_asked_for_with_every_send() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Refusing(AtomicUsize);
+        impl Transport for Refusing {
+            fn request(
+                &self,
+                _: &str,
+                path: &str,
+                _: &[(String, String)],
+                _: &[u8],
+            ) -> std::result::Result<Response, String> {
+                if path == api::LOOKUP {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Response { status: status::BAD_REQUEST, body: vec![] })
+            }
+        }
+        let transport = Arc::new(Refusing(AtomicUsize::new(0)));
+        let mut client = Client::registering(transport.clone(), "SESSIONS", None, None, None, Push::none()).unwrap();
+        let user = hex(&[7; 16]);
+        client.enqueue(&user, yo());
+        client.prepare().unwrap();
+        client.prepare().unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1, "asked once");
+        assert_eq!((client.waiting(), client.waiting_unheld()), (1, 0));
+        assert!(client.request_held(&user), "its row says so");
+        client.pass_time_for_tests(OUTDATED_RETRY_MS);
+        client.prepare().unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2, "asked again later");
+    }
+
+    /// A `429` to the outbox's lookups holds them for a minute: not asked again with the next send or sync.
+    #[test]
+    fn a_limited_lookup_is_not_asked_again_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Limited(AtomicUsize);
+        impl Transport for Limited {
+            fn request(
+                &self,
+                _: &str,
+                path: &str,
+                _: &[(String, String)],
+                _: &[u8],
+            ) -> std::result::Result<Response, String> {
+                if path == api::LOOKUP {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Response { status: status::RATE_LIMITED, body: vec![] })
+            }
+        }
+        let transport = Arc::new(Limited(AtomicUsize::new(0)));
+        let mut client = Client::registering(transport.clone(), "LOOKUPS", None, None, None, Push::none()).unwrap();
+        client.enqueue(&hex(&[7; 16]), vec![]);
+        client.enqueue(&hex(&[8; 16]), vec![]);
+        client.prepare().unwrap();
+        client.prepare().unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1, "one 429, then none asked for its time");
+        client.pass_time_for_tests(LOOKUP_LIMIT_WAIT_MS);
+        client.prepare().unwrap();
+        assert_eq!(transport.0.load(Ordering::SeqCst), 2, "asked again after it");
+        assert_eq!(client.waiting(), 2, "kept: not now is not never");
+    }
+
+    /// What a contact's own state holds (a key to confirm, an app too old) waits quietly: its row says so, the global
+    /// banner does not stay on for it while everyone else's Yos go.
+    #[test]
+    fn what_a_contact_holds_waits_without_the_banner() {
+        let mut client = Client::registering(Arc::new(Offline), "QUIET", None, None, None, Push::none()).unwrap();
+        client.state.contacts.insert("changed".into(), Contact { unconfirmed: true, ..Contact::default() });
+        client.state.contacts.insert("old".into(), Contact { outdated_at: 5, ..Contact::default() });
+        client.enqueue("changed", yo());
+        client.enqueue("old", yo());
+        assert_eq!((client.waiting(), client.waiting_unheld()), (2, 0));
+        client.enqueue("other", yo());
+        assert_eq!(client.waiting_unheld(), 1, "what the hub should have taken still shows");
+    }
+
+    /// A `429` holds what shares its limit for the time it names (6.6), or 5 s: never posted again at once (the
+    /// storm of `429`s a client hammering a limit makes), then it goes by itself.
+    #[test]
+    fn a_rate_limit_holds_for_its_time_and_never_at_once() {
+        let mut client = Client::registering(Arc::new(Offline), "LIMITED", None, None, None, Push::none()).unwrap();
+        let limited = |body: &str| Some(Ok(Response { status: 429, body: body.as_bytes().to_vec() }));
+        client.enqueue("a", vec![]);
+        let deliveries = one_delivery(&client, "a", None);
+        client.delivered(&deliveries, vec![limited("ip")]).unwrap();
+        let now = client.monotonic();
+        assert!(client.held_until.deliveries >= now + LIMIT_WAIT_MS - 1_000, "no time named");
+        assert_eq!(client.waits_for("a", 0).0, OutboxReason::RateLimited);
+        client.pass_time_for_tests(LIMIT_WAIT_MS);
+        assert!(client.held_until.deliveries <= client.monotonic(), "then it goes");
+        client.delivered(&deliveries, vec![limited("device 90")]).unwrap();
+        assert!(client.held_until.signed >= client.monotonic() + 89_000, "the time named");
+        // A contact's delivery past the recipient's bytes: that contact's wait, though their key is here.
+        client.state.contacts.insert("b".into(), Contact { profile_key: Some([1; 32]), ..Contact::default() });
+        client.enqueue("b", vec![]);
+        let deliveries = one_delivery(&client, "b", Some([1; 32]));
+        client.delivered(&deliveries, vec![limited("recipient 600")]).unwrap();
+        assert!(client.contact_wait["b"] >= client.monotonic() + 599_000);
+        assert!(client.request_held("b"), "that row alone says it waits");
     }
 
     /// A contact renamed again and again is remembered by its newest few names, the latest last, not by every one.

@@ -141,18 +141,40 @@ impl Client {
             .iter()
             .filter(|item| item.device.is_none() && !self.blocked(&item.user) && !self.delivering.contains(&item.user))
             .filter(|item| self.roster_unknown(&item.user) || self.missing_session(&item.user, &item.audience))
+            .filter(|item| !self.state.contacts.get(&item.user).is_some_and(|c| c.unconfirmed))
             .filter(|item| {
                 self.state.contacts.get(&item.user).is_none_or(|c| passed(now, c.outdated_at, OUTDATED_RETRY_MS))
             })
             .map(|item| item.user.clone())
             .collect();
+        // A `429` to a lookup (or to what goes signed) holds them all for its time: never asked again at once.
+        let mono = self.monotonic();
+        if self.held_until.lookups > mono || self.held_until.signed > mono {
+            return Ok(());
+        }
+        self.lookup_wait.retain(|_, until| *until > mono);
         for user in users {
+            if self.lookup_wait.contains_key(&user) {
+                continue;
+            }
             match self.fetch_bundles(&user) {
+                // No device or no bundle for one (a contact's is `outdated_at`'s), as below.
+                Ok(()) if self.roster_unknown(&user) || (user == self.state.user_id && self.no_session(&user)) => {
+                    self.lookup_wait.insert(user, mono + OUTDATED_RETRY_MS);
+                }
                 Ok(()) => {}
+                Err(Error::Refused(status::RATE_LIMITED)) => {
+                    self.held_until.lookups = self.monotonic() + LOOKUP_LIMIT_WAIT_MS;
+                    break;
+                }
                 Err(error) if retryable(&error) || error == Error::Unconfirmed => {}
                 Err(error @ (Error::Save(_) | Error::Replaced)) => return Err(error),
                 Err(Error::NotOnYo) => self.user_gone(&user),
-                Err(error) => self.drop_one(format!("sessions: {error}")),
+                // Kept (an answer that does not verify must not lose a message), asked again in a while only.
+                Err(error) => {
+                    self.lookup_wait.insert(user, mono + OUTDATED_RETRY_MS);
+                    self.drop_one(format!("sessions: {error}"));
+                }
             }
         }
         Ok(())
@@ -174,6 +196,7 @@ impl Client {
         let contacts = &self.state.contacts;
         self.request_wait
             .retain(|user, (until, _)| *until > now && contacts.get(user).is_none_or(|c| c.profile_key.is_none()));
+        self.contact_wait.retain(|_, until| *until > now);
         let mut encrypted = false;
         let mut i = 0;
         while i < self.state.outbox.len() {
@@ -238,6 +261,8 @@ impl Client {
         let certificate = self.certificate();
         let own = identity::account_pair(&self.state.account_secret)?;
         let mut first = BTreeSet::new();
+        // Users one of whose envelopes a `429` holds (6.6): their next ones wait behind it, in order.
+        let mut limited = BTreeSet::new();
         for item in &self.state.outbox {
             if item.payloads.is_empty() {
                 continue;
@@ -286,6 +311,15 @@ impl Client {
             // Identified for want of a certificate, or as a request (spec 4.10); an envelope per device.
             let identity = signal::identity_of(&account_key)?;
             let sealed = certificate.as_ref().filter(|_| access.is_some() || endorsed);
+            // Held by a `429` for the time it named: not posted again before (6.6), so a limit is never hammered.
+            if limited.contains(&item.user)
+                || self.held_until.deliveries > now
+                || (sealed.is_none() && self.held_until.signed > now)
+                || self.contact_wait.get(&item.user).is_some_and(|until| *until > now)
+            {
+                limited.insert(item.user.clone());
+                continue;
+            }
             let copies: Result<Vec<api::CopyFor>> = item
                 .payloads
                 .iter()
@@ -371,7 +405,10 @@ impl Client {
                             .read_before_roster(&item.user, &devices.devices)
                             .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices, None))
                         {
-                            Ok(()) => changed = true,
+                            Ok(()) => {
+                                self.lookup_wait.remove(&item.user);
+                                changed = true;
+                            }
                             // The inbox could not be read first: the envelope waits like any "not now".
                             Err(error) if retryable(&error) => self.note(format!("roster later: {error}")),
                             Err(error) => result = Err(error),
@@ -419,10 +456,24 @@ impl Client {
                         }
                     }
                 }
-                Some(Ok(response)) if matches!(limit_of(&response), Some(Limit::Recipient(_))) => {
-                    if let Some(Limit::Recipient(wait)) = limit_of(&response) {
-                        let key_refused = self.request_wait.contains_key(&item.user);
-                        self.request_wait.insert(item.user.clone(), (self.monotonic() + wait, key_refused));
+                // A `429` holds what shares its limit for the time it names (spec 6.6), then it goes by itself.
+                Some(Ok(response)) if limit_of(&response).is_some() => {
+                    let now = self.monotonic();
+                    match limit_of(&response) {
+                        // A contact's delivery past the recipient's inbound bytes: theirs wait, key or not.
+                        Some(Limit::Recipient(wait)) if item.access.is_some() || item.endorsed => {
+                            self.contact_wait.insert(item.user.clone(), now + wait);
+                        }
+                        // A request past its bucket (4.10): until then, or until their key comes.
+                        Some(Limit::Recipient(wait)) => {
+                            let key_refused = self.request_wait.contains_key(&item.user);
+                            self.request_wait.insert(item.user.clone(), (now + wait, key_refused));
+                        }
+                        Some(Limit::Address(wait) | Limit::All(wait)) => {
+                            self.held_until.deliveries = self.held_until.deliveries.max(now + wait);
+                        }
+                        Some(Limit::Device(wait)) => self.held_until.signed = self.held_until.signed.max(now + wait),
+                        None => {}
                     }
                 }
                 Some(Ok(response)) if gone_for_good(response.status) => {

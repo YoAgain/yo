@@ -974,13 +974,14 @@ impl YoClient {
         self.look(|c| c.waiting()).map_or(0, |n| n.try_into().unwrap_or(u32::MAX))
     }
 
-    /// `waiting` but for requests past their bucket: the "Waiting to Send" banner's count (those wait quietly).
+    /// The "Waiting to Send" banner's count: what the user sent and the hub should have taken by now (not on its way,
+    /// no receipts or keys, nothing one recipient's own state holds).
     pub fn waiting_unheld(&self) -> u32 {
         self.look(|c| c.waiting_unheld()).map_or(0, |n| n.try_into().unwrap_or(u32::MAX))
     }
 
-    /// What waits for `user` (id) is a request past its bucket (spec 4.10): it goes at the hub's time, or at once
-    /// with their yes. The bar says "Waiting to Send", no banner: nothing went wrong.
+    /// What waits for `user` (id) waits for them alone: a request past its bucket (spec 4.10: at the hub's time, or at
+    /// once with their yes), a full inbox, no session to be had. The bar says "Waiting to Send", no banner.
     pub fn request_held(&self, user: String) -> bool {
         self.look(|c| c.request_held(&user)).unwrap_or(false)
     }

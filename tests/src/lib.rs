@@ -144,6 +144,8 @@ pub enum Fault {
     LoseAnswer,
     /// The hub is not asked; this status comes back.
     Answer(u16),
+    /// The hub is not asked; this status and body come back (a `429` naming its limit and seconds).
+    Body(u16, &'static [u8]),
 }
 
 /// A signed request as it was sent: method, path, headers, body.
@@ -217,8 +219,10 @@ impl Transport for Http {
             let mut faults = self.faults.lock().unwrap_or_else(PoisonError::into_inner);
             faults.iter().position(|(pattern, _)| path.contains(pattern.as_str())).map(|i| faults.remove(i).1)
         };
-        if let Some(Fault::Answer(status)) = fault {
-            return Ok(Response { status, body: Vec::new() });
+        match fault {
+            Some(Fault::Answer(status)) => return Ok(Response { status, body: Vec::new() }),
+            Some(Fault::Body(status, body)) => return Ok(Response { status, body: body.to_vec() }),
+            _ => {}
         }
         let url = format!("{}{}", self.base.read().unwrap(), path);
         let mut request = self.client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
