@@ -309,12 +309,6 @@ import uniffi.yo.usernameValid
                         style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White),
                         maxLines = 1,
                     )
-                    Text(
-                        question,
-                        Modifier.alignByBaseline().alpha(0f).clearAndSetSemantics {},
-                        style = questionStyle,
-                        maxLines = 1,
-                    )
                 }
             }
             Text(
@@ -469,7 +463,6 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                 Text(question, Modifier.alignByBaseline(), style = questionStyle, maxLines = 1)
                 Text(copy(ProductText.USE_A_KEY), Modifier.alignByBaseline(),
                     style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White), maxLines = 1)
-                Text(question, Modifier.alignByBaseline().alpha(0f), style = questionStyle, maxLines = 1)
             }
         }
         AnimatedVisibility(
