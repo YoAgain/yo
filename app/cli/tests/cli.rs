@@ -1,4 +1,4 @@
-//! `yo` as the operator and the skills run it: against a hub in-process, people as core clients.
+//! `yo` as the operator and the bots run it: against a hub in-process, people as core clients.
 
 mod common;
 

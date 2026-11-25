@@ -1,12 +1,11 @@
 name: CLI
 
 # The `yo` CLI (app/cli) for Linux x86_64 (like the server it runs on) and macOS arm64: every push → workflow
-# artifacts, a published release → `yo-linux-x86_64`, `yo-macos-arm64`, `skills.tar.gz` and a `.sha256` for each
-# attached to it.
+# artifacts, a published release → `yo-linux-x86_64`, `yo-macos-arm64` and a `.sha256` for each attached to it.
 on:
   push:
     branches: ['**']  # not tags: a release runs once, by its release event
-    paths: ['app/cli/**', 'core/**', 'skills/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/cli.yml']
+    paths: ['app/cli/**', 'core/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/cli.yml']
   release:
     types: [published]
 permissions:
@@ -44,7 +43,6 @@ jobs:
         run: |
           mkdir dist
           cp target/release/yo dist/${{ matrix.name }}
-          [ "$RUNNER_OS" = Linux ] && tar -czf dist/skills.tar.gz skills
           cd dist && for f in *; do shasum -a 256 "$f" > "$f.sha256"; done
       - uses: actions/upload-artifact@v7
         with:

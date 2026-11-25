@@ -379,9 +379,6 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 /* Status */
 #st-error.bad { color: var(--bad); }
 
-/* Overview: the status bot in one line, how often right in its title */
-#t-statusbot h2 select { margin-left: auto; padding: 3px 8px; font-size: 12px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--text); }
-#t-statusbot .cap { font-size: 12px; color: var(--muted); }
 
 .ov .full { grid-column: 1 / -1; }
 /* Server: one line of figures, the services, the queue */
@@ -458,8 +455,6 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 #c-svcs[aria-expanded="true"] .chev { transform: rotate(180deg); }
 #svc-rows .crow { padding-left: 22px; }
 #svc-rows .crow, #svc-rows + * { border-top: 1px solid var(--line); }
-#t-stbot select { grid-column: 2 / -1; justify-self: end; margin: 0 0 6px; padding: 3px 8px; font-size: 12px; }
-#t-stbot:has(select:not([hidden])) { height: auto; padding-top: 6px; }
 .crow .stack.plats { grid-column: 4; height: 10px; }
 .stack.plats span { background: var(--muted); opacity: .6; }
 .stack.plats .p-ios { background: var(--amethyst); opacity: 1; } .stack.plats .p-android { background: var(--ok); opacity: 1; }
@@ -539,7 +534,6 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .crow.opens { cursor: pointer; transition: background .12s; }
 .crow.opens:hover { background: var(--hover); border-radius: 8px; }
 .crow.opens:hover + .crow { border-top-color: transparent; }
-#t-stbot select { grid-column: 2 / -1; }
 .tile h2 > i { width: 7px; height: 7px; }
 
 /* Database: calmer list and table */

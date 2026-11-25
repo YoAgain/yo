@@ -228,11 +228,11 @@ if (document.body.classList.contains("login")) {
     ] };
 
   };
-  // CLI: YoGPT and the status bot together, green only while both units run.
+  // CLI: YoGPT.
   function drawCli() {
-    const y = svcInfo.yogpt, b = svcInfo.stbot;
-    state("t-cli", y?.ok === false || b?.ok === false ? "bad" : y?.ok && b?.ok ? "ok" : null);
-    svcInfo.cli = { parts: [["YoGPT", y], ["Status bot", b]], select: true };
+    const y = svcInfo.yogpt;
+    state("t-cli", y?.ok === false ? "bad" : y?.ok ? "ok" : null);
+    svcInfo.cli = { parts: [["YoGPT", y]] };
   }
   async function tick() {
     if (document.visibilityState !== "visible") return;
@@ -279,7 +279,6 @@ if (document.body.classList.contains("login")) {
     part(() => service("tunnel", s.tunnel));
     part(() => {
       service("yogpt", s.yogpt);
-      service("stbot", s.stbot);
       drawCli();
       const people = last?.live?.yogpt_contacts;
       if (s.yogpt?.state === "active" && people != null) svcInfo.yogpt.rows.push(["Knows", `${num(people)} people`]);
@@ -538,8 +537,6 @@ if (document.body.classList.contains("login")) {
   const slotWord = () => (range === 1 ? "This hour" : range ? "This day" : "This stretch");
   let tipAnchor, tipX, tipY;
   const showTip = (t, x, y, node) => {
-    const held = tipBox.querySelector("#st-every");  // the status bot's select goes home before the card changes
-    if (held) { held.hidden = true; $("t-system").append(held); }
     if (typeof t === "string") {
       const [head, ...rest] = t.split(" · ");
       t = { head, note: rest.join(" · ") };
@@ -597,8 +594,6 @@ if (document.body.classList.contains("login")) {
     clearMark = null;
     tipBox.classList.remove("pin");
     tipBox.hidden = true;
-    const sel = tipBox.querySelector("#st-every");
-    if (sel) { sel.hidden = true; $("t-system").append(sel); }
   };
   closeTip.addEventListener("click", unpin);
   const fitTip = () => {
@@ -715,25 +710,23 @@ if (document.body.classList.contains("login")) {
         { label: "Reboot needed", value: yn(srvNow?.reboot?.needed ?? u.reboot) }, u.reboot_packages?.length ? { label: "Packages", value: u.reboot_packages.join(", ") } : null, { label: "Kernel update", value: yn(kernel) }, { label: "New Ubuntu LTS", value: yn(lts) }] };
     };
     hint($("c-svc"), () => {
-      const rows = [["hub", "Hub"], ["dev", "Dev"], ["tunnel", "Tunnel"], ["yogpt", "YoGPT"], ["stbot", "Status bot"]].map(([id, name]) => {
+      const rows = [["hub", "Hub"], ["dev", "Dev"], ["tunnel", "Tunnel"], ["yogpt", "YoGPT"]].map(([id, name]) => {
         const i = svcInfo[id], r = (k) => i?.rows?.find(([n]) => n === k)?.[1], up = r("Up"), row = el("div", "tr"), mark = el("span", "tm");
         mark.append(el("span", `dot ${i?.ok == null ? "" : i.ok ? "ok" : "bad"}`));
         row.append(mark, el("span", "tl", name), el("b", "tv", i?.ok == null ? "unknown" : i.ok ? (up && up !== "–" ? up : "running") : r("State") || "off"));
         if (!i?.rows?.length) return row;
         const detail = el("details", "tip-details"), summary = el("summary");
         summary.append(row);
-        detail.append(summary, ...i.rows.concat(id === "stbot" ? botReportRows : []).map(([label, value, cls]) => tipRow({ label, value, cls })));
+        detail.append(summary, ...i.rows.map(([label, value, cls]) => tipRow({ label, value, cls })));
         return detail;
       });
-      const sel = $("st-every"), every = el("label", "hc-sel", "Status bot schedule");
-      sel.hidden = false; every.append(sel);
       const u = updateDetails(), extra = el("details", "tip-details");
       extra.append(el("summary", null, "Package and release details"));
       extra.addEventListener("toggle", () => {
         if (extra.open && extra.childElementCount === 1) extra.append(...DETAIL.upd());
       });
       return { head: "Status", nodes: [tipRow({ section: "Updates" }), ...u.rows.filter(Boolean).map(tipRow),
-        ...(u.note ? [el("span", "tn", u.note)] : []), extra, tipRow({ section: "Services" }), ...rows, tipRow({ label: "Failed units", value: num(srvNow?.failed_units) }), every] };
+        ...(u.note ? [el("span", "tn", u.note)] : []), extra, tipRow({ section: "Services" }), ...rows, tipRow({ label: "Failed units", value: num(srvNow?.failed_units) })] };
     });
   };
   document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && !pinned) cancelPreview(); }, true);
@@ -2123,33 +2116,9 @@ if (document.body.classList.contains("login")) {
     } finally { peopleBusy = false; }
   }
 
-  // ---- status bot (skills/status): its last report in one line on the Overview, how often it sends right there -----
-  let botReportRows = [];
-  const drawStatus = (d) => {
-    const l = d.last, c = d.config || {}, at = l && l.at ? l.at * 1000 : null;
-    botReportRows = [
-      ["Last report", l ? `${clock(at)} · ${l.sent ? "sent" : "not sent"}` : "none yet", l && !l.sent ? "bad" : ""],
-      ["Schedule", !c.every_minutes ? "on demand" : c.every_minutes === 1440 ? "day (09:00 Berlin)" : `${c.every_minutes} min`],
-    ];
-    redrawDetail(["svc", "server"]);
-    if (document.activeElement !== $("st-every")) $("st-every").value = String(c.every_minutes ?? 0);
-  };
-  async function statusRefresh() {
-    try {
-      const r = await fetch("/status.json", { cache: "no-store" });
-      if (r.ok) drawStatus(await r.json());
-    } catch {}
-  }
-  $("st-every").addEventListener("change", async (e) => {
-    try {
-      drawStatus(await (await postJSON("/status", { every_minutes: Number(e.target.value) })).json());
-    } catch { if (svcInfo.stbot) { botReportRows.push(["", "not saved, try again", "bad"]); redrawDetail(["svc", "server"]); } }
-  });
-
   // ---- one page of widgets; the Database widget is always open. Rows of Attention and Usage jump there: Feedback to
   // the support chat, Errors to diagnostics, Reports to reports, Sign-ups (and the Users card's title) to the users
-  // table. Services is one row in Server, opened in place (on its own while something is down); the Status bot row
-  // there shows its frequency select. Keys: 1 top, 2 chat, 3 diagnostics, 4 users, 5 database, 0 the hub.
+  // table. Services is one row in Server, opened in place (on its own while something is down). Keys: 1 top, 2 chat, 3 diagnostics, 4 users, 5 database, 0 the hub.
   const showTable = (name) => { tableOpen = { users: "people", support_messages: "v-support", diagnostics: "v-errors", reports: "v-reports", todos: "v-todos", services_yos: "v-services" }[name] || name; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
   // The support chat shown, scrolled to only when it is out of sight (a click inside it never moves the page).
   const toInbox = () => {
@@ -2861,7 +2830,6 @@ if (document.body.classList.contains("login")) {
       const info = svcInfo[id], body = [], chip = $(`t-${id}`);
       if (info?.parts) for (const [n, p] of info.parts) body.push(el("div", `hc-sub ${p?.ok ? "ok" : "bad"}`, n), kvRows(p?.rows || [["State", "unknown"]]));
       else body.push(kvRows(info?.rows || [["State", "unknown"]]));
-      if (info?.select) { const sel = $("st-every"); sel.hidden = false; const l = el("label", "hc-sel", "Report every"); l.append(sel); body.push(l); }
       const c = dcard(name, null, body);
       c.querySelector("h3").prepend(el("span", `dot ${chip?.classList.contains("ok") ? "ok" : chip?.classList.contains("bad") ? "bad" : ""}`));
       return c;
@@ -3064,11 +3032,8 @@ if (document.body.classList.contains("login")) {
     cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
   const detailHosts = [$("grp-vr"), $("delivery-rows"), $("grp-pr"), $("uc-rows")];
   let detailPending = false;
-  // The status bot's select lives in the Services popover while it shows, else hidden at home.
-  const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
   const drawDetail = () => {
     if (!hubNow) return;
-    parkSelect();
     $("grp-vr").replaceChildren(...relCard(hubNow));
     drawUsageRows(hubNow);
     $("grp-pr").replaceChildren(DETAIL.pr()[0]);
@@ -3112,11 +3077,9 @@ if (document.body.classList.contains("login")) {
   });
   landing();
   drawRange();
-  statusRefresh();
   tick();
   setInterval(tick, 3000);
   refresh();
   setInterval(refresh, 10000);
-  setInterval(() => { if (document.visibilityState === "visible") statusRefresh(); }, 30000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { tick(); refresh(); } });
 }

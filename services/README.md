@@ -21,7 +21,6 @@ Hub <-> executor (account, keys, book) <-> script (no keys, no network)
 | [book.rs](src/book.rs) | One SQLite for all bots: a row per Yo, its time, its reminder; who only with a reminder |
 | [script.rs](src/script.rs) | A connection starts a script |
 | [yo.rs](src/yo.rs) | `yo listen` and its control socket |
-| [status](status) | The numbers STATUS draws, as a file (root, no Yo near it) |
 | [systemd](systemd) | The sandbox; `install.sh` |
 
 Security: [SECURITY.md](SECURITY.md). Tests: `cargo build -p yo-cli && cargo test -p yo-services`.

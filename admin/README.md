@@ -3,8 +3,7 @@
 Python standard library dashboard, one page: Usage (sign-ups, Yos, media, groups) and Attention (feedback, errors,
 reports) over one range next to the logo (7, 30 or 365 days: totals with a trend against the range before, bars per
 day or month; green where more is good, orange where more is bad), Users (secured, active, platforms), Server (CPU,
-memory, disk, network with the last hour's bars, kept in memory by admin.py; updates), Services (queue, the units, the
-STATUS bot with its frequency, [skills/status](../skills/status)) and an always-open Database widget. No hovers: a click
+memory, disk, network with the last hour's bars, kept in memory by admin.py; updates), Services (queue, the units) and an always-open Database widget. No hovers: a click
 on a row, a service or a chart opens its detail (all its cards, in the range; the server's last 24 hours, a point
 per quarter hour in admin.py's memory) between the widgets and the Database; again, × or Escape closes it. Its sidebar starts with the views: Users (the sortable users table), Support (the support chat), Errors (open
 groups first with Done/Reopen) and To-dos; below them every table as it is, by name (reserved with its switch and reasons); a footer eye
@@ -41,8 +40,6 @@ keep credentials and deployment settings outside this public repository.
 | `ADMIN_USERS_FILE` | Collector output and dashboard snapshot | `./users.json` |
 | `ADMIN_REQUEST_FILE` | Path-unit request file; parent writable by yo-admin | `/run/yo-admin-request/want` |
 | `STATE_DIRECTORY` | Writable done-state and migration directory; create beforehand | `./state` |
-| `STATUS_CONFIG` | The STATUS bot's rhythm, written here | `$STATE_DIRECTORY/status-bot.json` |
-| `STATUS_LAST` | The STATUS bot's last report (numbers only) | `/run/yo-status-live/last.json` |
 | `YOGPT_REPLIES` | Reply pictures and their README table | `./replies` |
 | `YO_HUB_DB` | Live SQLite database | `./hub.sqlite` |
 | `YO_HUB_DEV_DB` | Development SQLite database | `./hub-dev.sqlite` |

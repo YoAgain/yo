@@ -3,8 +3,7 @@
 A Yo account on the command line, on the core (`core/client`). Every command prints one JSON value on stdout; a
 failure prints `{"error": …, "retryable": …}` on stderr. Exit codes: 0 done, 1 failed, 2 usage, 3 this device is
 gone for good (replaced by another, name released: stop), 4 nothing registered in the directory, 5 the hub did not
-accept the device's signature (a `401`: a clock still off after a reboot, a hub restarting; retryable). The bots in
-[skills/](../../skills) are small scripts driving it.
+accept the device's signature (a `401`: a clock still off after a reboot, a hub restarting; retryable). Small bots drive it through `yo listen`.
 
 ```sh
 cargo build --release --locked -p yo-cli          # target/release/yo
@@ -36,7 +35,7 @@ events are acknowledged at once; with `--manual-ack` only by `yo ack`, and the u
 restart. A `media.ref` holds the blob's key: whoever has it can open the photo, so `send --media -` reads it from
 stdin, never from the arguments (which every local user sees). No video from a file: the CLI can neither check its
 length nor take out its metadata. `--drain-media` forgets media keys instead and fetches and acknowledges every
-received blob, never opened (the hub deletes it after its last fetch), for a bot that never looks. `sync --drain-media` does the same once, for a bot that only sends (skills/status).
+received blob, never opened (the hub deletes it after its last fetch), for a bot that never looks. `sync --drain-media` does the same once, for a bot that only sends.
 
 **The state directory** is YoGPT's as before: `account` (the account secret), `key` (the state key) and `state.sqlite`,
 all 0600; keep `account` in the operator's secret backup. A `state` file of the build before the database is taken

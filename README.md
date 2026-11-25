@@ -25,7 +25,7 @@ The apps on top:
 
 - [app/ios](app/ios): Swift, the iPhone app and its extensions
 - [app/android](app/android): Kotlin, the Android app
-- [app/cli](app/cli): Rust, the CLI; the bots on it in [skills](skills)
+- [app/cli](app/cli): Rust, the CLI
 
 ### iOS and Android
 
@@ -143,7 +143,6 @@ DB: the local database, sealed per column.
   - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
   - [android](app/android): the Android app
   - [cli](app/cli): the CLI, `yo`
-- [skills](skills): what is left of the bots as scripts driving the CLI: [skills/status](skills/status) sends the server's numbers as a picture at the rhythm set on the admin page
 - [core](core)
   - [client](core/client): state, sessions, groups, media, recovery, outbox
   - [wire](core/wire): protocol formats

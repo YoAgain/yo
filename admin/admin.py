@@ -255,40 +255,6 @@ def done_set(key: str, done: bool) -> None:
         os.replace(tmp, DONE_FILE)
 
 
-# The STATUS bot (skills/status): how often, written here, read by the bot every minute; the numbers of its last
-# report, written by the bot (no names). Whom it sends to is fixed on the server (STATUS_TO_USER), never set here.
-STATUS_CONFIG = os.environ.get("STATUS_CONFIG", os.environ.get("STATE_DIRECTORY", "./state") + "/status-bot.json")
-STATUS_LAST = os.environ.get("STATUS_LAST", "/run/yo-status-live/last.json")
-STATUS_EVERY = (0, 15, 30, 60, 120, 1440)
-_status_lock = threading.Lock()
-
-
-def status_read() -> dict:
-    def load(path):
-        try:
-            data = json.loads(read_bytes(path))
-            return data if isinstance(data, dict) else None
-        except (OSError, ValueError):
-            return None
-    config = load(STATUS_CONFIG) or {}
-    return {"config": {"every_minutes": config.get("every_minutes", 0), "baseline_users": config.get("baseline_users", 0)},
-            "last": load(STATUS_LAST), "every": list(STATUS_EVERY)}
-
-
-def status_save(data) -> dict:
-    """{"every_minutes": one of STATUS_EVERY}; the baseline is kept. ValueError when malformed."""
-    every = data.get("every_minutes")
-    if type(every) is not int or every not in STATUS_EVERY or set(data) != {"every_minutes"}:
-        raise ValueError()
-    with _status_lock:
-        config = {**status_read()["config"], "every_minutes": every}
-        tmp = STATUS_CONFIG + ".new"
-        with open(tmp, "w") as f:
-            json.dump(config, f)
-        os.replace(tmp, STATUS_CONFIG)
-    return status_read()
-
-
 # The active users, queue and open problems over time come from the hub's own `levels` (users.py), not from here.
 
 
@@ -678,7 +644,6 @@ def stats_now() -> dict:
         "hub_dev": section("hub_dev", lambda: unit(os.environ.get("YO_HUB_DEV_UNIT", "yo-hub-dev.service"))),
         "tunnel": section("tunnel", lambda: unit(os.environ.get("ADMIN_TUNNEL_UNIT", "cloudflared.service"))),
         "yogpt": section("yogpt", lambda: unit(os.environ.get("YOGPT_UNIT", "yo-yogpt.service"))),
-        "stbot": section("stbot", lambda: unit(os.environ.get("STATUS_UNIT", "yo-status@live.service"))),
         "failed_units": section("failed_units", failed_unit_count),
         "reserved": section("reserved", reserved_names),
     }
@@ -808,10 +773,6 @@ class Admin(BaseHTTPRequestHandler):
             except OSError:
                 return self.send(404, b"Not found", "text/plain")
             return self.send(200, body, "image/jpeg", {"Cache-Control": "private, max-age=3600"})
-        if path == "/status.json":
-            if not logged_in:
-                return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(status_read()).encode(), "application/json")
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
@@ -915,19 +876,6 @@ class Admin(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 return self.send(502, b"Hub unavailable or not configured", "text/plain")
             return self.send(201, json.dumps(todo).encode(), "application/json")
-        if path == "/status":
-            if not session_valid(self.headers.get("Cookie"), who):
-                return self.send(401, b"", "text/plain")
-            length = int(self.headers.get("Content-Length") or 0)
-            if not 0 < length <= 512:
-                return self.send(413, b"", "text/plain")
-            try:
-                result = status_save(json.loads(self.rfile.read(length)))
-            except (ValueError, KeyError, TypeError, AttributeError):
-                return self.send(400, b"Bad request", "text/plain")
-            except OSError:
-                return self.send(500, b"Could not save", "text/plain")
-            return self.send(200, json.dumps(result).encode(), "application/json")
         if path == "/diagnostics/done":
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")

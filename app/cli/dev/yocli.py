@@ -1,6 +1,6 @@
-"""What the skills share: running `yo`, reading `yo listen`, and the volatile limits.
+"""What the dev bots share: running `yo`, reading `yo listen`, and the volatile limits.
 
-Anyone can write to a bot, so what comes is hostile: a skill acts on a Yo, a photo, a video or a probe and nothing
+Anyone can write to a bot, so what comes is hostile: a bot acts on a Yo, a photo, a video or a probe and nothing
 else, never runs or logs what a message says, and logs counts only, never who.
 """
 

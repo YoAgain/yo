@@ -104,7 +104,7 @@ def skeleton(name: str) -> str:
 
 
 def names(rng: random.Random, n: int) -> list:
-    out, seen = [], {"YOGPT", "STATUS"}
+    out, seen = [], {"YOGPT", "PING"}
     while len(out) < n:
         r = rng.random()
         base = rng.choice(JAPANESE if r < 0.3 else FIRST)
@@ -184,7 +184,7 @@ CRASHES = [
                "details": "APNs 500 {\"reason\":\"InternalServerError\"}"}),
     ("crash", {"exception": "EXC_BAD_ACCESS (SIGBUS)", "frames": "0  libswiftCore  swift_retain + 12\n1  Yo  ImageCache.thumbnail(for:) + 210"}),
 ]
-RESERVED = [("Yo", "the app"), ("YoGPT", "our bot"), ("STATUS", "our status bot"), ("admin", "staff"), ("support", "staff"),
+RESERVED = [("Yo", "the app"), ("YoGPT", "our bot"), ("STATUS", "ours"), ("admin", "staff"), ("support", "staff"),
             ("help", "staff"), ("team", "staff"), ("official", "impersonation"), ("justyo", "domain"), ("apple", "brand"),
             ("google", "brand"), ("root", "system"), ("security", "staff"), ("null", "system"), ("moderator", "staff"),
             ("press", "staff"), ("billing", "scam bait"), ("verified", "impersonation")]
@@ -250,7 +250,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             db.execute("INSERT INTO attestation VALUES (?,?,?,?,?,?)", (uid, "failed" if failed else "attested", platform,
                        reason, level, start + at_rng.randint(0, max(1, now - start))))
     # The bots.
-    for name, app in (("YoGPT", "yogpt/" + time.strftime("%Y%m%d%H%M", time.gmtime((now - 26 * HOUR) / 1000))), ("STATUS", "cli/7")):
+    for name, app in (("YoGPT", "yogpt/" + time.strftime("%Y%m%d%H%M", time.gmtime((now - 26 * HOUR) / 1000))), ("PING", "cli/7")):
         uid = rid(rng)
         db.execute("INSERT INTO users VALUES (?,?,?)", (uid, rid(rng, 32), now - 28 * DAY))
         db.execute("INSERT INTO handles VALUES (2,?,?,?)", (skeleton(name).encode(), uid, name))
@@ -504,7 +504,6 @@ class FakeServer:
             "hub_dev": unit(time.time() - 26 * 3600, 23 << 20),
             "tunnel": unit(self.boot, 38 << 20, 1),
             "failed_units": 0,
-            "stbot": unit(self.boot, 24 << 20),
             "yogpt": unit(time.time() - 26 * 3600, 112 << 20),
             "reserved": reserved,
             # The last hour, a point a minute, as admin.remember keeps it.
@@ -618,7 +617,6 @@ def main():
     write("yogpt/live/stats.json", {"contacts": 87})
     hub_hex = lambda b: b.hex().upper()  # noqa: E731
     write("feedback-done.json", [])
-    write("status-bot.json", {"every_minutes": 60, "baseline_users": args.users - 14})
     today = now // DAY
     write("active-days.json", {"live": {str(d): max(3, int(args.users * (0.18 + 0.32 * (1 - (today - d) / 30)) * rng.uniform(0.8, 1.15)) - (today - d))
                                         for d in range(today - 29, today)},
@@ -686,7 +684,7 @@ def main():
         "ADMIN_LISTEN": args.host, "ADMIN_PORT": str(args.port), "YO_ADMIN_TOKEN": "",
         "YO_HUB_URL": "http://demo.invalid", "YO_HUB_DEV_URL": "http://demo.invalid",
         "STATE_DIRECTORY": state, "ADMIN_USERS_FILE": os.path.join(state, "users.json"),
-        "ADMIN_REQUEST_FILE": os.path.join(state, "want"), "STATUS_LAST": os.path.join(state, "status-last.json"),
+        "ADMIN_REQUEST_FILE": os.path.join(state, "want"), 
         "YOGPT_REPLIES": os.path.join(state, "replies"), "YO_HUB_DB": paths["live"], "YO_HUB_DEV_DB": paths["dev"],
         "YO_HUB_ENV_FILE": os.path.join(state, "hub.env"), "YO_HUB_DEV_ENV_FILE": os.path.join(state, "hub-dev.env"),
         "YOGPT_STATS_PATTERN": os.path.join(state, "yogpt", "{}", "stats.json"),

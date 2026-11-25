@@ -1,5 +1,5 @@
 //! yo: a Yo account on the command line. Every command prints one JSON value; `yo listen` prints one JSON line per
-//! event. The bots in `skills/` drive it (README.md).
+//! event. Bots drive it (README.md).
 //!
 //!   yo [--state DIR] [--hub URL] [--hub-key KEY]… [--trust-root KEY]… [--zk-params PARAMS] COMMAND …
 //!

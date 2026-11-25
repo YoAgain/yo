@@ -69,7 +69,7 @@ json() { python3 -I -c "import json, sys; v = json.load(sys.stdin); print($1)"; 
 
 read -r -d '' BOT_PY <<'EOF' || true
 import os, random, sys, threading, time
-sys.path.insert(0, os.environ["SKILLS"])
+sys.path.insert(0, os.environ["DEV"])
 import yocli
 bot, owner, photo = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.argv[0] = bot  # the name yocli.log prints
@@ -161,7 +161,7 @@ supervise)
     [[ -e $DIR/$bot/state.sqlite ]] || continue
     (
       env_for "$bot"
-      export SKILLS=$REPO/skills
+      export DEV=$REPO/app/cli/dev
       while :; do
         echo "$(date -Is) start"
         code=0

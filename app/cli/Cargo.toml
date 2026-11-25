@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "yo: a Yo account on the command line, JSON out; the bots (skills/) drive it."
+description = "yo: a Yo account on the command line, JSON out."
 
 [[bin]]
 name = "yo"

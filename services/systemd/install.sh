@@ -29,9 +29,3 @@ for bot; do
     id -u "yo-service-$bot" > /dev/null 2>&1 ||
         useradd -r -M -d /nonexistent -s /usr/sbin/nologin -G yo-services "yo-service-$bot"
 done
-# Only STATUS sees the numbers it draws.
-case " $* " in *" status "*)
-    install -d "$dir/yo-script-status@.service.d"
-    install -m 644 "$here/status-numbers.conf" "$dir/yo-script-status@.service.d"
-    install -m 644 "$here"/yo-status-collect.* "$dir"
-esac

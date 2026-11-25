@@ -23,7 +23,7 @@ impl Yo {
         Yo { state: state_dir(), hub: hub.url() }
     }
 
-    /// What `yo` and the skills find the account and its hub by.
+    /// What `yo` finds the account and its hub by.
     fn envs(&self) -> Vec<(&'static str, String)> {
         vec![
             ("YO_STATE", self.state.display().to_string()),
