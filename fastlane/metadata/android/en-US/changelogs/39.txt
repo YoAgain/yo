@@ -1,0 +1,5 @@
+Thirty-ninth release candidate — share your Yo link.
+
+• Your Code: Copy Link and Share under your QR code; tap the QR code to share it as a picture
+• Your invite is shared as a link, so share menus offer Copy Link
+• Fewer false alarms in error reports
