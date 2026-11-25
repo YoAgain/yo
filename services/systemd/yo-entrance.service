@@ -1,0 +1,43 @@
+[Unit]
+Description=Yo entrance (api.justyo.app)
+After=network.target
+
+# HTTP from the tunnel, handed to the executors' sockets: no account, no keys, no book.
+[Service]
+Slice=yo-services.slice
+DynamicUser=yes
+Environment=ENTRANCE_LISTEN=127.0.0.1:8095 ENTRANCE_SOCKETS=/run/yo-services
+ExecStart=/opt/yo/yo-services entrance
+Restart=on-failure
+RestartSec=3
+MemoryMax=64M
+TasksMax=32
+InaccessiblePaths=-/var/lib/yo-services -/etc/yo-services
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

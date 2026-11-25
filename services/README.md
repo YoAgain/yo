@@ -18,7 +18,9 @@ Hub <-> executor (account, keys, book) <-> script (no keys, no network)
 |-|-|
 | [executor.rs](src/executor.rs) | What comes, the script, what goes |
 | [gatekeeper](src/gatekeeper) | TOML, actions, limits: rules only, no I/O |
-| [book.rs](src/book.rs) | One SQLite for all bots: a row per Yo, its time, its reminder; who only with a reminder |
+| [book.rs](src/book.rs) | One SQLite for all bots: a row per Yo, its time, its reminder; who only with a reminder or connected; and the connections, hashed |
+| [entrance.rs](src/entrance.rs) | api.justyo.app: a process of its own, HTTP in, to the executors' sockets |
+| [partner.rs](src/partner.rs) | The other side of a service with a `[bridge]`: OAuth 2, its calls, calls to it |
 | [script.rs](src/script.rs) | A connection starts a script |
 | [yo.rs](src/yo.rs) | `yo listen` and its control socket |
 | [systemd](systemd) | The sandbox; `install.sh` |

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use yo_core::{media, Client, Content, Event};
 use yo_tests::{random_u64, register, username, Http, TestHub};
 
-const TOML: &str = "names = [\"NAME\"]\nabout = \"a\"\ntriggers = TRIGGERS\nallowed_urls = []\n";
+const TOML: &str = "names = [\"NAME\"]\nabout = \"a\"\ntriggers = TRIGGERS\n";
 const HEAD: &str = "import json, sys, time\ne = json.load(sys.stdin)\n";
 const PING: &str = "print(json.dumps([{'send': e['kind'], 'media': e['media']}]))\n";
 const REMIND: &str = "print(json.dumps([{'send': 'yo'}] if e['trigger'] == 'cron' else [{'remind': e['now'] + 60}]))\n";
@@ -275,6 +275,87 @@ fn it_does_not_start_with_another_account_or_a_bad_toml() {
         };
         assert_eq!(code, Some(2));
     }
+}
+
+/// Anna connects the service; the other side Yos her, is told of her Yo and asks for it.
+#[test]
+fn a_connection_both_ways() {
+    let hub = TestHub::start();
+    // The other side: takes one call, which the script makes for a Yo of a connected user.
+    let code =
+        "if e['trigger'] == 'webhook' and e['path'] == 'yos': a = [{'reply': {'yos': e['yos'], 'out': e['out']}}]\n\
+                elif e['trigger'] == 'webhook' and e['out']: a = [{'send': 'yo'}, {'reply': {'id': e['id']}}]\n\
+                elif e['trigger'] == 'webhook': a = [{'reply': {'test': e['test']}}]\n\
+                else: a = [{'call': 'https://localhost.invalid/x', 'body': {'user': e['out']}}] if e['out'] else []\n\
+                print(json.dumps(a))\n";
+    let mut bot = Bot::new(&hub, code, false);
+    let toml = std::fs::read_to_string(bot.file("toml")).unwrap();
+    let connect =
+        "[bridge]\nreturn_url = \"https://other.invalid/back\"\ncall_urls = [\"https://localhost.invalid/\"]\n\
+                   key_header = \"X-Partner-Key\"\n";
+    std::fs::write(bot.file("toml"), toml + connect).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    for (key, value) in [
+        ("SERVICES_SOCKET", bot.dir.join(format!("{}.sock", bot.name.to_lowercase())).display().to_string()),
+        ("SERVICES_KEY", "the-partners-own-key".into()),
+    ] {
+        bot.env.push((key, value));
+    }
+    let bot = bot.start();
+    let mut entrance = Command::new(env!("CARGO_BIN_EXE_yo-services"))
+        .arg("entrance")
+        .env("ENTRANCE_LISTEN", format!("127.0.0.1:{port}"))
+        .env("ENTRANCE_SOCKETS", &bot.dir)
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let base = format!("http://127.0.0.1:{port}/{}", bot.name.to_lowercase());
+    let http = reqwest::blocking::Client::new();
+    let exchange = |code: &str, secret: &str| {
+        let form = format!(
+            "grant_type=authorization_code&client_id={}&client_secret={secret}&code={code}&\
+             redirect_uri=https%3A%2F%2Fother.invalid%2Fback",
+            bot.name.to_lowercase()
+        );
+        let request = http.post(format!("{base}/token")).header("content-type", "application/x-www-form-urlencoded");
+        let answer = request.body(form).send().unwrap();
+        (answer.status().as_u16(), answer.text().unwrap())
+    };
+    let call = |path: &str, key: &str| {
+        let answer = http.post(format!("{base}/{path}")).bearer_auth(key).body("{}").send().unwrap();
+        (answer.status().as_u16(), answer.text().unwrap())
+    };
+    let (mut alice, code) = (someone(&hub), "the-state-of-the-other-side");
+    alice
+        .connect_service(
+            &bot.name,
+            sha2::Digest::finalize(sha2::Digest::chain_update(sha2::Sha256::default(), code)).into(),
+        )
+        .unwrap();
+    assert_eq!(exchange(code, "wrong").0, 401);
+    let (status, token) = exchange(code, "the-partners-own-key");
+    assert_eq!(status, 200, "{token}");
+    let key = token.split('"').find(|part| part.len() == 43).unwrap().to_owned();
+    assert_eq!(exchange(code, "the-partners-own-key").0, 400, "once");
+
+    let (status, reply) = call("yo", &key);
+    assert!(status == 200 && reply.contains("id"), "{reply}");
+    assert_eq!(comes(&mut alice, QUIET), [Content::Yo]);
+    assert_eq!((call("yo", "wrong").0, http.post(format!("{base}/yo")).send().unwrap().status().as_u16()), (401, 401));
+    let keyed = http.get(format!("{base}/x")).header("x-partner-key", "the-partners-own-key").send().unwrap();
+    assert_eq!((keyed.status().as_u16(), keyed.text().unwrap()), (200, r#"{"test":null}"#.into()));
+
+    alice.send_yo(&bot.name).unwrap();
+    someone(&hub).send_yo(&bot.name).unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let (_, yos) = call("yos", &key);
+    assert_eq!(yos.matches(r#""kind":"yo""#).count(), 1, "hers alone: {yos}");
+    assert!(!yos.contains(alice.user_id()));
+    assert_eq!(bot.book("SELECT count(*) FROM services_yos WHERE user IS NOT NULL"), "[(1,)]");
+    let secrets = bot.book("SELECT hex(key), out FROM services_secrets");
+    assert!(!secrets.contains(&key), "only its hash");
+    let _ = entrance.kill();
+    let _ = entrance.wait();
 }
 
 /// The real ones, from a checkout of yo-services (`YO_SERVICES`, else nothing to do here).

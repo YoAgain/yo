@@ -809,6 +809,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (!invitation.known) addFriend(c, invitation.name, invitation.user)
         known(invitation.name, invitation.user)?.let { send(it) }
     }
+    fun askToConnect(request: ConnectRequest?) { mutable.update { it.copy(connecting = request) } }
+    /** Allowed: that service's account is told the code, end-to-end encrypted. */
+    suspend fun connect(request: ConnectRequest) {
+        askToConnect(null)
+        client?.connectService(request.service, request.code)
+    }
     fun dismissInvite() { mutable.update { it.copy(invitation = null) } }
     suspend fun send(friend: Friend) {
         val c = client ?: return

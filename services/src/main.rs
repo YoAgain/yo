@@ -2,15 +2,22 @@
 //!
 //!   yo-services SERVICE      a folder, e.g. /opt/yo-services/yo/ping: its ping.toml, ping.py, assets/
 //!
+//!   yo-services entrance     HTTP for all of them (entrance.rs): ENTRANCE_LISTEN, ENTRANCE_SOCKETS
+//!
 //! Environment: YO_STATE (the account's directory, registered by hand once), YO_BIN, the hub's pins (app/cli/README.md),
 //! SCRIPT_SOCKET (where a connection starts the script), SERVICES_DB (the book, one for all services).
 //! Optional: SERVICES_NAME (the account's, for a service of several names; else the first), SERVICES_PER_HOUR,
 //! SERVICES_ONLY_USER (a user id: nobody else is served), SERVICES_DRAIN=1 (media is fetched into nothing),
 //! SERVICES_BOTS (names of other bots, comma separated, never answered).
+//! Of a service with a `[bridge]`: SERVICES_SOCKET (the entrance's way to it), and
+//! SERVICES_KEY (the partner's own key, the OAuth 2 client's secret too; its id is the service's folder). Optional:
+//! SERVICES_TEST_USER and SERVICES_TEST_KEY (the account of the partner's tests, a user id, and a key for it).
 
 mod book;
+mod entrance;
 mod executor;
 mod gatekeeper;
+mod partner;
 mod script;
 mod yo;
 
@@ -41,6 +48,10 @@ fn env(key: &str) -> String {
 fn main() {
     let service =
         PathBuf::from(std::env::args_os().nth(1).unwrap_or_else(|| fail(USAGE, "usage: yo-services SERVICE")));
+    if service.as_os_str() == "entrance" {
+        let why = entrance::serve(&env("ENTRANCE_LISTEN"), PathBuf::from(env("ENTRANCE_SOCKETS")));
+        fail(1, &format!("the entrance: {why:?}"));
+    }
     let folder = service.file_name().and_then(|n| n.to_str()).unwrap_or_else(|| fail(USAGE, "not a service's folder"));
     let text = std::fs::read_to_string(service.join(format!("{folder}.toml")))
         .unwrap_or_else(|_| fail(USAGE, "the TOML cannot be read"));
@@ -70,10 +81,17 @@ fn main() {
         only: std::env::var("SERVICES_ONLY_USER").ok(),
         under_way: Mutex::default(),
         counts: executor::Counts::default(),
+        partner: header.bridge.as_ref().map(|bridge| partner(folder, bridge)),
         header,
         name,
     });
 
+    if executor.partner.is_some() {
+        let listener = partner::listen(Path::new(&env("SERVICES_SOCKET")))
+            .unwrap_or_else(|e| fail(1, &format!("SERVICES_SOCKET: {e}")));
+        let executor = executor.clone();
+        std::thread::spawn(move || partner::serve(executor, listener));
+    }
     let drain = std::env::var("SERVICES_DRAIN").is_ok_and(|v| v == "1");
     let yo = std::env::var_os("YO_BIN").map_or_else(|| PathBuf::from("yo"), PathBuf::from);
     let listener = yo::Listener::start(&yo, &state, drain).unwrap_or_else(|_| fail(1, "yo did not start"));
@@ -95,6 +113,10 @@ fn main() {
             std::thread::spawn(move || upkeep(&executor, &jobs, &changed, unknown));
             Ok(())
         }
+        Some("connect") => {
+            executor.connect(&event);
+            Ok(())
+        }
         Some("group_changed") => {
             groups_changed.store(true, Ordering::Relaxed);
             Ok(())
@@ -108,6 +130,22 @@ fn main() {
         }
     });
     std::process::exit(if code == 0 { 1 } else { code })
+}
+
+/// The other side of its connections, from the environment.
+fn partner(folder: &str, bridge: &gatekeeper::header::Bridge) -> partner::Partner {
+    let secret = |key: &str| {
+        Some(env(key)).filter(|s| s.len() >= 16).unwrap_or_else(|| fail(USAGE, &format!("{key}: too short")))
+    };
+    let test = std::env::var("SERVICES_TEST_USER").ok().map(|user| (user, secret("SERVICES_TEST_KEY")));
+    partner::Partner {
+        header: bridge.key_header.to_ascii_lowercase(),
+        return_url: bridge.return_url.clone(),
+        key: secret("SERVICES_KEY"),
+        client_id: folder.to_owned(),
+        test,
+        client: partner::Partner::client().unwrap_or_else(|_| fail(1, "no HTTP client")),
+    }
 }
 
 /// A picture left by a run that was cut short.

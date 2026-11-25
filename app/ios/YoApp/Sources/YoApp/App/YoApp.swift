@@ -232,6 +232,7 @@ struct YoApp: App {
       .onOpenURL { url in
         if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "camera" { AppRoute.shared.camera = true }
         else if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "open" {}
+        else if Connect.link(url) { Connect.shared.open(url) }
         else { Invite.shared.open(url) }
       }
       .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in

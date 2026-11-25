@@ -3,6 +3,7 @@
 
 mod aead;
 pub mod backup;
+mod connect;
 mod contacts;
 #[cfg(test)]
 mod device_tests;
@@ -38,7 +39,7 @@ pub use yo_wire::api::anonymous as anonymous_request;
 pub use yo_wire::api::{Backup, Push, SupportThread, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
 pub use yo_wire::content::{Content, Media};
 /// Usernames as the hub takes and compares them (spec 3.3), for the apps.
-pub use yo_wire::handle;
+pub use yo_wire::{handle, unb64};
 
 use identity::Key;
 use libsignal_protocol::{
@@ -574,6 +575,7 @@ pub struct Client {
     /// Once a signed inbox response says this device is revoked, no further sends leave.
     replaced: std::cell::Cell<bool>,
     probe_requests: Vec<(String, [u8; 32])>,
+    connect_requests: Vec<(String, [u8; 32])>,
     /// The hub's public keys the app ships (spec 6.10): answers that hand out keys must be signed by one of them.
     hub_keys: Vec<Key>,
     /// Sender-certificate trust roots (spec 6.1): none, nothing sealed opens or is sent.
@@ -709,6 +711,7 @@ fn shown(content: &Content) -> bool {
             | Content::ProfileKey(_)
             | Content::Probe(_)
             | Content::Sync(_)
+            | Content::Connect(_)
             | Content::ProbeReply(_)
             | Content::Unknown(_)
     )
@@ -961,6 +964,7 @@ impl Client {
             after_due: false,
             replaced: std::cell::Cell::new(false),
             probe_requests: Vec::new(),
+            connect_requests: Vec::new(),
             hub_keys: Vec::new(),
             trust_roots: test_trust_roots(),
             recovery_lookups_per_day: RECOVERY_LOOKUPS_PER_DAY,

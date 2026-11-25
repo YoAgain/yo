@@ -80,6 +80,11 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             let token = token.ok_or_else(|| Failure::usage("echo-probe USER TOKEN: a token of 32 bytes"))?;
             done(context, |c| c.echo_probe(user, token))
         }
+        ["connect", service, code] => {
+            let code = yo_wire::unb64(code).ok().and_then(|c| c.try_into().ok());
+            let code = code.ok_or_else(|| Failure::usage("connect SERVICE CODE: the code of its connect link"))?;
+            done(context, |c| c.connect_service(service, code))
+        }
         ["probe", rest @ ..] => {
             let timeout_ms = match rest {
                 [] => 10_000,
@@ -189,6 +194,7 @@ fn sync(context: &Context, args: &[&str]) -> Outcome {
     let events = client.sync(wait)?;
     let mut out: Vec<Value> = events.iter().map(|e| event(e, !drain_media)).collect();
     out.extend(client.take_probe_requests().into_iter().map(|(user, token)| probe(&user, &token)));
+    out.extend(client.take_connect_requests().into_iter().map(|(user, code)| connect(&user, &code)));
     let _ = client.after_sync();
     client.acknowledge_only(|e| events.contains(e));
     if drain_media {
@@ -203,6 +209,11 @@ fn sync(context: &Context, args: &[&str]) -> Outcome {
         }
     }
     Ok(json!(out))
+}
+
+/// A user connects this service with another one.
+pub fn connect(user: &str, code: &[u8; 32]) -> Value {
+    json!({ "type": "connect", "from": user, "code": yo_wire::b64(code) })
 }
 
 /// A probe request for an echo service: answered with `echo-probe`.

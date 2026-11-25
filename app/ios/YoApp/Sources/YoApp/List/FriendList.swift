@@ -226,6 +226,16 @@ struct FriendList: View {
       Text(invitation.problem ?? productText(text: invitation.known ? .inviteYo : .inviteAddYo, lang: .english))
     }
     .alert(
+      "Connect \(Connect.shared.pending?.service ?? "")?",
+      isPresented: Binding(get: { Connect.shared.pending != nil }, set: { if !$0 { Connect.shared.pending = nil } }),
+      presenting: Connect.shared.pending
+    ) { request in
+      Button("Allow") { allow(request) }.keyboardShortcut(.defaultAction)
+      Button("Cancel", role: .cancel) {}
+    } message: { request in
+      Text("\(request.service) can Yo you, and sees the Yos you send it.")
+    }
+    .alert(
       productText(text: .groupEmpty, lang: .english),
       isPresented: $emptyGroup.isPresent, presenting: emptyGroup
     ) { bar in
@@ -233,6 +243,18 @@ struct FriendList: View {
       Button("Cancel", role: .cancel) {}
     } message: { bar in
       Text("Nobody else is in \(bar.name) any more. Delete it?")
+    }
+  }
+
+  func allow(_ request: Connect.Request) {
+    guard let client = accounts.client else { return }
+    Task {
+      do {
+        try await Hub.run { try client.connectService(service: request.service, code: request.code) }
+        Haptic.tap()
+      } catch {
+        Problems.shared.report(error)
+      }
     }
   }
 

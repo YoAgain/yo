@@ -8,12 +8,14 @@ After=network.target time-sync.target yo-script-%i.socket
 Slice=yo-services.slice
 User=yo-service-%i
 SupplementaryGroups=yo-services
-Environment=SERVICE=%i YO_BIN=/opt/yo/yo YO_STATE=%S/yo-services/accounts/%i SCRIPT_SOCKET=/run/yo-script/%i.sock
+Environment=YO_BIN=/opt/yo/yo YO_STATE=%S/yo-services/accounts/%i SCRIPT_SOCKET=/run/yo-script/%i.sock
 Environment=SERVICES_DB=/var/lib/yo-services/db/live.sqlite SERVICES_BOTS=PING,PINGTEST,YOGPT
-# YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, and this bot's settings (src/main.rs); on the dev hub
-# (yo-service@pingdev) SERVICE and SERVICES_DB too, for another name (yo-service@pingtest) SERVICE and SERVICES_NAME
-EnvironmentFile=/etc/yo-services/%i.env
-ExecStart=/opt/yo/yo-services /opt/yo-services/yo/${SERVICE}
+# The hub: YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS
+EnvironmentFile=/etc/yo-services/hub.env
+# Only of a bot that needs it: a bridge's SERVICES_KEY; another name's SERVICES_NAME (pingtest).
+# SERVICE, its folder, is in folder.conf (install.sh)
+EnvironmentFile=-/etc/yo-services/%i.env
+ExecStart=/opt/yo/yo-services /opt/yo-services/${SERVICE}
 StateDirectory=yo-services/accounts/%i
 StateDirectoryMode=0700
 ReadWritePaths=/var/lib/yo-services/db

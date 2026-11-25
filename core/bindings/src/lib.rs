@@ -398,6 +398,7 @@ impl From<Content> for MessageKind {
             | Content::ProfileKey(_)
             | Content::Probe(_)
             | Content::Sync(_)
+            | Content::Connect(_)
             | Content::ProbeReply(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
@@ -848,6 +849,13 @@ impl YoClient {
             }
             probe = self.with(|c| c.round_trip_probe_wait(&reply, timeout_ms - elapsed))??;
         }
+    }
+
+    /// Connects a service (its name) with another one: the code of its connect link, once the user allowed it.
+    pub fn connect_service(&self, service: String, code: String) -> Result<(), YoError> {
+        let code = yo_core::unb64(&code).ok().and_then(|c| c.try_into().ok()).ok_or(YoError::State)?;
+        self.with(|c| c.connect_service(&service, code))??;
+        Ok(())
     }
 
     /// Signed out: the client stops after the step under way and every later step fails with `State`.

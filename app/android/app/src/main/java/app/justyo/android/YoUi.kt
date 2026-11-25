@@ -142,8 +142,16 @@ import uniffi.yo.usernameValid
     val context = LocalContext.current
     // One alert at a time, as iOS: a link opened while "First Yo Sent!" is up would cover it with a second window
     // and its scrim (only the edge of the first one showing). The others follow when it is closed.
+    val request = state.connecting
     val invitation = state.invitation; val group = state.emptyGroup; val change = state.keyChanged
     when {
+        request != null && state.username != null -> { YoSystemTheme { AlertDialog(
+            onDismissRequest = { repo.askToConnect(null) },
+            title = { Text(stringResource(R.string.connect_service, request.service)) },
+            text = { Text(stringResource(R.string.connect_service_text, request.service)) },
+            confirmButton = { TextButton(onClick = { repo.command { connect(request) } }) { Text(stringResource(R.string.connect_allow)) } },
+            dismissButton = { TextButton(onClick = { repo.askToConnect(null) }) { Text(stringResource(R.string.ui_cancel)) } },
+        ) } }
         invitation != null -> { YoSystemTheme { AlertDialog(onDismissRequest=repo::dismissInvite,title={Text(invitation.name)},
             text={Text(invitation.problem ?: copy(if(invitation.known) ProductText.INVITE_YO else ProductText.INVITE_ADD_YO))},
             confirmButton={

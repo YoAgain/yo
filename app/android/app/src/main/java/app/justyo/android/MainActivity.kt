@@ -59,6 +59,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         intent.data?.takeIf { it.scheme?.lowercase() == "yo" && it.host?.lowercase() == "camera" }?.let { openCamera.value = true }
+        intent.data?.let(::connectRequest)?.let(repository::askToConnect)
         intent.data?.let { uri -> inviteName(uri)?.let { name -> repository.command { invite(name) } } }
         val streams = when (intent.action) {
             Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))

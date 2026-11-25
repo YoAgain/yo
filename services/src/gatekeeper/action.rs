@@ -4,6 +4,9 @@
 use base64::Engine;
 use serde::de::{Error, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use serde_json::Value;
+
+use super::Header;
 
 const MAX_ACTIONS: usize = 4;
 /// One answer to a Yo, and one reminder: no bot writes more than it was written to.
@@ -15,6 +18,8 @@ const MIN_AHEAD_S: i64 = 60;
 const MAX_AHEAD_S: i64 = 400 * 86_400;
 /// All waits of one answer.
 const MAX_WAIT_MS: u64 = 5_000;
+/// A reply's, or a call's, JSON.
+const MAX_JSON: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -34,6 +39,10 @@ pub enum Action {
     Remind(i64),
     /// `{"forget": true}`
     Forget,
+    /// `{"reply": JSON, "status": 200}`: what a caller gets back.
+    Reply(u16, Value),
+    /// `{"call": URL, "body": JSON}`: the other side of a connection is called.
+    Call(String, Value),
 }
 
 /// An action as written. Read with no room for anything else, so an answer takes no more memory than its own size.
@@ -47,6 +56,10 @@ struct Written {
     wait_ms: Option<u64>,
     remind: Option<i64>,
     forget: Option<bool>,
+    reply: Option<Value>,
+    status: Option<u16>,
+    call: Option<String>,
+    body: Option<Value>,
 }
 
 /// A list that stops being read at one action too many.
@@ -84,6 +97,9 @@ pub struct Asked<'a> {
     pub group: bool,
     pub remember_user: bool,
     pub now: i64,
+    /// Whether the user it is about is connected.
+    pub connected: bool,
+    pub header: &'a Header,
 }
 
 impl Action {
@@ -101,6 +117,10 @@ pub fn parse(answer: &[u8], asked: &Asked) -> Result<Vec<Action>, &'static str> 
     match () {
         () if count(Action::sends) > MAX_SENDS => Err("too much to send"),
         () if count(|a| matches!(a, Action::Remind(_))) > 1 => Err("more than one reminder"),
+        () if count(|a| matches!(a, Action::Reply(..))) > 1 => Err("more than one reply"),
+        () if count(|a| matches!(a, Action::Call(..))) > 1 => Err("more than one call"),
+        // A call of nobody has nobody to send to.
+        () if asked.kind == "webhook" && !asked.connected && count(Action::sends) > 0 => Err("sent to nobody"),
         () if wait > MAX_WAIT_MS => Err("too long a wait"),
         // A probe is no Yo: it comes back, or nothing happens.
         () if asked.kind == "probe" && !matches!(actions[..], [] | [Action::Probe]) => Err("more than the probe"),
@@ -110,7 +130,26 @@ pub fn parse(answer: &[u8], asked: &Asked) -> Result<Vec<Action>, &'static str> 
 
 fn one(written: Written, asked: &Asked) -> Result<Action, &'static str> {
     let may_remember = asked.remember_user && !asked.group;
-    let Written { send, media, jpeg, file, wait_ms, remind, forget } = written;
+    let Written { send, media, jpeg, file, wait_ms, remind, forget, reply, status, call, body } = written;
+    let nothing = send.is_none()
+        && media.is_none()
+        && jpeg.is_none()
+        && file.is_none()
+        && wait_ms.is_none()
+        && remind.is_none()
+        && forget.is_none();
+    let short = |json: &Value| (json.is_object() || json.is_array()) && json.to_string().len() <= MAX_JSON;
+    match (reply, status, call, body) {
+        (None, None, None, None) => {}
+        (Some(json), status, None, None) if nothing && asked.kind == "webhook" && short(&json) => {
+            let status = status.unwrap_or(200);
+            return (200..600).contains(&status).then_some(Action::Reply(status, json)).ok_or("not a status");
+        }
+        (None, None, Some(url), Some(json)) if nothing && asked.connected && json.is_object() && short(&json) => {
+            return asked.header.may_call(&url).then_some(Action::Call(url, json)).ok_or("not an address it may call");
+        }
+        _ => return Err("not a reply or a call it may make"),
+    }
     match (send.as_deref(), media, jpeg, file, wait_ms, remind, forget) {
         (Some("yo"), None, None, None, None, None, None) => Ok(Action::Yo),
         (Some("probe"), None, None, None, None, None, None) if asked.kind == "probe" => Ok(Action::Probe),
@@ -127,7 +166,9 @@ fn one(written: Written, asked: &Asked) -> Result<Action, &'static str> {
         (None, None, None, None, Some(ms), None, None) => {
             (ms <= MAX_WAIT_MS).then_some(Action::Wait(ms)).ok_or("too long a wait")
         }
-        (None, None, None, None, None, Some(due), None) if may_remember && asked.kind != "cron" => {
+        (None, None, None, None, None, Some(due), None)
+            if may_remember && !matches!(asked.kind, "cron" | "webhook") =>
+        {
             let times = asked.now + MIN_AHEAD_S..=asked.now + MAX_AHEAD_S;
             times.contains(&due).then_some(Action::Remind(due)).ok_or("not a time to come")
         }
@@ -155,8 +196,14 @@ mod tests {
 
     const NOW: i64 = 1_000_000;
 
+    fn header() -> &'static Header {
+        let text = "names = [\"A\"]\nabout = \"a\"\ntriggers = [\"yo\"]\n[bridge]\n\
+                    return_url = \"https://a.com/b\"\ncall_urls = [\"https://a.com/\"]\nkey_header = \"X\"\n";
+        Box::leak(Box::new(Header::parse(text, "a").unwrap()))
+    }
+
     fn asked(kind: &str) -> Asked<'_> {
-        Asked { kind, media: None, group: false, remember_user: false, now: NOW }
+        Asked { kind, media: None, group: false, remember_user: false, now: NOW, connected: false, header: header() }
     }
 
     fn all(answer: &str, asked: &Asked) -> Result<Vec<Action>, &'static str> {
@@ -179,6 +226,32 @@ mod tests {
         let keeps = Asked { remember_user: true, ..asked("yo") };
         let both = all(r#"[{"remind": 1000060}, {"forget": true}]"#, &keeps);
         assert_eq!(both, Ok(vec![Action::Remind(NOW + 60), Action::Forget]));
+    }
+
+    #[test]
+    fn replies_and_calls() {
+        let reply = r#"[{"send": "yo"}, {"reply": {"a": 1}, "status": 201}]"#;
+        let (call, body) = (r#"[{"call": "https://a.com/x", "body": {}}]"#, serde_json::json!({}));
+        let connected = |kind| Asked { connected: true, ..asked(kind) };
+        let got = all(reply, &connected("webhook"));
+        assert_eq!(got, Ok(vec![Action::Yo, Action::Reply(201, serde_json::json!({"a": 1}))]));
+        assert!(all(reply, &connected("yo")).is_err() && all(reply, &asked("webhook")).is_err());
+        assert_eq!(all(r#"[{"reply": []}]"#, &asked("webhook")), Ok(vec![Action::Reply(200, serde_json::json!([]))]));
+        assert_eq!(all(call, &connected("yo")), Ok(vec![Action::Call("https://a.com/x".into(), body)]));
+        assert!(all(call, &asked("yo")).is_err(), "nobody connected");
+        for bad in [
+            r#"[{"call": "https://b.com/x", "body": {}}]"#,
+            r#"[{"call": "https://a.com/x"}]"#,
+            r#"[{"call": "https://a.com/x", "body": 1}]"#,
+            r#"[{"call": "https://a.com/x", "body": {}, "send": "yo"}]"#,
+            r#"[{"reply": "x"}]"#,
+            r#"[{"reply": {}, "status": 99}]"#,
+            r#"[{"reply": {}}, {"reply": {}}]"#,
+            r#"[{"status": 200}]"#,
+            r#"[{"remind": 1000060}]"#,
+        ] {
+            assert!(all(bad, &Asked { remember_user: true, ..connected("webhook") }).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -28,6 +28,7 @@ final class Invite {
   nonisolated static func name(in url: URL) -> String? {
     let parts = url.pathComponents.filter { $0 != "/" }  // percent-decoded
     let host = url.host()?.lowercased()
+    if Connect.link(url) { return nil }
     let raw: String?
     switch url.scheme?.lowercased() {
     case "yo": raw = url.host(percentEncoded: false)

@@ -589,6 +589,13 @@ impl Client {
             }
             return Ok(());
         }
+        if let Content::Connect(code) = message.content {
+            let taken = message.group.is_none() && !self.blocked(user) && self.first_time(user, device, plaintext);
+            if taken && self.connect_requests.len() < 256 {
+                self.connect_requests.push((user.to_owned(), code));
+            }
+            return Ok(());
+        }
         // Group content is checked against membership; the probe service stays hidden in one-to-one exchanges.
         let in_group = message.group.is_some() || matches!(message.content, Content::Group(_));
         if self.probe_service(user) && !in_group {

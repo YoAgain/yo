@@ -212,12 +212,16 @@ fn receive(listener: &Listener) -> ! {
             Ok(events) => {
                 failures = 0;
                 let probes = listener.client().take_probe_requests();
+                let connects = listener.client().take_connect_requests();
                 let message = events.iter().any(|e| matches!(e, Event::Message { .. } | Event::GroupMessage { .. }));
                 let begun = listener.begun.load(Ordering::SeqCst);
                 listener.print_events(&events);
                 let probed = !probes.is_empty();
                 for (user, token) in probes {
                     listener.line(&commands::probe(&user, &token));
+                }
+                for (user, code) in connects {
+                    listener.line(&commands::connect(&user, &code));
                 }
                 if message || probed {
                     listener.give_way(begun);

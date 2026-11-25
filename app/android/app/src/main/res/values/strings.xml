@@ -18,6 +18,9 @@
     <string name="ui_every_yo_photo_and_video_is_end_to_end_encrypted_only_you_an">Every Yo, photo and video is end-to-end encrypted. Only you and your friends can open them.</string>
     <string name="ui_first_yo_sent">First Yo Sent!</string>
     <string name="ui_group_name">Group Name</string>
+    <string name="connect_service">Connect %1$s?</string>
+    <string name="connect_service_text">%1$s can Yo you, and sees the Yos you send it.</string>
+    <string name="connect_allow">Allow</string>
     <string name="ui_invite">Invite</string>
     <string name="ui_invite_friends">Invite Friends</string>
     <string name="ui_members">Members</string>

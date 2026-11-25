@@ -52,6 +52,7 @@ pub const HELP: &str =
   sync [--wait S] [--drain-media]   receive once (no listener running)
   ack                               acknowledge what `listen --manual-ack` handed out
   echo-probe USER TOKEN             answer a round-trip probe (the PING service)
+  connect SERVICE CODE              connect a service with another one (its connect link's code)
   probe [--timeout-ms N]            measure the round trip to PING
 environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated),
   YO_RECOVERY_LOOKUPS (roster lookups a day for messages from replaced phones; default 10, a bot raises it)";

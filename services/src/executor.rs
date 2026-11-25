@@ -3,6 +3,7 @@
 
 use crate::book::{Book, Reminder};
 use crate::gatekeeper::{action, Action, Asked, Header, Limits, Trigger};
+use crate::partner::{hash, Call, Partner};
 use crate::script::Script;
 use crate::yo::{Failure, Yo};
 use serde_json::{json, Value};
@@ -36,6 +37,8 @@ pub struct Executor {
     /// Reminders being sent (None), or not to be tried again before a time.
     pub under_way: Mutex<HashMap<i64, Option<Instant>>>,
     pub counts: Counts,
+    /// The other side of its connections, for a service that has one.
+    pub partner: Option<Partner>,
 }
 
 #[derive(Default)]
@@ -45,6 +48,7 @@ pub struct Counts {
     pub limited: AtomicU64,
     pub refused: AtomicU64,
     pub failed: AtomicU64,
+    pub uncalled: AtomicU64,
 }
 
 /// One start of the script.
@@ -58,6 +62,8 @@ pub struct Job {
     media: Option<String>,
     at: i64,
     reminder: Option<i64>,
+    /// The other side called.
+    call: Option<Call>,
 }
 
 impl Job {
@@ -74,6 +80,7 @@ impl Job {
             media: None,
             at: now,
             reminder: Some(reminder.id),
+            call: None,
         }
     }
 }
@@ -127,7 +134,54 @@ impl Executor {
             media: media.map(str::to_owned),
             at,
             reminder: None,
+            call: None,
         })
+    }
+
+    /// A user allowed a connection: their code is kept.
+    pub fn connect(&self, event: &Value) {
+        let user = event["from"].as_str().filter(|u| user_id(u) && self.serves(u));
+        let (Some(_), Some(user), Some(code)) = (&self.partner, user, event["code"].as_str()) else { return };
+        if !locked(&self.limits).take(user, None, Instant::now())
+            || self.book.connect(user, &hash(code), now()).is_err()
+        {
+            count(&self.counts.limited);
+        }
+    }
+
+    /// The other side called, for `user` or for nobody: what it gets back.
+    pub fn called(&self, call: Call, user: Option<String>) -> Result<(u16, Value), u16> {
+        let user = user.unwrap_or_default();
+        if !user.is_empty() && !self.serves(&user) {
+            return Err(401);
+        }
+        let job = Job {
+            trigger: Trigger::Webhook,
+            kind: "webhook".into(),
+            to: user.clone(),
+            user,
+            media: None,
+            at: now(),
+            reminder: None,
+            call: Some(call),
+        };
+        let done = self.answer(&job).and_then(|actions| {
+            self.act(&job, None, &actions)?;
+            Ok(actions.into_iter().find_map(|a| {
+                if let Action::Reply(status, json) = a {
+                    Some((status, json))
+                } else {
+                    None
+                }
+            }))
+        });
+        match done {
+            Ok(reply) => reply.ok_or(500),
+            Err(failure) => {
+                count(&self.counts.failed);
+                Err(if failure.retryable { 503 } else { 500 })
+            }
+        }
     }
 
     /// The reminders whose time has come, each as a job once.
@@ -170,6 +224,9 @@ impl Executor {
             Trigger::Yo if job.kind != "probe" => self.book.received(job.at).ok(),
             _ => None,
         };
+        if let (Some(row), false, Some(_)) = (came, job.group(), self.out(job)) {
+            let _ = self.book.keep(row, &job.user, &job.kind);
+        }
         let done = self.answer(job).and_then(|actions| self.act(job, came, &actions));
         match (&done, job.reminder) {
             (Ok(()), Some(id)) if self.book.done(id, now()).is_ok() => drop(locked(&self.under_way).remove(&id)),
@@ -181,19 +238,44 @@ impl Executor {
         }
     }
 
+    /// What the other side knows the user by, if they are connected.
+    fn out(&self, job: &Job) -> Option<String> {
+        let partner = self.partner.as_ref().filter(|_| !job.user.is_empty() && job.kind != "probe")?;
+        partner.test_out(&job.user).or_else(|| self.book.out(&job.user).ok().flatten())
+    }
+
     fn answer(&self, job: &Job) -> Result<Vec<Action>, Failure> {
         let private = !job.group() && job.kind != "probe";
         let remembered = private && self.header.remembers() && self.book.remembers(&job.user, job.at).unwrap_or(false);
         // The reference itself holds the blob's key: the script gets a word for it.
         let media = job.media.as_ref().filter(|_| job.kind != "probe").map(|_| "it");
-        let event = json!({
+        let out = self.out(job);
+        let mut event = json!({
             "name": self.name, "trigger": job.trigger.word(), "kind": job.kind, "media": media, "group": job.group(),
             "remembered": remembered, "now": job.at,
+            "out": out, "id": null, "method": null, "path": null, "body": null, "yos": null, "test": null,
         });
+        if let (Some(call), Some(partner)) = (&job.call, &self.partner) {
+            let connected = out.is_some() && partner.test_out(&job.user).is_none();
+            let yos = if connected { self.book.kept(&job.user, job.at).unwrap_or_default() } else { Vec::new() };
+            event["id"] = json!(call.id);
+            event["method"] = json!(call.method);
+            event["path"] = json!(call.path);
+            event["body"] = json!(call.body);
+            event["yos"] = json!(yos);
+            event["test"] = json!(call.keyed.then(|| partner.test_key()).flatten());
+        }
         let answer = self.script.call(format!("{event}\n").as_bytes());
         let answer = answer.map_err(|_| Failure { code: 1, retryable: true })?;
-        let asked =
-            Asked { kind: &job.kind, media, group: job.group(), remember_user: self.header.remembers(), now: job.at };
+        let asked = Asked {
+            kind: &job.kind,
+            media,
+            group: job.group(),
+            remember_user: self.header.remembers(),
+            now: job.at,
+            connected: out.is_some(),
+            header: &self.header,
+        };
         action::parse(&answer, &asked).map_err(|why| {
             count(&self.counts.refused);
             eprintln!("refused: {why}");
@@ -210,7 +292,7 @@ impl Executor {
         for action in actions {
             match action {
                 Action::Wait(ms) => std::thread::sleep(Duration::from_millis(*ms)),
-                Action::Forget | Action::Remind(_) => {}
+                Action::Forget | Action::Remind(_) | Action::Reply(..) | Action::Call(..) => {}
                 send => self.send(job, send)?,
             }
         }
@@ -221,6 +303,14 @@ impl Executor {
                 _ => Ok(()),
             };
             written.map_err(|_| Failure { code: 1, retryable: true })?;
+        }
+        // Last: what the other side then asks for is in the book. One that fails is only late: it asks by itself too.
+        for action in actions {
+            if let (Action::Call(url, body), Some(partner)) = (action, &self.partner) {
+                if !partner.call(url, body) {
+                    count(&self.counts.uncalled);
+                }
+            }
         }
         Ok(())
     }
@@ -287,6 +377,7 @@ impl Executor {
             ("limited", &c.limited),
             ("refused", &c.refused),
             ("failed", &c.failed),
+            ("calls failed", &c.uncalled),
         ];
         let words: Vec<String> = all
             .iter()

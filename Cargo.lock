@@ -4245,11 +4245,15 @@ dependencies = [
 name = "yo-services"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64",
  "getrandom 0.4.3",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "tokio",
  "toml",
  "yo-core",
  "yo-tests",

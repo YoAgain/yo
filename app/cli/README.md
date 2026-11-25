@@ -30,7 +30,8 @@ directory itself (and waits up to 30 s for another command that has it).
 
 **Events.** `{"type":"ready","user":…}` first, then `message` (`from`, `group`, `reply_to`: the user or `group:ID` to
 answer, `content`: `yo`, `photo`, `video` or `other`, `media`: size, width, height, duration and `ref`), `new_chat`,
-`profile`, `identity_changed`, `group_changed`, and `probe` (`from`, `token`: answer with `yo echo-probe`). Printed
+`profile`, `identity_changed`, `group_changed`, `probe` (`from`, `token`: answer with `yo echo-probe`) and
+`connect` (`from`, `code`: a user connects this service). Printed
 events are acknowledged at once; with `--manual-ack` only by `yo ack`, and the unacknowledged come again after a
 restart. A `media.ref` holds the blob's key: whoever has it can open the photo, so `send --media -` reads it from
 stdin, never from the arguments (which every local user sees). No video from a file: the CLI can neither check its
