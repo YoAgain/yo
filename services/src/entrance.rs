@@ -34,6 +34,8 @@ const BODY_TIME: Duration = Duration::from_secs(5);
 const WAITS: usize = 128;
 const WAIT: Duration = Duration::from_secs(20);
 const AGAIN: Duration = Duration::from_secs(1);
+/// How often idle addresses are forgotten.
+const SWEEP: Duration = Duration::from_secs(60);
 const PAGE: &str = "https://justyo.co";
 const TIME: Duration = Duration::from_secs(30);
 
@@ -87,6 +89,13 @@ pub fn serve(address: &str, sockets: PathBuf, services: &std::path::Path) -> std
             at_once: Semaphore::new(AT_ONCE),
             waits: Semaphore::new(WAITS),
             sources: Sources::default(),
+        });
+        let swept = entrance.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(SWEEP).await;
+                swept.sources.sweep(Instant::now());
+            }
         });
         axum::serve(listener, routes(entrance)).await
     })

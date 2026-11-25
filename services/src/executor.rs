@@ -20,6 +20,14 @@ const AGAIN: Duration = Duration::from_secs(600);
 /// What a user decided is tried so often to be kept, at once: what comes after it waits.
 const TRIES: usize = 3;
 const PAUSE: Duration = Duration::from_millis(200);
+/// An answer that could not go, the listener being busy, is tried again after each of these.
+const ANSWER_WAITS: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
 /// What a call still needs to be answered in time.
 const MARGIN_MS: i64 = 5_000;
 
@@ -117,6 +125,17 @@ fn kept<T>(mut keep: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T>
     keep()
 }
 
+/// As often as it may help. An answer counts only for the code it has, so a late one does no harm.
+fn answered(waits: &[Duration], mut answer: impl FnMut() -> Result<(), Failure>) -> Result<(), Failure> {
+    for wait in waits {
+        match answer() {
+            Err(failure) if failure.retryable => std::thread::sleep(*wait),
+            done => return done,
+        }
+    }
+    answer()
+}
+
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -204,7 +223,8 @@ impl Executor {
 
     /// Answers what changed nothing: a flood of that is answered a little.
     fn tell_nothing(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
-        if locked(&self.connects).take(user, None, Instant::now()) {
+        let now = Instant::now();
+        if locked(&self.connects).take(user, None, now) && locked(&self.limits).send(now) {
             return self.tell(user, kind, code);
         }
         count(&self.counts.limited);
@@ -215,7 +235,7 @@ impl Executor {
     pub fn tell(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
         let (executor, user, code) = (self.clone(), user.to_owned(), code.to_owned());
         std::thread::spawn(move || {
-            if executor.yo.answer(&user, kind, &code).is_err() {
+            if answered(ANSWER_WAITS, || executor.yo.answer(&user, kind, &code)).is_err() {
                 count(&executor.counts.failed);
             }
         });
@@ -412,25 +432,30 @@ impl Executor {
     }
 
     fn send(&self, job: &Job, action: &Action) -> Result<(), Failure> {
+        let limited = || {
+            count(&self.counts.limited);
+            Err(Failure { code: 1, retryable: true })
+        };
+        // Nothing is fetched that could not go.
+        if !locked(&self.limits).room(Instant::now()) {
+            return limited();
+        }
         let fetched = match action {
-            Action::Fetched(url) => {
-                Some(crate::picture::fetch(url).map_err(|retryable| Failure { code: 1, retryable })?)
-            }
-            _ => None,
+            Action::Fetched(url) => crate::picture::fetch(url).map_err(|retryable| Failure { code: 1, retryable })?,
+            _ => Vec::new(),
         };
         if Executor::late(job) {
             return Err(Failure { code: 1, retryable: true });
         }
         if !locked(&self.limits).send(Instant::now()) {
-            count(&self.counts.limited);
-            return Err(Failure { code: 1, retryable: true });
+            return limited();
         }
         let media = || job.media.as_deref().ok_or(Failure { code: 1, retryable: false });
         match action {
             Action::Back => self.yo.send_media(&job.to, media()?)?,
             Action::Drawn(jpeg) => self.send_picture(&job.to, jpeg)?,
             Action::File(name) => self.send_picture(&job.to, &self.own_picture(name)?)?,
-            Action::Fetched(_) => self.send_picture(&job.to, &fetched.unwrap_or_default())?,
+            Action::Fetched(_) => self.send_picture(&job.to, &fetched)?,
             Action::Probe => return self.yo.echo_probe(&job.to, media()?),
             _ => self.yo.send(&job.to)?,
         }
@@ -512,6 +537,27 @@ mod tests {
             Err(rusqlite::Error::InvalidQuery)
         });
         assert!(failed.is_err() && tries == TRIES);
+    }
+
+    #[test]
+    fn an_answer_waits_for_a_busy_listener() {
+        let failing = |retryable| Err(Failure { code: 1, retryable });
+        let (mut tries, waits) = (0, &[Duration::ZERO; 3]);
+        let done = answered(waits, || {
+            tries += 1;
+            if tries < 4 {
+                failing(true)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!((done, tries), (Ok(()), 4));
+        tries = 0;
+        let done = answered(waits, || {
+            tries += 1;
+            failing(false)
+        });
+        assert!(done.is_err() && tries == 1);
     }
 
     #[test]

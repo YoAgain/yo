@@ -46,12 +46,17 @@ impl Limits {
         taken
     }
 
-    /// Whether one more may go out this hour.
-    pub fn send(&mut self, now: Instant) -> bool {
+    /// Whether there is room for one more this hour.
+    pub fn room(&mut self, now: Instant) -> bool {
         while self.hour.front().is_some_and(|t| now - *t >= HOUR) {
             self.hour.pop_front();
         }
-        let may = self.hour.len() < self.per_hour;
+        self.hour.len() < self.per_hour
+    }
+
+    /// Whether one more may go out this hour: then it counts.
+    pub fn send(&mut self, now: Instant) -> bool {
+        let may = self.room(now);
         if may {
             self.hour.push_back(now);
         }

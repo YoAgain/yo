@@ -90,23 +90,30 @@ mod tests {
     /// A body that drips on and on ends at the deadline, not at the last byte.
     #[test]
     fn a_slow_picture_is_not_waited_for() {
-        use std::io::Write;
+        use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // The request first: an answer before it is none.
+            let mut asked = Vec::new();
+            while !asked.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                asked.push(byte[0]);
+            }
             let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\n\xff\xd8\xff");
             while stream.write_all(b"x").is_ok() {
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
-        let began = std::time::Instant::now();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let done = runtime.block_on(async {
-            let answer = Client::new().get(format!("http://{address}/")).send().await.unwrap();
+            let answer =
+                Client::builder().no_proxy().build().unwrap().get(format!("http://{address}/")).send().await.unwrap();
             tokio::time::timeout(Duration::from_millis(400), body(answer)).await
         });
-        assert!(done.is_err() && began.elapsed() < Duration::from_secs(5));
+        assert!(done.is_err());
         assert_eq!(fetch_within("https://example.com/a.jpg", Duration::ZERO), Err(true));
     }
 

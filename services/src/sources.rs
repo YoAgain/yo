@@ -12,7 +12,7 @@ const BURST: f64 = 10.0;
 const EVERY_S: f64 = 10.0;
 /// Waits at once (one of them may be a page's that went away).
 const WAITS: usize = 3;
-/// As many sources as are kept; more are refused.
+/// As many sources as are kept; more are refused until the next sweep.
 const MAX: usize = 20_000;
 
 /// The caller as the tunnel names it: the entrance listens on loopback alone, so nobody else reaches it. An IPv6 address
@@ -79,13 +79,15 @@ impl Sources {
         may.then(|| Waits(self, source))
     }
 
+    /// Forgets who has nothing to be remembered for: full again 100 s after the last, and not waiting.
+    pub fn sweep(&self, now: Instant) {
+        self.lock().retain(|_, s| s.waits > 0 || s.tokens(now) < BURST);
+    }
+
     fn with(&self, source: u128, now: Instant, may: impl FnOnce(&mut Source) -> bool) -> bool {
         let mut sources = self.lock();
         if sources.len() >= MAX && !sources.contains_key(&source) {
-            sources.retain(|_, s| s.waits > 0 || s.tokens(now) < BURST);
-            if sources.len() >= MAX {
-                return false;
-            }
+            return false;
         }
         may(sources.entry(source).or_insert(Source { tokens: BURST, last: now, waits: 0 }))
     }
@@ -94,6 +96,7 @@ impl Sources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn one_source_takes_nothing_from_another() {
@@ -103,8 +106,14 @@ mod tests {
         let waits: Vec<_> = std::iter::from_fn(|| sources.wait(1)).collect();
         assert_eq!(waits.len(), WAITS);
         assert!(sources.wait(2).is_some());
+        let later = Instant::now() + Duration::from_secs(200);
+        sources.sweep(later);
+        assert_eq!(sources.lock().len(), 1, "who waits is kept");
         drop(waits);
-        assert!(sources.wait(1).is_some());
+        sources.sweep(Instant::now());
+        assert_eq!(sources.lock().len(), 1, "who just began, too");
+        sources.sweep(later);
+        assert!(sources.lock().is_empty() && sources.wait(1).is_some());
         let of = |ip: &str| source(&HeaderMap::from_iter([("cf-connecting-ip".parse().unwrap(), ip.parse().unwrap())]));
         assert_eq!((of("2001:db8::1"), of("::ffff:192.0.2.1")), (of("2001:db8::ff:2"), of("192.0.2.1")));
         assert_ne!((of("2001:db8::1"), of("192.0.2.1")), (of("2001:db8:0:1::1"), of("192.0.2.2")));
