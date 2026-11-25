@@ -7,7 +7,7 @@ A script is taken as hostile, reviewed or not.
 | Account keys, decryption | yes (`yo listen`) | no |
 | Who the sender is | a user id | nothing, not even a number |
 | Network | the hub, on localhost | none |
-| Files | its account, the book | Python and yo-services, read-only |
+| Files | its account (`/var/lib/yo-services/accounts`), the book | Python and yo-services, read-only |
 | Processes | its own | one per event, gone after 45 s |
 | To whom, how often | decides | cannot say |
 

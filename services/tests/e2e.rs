@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use yo_core::{media, Client, Content, Event};
 use yo_tests::{random_u64, register, username, Http, TestHub};
 
-const TOML: &str = "name = \"NAME\"\nabout = \"a\"\ntriggers = TRIGGERS\nallowed_urls = []\n";
+const TOML: &str = "names = [\"NAME\"]\nabout = \"a\"\ntriggers = TRIGGERS\nallowed_urls = []\n";
 const HEAD: &str = "import json, sys, time\ne = json.load(sys.stdin)\n";
 const PING: &str = "print(json.dumps([{'send': e['kind'], 'media': e['media']}]))\n";
 const REMIND: &str = "print(json.dumps([{'send': 'yo'}] if e['trigger'] == 'cron' else [{'remind': e['now'] + 60}]))\n";
@@ -33,6 +33,8 @@ struct Bot {
     child: Option<Child>,
     hub: String,
     env: Vec<(&'static str, String)>,
+    /// Its folder, if not the one of its name.
+    service: Option<PathBuf>,
 }
 
 impl Bot {
@@ -63,7 +65,7 @@ impl Bot {
                 });
             }
         });
-        let bot = Bot { dir, name, child: None, hub: hub.url(), env: Vec::new() };
+        let bot = Bot { dir, name, child: None, hub: hub.url(), env: Vec::new(), service: None };
         let registered = bot.command(&yo()).args(["register", &bot.name]).output().unwrap();
         assert!(registered.status.success(), "{}", String::from_utf8_lossy(&registered.stderr));
         bot
@@ -95,7 +97,7 @@ impl Bot {
 
     fn start(mut self) -> Bot {
         let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_yo-services")));
-        self.child = Some(command.arg(self.folder()).spawn().unwrap());
+        self.child = Some(command.arg(self.service.clone().unwrap_or_else(|| self.folder())).spawn().unwrap());
         std::thread::sleep(Duration::from_secs(2));
         self
     }
@@ -231,6 +233,25 @@ fn only_the_one_user_is_served() {
 }
 
 #[test]
+fn another_name_is_another_account_and_the_script_knows_which() {
+    let hub = TestHub::start();
+    let code = "print(json.dumps([{'send': 'yo'}] if e['name'] == 'NAME' else []))\n";
+    let mut bot = Bot::new(&hub, "", false);
+    std::fs::write(bot.file("py"), HEAD.to_owned() + &code.replace("NAME", &bot.name)).unwrap();
+    // The service is FIRST, this account its second name.
+    let service = bot.dir.join("first");
+    std::fs::create_dir(&service).unwrap();
+    let toml = std::fs::read_to_string(bot.file("toml")).unwrap().replace("[\"BOT", "[\"FIRST\", \"BOT");
+    std::fs::write(service.join("first.toml"), toml).unwrap();
+    bot.env.push(("SERVICES_NAME", bot.name.clone()));
+    bot.service = Some(service);
+    let bot = bot.start();
+    let mut alice = someone(&hub);
+    alice.send_yo(&bot.name).unwrap();
+    assert_eq!(comes(&mut alice, QUIET), [Content::Yo]);
+}
+
+#[test]
 fn it_does_not_start_with_another_account_or_a_bad_toml() {
     let hub = TestHub::start();
     let bot = Bot::new(&hub, PING, false);
@@ -268,7 +289,7 @@ fn the_real_services_run() {
         let toml = std::fs::read_to_string(source.with_extension("toml")).unwrap();
         let toml: Vec<_> = toml
             .lines()
-            .map(|l| if l.starts_with("name") { format!("name = {:?}", bot.name) } else { l.to_owned() })
+            .map(|l| if l.starts_with("names") { format!("names = [{:?}]", bot.name) } else { l.to_owned() })
             .collect();
         std::fs::write(bot.file("toml"), toml.join("\n")).unwrap();
         for picture in std::fs::read_dir(services.join(file).join("assets")).into_iter().flatten().flatten() {

@@ -4,8 +4,9 @@
 //!
 //! Environment: YO_STATE (the account's directory, registered by hand once), YO_BIN, the hub's pins (app/cli/README.md),
 //! SCRIPT_SOCKET (where a connection starts the script), SERVICES_DB (the book, one for all services).
-//! Optional: SERVICES_PER_HOUR, SERVICES_ONLY_USER (a user id: nobody else is served), SERVICES_DRAIN=1 (media is
-//! fetched into nothing), SERVICES_BOTS (names of other bots, comma separated, never answered).
+//! Optional: SERVICES_NAME (the account's, for a service of several names; else the first), SERVICES_PER_HOUR,
+//! SERVICES_ONLY_USER (a user id: nobody else is served), SERVICES_DRAIN=1 (media is fetched into nothing),
+//! SERVICES_BOTS (names of other bots, comma separated, never answered).
 
 mod book;
 mod executor;
@@ -44,9 +45,14 @@ fn main() {
     let text = std::fs::read_to_string(service.join(format!("{folder}.toml")))
         .unwrap_or_else(|_| fail(USAGE, "the TOML cannot be read"));
     let header = Header::parse(&text, folder).unwrap_or_else(|why| fail(USAGE, &format!("TOML: {why}")));
+    let name = match std::env::var("SERVICES_NAME") {
+        Ok(name) if header.names.contains(&name) => name,
+        Ok(_) => fail(USAGE, "SERVICES_NAME: not one of its names"),
+        Err(_) => header.names[0].clone(),
+    };
     let state = PathBuf::from(env("YO_STATE"));
-    let book = book::Book::open(Path::new(&env("SERVICES_DB")), &header.name)
-        .unwrap_or_else(|e| fail(1, &format!("the book: {e}")));
+    let book =
+        book::Book::open(Path::new(&env("SERVICES_DB")), &name).unwrap_or_else(|e| fail(1, &format!("the book: {e}")));
     let per_hour = match std::env::var("SERVICES_PER_HOUR") {
         Ok(n) => n.parse().unwrap_or_else(|_| fail(USAGE, "SERVICES_PER_HOUR: a number")),
         Err(_) => PER_HOUR,
@@ -65,6 +71,7 @@ fn main() {
         under_way: Mutex::default(),
         counts: executor::Counts::default(),
         header,
+        name,
     });
 
     let drain = std::env::var("SERVICES_DRAIN").is_ok_and(|v| v == "1");
@@ -130,11 +137,11 @@ fn leave_empty_groups(executor: &Executor) {
     }
 }
 
-/// Is the account the one the TOML names? Asked before the first Yo is taken.
+/// Is it the account it should be? Asked before the first Yo is taken.
 fn check_account(executor: &Executor) -> Result<(), i32> {
     match executor.yo.whoami() {
-        Ok((_, username)) if username.eq_ignore_ascii_case(&executor.header.name) => return Ok(()),
-        Ok(_) => eprintln!("stopped: the account is not the one the TOML names"),
+        Ok((_, username)) if username.eq_ignore_ascii_case(&executor.name) => return Ok(()),
+        Ok(_) => eprintln!("stopped: the account is not the one named"),
         Err(_) => {
             eprintln!("stopped: the account did not answer");
             return Err(1);
@@ -146,7 +153,7 @@ fn check_account(executor: &Executor) -> Result<(), i32> {
 /// The names of the other bots.
 fn other_bots(executor: &Executor) -> Vec<String> {
     let names = std::env::var("SERVICES_BOTS").unwrap_or_default();
-    let own = &executor.header.name;
+    let own = &executor.name;
     names.split(',').map(str::trim).filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(own)).map(Into::into).collect()
 }
 

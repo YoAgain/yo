@@ -117,7 +117,7 @@ def services(name: str, now: int):
 
 def yogpt_contacts(name: str):
     try:
-        with open(YOGPT.format(name)) as f:
+        with open(YOGPT.format(name, "" if name == "live" else name)) as f:
             return json.load(f).get("contacts")
     except (OSError, ValueError):
         return None

@@ -19,6 +19,8 @@ const AGAIN: Duration = Duration::from_secs(600);
 
 pub struct Executor {
     pub header: Header,
+    /// The one of its names whose account this is.
+    pub name: String,
     pub yo: Yo,
     pub script: Script,
     pub book: Book,
@@ -185,7 +187,7 @@ impl Executor {
         // The reference itself holds the blob's key: the script gets a word for it.
         let media = job.media.as_ref().filter(|_| job.kind != "probe").map(|_| "it");
         let event = json!({
-            "trigger": job.trigger.word(), "kind": job.kind, "media": media, "group": job.group(),
+            "name": self.name, "trigger": job.trigger.word(), "kind": job.kind, "media": media, "group": job.group(),
             "remembered": remembered, "now": job.at,
         });
         let answer = self.script.call(format!("{event}\n").as_bytes());

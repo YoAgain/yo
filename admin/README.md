@@ -48,7 +48,7 @@ keep credentials and deployment settings outside this public repository.
 | `YO_HUB_DEV_DB` | Development SQLite database | `./hub-dev.sqlite` |
 | `YO_HUB_ENV_FILE` | Live hub env file, reads `YO_MIN_APP` | `./hub.env` |
 | `YO_HUB_DEV_ENV_FILE` | Development hub env file, reads `YO_MIN_APP` | `./hub-dev.env` |
-| `YOGPT_STATS_PATTERN` | Stats path with `{}` replaced by `live` or `dev` | `./yogpt/{}/stats.json` |
+| `YOGPT_STATS_PATTERN` | Stats path; `{0}` is `live` or `dev`, `{1}` empty or `dev` | `./yogpt/{}/stats.json` |
 | `YO_HUB_VERSION_FILE` | Hub deploy version | `./version` |
 | `YOGPT_VERSION_FILE` | YoGPT deploy version | `./version-yogpt` |
 | `YO_ADMIN_INTERNAL_USERS` | Internal testers' user ids (hex, comma separated), on the server only | empty |
