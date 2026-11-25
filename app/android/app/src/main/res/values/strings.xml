@@ -43,7 +43,6 @@
     <string name="ui_yo_team">Yo Team</string>
     <string name="ui_you_won_t_get_its_yos_any_more_a_member_can_add_you_again">You won’t get its Yos any more. A member can add you again.</string>
     <string name="ui_you_won_t_get_their_yos_unblock_them_in_your_profile">You won’t get their Yos. Unblock them under Yodentity › Account › Blocked.</string>
-    <string name="ui_your_code">Your Code</string>
     <string name="ui_available">Available</string>
     <string name="ui_undo_send">Undo Send</string>
     <string name="ui_allow_camera_access_in_android_settings_to_send_photos">Allow camera access in Android Settings to send photos.</string>

@@ -167,7 +167,7 @@ enum InviteLayout {
 struct InviteNameRow: View {
   let name: String
   let size: CGFloat
-  let inset: CGFloat
+  let height: CGFloat
 
   var body: some View {
     Text(name)
@@ -176,8 +176,8 @@ struct InviteNameRow: View {
       .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
       .padding(.horizontal, 16)
-      .padding(.vertical, inset)
       .frame(maxWidth: .infinity)
+      .frame(height: height)
       .background(InviteLayout.color(name))
   }
 }
@@ -189,6 +189,20 @@ struct InviteWants: View {
     Text("wants to Yo")
       .font(.custom("Montserrat-Bold", fixedSize: size))
       .lineLimit(1)
+      .foregroundStyle(.white)
+  }
+}
+
+/// The link as it is typed, under the code: a screenshot or the picture without its message still says it.
+struct InviteAddress: View {
+  let name: String
+  let size: CGFloat
+
+  var body: some View {
+    Text(verbatim: "justyo.co/\(name)")
+      .font(.custom("Montserrat-Bold", fixedSize: size))
+      .lineLimit(1)
+      .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
   }
 }
@@ -247,11 +261,12 @@ private struct InvitePicture: View {
   let code: InviteCode
 
   var body: some View {
-    let size = InviteLayout.nameSize(name, width: 281 - 32, max: 56)
+    let size = InviteLayout.nameSize(name, width: 281 - 32, max: 36)
     VStack(spacing: 0) {
-      InviteNameRow(name: name, size: size, inset: 10)
+      InviteNameRow(name: name, size: size, height: 64)
       InviteWants(size: InviteLayout.wantsSize(nameSize: size)).padding(.top, 10)
-      QRCard(code: code, side: 200).padding(.top, 18)
+      QRCard(code: code, side: 200).padding(.top, 14)
+      InviteAddress(name: name, size: 16).padding(.top, 12).padding(.horizontal, 16)
     }
     .frame(width: 281, height: 400)
     .background(Color.amethyst)
@@ -287,15 +302,18 @@ struct YourCodePage: View {
     GeometryReader { proxy in
       let width = proxy.size.width
       let height = proxy.size.height
-      // Everything on one screen, the iPhone SE's too: the name at most an eighth of the height, the code what is left.
+      // Everything on one screen, the iPhone SE's too: the name as a bar of the list, the code what is left.
       let gap = min(36, max(14, height * 0.04))
-      let nameSize = InviteLayout.nameSize(name, width: width - 32, max: min(100, height * 0.13))
+      let nameSize = InviteLayout.nameSize(name, width: width - 32, max: RowMetrics.base.font)
       let wantsSize = InviteLayout.wantsSize(nameSize: nameSize)
-      let around = nameSize * 1.22 + gap + gap * 0.5 + wantsSize * 1.22 + gap * 0.8 + gap + 50 + 16
+      let around = RowMetrics.base.height + gap * 0.5 + wantsSize * 1.22 + gap * 0.8 + gap * 0.5 + 22 + gap * 0.7 + 50 + 16
       let side = max(120, min(260, (width - 40) * 260 / 296, (height - around) * 260 / 296))
       let cardWidth = side + 2 * InviteLayout.padding(side: side)
+      // Centred in the whole sheet, not below its bar, as far as the bar's button leaves room.
+      let spare = max(0, (height - around - cardWidth) / 2)
+      let lift = min(spare, max(0, (proxy.safeAreaInsets.top - proxy.safeAreaInsets.bottom) / 2))
       VStack(spacing: 0) {
-        InviteNameRow(name: name, size: nameSize, inset: gap * 0.5)
+        InviteNameRow(name: name, size: nameSize, height: RowMetrics.base.height)
         InviteWants(size: wantsSize).padding(.top, gap * 0.5)
         Group {
           if let code {
@@ -315,6 +333,7 @@ struct YourCodePage: View {
           }
         }
         .padding(.top, gap * 0.8)
+        InviteAddress(name: name, size: 18).frame(width: cardWidth, height: 22).padding(.top, gap * 0.5)
         HStack {
           Button {
             let url = Invite.link(for: name)
@@ -333,19 +352,22 @@ struct YourCodePage: View {
         .buttonStyle(.glassProminent)
         .tint(.white)
         .foregroundStyle(.black)
+        .fontWeight(.semibold)
         .controlSize(.large)
         .frame(width: cardWidth)
-        .padding(.top, gap)
+        .padding(.top, gap * 0.7)
       }
       .foregroundStyle(.white)
       .padding(.vertical, 8)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .offset(y: -lift)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .background(Color.amethyst.ignoresSafeArea())
     .toolbarBackground(.hidden, for: .navigationBar)
     .toolbarColorScheme(.dark, for: .navigationBar)
     .navigationTitle("Your Code")
+    .toolbar(removing: .title)  // named for VoiceOver and Back, not shown
     .navigationBarTitleDisplayMode(.inline)
     .toolbar(.visible, for: .navigationBar)
     .sensoryFeedback(.success, trigger: copyCount)

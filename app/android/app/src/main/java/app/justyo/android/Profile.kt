@@ -645,20 +645,19 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White,
         // The tall card, like iOS's large detent: people screenshot it, so no friend names show behind it.
         height = 1f) {
-        Text(stringResource(R.string.ui_your_code), Modifier.align(Alignment.CenterHorizontally), style = MaterialTheme.typography.titleMedium)
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             val width = maxWidth.value
             val height = maxHeight.value
             val gap = (height * 0.04f).coerceIn(14f, 36f)
-            val nameSize = inviteNameSize(typeface, name, width - 32f, minOf(100f, height * 0.13f))
+            val nameSize = inviteNameSize(typeface, name, width - 32f, 36f)  // a bar of the list
             val wantsSize = inviteWantsSize(nameSize)
-            val around = nameSize * 1.22f + gap + gap * 0.5f + wantsSize * 1.22f + gap * 0.8f + gap + 48f + 16f
+            val around = BarHeight.value + gap * 0.5f + wantsSize * 1.22f + gap * 0.8f + gap * 0.5f + 22f + gap * 0.7f + 48f + 16f
             val side = maxOf(120f, minOf(260f, (width - 40f) * 260f / 296f, (height - around) * 260f / 296f))
             val padding = invitePadding(side)
             val cardWidth = side + 2 * padding
             fun Float.fixedSp() = with(density) { dp.toSp() }
             Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                BasicText(name, Modifier.fillMaxWidth().background(inviteColor(name)).padding(horizontal = 16.dp, vertical = (gap * 0.5f).dp),
+                BasicText(name, Modifier.fillMaxWidth().height(BarHeight).background(inviteColor(name)).padding(horizontal = 16.dp).wrapContentHeight(),
                     maxLines = 1, softWrap = false,
                     style = TextStyle(fontFamily = YoFont, fontSize = nameSize.fixedSp(), color = Color.White, textAlign = TextAlign.Center),
                     autoSize = TextAutoSize.StepBased(minFontSize = (nameSize * 0.5f).fixedSp(), maxFontSize = nameSize.fixedSp()))
@@ -673,8 +672,13 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         drawIntoCanvas { drawInviteQr(it.nativeCanvas, shown, 0f, 0f, size.width, typeface) }
                     }
                 }
+                // The link as it is typed: a screenshot still says it.
+                BasicText(inviteAddress(name), Modifier.padding(top = (gap * 0.5f).dp).width(cardWidth.dp).height(22.dp).wrapContentHeight(),
+                    maxLines = 1, softWrap = false,
+                    style = TextStyle(fontFamily = YoFont, fontSize = 18f.fixedSp(), color = Color.White, textAlign = TextAlign.Center),
+                    autoSize = TextAutoSize.StepBased(minFontSize = 9f.fixedSp(), maxFontSize = 18f.fixedSp()))
                 val colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
-                Row(Modifier.width(cardWidth.dp).padding(top = gap.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.width(cardWidth.dp).padding(top = (gap * 0.7f).dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         // Android (13+, the app's least is 14) shows its own toast for the copy.
                         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(copyLabel, link))
@@ -706,6 +710,8 @@ private fun inviteNameSize(typeface: android.graphics.Typeface?, name: String, w
     val measured = Paint().apply { this.typeface = typeface; textSize = 100f }.measureText(name)
     return if (measured <= 0f) max else kotlin.math.floor(width * 100f / measured).coerceIn(14f, max.coerceAtLeast(14f))
 }
+/** The link as it is typed, under the code. */
+private fun inviteAddress(name: String) = "justyo.co/$name"
 private fun inviteWantsSize(nameSize: Float) = kotlin.math.round(nameSize * 0.34f).coerceIn(20f, 28f)
 /** The white around the code: 18 for a 260 code. */
 private fun invitePadding(side: Float) = kotlin.math.round(side * 18f / 260f)
@@ -795,14 +801,15 @@ private fun inviteCard(context: Context, name: String, code: InviteCode): Bitmap
     val canvas = Canvas(bitmap)
     canvas.drawColor(Amethyst.toArgb())
     val typeface = androidx.core.content.res.ResourcesCompat.getFont(context, R.font.montserrat_bold)
-    val nameSize = inviteNameSize(typeface, name, 281f - 32f, 56f) * scale
+    val nameSize = inviteNameSize(typeface, name, 281f - 32f, 36f) * scale
     val wantsSize = inviteWantsSize(nameSize / scale) * scale
     val side = 200 * scale
     val padding = invitePadding(200f) * scale
-    val inset = 10 * scale
-    val rowHeight = nameSize * 1.22f + 2 * inset
+    val rowHeight = 64 * scale
+    val addressSize = 16 * scale
+    val addressHeight = addressSize * 1.22f
     val wantsHeight = wantsSize * 1.22f
-    val total = rowHeight + 10 * scale + wantsHeight + 18 * scale + side + 2 * padding
+    val total = rowHeight + 10 * scale + wantsHeight + 14 * scale + side + 2 * padding + 12 * scale + addressHeight
     var y = (1200 - total) / 2
     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.typeface = typeface; textAlign = Paint.Align.CENTER }
     fun line(text: String, size: Float, middle: Float, max: Float) {
@@ -816,12 +823,14 @@ private fun inviteCard(context: Context, name: String, code: InviteCode): Bitmap
     line(name, nameSize, y + rowHeight / 2, width - 32 * scale)
     y += rowHeight + 10 * scale
     line(context.getString(R.string.code_wants), wantsSize, y + wantsHeight / 2, width)
-    y += wantsHeight + 18 * scale
+    y += wantsHeight + 14 * scale
     val cardWidth = side + 2 * padding
     val left = (width - cardWidth) / 2
     paint.color = android.graphics.Color.WHITE
     canvas.drawRect(left, y, left + cardWidth, y + cardWidth, paint)
     drawInviteQr(canvas, code, left + padding, y + padding, side, typeface)
+    y += cardWidth + 12 * scale
+    line(inviteAddress(name), addressSize, y + addressHeight / 2, width - 32 * scale)
     return bitmap
 }
 
