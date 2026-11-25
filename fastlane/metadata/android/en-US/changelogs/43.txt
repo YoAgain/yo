@@ -1,0 +1,6 @@
+Forty-third release candidate — Your Code, free-standing.
+
+• Link and Share sit at the bottom; your name, code and address stand free above them
+• Your Code and its picture show your address under the code, so a screenshot is enough to find you
+• iPhone: Group and Invite no longer hide behind the buttons of a new account
+• Android: "Got Yo? Sign In" is centred
