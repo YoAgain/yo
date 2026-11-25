@@ -19,20 +19,35 @@ enum RecoveryQR {
     return UIImage(cgImage: cg)
   }
 
-  /// White modules on the brand colour; high correction tolerates the card’s small centre logo.
-  static func contactImage(text: String, inverted: Bool) -> UIImage? {
+  /// The modules of a Yo code (error correction H, which carries the cleared centre with "Yo"), drawn by `QRCard`.
+  static func contactMatrix(text: String) -> QRMatrix? {
     let generator = CIFilter.qrCodeGenerator()
     generator.message = Data(text.utf8)
     generator.correctionLevel = "H"
-    guard let qr = generator.outputImage else { return nil }
-    let colors = CIFilter.falseColor()
-    colors.inputImage = qr
-    let amethyst = CIColor(red: 155.0 / 255, green: 89.0 / 255, blue: 182.0 / 255)
-    colors.color0 = inverted ? CIColor.white : amethyst
-    colors.color1 = inverted ? amethyst : CIColor.white
-    guard let output = colors.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
-      let cg = context.createCGImage(output, from: output.extent) else { return nil }
-    return UIImage(cgImage: cg)
+    guard let qr = generator.outputImage, let cg = context.createCGImage(qr, from: qr.extent) else { return nil }
+    let width = cg.width
+    guard width > 0, cg.height == width else { return nil }
+    var pixels = [UInt8](repeating: 255, count: width * width)
+    let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+      guard let bitmap = CGContext(
+        data: buffer.baseAddress, width: width, height: width, bitsPerComponent: 8, bytesPerRow: width,
+        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+      else { return false }
+      bitmap.interpolationQuality = .none
+      bitmap.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: width))
+      return true
+    }
+    guard drawn else { return nil }
+    // One pixel a module, in a white quiet zone: the top left finder's corner is the first dark one on the diagonal.
+    var margin = 0
+    while margin < width / 2, pixels[margin * width + margin] > 127 { margin += 1 }
+    let count = width - 2 * margin
+    guard count >= 21 else { return nil }
+    var bits = [Bool](repeating: false, count: count * count)
+    for row in 0..<count {
+      for column in 0..<count { bits[row * count + column] = pixels[(row + margin) * width + column + margin] < 128 }
+    }
+    return QRMatrix(count: count, bits: bits)
   }
 
   static func read(_ image: UIImage) -> String? {
@@ -41,6 +56,14 @@ enum RecoveryQR {
     else { return nil }
     return detector.features(in: ci).compactMap { ($0 as? CIQRCodeFeature)?.messageString }.first
   }
+}
+
+/// A QR code's modules, row by row (true = dark).
+struct QRMatrix: Sendable, Equatable {
+  let count: Int
+  let bits: [Bool]
+
+  subscript(row: Int, column: Int) -> Bool { bits[row * count + column] }
 }
 
 struct RecoveryQRView: View {

@@ -48,6 +48,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -74,7 +76,6 @@ import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
@@ -619,58 +620,147 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     )
 }
 
-/** Your code (iOS YourCodePage): Amethyst, "X wants to Yo", the QR code (a tap shares it as a picture), the link,
- * and Copy link and Share under it (Signal's QR code & link). */
+/** Your code (iOS YourCodePage), as justyo.co/NAME: the name as a coloured row, "wants to Yo", the QR code on a white
+ * card (a tap shares it), and Link and Share as wide as the code under it. All on one screen, a small phone's too. */
 @Composable private fun YourCodeSheet(name: String, onClose: () -> Unit) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val link = inviteLink(name)
     val pictureLabel = stringResource(R.string.code_share_picture)
     val copyLabel = stringResource(R.string.code_copy_link)
     val scope = rememberCoroutineScope()
-    var exporting by remember { mutableStateOf(false) }
+    var sharing by remember { mutableStateOf(false) }
+    val typeface = remember { androidx.core.content.res.ResourcesCompat.getFont(context, R.font.montserrat_bold) }
+    val code by produceState<InviteCode?>(null, name) { value = withContext(Dispatchers.Default) { inviteCode(context, name) } }
+    fun share() {
+        if (sharing) return
+        sharing = true
+        scope.launch {
+            try { shareInviteCard(context, name) }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { Toast.makeText(context, R.string.generic_failure, Toast.LENGTH_SHORT).show() }
+            finally { sharing = false }
+        }
+    }
     FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White,
         // The tall card, like iOS's large detent: people screenshot it, so no friend names show behind it.
         height = 1f) {
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween) {
-            Text(stringResource(R.string.ui_your_code), style = MaterialTheme.typography.titleMedium)
-            BasicText(stringResource(R.string.code_wants_to_yo, name), Modifier.padding(top = 12.dp), maxLines = 1, softWrap = false,
-                style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White, textAlign = TextAlign.Center),
-                autoSize = TextAutoSize.StepBased(minFontSize = 9.sp, maxFontSize = 28.sp))
-            Qr(link, Modifier.padding(vertical = 12.dp).size(260.dp).clickable(
-                enabled = !exporting, onClickLabel = pictureLabel, role = Role.Button,
-            ) {
-                exporting = true
-                scope.launch {
-                    try { shareInviteCard(context, name) }
-                    catch (e: CancellationException) { throw e }
-                    catch (e: Exception) { Toast.makeText(context, R.string.generic_failure, Toast.LENGTH_SHORT).show() }
-                    finally { exporting = false }
+        Text(stringResource(R.string.ui_your_code), Modifier.align(Alignment.CenterHorizontally), style = MaterialTheme.typography.titleMedium)
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            val width = maxWidth.value
+            val height = maxHeight.value
+            val gap = (height * 0.04f).coerceIn(14f, 36f)
+            val nameSize = inviteNameSize(typeface, name, width - 32f, minOf(100f, height * 0.13f))
+            val wantsSize = inviteWantsSize(nameSize)
+            val around = nameSize * 1.22f + gap + gap * 0.5f + wantsSize * 1.22f + gap * 0.8f + gap + 48f + 16f
+            val side = maxOf(120f, minOf(260f, (width - 40f) * 260f / 296f, (height - around) * 260f / 296f))
+            val padding = invitePadding(side)
+            val cardWidth = side + 2 * padding
+            fun Float.fixedSp() = with(density) { dp.toSp() }
+            Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                BasicText(name, Modifier.fillMaxWidth().background(inviteColor(name)).padding(horizontal = 16.dp, vertical = (gap * 0.5f).dp),
+                    maxLines = 1, softWrap = false,
+                    style = TextStyle(fontFamily = YoFont, fontSize = nameSize.fixedSp(), color = Color.White, textAlign = TextAlign.Center),
+                    autoSize = TextAutoSize.StepBased(minFontSize = (nameSize * 0.5f).fixedSp(), maxFontSize = nameSize.fixedSp()))
+                BasicText(stringResource(R.string.code_wants), Modifier.padding(top = (gap * 0.5f).dp), maxLines = 1, softWrap = false,
+                    style = TextStyle(fontFamily = YoFont, fontSize = wantsSize.fixedSp(), color = Color.White))
+                Box(Modifier.padding(top = (gap * 0.8f).dp).size(cardWidth.dp), contentAlignment = Alignment.Center) {
+                    val shown = code
+                    if (shown == null) CircularProgressIndicator(color = Color.White)
+                    else androidx.compose.foundation.Canvas(Modifier.fillMaxSize()
+                        .clickable(enabled = !sharing, onClickLabel = pictureLabel, role = Role.Button) { share() }
+                        .semantics { contentDescription = pictureLabel }.background(Color.White).padding(padding.dp)) {
+                        drawIntoCanvas { drawInviteQr(it.nativeCanvas, shown, 0f, 0f, size.width, typeface) }
+                    }
                 }
-            }, description = pictureLabel)
-            BasicText(link, maxLines = 1, softWrap = false, style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White),
-                autoSize = TextAutoSize.StepBased(minFontSize = 6.sp, maxFontSize = 28.sp))
-            val colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
-            Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    // Android (13+, the app's least is 14) shows its own toast for the copy.
-                    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(copyLabel, link))
-                }, modifier = Modifier.weight(1f), colors = colors) {
-                    Icon(Icons.Default.ContentCopy, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.code_copy_link))
-                }
-                Button(onClick = { shareInvite(context, name) }, modifier = Modifier.weight(1f), colors = colors) {
-                    Icon(Icons.Default.Share, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.recovery_share))
+                val colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
+                Row(Modifier.width(cardWidth.dp).padding(top = gap.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        // Android (13+, the app's least is 14) shows its own toast for the copy.
+                        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(copyLabel, link))
+                    }, modifier = Modifier.weight(1f), colors = colors, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Default.ContentCopy, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.code_link), maxLines = 1)
+                    }
+                    Button(onClick = { share() }, enabled = !sharing, modifier = Modifier.weight(1f), colors = colors,
+                        contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.Default.Share, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.recovery_share), maxLines = 1)
+                    }
                 }
             }
         }
     }
 }
 
-/** The card as a picture only (iOS InviteCard): no link, no text beside it. */
+/** The code as drawn: its modules and whether its centre is cleared for "Yo" (taken back where it would not read). */
+private class InviteCode(val matrix: com.google.zxing.qrcode.encoder.ByteMatrix, val cleared: Boolean)
+
+/** The row's colour: justyo.co's palette (the bars' without wisteria), picked by the name's bytes. */
+private fun inviteColor(name: String) = RowColors[name.toByteArray(Charsets.UTF_8).sumOf { it.toInt() and 0xFF } % 7]
+
+/** The name as large as its row allows (in dp), measured once in Montserrat at 100 (as justyo.co/NAME does). */
+private fun inviteNameSize(typeface: android.graphics.Typeface?, name: String, width: Float, max: Float): Float {
+    val measured = Paint().apply { this.typeface = typeface; textSize = 100f }.measureText(name)
+    return if (measured <= 0f) max else kotlin.math.floor(width * 100f / measured).coerceIn(14f, max.coerceAtLeast(14f))
+}
+private fun inviteWantsSize(nameSize: Float) = kotlin.math.round(nameSize * 0.34f).coerceIn(20f, 28f)
+/** The white around the code: 18 for a 260 code. */
+private fun invitePadding(side: Float) = kotlin.math.round(side * 18f / 260f)
+
+/** justyo.co/NAME's code, for the page and the picture alike: square amethyst modules and finder eyes, "Yo" in the
+ * cleared centre (error correction H carries it), in a square of [side] at [left], [top]. */
+private fun drawInviteQr(canvas: Canvas, code: InviteCode, left: Float, top: Float, side: Float, typeface: android.graphics.Typeface?) {
+    val matrix = code.matrix
+    val count = matrix.width
+    val m = side / count
+    val mid = (count - 1) / 2.0
+    fun eye(r: Int, k: Int) = (r < 7 && k < 7) || (r < 7 && k >= count - 7) || (r >= count - 7 && k < 7)
+    fun clear(r: Int, k: Int) = code.cleared && kotlin.math.abs(r - mid) < count * 0.13 && kotlin.math.abs(k - mid) < count * 0.19
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Amethyst.toArgb() }
+    for (r in 0 until count) for (k in 0 until count) {
+        if (matrix[k, r].toInt() != 1 || eye(r, k) || clear(r, k)) continue
+        canvas.drawRect(left + k * m + m * .06f, top + r * m + m * .06f, left + k * m + m * .94f, top + r * m + m * .94f, paint)
+    }
+    for ((r, k) in listOf(0 to 0, 0 to count - 7, count - 7 to 0)) {
+        val x = left + k * m
+        val y = top + r * m
+        canvas.drawRect(x + m * 2, y + m * 2, x + m * 5, y + m * 5, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = m
+        canvas.drawRect(x + m / 2, y + m / 2, x + m * 6.5f, y + m * 6.5f, paint)
+        paint.style = Paint.Style.FILL
+    }
+    if (code.cleared) {
+        paint.typeface = typeface
+        paint.textSize = m * 6.4f
+        paint.textAlign = Paint.Align.CENTER
+        canvas.drawText("Yo", left + side / 2, top + side / 2 - (paint.ascent() + paint.descent()) / 2, paint)
+    }
+}
+
+/** The code for NAME's link, read back from the picture: should "Yo" in the centre keep it from reading, it goes without. */
+private fun inviteCode(context: Context, name: String): InviteCode {
+    val link = inviteLink(name)
+    val matrix = com.google.zxing.qrcode.encoder.Encoder.encode(link, ErrorCorrectionLevel.H).matrix
+    val cleared = InviteCode(matrix, true)
+    val picture = inviteCard(context, name, cleared)
+    return try { if (readQr(picture) == link) cleared else InviteCode(matrix, false) } finally { picture.recycle() }
+}
+
+/** A picture's QR code. The hybrid binarizer loses one on a large flat colour (our own card): then the global one. */
+private fun readQr(bitmap: Bitmap): String? {
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    val source = RGBLuminanceSource(bitmap.width, bitmap.height, pixels)
+    val hints = mapOf(com.google.zxing.DecodeHintType.POSSIBLE_FORMATS to listOf(com.google.zxing.BarcodeFormat.QR_CODE))
+    return sequenceOf(HybridBinarizer(source), com.google.zxing.common.GlobalHistogramBinarizer(source))
+        .firstNotNullOfOrNull { runCatching { MultiFormatReader().decode(BinaryBitmap(it), hints).text }.getOrNull() }
+}
+
+/** The card as a picture and "Yo me on Yo: LINK" (iOS InviteShare): the same for Share and a tap on the code. */
 private suspend fun shareInviteCard(context: Context, name: String) {
     val uri = withContext(Dispatchers.IO) {
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
@@ -678,57 +768,60 @@ private suspend fun shareInviteCard(context: Context, name: String) {
         // A chooser still reading the previous export gets a complete picture.
         val temp = File.createTempFile("yo-code-", ".png", dir)
         try {
-            val bitmap = inviteCard(context, name)
+            val bitmap = inviteCard(context, name, inviteCode(context, name))
             try { temp.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) } }
             finally { bitmap.recycle() }
             check(temp.renameTo(file))
         } finally { temp.delete() }
         FileProvider.getUriForFile(context, "${context.packageName}.files", file)
     }
+    val title = context.getString(R.string.code_wants_to_yo, name)
     val send = Intent(Intent.ACTION_SEND).setType("image/png").apply {
         putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_TEXT, context.getString(R.string.code_share_text, inviteLink(name)))
+        putExtra(Intent.EXTRA_SUBJECT, title)
+        putExtra(Intent.EXTRA_TITLE, title)
         clipData = ClipData.newUri(context.contentResolver, null, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(Intent.createChooser(send, context.getString(R.string.share_your_code)))
 }
 
-/** iOS ContactCodeCard at 3x: the name, white modules on amethyst with "Yo" in the centre (error correction H), the link. */
-private fun inviteCard(context: Context, name: String): Bitmap {
-    val link = inviteLink(name)
-    val matrix = QRCodeWriter().encode(link, BarcodeFormat.QR_CODE, 0, 0,
-        mapOf(EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.H, EncodeHintType.MARGIN to 4))
-    val bitmap = androidx.core.graphics.createBitmap(1080, 1350)
+/** iOS InvitePicture at 3x (843 × 1200): the page without its buttons, on amethyst with a little margin. */
+private fun inviteCard(context: Context, name: String, code: InviteCode): Bitmap {
+    val scale = 3f
+    val width = 281 * scale
+    val bitmap = androidx.core.graphics.createBitmap(843, 1200)
     val canvas = Canvas(bitmap)
-    val background = Amethyst.toArgb()
-    canvas.drawColor(background)
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = androidx.core.content.res.ResourcesCompat.getFont(context, R.font.montserrat_bold)
-        textAlign = Paint.Align.CENTER
-        color = android.graphics.Color.WHITE
-    }
-    fun drawLine(text: String, size: Float, baseline: Float) {
+    canvas.drawColor(Amethyst.toArgb())
+    val typeface = androidx.core.content.res.ResourcesCompat.getFont(context, R.font.montserrat_bold)
+    val nameSize = inviteNameSize(typeface, name, 281f - 32f, 56f) * scale
+    val wantsSize = inviteWantsSize(nameSize / scale) * scale
+    val side = 200 * scale
+    val padding = invitePadding(200f) * scale
+    val inset = 10 * scale
+    val rowHeight = nameSize * 1.22f + 2 * inset
+    val wantsHeight = wantsSize * 1.22f
+    val total = rowHeight + 10 * scale + wantsHeight + 18 * scale + side + 2 * padding
+    var y = (1200 - total) / 2
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.typeface = typeface; textAlign = Paint.Align.CENTER }
+    fun line(text: String, size: Float, middle: Float, max: Float) {
+        paint.color = android.graphics.Color.WHITE
         paint.textSize = size
-        paint.textSize *= minOf(1f, 936f / paint.measureText(text))
-        canvas.drawText(text, 540f, baseline, paint)
+        paint.textSize *= minOf(1f, max / paint.measureText(text))
+        canvas.drawText(text, width / 2, middle - (paint.ascent() + paint.descent()) / 2, paint)
     }
-    drawLine(context.getString(R.string.code_wants_to_yo, name), 96f, 180f)
-    val module = 900 / matrix.width
-    val left = (1080 - matrix.width * module) / 2
-    val top = (1350 - matrix.height * module) / 2
-    for (y in 0 until matrix.height) for (x in 0 until matrix.width) {
-        if (matrix[x, y]) {
-            val px = (left + x * module).toFloat()
-            val py = (top + y * module).toFloat()
-            canvas.drawRect(px, py, px + module, py + module, paint)
-        }
-    }
-    paint.color = background
-    canvas.drawRect(474f, 609f, 606f, 741f, paint)
+    paint.color = inviteColor(name).toArgb()
+    canvas.drawRect(0f, y, width, y + rowHeight, paint)
+    line(name, nameSize, y + rowHeight / 2, width - 32 * scale)
+    y += rowHeight + 10 * scale
+    line(context.getString(R.string.code_wants), wantsSize, y + wantsHeight / 2, width)
+    y += wantsHeight + 18 * scale
+    val cardWidth = side + 2 * padding
+    val left = (width - cardWidth) / 2
     paint.color = android.graphics.Color.WHITE
-    paint.textSize = 72f
-    canvas.drawText("Yo", 540f, 675f - (paint.ascent() + paint.descent()) / 2, paint)
-    drawLine(link, 120f, 1260f)
+    canvas.drawRect(left, y, left + cardWidth, y + cardWidth, paint)
+    drawInviteQr(canvas, code, left + padding, y + padding, side, typeface)
     return bitmap
 }
 
@@ -1511,7 +1604,7 @@ suspend fun readQr(context: Context,uri: Uri): String? = withContext(Dispatchers
         decoder.allocator=android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
         val ratio=minOf(1.0,2048.0/maxOf(info.size.width,info.size.height));decoder.setTargetSize((info.size.width*ratio).toInt().coerceAtLeast(1),(info.size.height*ratio).toInt().coerceAtLeast(1))
     }
-    try { val pixels=IntArray(bitmap.width*bitmap.height);bitmap.getPixels(pixels,0,bitmap.width,0,0,bitmap.width,bitmap.height);runCatching { MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(RGBLuminanceSource(bitmap.width,bitmap.height,pixels)))).text }.getOrNull() }
+    try { readQr(bitmap) }
     finally { bitmap.recycle() }
 }
 @Composable private fun rememberLicenseChunks(enabled: Boolean): List<String> {
