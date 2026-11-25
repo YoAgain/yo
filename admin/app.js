@@ -1317,7 +1317,8 @@ if (document.body.classList.contains("login")) {
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
   let allSort = { key: "created", dir: -1 };  // newest sign-ups first
   const allValue = (u, key, releases) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? -(releases.get(u.app)?.ageH ?? Infinity)
-    : key === "secured" ? 2 * Number(!!u.secured) + ({ attested: 1, failed: 0 }[u.attest] ?? 0.5)
+    : key === "secured" ? Number(!!u.secured)
+    : key === "attested" ? ({ attested: 2, failed: 1 }[u.attest] ?? 0)
     : key === "push" ? Number(!!u[key]) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
     th.tabIndex = 0;
@@ -1366,13 +1367,17 @@ if (document.body.classList.contains("login")) {
       if (ICONS[platform] && platform !== "lock") app.prepend(icon(platform));
       hint(app, info ? [info.label, appTitle(u.app, u.id), band && `${age} old`, band?.behind && !newest ? `${num(band.behind)} builds behind the newest` : ""].filter(Boolean).join(" · ") : "Unknown build");
       cell(tr, app);
-      // Secured: the lock (a backup), then the shield (attestation, spec 6.11, measured, never enforced): checked green
-      // when attested, grey when failed (the reason in its hover), none when not measured yet.
-      const sec = el("span", "uicons");
-      if (u.secured) sec.append(icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured"));
-      if (u.attest === "attested") sec.append(icon("shield-check", "secured", `attested${u.attest_at ? " " + date(u.attest_at) : ""}`));
-      else if (u.attest === "failed") sec.append(icon("shield", "", `attestation failed${u.attest_reason ? ": " + u.attest_reason : ""}${u.attest_at ? " " + date(u.attest_at) : ""}`));
-      cell(tr, sec.childElementCount ? sec : el("span", "muted", "–"));
+      // The lock (a backup), then the shield (attestation, spec 6.11, measured, never enforced): checked green when
+      // attested, grey when failed (the reason in its hover), none when not measured yet.
+      const iconCell = (ico) => {
+        const holder = el("span", ico ? "uicons" : "muted", ico ? null : "–");
+        if (ico) holder.append(ico);
+        cell(tr, holder);
+      };
+      iconCell(u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : null);
+      const at = u.attest_at ? " " + date(u.attest_at) : "";
+      iconCell(u.attest === "attested" ? icon("shield-check", "secured", `attested${at}`)
+        : u.attest === "failed" ? icon("shield", "", `attestation failed${u.attest_reason ? ": " + u.attest_reason : ""}${at}`) : null);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.queued ? num(u.queued) : "–", "num muted");
       // Signed requests to strangers in 24 h (spec 4.10): a flood by a stranger stands out; contacts' are never counted.
@@ -1380,7 +1385,7 @@ if (document.body.classList.contains("login")) {
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
     }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 8;
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 9;
   };
 
   // ---- reports: handled is kept by the admin page (done.json); ticked in a user's details
