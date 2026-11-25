@@ -53,6 +53,8 @@ pub struct Call {
     pub body: Value,
     /// With the partner's own key.
     pub keyed: bool,
+    /// When who called has given up (Unix, ms).
+    pub until_ms: i64,
 }
 
 pub fn hash(text: &str) -> [u8; 32] {
@@ -202,7 +204,9 @@ fn called(executor: &Executor, partner: &Partner, asked: Asked) -> Answer {
         _ => return refused(400, "Not a JSON object"),
     };
     let Some(id) = random() else { return refused(500, "Failed") };
-    match executor.called(Call { id, method: asked.method, path: asked.path, body, keyed }, user) {
+    match executor
+        .called(Call { id, method: asked.method, path: asked.path, body, keyed, until_ms: asked.until_ms }, user)
+    {
         Ok((status, body)) => Answer::new(status, body),
         // Not to be tried again.
         Err(400) => Answer::new(400, json!({ "errors": [{ "status": "SKIP", "message": "Failed" }] })),

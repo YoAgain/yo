@@ -2,6 +2,7 @@
 //! `/services` list them; it
 //! reads HTTP and hands `/NAME/…` to that service's executor, one JSON line each way over its socket.
 
+use crate::executor::now_ms;
 use crate::list::List;
 use crate::sources::{source, Sources};
 use axum::body::Bytes;
@@ -44,6 +45,8 @@ pub struct Asked {
     pub body: String,
     /// What a form says, or a GET's query.
     pub form: HashMap<String, String>,
+    /// When the answer is waited for no more (Unix, ms).
+    pub until_ms: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,7 +188,8 @@ async fn hand(entrance: &Entrance, places: &Semaphore, name: String, path: Strin
     };
     let Ok(body) = String::from_utf8(body.to_vec()) else { return refused(StatusCode::BAD_REQUEST, "Not text") };
     let headers = headers.iter().filter_map(|(k, v)| Some((k.to_string(), v.to_str().ok()?.to_owned()))).collect();
-    let asked = Asked { method: method.to_string(), path, headers, body, form };
+    let asked =
+        Asked { method: method.to_string(), path, headers, body, form, until_ms: now_ms() + TIME.as_millis() as i64 };
     let socket = entrance.sockets.join(format!("{name}.sock"));
     // Who waits for an answer holds no more than its place here.
     let end = Instant::now() + WAIT;

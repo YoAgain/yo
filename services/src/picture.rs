@@ -2,49 +2,58 @@
 //! its network. The address checked is the address asked: the name is looked up once, here.
 
 use crate::gatekeeper::action::MAX_PICTURE;
-use reqwest::blocking::Client;
-use reqwest::Url;
-use std::io::Read;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::time::{Duration, Instant};
+use reqwest::{Client, Response, Url};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 
 /// The name's lookup, and all that follows.
 const TIME: Duration = Duration::from_secs(10);
 
 /// Or whether trying again may help.
 pub fn fetch(url: &str) -> Result<Vec<u8>, bool> {
+    fetch_within(url, TIME)
+}
+
+/// One deadline, from the name's lookup to the last byte.
+fn fetch_within(url: &str, time: Duration) -> Result<Vec<u8>, bool> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| true)?;
+    let jpeg = runtime.block_on(async { tokio::time::timeout(time, get(url)).await });
+    // A lookup still under way ends by itself.
+    runtime.shutdown_background();
+    jpeg.unwrap_or(Err(true))
+}
+
+async fn get(url: &str) -> Result<Vec<u8>, bool> {
     let url = Url::parse(url).ok().filter(|u| u.scheme() == "https" && u.username().is_empty() && u.port().is_none());
     let url = url.ok_or(false)?;
     // A name, not an address written out: those end in a digit or a bracket.
     let host = url.host_str().filter(|h| h.ends_with(|c: char| c.is_ascii_alphabetic())).ok_or(false)?.to_owned();
-    let end = Instant::now() + TIME;
-    let addresses = within(TIME, host.clone(), |host| (host.as_str(), 443).to_socket_addrs().ok().map(Vec::from_iter));
-    let addresses: Vec<SocketAddr> = addresses.flatten().ok_or(true)?;
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 443)).await.map_err(|_| true)?.collect();
     if addresses.is_empty() || !addresses.iter().all(|a| public(a.ip())) {
         return Err(false);
     }
     let client = Client::builder()
-        .timeout(end.saturating_duration_since(Instant::now()))
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(&host, &addresses)
         .build()
         .map_err(|_| true)?;
-    let answer = client.get(url).send().map_err(|_| true)?;
+    body(client.get(url).send().await.map_err(|_| true)?).await
+}
+
+async fn body(mut answer: Response) -> Result<Vec<u8>, bool> {
     let status = answer.status();
     if !status.is_success() {
         return Err(status.is_server_error() || matches!(status.as_u16(), 408 | 429));
     }
     let mut jpeg = Vec::new();
-    answer.take(MAX_PICTURE as u64 + 1).read_to_end(&mut jpeg).map_err(|_| true)?;
-    (jpeg.len() <= MAX_PICTURE && jpeg.starts_with(b"\xff\xd8\xff")).then_some(jpeg).ok_or(false)
-}
-
-/// A lookup has no time of its own: one too slow ends by itself, unheard.
-fn within<A: Send + 'static, B: Send + 'static>(time: Duration, of: A, ask: fn(A) -> B) -> Option<B> {
-    let (tell, told) = std::sync::mpsc::channel();
-    std::thread::spawn(move || tell.send(ask(of)));
-    told.recv_timeout(time).ok()
+    while let Some(part) = answer.chunk().await.map_err(|_| true)? {
+        jpeg.extend_from_slice(&part);
+        if jpeg.len() > MAX_PICTURE {
+            return Err(false);
+        }
+    }
+    jpeg.starts_with(b"\xff\xd8\xff").then_some(jpeg).ok_or(false)
 }
 
 fn public(ip: IpAddr) -> bool {
@@ -78,11 +87,27 @@ fn public_v4(ip: Ipv4Addr) -> bool {
 mod tests {
     use super::*;
 
+    /// A body that drips on and on ends at the deadline, not at the last byte.
     #[test]
-    fn a_slow_lookup_is_not_waited_for() {
-        assert_eq!(within(Duration::from_secs(5), 1, |n| n + 1), Some(2));
-        let slow = |()| std::thread::sleep(Duration::from_secs(5));
-        assert_eq!(within(Duration::from_millis(10), (), slow), None);
+    fn a_slow_picture_is_not_waited_for() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\n\xff\xd8\xff");
+            while stream.write_all(b"x").is_ok() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let began = std::time::Instant::now();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let done = runtime.block_on(async {
+            let answer = Client::new().get(format!("http://{address}/")).send().await.unwrap();
+            tokio::time::timeout(Duration::from_millis(400), body(answer)).await
+        });
+        assert!(done.is_err() && began.elapsed() < Duration::from_secs(5));
+        assert_eq!(fetch_within("https://example.com/a.jpg", Duration::ZERO), Err(true));
     }
 
     #[test]

@@ -11,16 +11,17 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A reminder whose Yo could not go is tried again after this long.
 const AGAIN: Duration = Duration::from_secs(600);
-/// A decision the book did not take is tried again after this long; so many at once.
-const RETRY: Duration = Duration::from_secs(2);
-const MAX_RETRIES: usize = 16;
-static RETRIES: AtomicUsize = AtomicUsize::new(0);
+/// What a user decided is tried so often to be kept, at once: what comes after it waits.
+const TRIES: usize = 3;
+const PAUSE: Duration = Duration::from_millis(200);
+/// What a call still needs to be answered in time.
+const MARGIN_MS: i64 = 5_000;
 
 pub struct Executor {
     pub header: Header,
@@ -30,7 +31,7 @@ pub struct Executor {
     pub script: Script,
     pub book: Book,
     pub limits: Mutex<Limits>,
-    /// What a user answered a request to connect: apart from their Yos.
+    /// Answers to decisions that changed nothing: apart from Yos.
     pub connects: Mutex<Limits>,
     /// The bot's own pictures.
     pub pictures: PathBuf,
@@ -93,6 +94,10 @@ impl Job {
     }
 }
 
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
@@ -101,24 +106,15 @@ fn count(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Done at once; or, when the book fails, beside the events a few times more.
-fn until_kept(mut keep: impl FnMut() -> rusqlite::Result<()> + Send + 'static) {
-    if keep().is_ok() {
-        return;
-    }
-    if RETRIES.fetch_add(1, Ordering::SeqCst) >= MAX_RETRIES {
-        RETRIES.fetch_sub(1, Ordering::SeqCst);
-        return;
-    }
-    std::thread::spawn(move || {
-        for _ in 0..10 {
-            std::thread::sleep(RETRY);
-            if keep().is_ok() {
-                break;
-            }
+/// As often as it takes, a few times, before anything else.
+fn kept<T>(mut keep: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    for _ in 1..TRIES {
+        if let Ok(done) = keep() {
+            return Ok(done);
         }
-        RETRIES.fetch_sub(1, Ordering::SeqCst);
-    });
+        std::thread::sleep(PAUSE);
+    }
+    keep()
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -166,38 +162,39 @@ impl Executor {
         })
     }
 
-    /// A user allowed a request to connect, or they are told it is refused.
+    /// A user allowed a request to connect, or they are told it is refused. In order with what they decide next: what
+    /// failed is not done later.
     pub fn connect(self: &Arc<Self>, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
-        if self.partner.is_none() || !locked(&self.connects).take(user, None, Instant::now()) {
-            count(&self.counts.limited);
-            return self.tell(user, "refused", code);
+        let taken = self.partner.is_some() && self.keep(|| self.book.allow(user, code, now())).unwrap_or(false);
+        if !taken {
+            self.tell_nothing(user, "refused", code);
         }
-        let (executor, user, code) = (self.clone(), user.to_owned(), code.to_owned());
-        until_kept(move || {
-            if !executor.book.allow(&user, &code, now())? {
-                executor.tell(&user, "refused", &code);
-            }
-            Ok(())
-        });
     }
 
-    /// A user declined a request to connect: whoever waits is told.
-    pub fn decline(self: &Arc<Self>, event: &Value) {
-        let Some((user, code)) = self.connecting(event) else { return };
-        if self.partner.is_none() || !locked(&self.connects).take(user, None, Instant::now()) {
-            return count(&self.counts.limited);
+    /// A user declined a request to connect: whoever waits is told. Of any other code nothing comes.
+    pub fn decline(&self, event: &Value) {
+        let Some((_, code)) = self.connecting(event) else { return };
+        if self.partner.is_some() {
+            let _ = self.keep(|| self.book.decline(code, now()));
         }
-        let (executor, code) = (self.clone(), code.to_owned());
-        until_kept(move || executor.book.decline(&code, now()));
     }
 
-    /// A user ends their connection: forgotten, whatever the limits say, and told so.
+    /// A user ends their connection: forgotten, with what they allowed before, whatever the limits say, and told so.
     pub fn disconnect(self: &Arc<Self>, event: &Value) {
         let Some((user, code)) = self.connecting(event) else { return };
-        if self.book.disconnect(user).is_ok() {
-            self.tell(user, "ended", code);
+        match self.keep(|| self.book.disconnect(user)) {
+            Ok(true) => self.tell(user, "ended", code),
+            Ok(false) => self.tell_nothing(user, "ended", code),
+            Err(_) => {}
         }
+    }
+
+    fn keep<T>(&self, keep: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+        kept(keep).inspect_err(|e| {
+            count(&self.counts.failed);
+            eprintln!("a decision is not kept: {e}");
+        })
     }
 
     fn connecting<'a>(&self, event: &'a Value) -> Option<(&'a str, &'a str)> {
@@ -205,12 +202,17 @@ impl Executor {
         Some((user, event["code"].as_str()?))
     }
 
-    /// Answers a connection, beside the events: the account must not wait for itself. Within the limits.
-    pub fn tell(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
-        if !locked(&self.limits).send(Instant::now()) {
-            count(&self.counts.limited);
-            return;
+    /// Answers what changed nothing: a flood of that is answered a little.
+    fn tell_nothing(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
+        if locked(&self.connects).take(user, None, Instant::now()) {
+            return self.tell(user, kind, code);
         }
+        count(&self.counts.limited);
+    }
+
+    /// Answers a connection, beside the events: the account must not wait for itself. Whatever the limits say: one answer
+    /// for a connection made or ended.
+    pub fn tell(self: &Arc<Self>, user: &str, kind: &'static str, code: &str) {
         let (executor, user, code) = (self.clone(), user.to_owned(), code.to_owned());
         std::thread::spawn(move || {
             if executor.yo.answer(&user, kind, &code).is_err() {
@@ -404,7 +406,21 @@ impl Executor {
         job.reminder.is_some_and(|id| !self.book.waits(id).unwrap_or(false))
     }
 
+    /// Whether who called has given up, or is about to: it will try again, and one Yo is enough.
+    fn late(job: &Job) -> bool {
+        job.call.as_ref().is_some_and(|call| now_ms() + MARGIN_MS > call.until_ms)
+    }
+
     fn send(&self, job: &Job, action: &Action) -> Result<(), Failure> {
+        let fetched = match action {
+            Action::Fetched(url) => {
+                Some(crate::picture::fetch(url).map_err(|retryable| Failure { code: 1, retryable })?)
+            }
+            _ => None,
+        };
+        if Executor::late(job) {
+            return Err(Failure { code: 1, retryable: true });
+        }
         if !locked(&self.limits).send(Instant::now()) {
             count(&self.counts.limited);
             return Err(Failure { code: 1, retryable: true });
@@ -414,10 +430,7 @@ impl Executor {
             Action::Back => self.yo.send_media(&job.to, media()?)?,
             Action::Drawn(jpeg) => self.send_picture(&job.to, jpeg)?,
             Action::File(name) => self.send_picture(&job.to, &self.own_picture(name)?)?,
-            Action::Fetched(url) => {
-                let jpeg = crate::picture::fetch(url).map_err(|retryable| Failure { code: 1, retryable })?;
-                self.send_picture(&job.to, &jpeg)?;
-            }
+            Action::Fetched(_) => self.send_picture(&job.to, &fetched.unwrap_or_default())?,
             Action::Probe => return self.yo.echo_probe(&job.to, media()?),
             _ => self.yo.send(&job.to)?,
         }
@@ -482,17 +495,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_decision_the_book_did_not_take_is_tried_again() {
-        let (told, kept) = std::sync::mpsc::channel();
+    fn a_decision_is_kept_at_once_or_not_at_all() {
         let mut failures = 1;
-        until_kept(move || {
-            if failures > 0 {
-                failures -= 1;
-                return Err(rusqlite::Error::InvalidQuery);
+        let tried = kept(|| {
+            failures -= 1;
+            if failures < 0 {
+                Ok(1)
+            } else {
+                Err(rusqlite::Error::InvalidQuery)
             }
-            told.send(()).unwrap();
-            Ok(())
         });
-        assert!(kept.recv_timeout(RETRY * 5).is_ok());
+        assert_eq!(tried, Ok(1));
+        let mut tries = 0;
+        let failed: rusqlite::Result<()> = kept(|| {
+            tries += 1;
+            Err(rusqlite::Error::InvalidQuery)
+        });
+        assert!(failed.is_err() && tries == TRIES);
+    }
+
+    #[test]
+    fn nothing_is_sent_for_who_gave_up() {
+        let job = |until_ms| {
+            let call = Call {
+                id: "i".into(),
+                method: "POST".into(),
+                path: "p".into(),
+                body: json!({}),
+                keyed: false,
+                until_ms,
+            };
+            let mut job = Job::reminder(Reminder { id: 1, user: "u".into() }, 1);
+            job.call = Some(call);
+            job
+        };
+        assert!(Executor::late(&job(now_ms())) && !Executor::late(&job(now_ms() + 2 * MARGIN_MS)));
+        assert!(!Executor::late(&Job::reminder(Reminder { id: 1, user: "u".into() }, 1)));
     }
 }

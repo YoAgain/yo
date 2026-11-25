@@ -263,18 +263,20 @@ impl Book {
     }
 
     /// `user` is connected no more, and nothing is kept of theirs but a reminder.
-    pub fn disconnect(&self, user: &str) -> rusqlite::Result<()> {
+    /// Whether they were, or had allowed it.
+    pub fn disconnect(&self, user: &str) -> rusqlite::Result<bool> {
         let mut db = self.db();
         let tx = db.transaction()?;
         let who = params![self.bot, user];
-        tx.execute("DELETE FROM services_secrets WHERE bot = ?1 AND user = ?2", who)?;
-        tx.execute("DELETE FROM services_requests WHERE bot = ?1 AND user = ?2", who)?;
+        let was = tx.execute("DELETE FROM services_secrets WHERE bot = ?1 AND user = ?2", who)?;
+        let allowed = tx.execute("DELETE FROM services_requests WHERE bot = ?1 AND user = ?2", who)?;
         tx.execute(
             "UPDATE services_yos SET kind = NULL, user = iif(cron_due IS NULL, NULL, user)
              WHERE bot = ?1 AND user = ?2 AND kind IS NOT NULL",
             who,
         )?;
-        tx.commit()
+        tx.commit()?;
+        Ok(was + allowed > 0)
     }
 
     /// The code of a request becomes its user's key, once: the user, and the code the app sent. What the other side
@@ -525,8 +527,29 @@ mod tests {
         request("n", "r", 300);
         book.allow("b", "n", 301).unwrap();
         let third = code("r", 302);
-        book.disconnect("b").unwrap();
+        assert!(book.disconnect("b").unwrap() && !book.disconnect("b").unwrap());
         assert_eq!(book.exchange(&third, &[5; 32], 303).unwrap(), None, "ended");
+        // An approval that failed, and a disconnect: nothing of it comes later.
+        request("late", "late", 350);
+        {
+            let db = book.db();
+            db.execute_batch(
+                "CREATE TEMP TRIGGER full BEFORE UPDATE ON services_requests BEGIN SELECT RAISE(ABORT, 'full'); END",
+            )
+            .unwrap();
+        }
+        assert!(book.allow("a", "late", 351).is_err());
+        assert!(book.disconnect("a").unwrap());
+        book.db().execute_batch("DROP TRIGGER full").unwrap();
+        assert_eq!(book.asked("late", 352).unwrap(), Request::Waits);
+        assert_eq!(book.out("a").unwrap(), None);
+        request("more", "more", 353);
+        book.allow("a", "more", 354).unwrap();
+        book.disconnect("a").unwrap();
+        assert!(book.asked("more", 355).unwrap() == Request::Over && !book.allow("a", "more", 355).unwrap());
+        request("again", "again", 356);
+        book.allow("a", "again", 357).unwrap();
+        book.exchange(&code("again", 358), &[6; 32], 359).unwrap().unwrap();
         request("u", "v", 400);
         book.decline("u", 401).unwrap();
         assert_eq!(book.asked("v", 402).unwrap(), Request::Declined("s".into()));
