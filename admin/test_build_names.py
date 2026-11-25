@@ -60,18 +60,19 @@ class BuildNameTests(unittest.TestCase):
               "console.log(JSON.stringify([g.map((x) => [x.name, x.apps.length, x.color]),"
               " foldRows(rows, 8).map((x) => [x.name, x.n]), foldRows(rows, 20).length]))")
         out, folded, unfolded = json.loads(subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout)
-        self.assertEqual([n for n, _, _ in out], ["Dev builds"] + [f"1.0.0-RC{d}" for d in range(17, 9, -1)]
+        # A build of main counts with the release it builds on ("+"), none is a band of its own.
+        self.assertEqual([n for n, _, _ in out], ["1.0.0-RC17 +", "1.0.0-RC16 +"] + [f"1.0.0-RC{d}" for d in range(15, 9, -1)]
                          + ["Unknown", "Below minimum"])
-        self.assertEqual(out[0][1], 2)  # the builds of main, one band
-        self.assertEqual(out[1][1], 2)  # iOS and Android together
+        self.assertEqual(out[0][1], 3)  # RC17 on iOS and Android, and the build of main after it
+        self.assertEqual(out[1][1], 2)  # RC16 and the build of main after it
         hue = [int(re.search(r"hsl\((\d+)", c).group(1)) for _, _, c in out if c.startswith("hsl")]
         self.assertEqual(hue[0], 135); self.assertEqual(hue[-1], 4)
-        self.assertTrue(all(a > b for a, b in zip(hue[:9], hue[1:9])), hue)  # each band its own shade
+        self.assertTrue(all(a > b for a, b in zip(hue[:8], hue[1:8])), hue)  # each band its own shade
         # The hover: past 8 rows the oldest fold into "Older"; "Below minimum" stays last.
-        self.assertEqual([n for n, _ in folded], ["Dev builds"] + [f"1.0.0-RC{d}" for d in range(17, 11, -1)]
+        self.assertEqual([n for n, _ in folded], ["1.0.0-RC17 +", "1.0.0-RC16 +"] + [f"1.0.0-RC{d}" for d in range(15, 10, -1)]
                          + ["Older", "Below minimum"])
-        self.assertEqual(folded[-2][1], 1 + 1 + 1)  # RC11, RC10 and Unknown
-        self.assertEqual(unfolded, 11)
+        self.assertEqual(folded[-2][1], 1 + 1)  # RC10 and Unknown
+        self.assertEqual(unfolded, 10)
 
 if __name__ == "__main__":
     unittest.main()

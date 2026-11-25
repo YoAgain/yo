@@ -2225,19 +2225,29 @@ if (document.body.classList.contains("login")) {
   };
   // @release-groups
   // The App card's bands, newest first, the same in the chart and its hover: one per release (its version; in All iOS
-  // and Android together); the builds of main as one "Dev builds" at the newest one's place; builds without a date
-  // "Unknown"; then "Below minimum" (YO_MIN_APP: refused, must update), always last. Each band its own shade: the
-  // builds the hub takes go green (newest) to yellow (oldest), below the minimum red.
+  // and Android together); a build of main counts with the last release of its platform before it ("RC38 +": what
+  // it builds on), only one before any release as "Dev builds"; builds without a date "Unknown"; then "Below minimum"
+  // (YO_MIN_APP: refused, must update), always last. Each band its own shade: the builds the hub takes go green
+  // (newest) to yellow (oldest), below the minimum red.
   const releaseGroups = (apps, versionOf, below) => {
     const stamp = (app) => (app || "").split("/").pop(), dated = (app) => /^\d{12}$/.test(stamp(app));
     const groups = [], byVersion = new Map(), add = (name, kind) => { const g = { name, kind, apps: [] }; groups.push(g); return g; };
     let dev = null, unknown = null;
     const low = { name: "Below minimum", kind: "below", apps: [] };
     const sorted = apps.filter(dated).sort((a, b) => stamp(b).localeCompare(stamp(a)) || a.localeCompare(b));
+    const platform = (app) => app.split("/")[0];
+    // The release a build of main builds on: the newest released build of its platform at or before it.
+    const released = sorted.filter(a => !below(a) && versionOf(a));
+    const base = (app) => released.find(r => platform(r) === platform(app) && stamp(r) <= stamp(app));
     for (const app of sorted) {
-      const v = versionOf(app);
+      const v = versionOf(app) || (!below(app) && base(app) && versionOf(base(app)));
       if (below(app)) low.apps.push(app);
-      else if (v) { if (!byVersion.has(v)) byVersion.set(v, add(v, "release")); byVersion.get(v).apps.push(app); }
+      else if (v) {
+        if (!byVersion.has(v)) byVersion.set(v, add(v, "release"));
+        const g = byVersion.get(v);
+        g.apps.push(app);
+        if (!versionOf(app) && !g.name.endsWith(" +")) g.name = `${v} +`;
+      }
       else (dev ||= add("Dev builds", "dev")).apps.push(app);
     }
     for (const app of apps.filter(a => !dated(a)).sort()) (unknown ||= add("Unknown", "unknown")).apps.push(app);
