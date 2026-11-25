@@ -5,6 +5,6 @@ import WatchKit
   @WKApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
   var body: some Scene {
-    WindowGroup { FriendList(link: .shared) }
+    WindowGroup { FriendList(link: .shared).tint(.amethyst) }
   }
 }

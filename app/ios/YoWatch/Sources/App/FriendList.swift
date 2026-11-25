@@ -53,11 +53,8 @@ struct FriendList: View {
             .allowsHitTesting(false)
         }
       }
-      .toolbar {
-        ToolbarItem(placement: .topBarLeading) {
-          Text("Yo").font(.yo(18)).foregroundStyle(Color.amethyst)
-        }
-      }
+      // The system's title: on the clock's line, in the app's tint (amethyst).
+      .navigationTitle("Yo")
     }
     .onOpenURL { url in
       guard url.scheme == "yo", url.host == "back" else { return }
