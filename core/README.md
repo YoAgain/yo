@@ -203,7 +203,7 @@ not a copy.
 | What | Sent | Content | Stored at the hub? |
 |---|---|---|---|
 | Connection warm-up | iOS: `HEAD /` on the anonymous pool every 20 s while the app is in the foreground | nothing but `Yo-App` | no |
-| Round trip probe | iOS: a tap on the Account title, and every ~1 s while Status is open; Android: a tap on Status | a sealed Yo to the `PINGTEST` bot, which echoes it | as any Yo: counted in `events` (`yo-in-bot`, `yo-out`, latency) |
+| Round trip probe | iOS: a tap on the Account title, and every ~1 s while Status is open; Android: a tap on Status | a sealed Yo to the `PING` bot, which echoes it | as any Yo: counted in `events` (`yo-in-bot`, `yo-out`, latency) |
 | Hub key | iOS Status: `GET /.well-known/yo-hub-key` | none | no |
 | MetricKit | iOS subscribes for **crash diagnostics only**; metric payloads (launch time, hangs, battery) are not read or sent | | |
 | Hitch monitor | `YO_DEV` builds only; a local file of the last 100 frame hitches, shown in Status | never sent | no |

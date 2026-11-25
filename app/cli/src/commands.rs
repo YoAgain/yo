@@ -86,7 +86,7 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
                 ["--timeout-ms", ms] => ms.parse().map_err(|_| Failure::usage("--timeout-ms: a number"))?,
                 _ => return Err(Failure::usage("probe [--timeout-ms N]")),
             };
-            let ms = context.client().round_trip_probe("PINGTEST", timeout_ms)?;
+            let ms = context.client().round_trip_probe("PING", timeout_ms)?;
             Ok(json!({ "ms": ms }))
         }
         _ => Err(Failure::usage(crate::HELP)),

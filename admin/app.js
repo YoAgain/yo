@@ -1449,8 +1449,9 @@ if (document.body.classList.contains("login")) {
     ["v-errors", "Problems", "warn", "App problems grouped by cause, open first, with Done and Reopen"],
     ["v-reports", "Reports", "flag", "Reported users: how many reports, from how many installs, why; the raw table is under Database"],
     ["v-todos", "To-dos", "check", "The team's to-dos: add, tick, delete"],
+    ["v-services", "Services", "yogpt", "The bots: their traffic, and who they will Yo later (services/)"],
   ];
-  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-todos": "todos" };
+  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-todos": "todos", "v-services": "services_yos" };
   // What each table is for, from the hub's schema (hub/src/db.rs); "(?)" marks a guess.
   const TABLE_INFO = {
     users: "Accounts: id, account key, sign-up time",
@@ -1478,6 +1479,7 @@ if (document.body.classList.contains("login")) {
     settings: "Hub switches, such as name reservation on/off",
     deliveries_hourly: "Deliveries per hour, a count only, 8 days",
     request_hours: "Signed requests (to strangers) per sender and hour, kept 25 hours",
+    services_yos: "The services' own database: a row per Yo of a bot, its time and its reminder",
     _litestream_lock: "Litestream replication bookkeeping (?)",
     _litestream_seq: "Litestream replication bookkeeping (?)",
   };
@@ -1697,13 +1699,40 @@ if (document.body.classList.contains("login")) {
   $("tables").addEventListener("scroll", ({ target }) => {
     if (target.matches(".scroll")) target.classList.toggle("scrolled-x", target.scrollLeft > 0);
   }, { capture: true, passive: true });
+  // The Services view: a row per bot, then its reminders; who they are for only after a click.
+  let whoShown = false;
+  const serviceList = (data) => {
+    const wrap = el("div", "services"), s = data?.services;
+    if (!s) { wrap.append(el("p", "muted", "No book of the services here.")); return wrap; }
+    const grid = (name, heads, rows) => {
+      const scroll = el("div", "scroll grid"), table = el("table", "list data"), head = table.createTHead().insertRow();
+      table.dataset.name = name;
+      for (const h of heads) head.append(el("th", null, h));
+      const body = table.createTBody();
+      for (const row of rows) { const tr = body.insertRow(); for (const v of row) cell(tr, v == null ? "–" : String(v), "mono"); }
+      scroll.append(table);
+      return scroll;
+    };
+    const when = (t) => t == null ? null : date(t * 1000);
+    wrap.append(grid("services", ["bot", "received 24 h", "sent 24 h", "received", "sent", "last", "waiting", "next", "done", "missed"],
+      s.bots.map((b) => [b.bot, num(b.received_day), num(b.sent_day), num(b.received), num(b.sent), when(b.last), num(b.waiting), when(b.next), num(b.done), num(b.missed)])));
+    const bar = el("div", "reserved-bar"), show = el("button", "pill", whoShown ? "Hide users" : "Show users");
+    show.type = "button";
+    show.addEventListener("click", () => { whoShown = !whoShown; tablesDrawn = ""; drawTables(); });
+    bar.append(el("span", "state", `Showing ${num(s.reminders.length)} reminders`), show);
+    const names = new Map((data.users || []).map((u) => [u.id, u.name]));
+    wrap.append(bar, grid("reminders", ["bot", ...(whoShown ? ["user"] : []), "since", "due", "done"],
+      s.reminders.map((m) => [m.bot, ...(whoShown ? [m.user == null ? "–" : names.get(m.user) || m.user.slice(0, 6)] : []), when(m.at), when(m.due), m.done ? when(m.done) : m.due < Date.now() / 1000 - 86400 ? "missed" : "waiting"])));
+    return wrap;
+  };
   const drawTables = () => {
-    const box = $("tables"), list = last?.[which]?.tables || [];
+    const book = last?.[which]?.services?.table;
+    const box = $("tables"), list = [...(last?.[which]?.tables || []), ...(book ? [book] : [])];
     const openGroups = openProblemGroups(last?.[which]), openCauses = causeCount(openGroups);
     const stillCauses = causeCount(stillProblemGroups(last?.[which]).filter(d => !openGroups.some(o => diagCause(o) === diagCause(d))));
     const openSupport = openSupportCount(last?.[which]), openReports = openReportCount(last?.[which]);
     const occurrences = openGroups.reduce((n, d) => n + (d.count || 0), 0);
-    const drawn = JSON.stringify([which, tableOpen, openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
+    const drawn = JSON.stringify([which, tableOpen, tableOpen === "v-services" && [whoShown, last?.[which]?.services], openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
       (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
@@ -1721,6 +1750,7 @@ if (document.body.classList.contains("login")) {
     const viewCount = (key) => key === "v-support" ? openSupport
       : key === "v-reports" ? openReports
       : key === "v-errors" ? (stillCauses ? `${num(openCauses)} · ${num(stillCauses)} still` : openCauses)
+      : key === "v-services" ? (last?.[which]?.services?.bots.length || 0)
       : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
       const b = el("button", `main view${tableOpen === key ? " on" : ""}`), name = el("span", null, label);
@@ -1735,16 +1765,24 @@ if (document.body.classList.contains("login")) {
       b.addEventListener("click", () => { unpin(); tableOpen = key; drawTables(); });
       side.append(b);
     }
-    side.append(el("div", "tside-h", "Database"));
-    for (const [kind, , ts] of tableGroups(list)) {
-      side.append(el("div", "tside-k", kind));
-      for (const t of ts) {
+    // The hub's database, then the services' own (another SQLite).
+    const rawTables = (tables) => {
+      for (const t of tables) {
         const b = el("button", `sub raw${t.name === tableOpen ? " on" : ""}`);
         b.type = "button"; b.title = TABLE_INFO[t.name] || t.name;
         b.append(el("span", null, t.name), el("small", null, num(t.count)));
         b.addEventListener("click", () => { tableOpen = t.name; drawTables(); });
         side.append(b);
       }
+    };
+    side.append(el("div", "tside-h", "Database"));
+    for (const [kind, , ts] of tableGroups(list.filter((t) => t !== book))) {
+      side.append(el("div", "tside-k", kind));
+      rawTables(ts);
+    }
+    if (book) {
+      side.append(el("div", "tside-h", "Database Services"));
+      rawTables([book]);
     }
     // On a phone the list is a row of chips: the chosen one scrolled into view.
     requestAnimationFrame(() => { const on = side.querySelector(".on"); if (on && side.scrollWidth > side.clientWidth) side.scrollLeft = on.offsetLeft - side.offsetLeft - 12; });
@@ -1767,6 +1805,7 @@ if (document.body.classList.contains("login")) {
       if (tableOpen === "v-todos") pane.append(todoBar());
       if (tableOpen === "v-errors") pane.append(diagnosticList(last?.[which]?.diagnostics || [], box));
       else if (tableOpen === "v-reports") pane.append(reportList(last?.[which], box));
+      else if (tableOpen === "v-services") pane.append(serviceList(last?.[which]));
       else if (view === "list") {
       const wrap = el("div", "scroll grid"), table = el("table", "list data");
       table.dataset.name = t.name;
@@ -1815,7 +1854,8 @@ if (document.body.classList.contains("login")) {
             cell(tr, note);
             return;
           }
-          if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
+          if (t.name === "services_yos" && /^(at|cron_due|cron_done)$/.test(t.columns[i]) && v) cell(tr, date(v * 1000), "mono", String(v));
+          else if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
           // A random install id (support, reports, diagnostic_installs): its first 6 hex, the full one on hover.
           else if (INSTALL_COL.test(t.columns[i]) && typeof v === "string" && /^[0-9a-f]{32}$/i.test(v)) cell(tr, installShort(v), "mono", v);
           else if (v != null && PII_COL.test(t.columns[i])) cell(tr, pii(String(v)), "mono", String(v).length > 40 ? String(v) : "");
@@ -2110,7 +2150,7 @@ if (document.body.classList.contains("login")) {
   // the support chat, Errors to diagnostics, Reports to reports, Sign-ups (and the Users card's title) to the users
   // table. Services is one row in Server, opened in place (on its own while something is down); the Status bot row
   // there shows its frequency select. Keys: 1 top, 2 chat, 3 diagnostics, 4 users, 5 database, 0 the hub.
-  const showTable = (name) => { tableOpen = { users: "people", support_messages: "v-support", diagnostics: "v-errors", reports: "v-reports", todos: "v-todos" }[name] || name; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const showTable = (name) => { tableOpen = { users: "people", support_messages: "v-support", diagnostics: "v-errors", reports: "v-reports", todos: "v-todos", services_yos: "v-services" }[name] || name; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
   // The support chat shown, scrolled to only when it is out of sight (a click inside it never moves the page).
   const toInbox = () => {
     if (tableOpen !== "v-support") { tableOpen = "v-support"; tablesDrawn = ""; part(drawTables); }
@@ -3053,7 +3093,7 @@ if (document.body.classList.contains("login")) {
     n.addEventListener("keydown", (e) => { if (e.target === n && n.tagName !== "BUTTON" && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(n.dataset.card); } });
   }
   // Links, old ones too: #support/#feedback at the chat, #crashes/#diagnostics at diagnostics, #reserved, #users.
-  const TABLES = { users: "users", todos: "todos", inbox: "support_messages", support: "support_messages", feedback: "support_messages", crashes: "diagnostics", diagnostics: "diagnostics", reports: "reports", db: null, reserved: "reserved" };
+  const TABLES = { book: "services_yos", users: "users", todos: "todos", inbox: "support_messages", support: "support_messages", feedback: "support_messages", crashes: "diagnostics", diagnostics: "diagnostics", reports: "reports", db: null, reserved: "reserved" };
   const landing = () => {
     const h = location.hash.slice(1), d = h.startsWith("detail-") && Object.keys(SLUG).find((k) => SLUG[k] === h.slice(7));
     if (d) openDetail(d); else if (h in TABLES) showTable(TABLES[h] || tableOpen);

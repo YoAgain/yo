@@ -1146,7 +1146,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val unread = try { (supportThread()?.unread ?: 0u) > 0u } catch (e: CancellationException) { throw e } catch (_: Exception) { return@launch }
         if (revision == supportRevision.get()) mutable.update { it.copy(supportUnread = unread) }
     }
-    suspend fun roundTrip() = client?.roundTripProbe("PINGTEST", 10000u)
+    suspend fun roundTrip() = client?.roundTripProbe("PING", 10000u)
     val crashes = CrashReports(context, transport)
 
     suspend fun settings(left: Boolean = state.value.leftHanded, requests: Boolean = state.value.requestsOpen) {

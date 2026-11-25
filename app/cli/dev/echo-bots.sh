@@ -4,7 +4,7 @@
 #
 # Echo bots answer OWNER's Yos after a fixed delay:
 #   ECHO1S   a Yo back after 1 s          ECHOBURST  3 Yos, 0.5 s apart
-#   ECHO3S   a Yo back after 3 s          ECHOPIC    a photo (skills/yogpt/replies/001.jpg)
+#   ECHO3S   a Yo back after 3 s          ECHOPIC    a photo (yo-services: yo/yogpt/assets/001.jpg)
 #   ECHO10S  a Yo back after 10 s
 # People bots (first names, some 15-16 characters long) answer OWNER's direct Yos after 1-5 s and OWNER's Yos in
 # their groups after 0.5-8 s, sometimes 2 or 3 times. Every 3-6 minutes a random member Yos into a random group on
@@ -36,7 +36,7 @@ GROUP_SPECS=(
   "#LANGENAMEN:MAXIMILIAN_MUELL,ALEXANDRAWINTERS,KONSTANTIN_BERG,CHRISTOPHERJONES"
 )
 HUB=https://dev.justyo.app
-PHOTO=$REPO/skills/yogpt/replies/001.jpg
+PHOTO=$REPO/../yo-services/yo/yogpt/assets/001.jpg
 
 mkdir -p -m 700 "$DIR" "$DIR/bin"
 

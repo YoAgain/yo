@@ -9,6 +9,7 @@ account is secured (a backup record), how many messages wait for it and how many
 spec 4.10) it sent in the last 24 hours. No IP addresses: the hub never stores them.
 """
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -23,6 +24,9 @@ HUBS = {"live": os.environ.get("YO_HUB_DB", "./hub.sqlite"),
         "dev": os.environ.get("YO_HUB_DEV_DB", "./hub-dev.sqlite")}
 OUT = os.environ.get("ADMIN_USERS_FILE", "./users.json")
 YOGPT = os.environ.get("YOGPT_STATS_PATTERN", "./yogpt/{}/stats.json")  # how many people YoGPT knows, written by YoGPT once a minute
+# The services' book (services/src/book.rs): a database of its own, no part of the hub's.
+SERVICES = {"live": os.environ.get("YO_SERVICES_DB", "./services.sqlite"),
+            "dev": os.environ.get("YO_SERVICES_DEV_DB", "./services-dev.sqlite")}
 DAY_MS = 86400 * 1000
 WEEK_MS = 7 * DAY_MS
 ENVS = {"live": os.environ.get("YO_HUB_ENV_FILE", "./hub.env"),
@@ -82,6 +86,33 @@ def tables(db) -> list:
                     "rows": [[cell_value(v) for v in row] for row in cur],
                     "count": db.execute(f"SELECT count(*) FROM {q}").fetchone()[0]})
     return out
+
+
+def services(name: str, now: int):
+    """What the book has: per bot its traffic and reminders, and the reminders themselves (who, when: the
+    page shows who after a click). None without a book."""
+    if not os.path.exists(SERVICES[name]):
+        return None
+    at = now // 1000
+    with contextlib.closing(sqlite3.connect(f"file:{SERVICES[name]}?mode=ro", uri=True, timeout=5)) as db:
+        bots = db.execute("""
+            SELECT bot, sum(way = 'received' AND at > ?1 - 86400), sum(way = 'sent' AND at > ?1 - 86400),
+                   sum(way = 'received'), sum(way = 'sent'), max(at),
+                   sum(coalesce(cron_done IS NULL AND cron_due > ?1 - 86400, 0)),
+                   min(CASE WHEN cron_done IS NULL AND cron_due > ?1 - 86400 THEN cron_due END),
+                   sum(cron_done IS NOT NULL), sum(coalesce(cron_done IS NULL AND cron_due <= ?1 - 86400, 0))
+            FROM services_yos GROUP BY bot ORDER BY bot""", (at,)).fetchall()
+        reminders = db.execute("""
+            SELECT bot, user, at, cron_due, cron_done FROM services_yos WHERE cron_due IS NOT NULL
+            ORDER BY cron_done IS NOT NULL, coalesce(-cron_done, cron_due) LIMIT ?""", (LIMIT,)).fetchall()
+        rows = db.execute("SELECT id, bot, way, at, cron_due, cron_done FROM services_yos ORDER BY id DESC LIMIT ?",
+                          (TABLE_ROWS,)).fetchall()
+        count = db.execute("SELECT count(*) FROM services_yos").fetchone()[0]
+    keys = ("bot", "received_day", "sent_day", "received", "sent", "last", "waiting", "next", "done", "missed")
+    return {"bots": [dict(zip(keys, row)) for row in bots],
+            "reminders": [dict(zip(("bot", "user", "at", "due", "done"), row)) for row in reminders],
+            "table": {"name": "services_yos", "columns": ["id", "bot", "way", "at", "cron_due", "cron_done"],
+                      "rows": rows, "count": count}}
 
 
 def yogpt_contacts(name: str):
@@ -619,6 +650,7 @@ def hub(name: str, path: str) -> dict:
                     "SELECT lower(hex(install)), text, from_team, max(id) FROM support_messages GROUP BY install LIMIT ?", (LIMIT,))}
                 if has_table(db, "support_messages") else {}, {}),
             "tables": part("tables", lambda: tables(db), []),
+            "services": part("services", lambda: services(name, now)),
             "total": part("total", lambda: one("SELECT count(*) FROM users")),
             "secured": part("secured", lambda: one("SELECT count(*) FROM backups")),
             "devices": part("devices", lambda: one("SELECT count(*) FROM devices")),

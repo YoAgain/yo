@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core/wire", "core/client", "core/bindings", "core/product", "hub", "tests", "app/cli"]
+members = ["core/wire", "core/client", "core/bindings", "core/product", "hub", "tests", "app/cli", "services"]
 # Fuzz targets build with nightly and cargo-fuzz: dev/fuzz.
 exclude = ["fuzz"]
 
@@ -22,6 +22,7 @@ base64 = "=0.23.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 thiserror = "=2.0.21"
+toml = "=1.2.3"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
 axum = "=0.8.9"
 # fallible_uint: u64 columns (times, counts), behind a feature since rusqlite 0.35.

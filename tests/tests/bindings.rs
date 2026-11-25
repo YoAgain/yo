@@ -1214,9 +1214,9 @@ fn roundtrip_binding_serializes_runs_and_leaves_no_contact_or_app_event() {
     let a = client(&hub, "PROBER", "", Disk::new());
     a.set_trust_roots(vec![yo_tests::trust_root().to_vec()]).unwrap();
     a.set_requests_open(false).unwrap();
-    let mut ping = yo_tests::register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = yo_tests::register(Http::new(hub.url()), "PING", None);
     let probing = a.clone();
-    let worker = std::thread::spawn(move || probing.round_trip_probe("PINGTEST".into(), 3000));
+    let worker = std::thread::spawn(move || probing.round_trip_probe("PING".into(), 3000));
     let began = Instant::now();
     let (user, token) = loop {
         ping.sync(0).unwrap();
@@ -1226,7 +1226,7 @@ fn roundtrip_binding_serializes_runs_and_leaves_no_contact_or_app_event() {
         assert!(began.elapsed() < Duration::from_secs(3));
         std::thread::sleep(Duration::from_millis(5));
     };
-    assert!(matches!(a.round_trip_probe("PINGTEST".into(), 3000), Err(yo::YoError::State)));
+    assert!(matches!(a.round_trip_probe("PING".into(), 3000), Err(yo::YoError::State)));
     ping.echo_probe(&user, token).unwrap();
     assert!(worker.join().unwrap().unwrap().is_some());
     assert!(a.contacts().is_empty());

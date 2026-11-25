@@ -12,7 +12,7 @@ fn storage(client: &Client) -> String {
 fn silent_probe_measures_a_real_yo_and_preserves_other_events_and_storage() {
     let hub = TestHub::start();
     let mut alice = register(Http::new(hub.url()), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     let mut bob = register(Http::new(hub.url()), "BOB", None);
     alice.maintenance().unwrap();
     let alice_id = alice.user_id().to_owned();
@@ -25,7 +25,7 @@ fn silent_probe_measures_a_real_yo_and_preserves_other_events_and_storage() {
         }
         std::thread::sleep(Duration::from_millis(5));
     });
-    let ms = alice.round_trip_probe("PINGTEST", 3000).unwrap().expect("echo");
+    let ms = alice.round_trip_probe("PING", 3000).unwrap().expect("echo");
     assert!(ms < 3000);
     responder.join().unwrap();
     let events = alice.sync(0).unwrap();
@@ -33,7 +33,7 @@ fn silent_probe_measures_a_real_yo_and_preserves_other_events_and_storage() {
         events.iter().any(|e| matches!(e, Event::Message { content: Content::Yo, .. })),
         "ordinary Yo must survive"
     );
-    assert!(alice.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PINGTEST")));
+    assert!(alice.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PING")));
     assert!(alice.friends().is_empty());
     // Bob's ordinary Yo legitimately stores his key. The service never does.
     let state = alice.saved().state;
@@ -53,10 +53,10 @@ fn silent_probe_measures_a_real_yo_and_preserves_other_events_and_storage() {
 fn timed_out_and_unsolicited_answers_stay_silent_after_restore() {
     let hub = TestHub::start();
     let mut alice = register(Http::new(hub.url()), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     alice.maintenance().unwrap();
     let before = storage(&alice);
-    assert_eq!(alice.round_trip_probe("PINGTEST", 30).unwrap(), None);
+    assert_eq!(alice.round_trip_probe("PING", 30).unwrap(), None);
     assert!(alice.contacts().is_empty());
     ping.sync(0).unwrap();
     let (user, token) = ping.take_probe_requests().pop().unwrap();
@@ -88,7 +88,7 @@ fn repeated_probes_work_with_requests_closed_and_never_change_synced_storage() {
     alice.set_requests_open(false).unwrap();
     alice.maintenance().unwrap();
     let before = storage(&alice);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     let user = alice.user_id().to_owned();
     let responder = std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -105,7 +105,7 @@ fn repeated_probes_work_with_requests_closed_and_never_change_synced_storage() {
         }
     });
     for _ in 0..3 {
-        assert!(alice.round_trip_probe("PINGTEST", 3000).unwrap().is_some());
+        assert!(alice.round_trip_probe("PING", 3000).unwrap().is_some());
         assert!(alice.sync(0).unwrap().is_empty());
         assert!(alice.contacts().is_empty());
         assert!(alice.friends().is_empty());
@@ -119,10 +119,10 @@ fn failed_probe_is_not_retried_by_a_later_sync() {
     let hub = TestHub::start();
     let http = Http::new(hub.url());
     let mut alice = register(http.clone(), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     let path = yo_wire::api::deliver_path(&yo_tests::user_id(ping.user_id()));
     http.fault(&path, yo_tests::Fault::Answer(503));
-    assert_eq!(alice.round_trip_probe("PINGTEST", 30).unwrap(), None);
+    assert_eq!(alice.round_trip_probe("PING", 30).unwrap(), None);
     let state = alice.saved().state;
     assert!(state.outbox.iter().all(|item| item.user != ping.user_id()));
     alice.sync(0).unwrap();
@@ -136,7 +136,7 @@ fn warm_probe_reuses_session_without_catch_up() {
     let hub = TestHub::start();
     let http = Http::new(hub.url());
     let mut alice = register(http.clone(), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     alice.maintenance().unwrap();
     let user = alice.user_id().to_owned();
     let responder = std::thread::spawn(move || {
@@ -151,11 +151,11 @@ fn warm_probe_reuses_session_without_catch_up() {
             }
         }
     });
-    assert!(alice.round_trip_probe("PINGTEST", 3000).unwrap().is_some());
+    assert!(alice.round_trip_probe("PING", 3000).unwrap().is_some());
     // Drain the first answer's ack outside the measurement, as an ordinary sync would.
     alice.sync(0).unwrap();
     http.sent.lock().unwrap().clear();
-    let ms = alice.round_trip_probe("PINGTEST", 3000).unwrap().unwrap();
+    let ms = alice.round_trip_probe("PING", 3000).unwrap().unwrap();
     responder.join().unwrap();
     let sent = http.sent.lock().unwrap();
     let routes: Vec<_> = sent.iter().map(|(method, path, _)| (method.as_str(), path.as_str())).collect();
@@ -235,16 +235,16 @@ fn normal_warm_request_counts() {
 fn added_pingtest_shows_normal_yos_but_only_the_matched_probe_is_consumed() {
     let hub = TestHub::start();
     let mut alice = register(Http::new(hub.url()), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
-    // A previous silent probe must not prevent subsequently adding PINGTEST.
-    assert_eq!(alice.round_trip_probe("PINGTEST", 10).unwrap(), None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
+    // A previous silent probe must not prevent subsequently adding PING.
+    assert_eq!(alice.round_trip_probe("PING", 10).unwrap(), None);
     ping.sync(0).unwrap();
     let (user, late) = ping.take_probe_requests().pop().unwrap();
-    alice.set_friend(ping.user_id(), Some("PINGTEST".into()), None).unwrap();
-    alice.send_yo("PINGTEST").unwrap();
+    alice.set_friend(ping.user_id(), Some("PING".into()), None).unwrap();
+    alice.send_yo("PING").unwrap();
     assert_eq!(alice.friends().len(), 1);
     assert_eq!(alice.contacts().len(), 1);
-    let probe = alice.round_trip_probe_begin("PINGTEST", 3000).unwrap();
+    let probe = alice.round_trip_probe_begin("PING", 3000).unwrap();
     let received = ping.sync(0).unwrap();
     assert_eq!(received.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count(), 1);
     let (_, token) = ping.take_probe_requests().pop().unwrap();
@@ -296,8 +296,8 @@ fn failed_probe_keeps_an_added_pingtests_ordinary_outbox() {
     let hub = TestHub::start();
     let http = Http::new(hub.url());
     let mut alice = register(http.clone(), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
-    alice.send_yo("PINGTEST").unwrap();
+    let mut ping = register(Http::new(hub.url()), "PING", None);
+    alice.send_yo("PING").unwrap();
     ping.sync(0).unwrap();
     ping.echo_yo(alice.user_id()).unwrap();
     alice.sync(0).unwrap();
@@ -307,8 +307,8 @@ fn failed_probe_keeps_an_added_pingtests_ordinary_outbox() {
     for _ in 0..12 {
         http.fault(&path, yo_tests::Fault::Answer(503));
     }
-    alice.send_yo("PINGTEST").unwrap();
-    assert_eq!(alice.round_trip_probe("PINGTEST", 10).unwrap(), None);
+    alice.send_yo("PING").unwrap();
+    assert_eq!(alice.round_trip_probe("PING", 10).unwrap(), None);
     let state = alice.saved().state;
     let contents: Vec<_> = state
         .outbox
@@ -333,13 +333,13 @@ fn failed_probe_keeps_an_added_pingtests_ordinary_outbox() {
 fn a_probe_to_an_added_pingtest_does_not_change_account_storage() {
     let hub = TestHub::start();
     let mut alice = register(Http::new(hub.url()), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     alice.maintenance().unwrap();
     ping.maintenance().unwrap();
-    alice.send_yo("PINGTEST").unwrap();
+    alice.send_yo("PING").unwrap();
     ping.sync(0).unwrap();
     ping.echo_yo(alice.user_id()).unwrap();
-    alice.set_friend(ping.user_id(), Some("PINGTEST".into()), None).unwrap();
+    alice.set_friend(ping.user_id(), Some("PING".into()), None).unwrap();
     for _ in 0..3 {
         alice.sync(0).unwrap();
         alice.after_sync().unwrap();
@@ -354,19 +354,19 @@ fn a_probe_to_an_added_pingtest_does_not_change_account_storage() {
             break;
         }
     });
-    assert!(alice.round_trip_probe("PINGTEST", 3000).unwrap().is_some());
+    assert!(alice.round_trip_probe("PING", 3000).unwrap().is_some());
     responder.join().unwrap();
     assert!(alice.saved_for_app().unwrap().is_empty());
     assert_eq!(storage(&alice), before);
     assert_eq!(alice.friends().len(), 1);
 }
 
-/// PINGTEST in a group is a member like any: its group Yos reach a member who never added it, with no 1:1 chat made.
+/// PING in a group is a member like any: its group Yos reach a member who never added it, with no 1:1 chat made.
 #[test]
 fn pingtest_in_a_group_reaches_members_who_never_added_it() {
     let hub = TestHub::start();
     let mut alice = register(Http::new(hub.url()), "ALICE", None);
-    let mut ping = register(Http::new(hub.url()), "PINGTEST", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
     let mut cleo = register(Http::new(hub.url()), "CLEO", None);
     let (id, _) = alice.create_group("ECHO", &[ping.user_id().to_owned(), cleo.user_id().to_owned()]).unwrap();
     for x in [&mut ping, &mut cleo] {
@@ -379,7 +379,7 @@ fn pingtest_in_a_group_reaches_members_who_never_added_it() {
     let from_ping = |e: &Event| matches!(e, Event::GroupMessage { group, user, content: Content::Yo, .. } if *group == id && user == ping.user_id());
     assert_eq!(events.iter().filter(|e| from_ping(e)).count(), 1, "{events:?}");
     assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. } | Event::Message { .. })));
-    assert!(cleo.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PINGTEST")));
+    assert!(cleo.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PING")));
     // Cleo knows it by its name: still the probe service to her, not a chat.
     let state = cleo.saved().state;
     assert!(state.contacts.get(ping.user_id()).is_some_and(|c| c.probe_service && !c.chat));

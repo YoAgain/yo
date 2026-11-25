@@ -8,109 +8,11 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, "yogpt"))
 sys.path.insert(0, os.path.join(HERE, "status"))
 import datetime  # noqa: E402
 import json  # noqa: E402
 import status  # noqa: E402
 import yocli  # noqa: E402
-import yogpt  # noqa: E402
-
-
-class YoGPTRules(unittest.TestCase):
-    def test_every_answer_is_one_picture_and_they_vary(self):
-        with tempfile.TemporaryDirectory() as d:
-            for i in range(1, 6):
-                with open(os.path.join(d, f"{i:03}.jpg"), "wb") as f:
-                    f.write(b"x")
-            bot, sent, old = yogpt.YoGPT(d), [], yogpt.yocli.yo
-            yogpt.yocli.yo = lambda *args: sent.append(args)
-            try:
-                for _ in range(10):
-                    bot.answer("u")
-            finally:
-                yogpt.yocli.yo = old
-        self.assertEqual(len(sent), 10, "one message per answer")
-        self.assertTrue(all(a[:3] == ("send", "u", "--photo") for a in sent), "never a plain Yo")
-        names = [os.path.basename(a[3]) for a in sent]
-        self.assertEqual(sorted(names[:5]), [f"{i:03}.jpg" for i in range(1, 6)], "each once before any again")
-        self.assertTrue(all(x != y for x, y in zip(names, names[1:])), "never the same twice in a row")
-
-    def test_a_plain_yo_only_when_no_picture_can_go(self):
-        sent, old = [], yogpt.yocli.yo
-
-        def refuse_pictures(*args):
-            if "--photo" in args:
-                raise yogpt.yocli.Failed(1, "no pictures now", False)
-            sent.append(args)
-
-        try:
-            yogpt.yocli.yo = lambda *args: sent.append(args)
-            yogpt.YoGPT(None).answer("u")
-            with tempfile.TemporaryDirectory() as d:
-                with open(os.path.join(d, "001.jpg"), "wb") as f:
-                    f.write(b"x")
-                yogpt.yocli.yo = refuse_pictures
-                yogpt.YoGPT(d).answer("u")
-        finally:
-            yogpt.yocli.yo = old
-        self.assertEqual(sent, [("send", "u"), ("send", "u")])
-
-    def test_reply_pictures_are_named_by_number_and_read_bounded(self):
-        self.assertTrue(yogpt.picture_name("007.jpg") and yogpt.picture_name("200.jpg"))
-        for name in ["", ".jpg", "a.jpg", "007.jpeg", "007.jpg.sh", "../1.jpg", "1.JPG"]:
-            self.assertFalse(yogpt.picture_name(name), name)
-        with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(yogpt.pick_picture(d, []), "nothing there")
-            with open(os.path.join(d, "001.jpg"), "wb") as f:
-                f.write(b"x" * (yogpt.MAX_PICTURE + 1))
-            self.assertIsNone(yogpt.pick_picture(d, []), "too large")
-            with open(os.path.join(d, "001.jpg"), "wb") as f:
-                f.write(b"x")
-            with open(os.path.join(d, "notes.txt"), "wb") as f:
-                f.write(b"x")
-            self.assertEqual(yogpt.pick_picture(d, []), ("001.jpg", os.path.join(d, "001.jpg")))
-
-    def test_every_picture_comes_up_about_equally_often(self):
-        names = [f"{i:03}.jpg" for i in range(1, 21)]
-        counts = [0] * 20
-        for _ in range(20_000):
-            counts[yogpt.choose(names, [])] += 1
-        # 1000 expected each, a standard deviation of about 31.
-        self.assertTrue(all(850 <= c <= 1150 for c in counts), counts)
-        self.assertIsNone(yogpt.choose([], []))
-
-    def test_no_picture_again_to_the_same_sender_within_the_last_fifty(self):
-        names = [f"{i:03}.jpg" for i in range(1, 201)]
-        recent, sent, counts = yogpt.Recent(), [], [0] * 200
-        for _ in range(20_000):
-            i = yogpt.choose(names, recent.of("a"))
-            self.assertNotIn(i, sent[-yogpt.RECENT_PICTURES:])
-            recent.sent("a", names[i])
-            sent.append(i)
-            counts[i] += 1
-        self.assertTrue(all(60 <= c <= 140 for c in counts), counts)
-        self.assertEqual(len(recent.of("b")), 0, "another sender is not held back")
-        # Fewer pictures than the window: never the same twice in a row, and every one comes up.
-        few, recent, last, seen = names[:5], yogpt.Recent(), None, set()
-        for _ in range(1000):
-            i = yogpt.choose(few, recent.of("a"))
-            self.assertNotEqual(i, last)
-            recent.sent("a", few[i])
-            last = i
-            seen.add(i)
-        self.assertEqual(seen, set(range(5)))
-        self.assertEqual(yogpt.choose(names[:1], recent.of("a")), 0, "a single picture is still sent")
-
-    def test_recent_pictures_stay_bounded(self):
-        recent = yogpt.Recent()
-        for i in range(yogpt.MAX_REMEMBERED + 10):
-            for j in range(yogpt.RECENT_PICTURES + 5):
-                recent.sent(f"user{i}", f"{j:03}.jpg")
-        self.assertEqual(len(recent.by_sender), yogpt.MAX_REMEMBERED)
-        self.assertEqual(len(recent.of("user0")), 0, "the oldest sender forgotten")
-        last = recent.of(f"user{yogpt.MAX_REMEMBERED + 9}")
-        self.assertEqual((len(last), last[0]), (yogpt.RECENT_PICTURES, "005.jpg"))
 
 
 class Limits(unittest.TestCase):
@@ -122,17 +24,6 @@ class Limits(unittest.TestCase):
         self.assertTrue(cooldown.allow("group:a", now + 30))
         self.assertFalse(cooldown.allow("group:a", now + 31))
         self.assertEqual(len(cooldown.at), 1, "only groups within the window are kept")
-
-    def test_a_failed_answer_never_blocks_its_sender(self):
-        bot = yogpt.YoGPT(None)
-        bot.pending["u"] = collections.deque([0])
-        bot.answer = lambda to: 1 / 0
-        old, yogpt.THINK_MS = yogpt.THINK_MS, (0, 0)
-        try:
-            bot.answer_pending("u")
-        finally:
-            yogpt.THINK_MS = old
-        self.assertNotIn("u", bot.pending, "the next Yo of this sender is answered again")
 
     def test_sender_buckets_refill_expire_and_stay_bounded(self):
         limits, now = yocli.Buckets(), 1000.0

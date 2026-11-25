@@ -71,11 +71,11 @@ The relay between phones. It holds encrypted Yos until the recipient fetches the
 
 Three programs on one server, each deployed on its own:
 
-| | |
-|---|---|
-| [hub](hub) | Passes Yos on, holds no keys of users |
-| [admin](admin) | The dashboard |
-| [services](services) | Runs the bots (planned; today in [skills](skills)) |
+| | | URL |
+|---|---|---|
+| [hub](hub) | Passes Yos on, holds no keys of users | `hub.justyo.app` |
+| [admin](admin) | The dashboard | not public |
+| [services](services) | Runs the bots (PING, YoGPT) | `api.justyo.app` (planned, for webhooks) |
 
 | | Yos/s | |
 |---|---:|---|
@@ -143,7 +143,7 @@ DB: the local database, sealed per column.
   - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
   - [android](app/android): the Android app
   - [cli](app/cli): the CLI, `yo`
-- [skills](skills): the bots (YoGPT, PING, PINGTEST, STATUS) as scripts driving the CLI; [skills/status](skills/status) sends the server's numbers as a picture at the rhythm set on the admin page
+- [skills](skills): what is left of the bots as scripts driving the CLI: [skills/status](skills/status) sends the server's numbers as a picture at the rhythm set on the admin page
 - [core](core)
   - [client](core/client): state, sessions, groups, media, recovery, outbox
   - [wire](core/wire): protocol formats
@@ -151,7 +151,7 @@ DB: the local database, sealed per column.
   - [bindings](core/bindings): Swift and Kotlin through UniFFI
 - [hub](hub): the Rust server, with its [routes](hub/README.md) and [threat model](hub/SECURITY.md)
 - [admin](admin): the admin page
-- [services](services): the gatekeeper that will run the bots (a shell so far)
+- [services](services): the executor that runs the bots
 - [spec](spec): the YoIP protocol, [v1.md](spec/v1.md)
 - [tests](tests): integration, chaos and load tests, with [fixtures](tests/fixtures)
 - [fuzz](fuzz): fuzz targets

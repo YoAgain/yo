@@ -663,7 +663,7 @@ fn user_bytes(user: &str) -> Result<UserId> {
     unhex(user).and_then(|u| u.try_into().ok()).ok_or(Error::Protocol("user id"))
 }
 
-const PROBE_HANDLE: &str = "PINGTEST";
+const PROBE_HANDLE: &str = "PING";
 
 /// Remembers how a contact is known: a username in another spelling replaces the one before.
 fn note_handle(contact: &mut Contact, shown: String) {

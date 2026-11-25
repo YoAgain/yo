@@ -1,0 +1,54 @@
+[Unit]
+Description=Yo service (%i)
+Requires=yo-script-%i.socket
+After=network.target time-sync.target yo-script-%i.socket
+
+# The executor and the account of one bot.
+[Service]
+Slice=yo-services.slice
+User=yo-service-%i
+SupplementaryGroups=yo-services
+Environment=SERVICE=%i YO_BIN=/opt/yo/yo YO_STATE=%S/yo-%i SCRIPT_SOCKET=/run/yo-script/%i.sock
+Environment=SERVICES_DB=/var/lib/yo-services/book.sqlite SERVICES_BOTS=PING,YOGPT,STATUS
+# YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, and this bot's settings (src/main.rs); on the dev hub
+# (yo-service@pingdev) SERVICE and SERVICES_DB too
+EnvironmentFile=/etc/yo-service-%i.env
+ExecStart=/opt/yo/yo-services /opt/yo-services/yo/${SERVICE}
+StateDirectory=yo-%i
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/yo-services
+UMask=0007
+Restart=on-failure
+RestartSec=3
+# 2: a wrong setting; 3: this device is gone for good; 4: nothing registered. All stay stopped.
+RestartPreventExitStatus=2 3 4
+MemoryMax=256M
+TasksMax=128
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

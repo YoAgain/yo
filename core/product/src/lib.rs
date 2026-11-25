@@ -251,7 +251,7 @@ pub fn show_notification_row(denied: bool, asked_this_launch: bool) -> bool {
 }
 
 pub fn is_real_friend(skeleton: &str, group: bool, request: bool, blocked: bool, gone: bool) -> bool {
-    !(group || request || blocked || gone || matches!(skeleton, "YOGPT" | "PING" | "PINGTEST"))
+    !(group || request || blocked || gone || matches!(skeleton, "YOGPT" | "PING"))
 }
 
 pub fn sound_slot(playing: &[bool]) -> Option<u32> {
@@ -776,7 +776,7 @@ mod tests {
                 assert_eq!(show_notification_row(denied, asked), denied && !asked);
             }
         }
-        for bot in ["PING", "PINGTEST", "YOGPT"] {
+        for bot in ["PING", "YOGPT"] {
             assert!(!is_real_friend(bot, false, false, false, false));
         }
         for flags in 0..16 {

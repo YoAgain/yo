@@ -24,7 +24,7 @@ impl Client {
     /// Starts a probe to the reserved service; events received meanwhile stay queued for the inbox consumer.
     pub fn round_trip_probe_begin(&mut self, target: &str, timeout_ms: u64) -> Result<Probe> {
         if !same_name(target, PROBE_HANDLE) {
-            return Err(Error::Protocol("probe target must be PINGTEST"));
+            return Err(Error::Protocol("probe target must be PING"));
         }
         let handle = Handle::parse(PROBE_HANDLE)?;
         let user = match self.known_user(&handle).filter(|u| self.has_chat(u)) {

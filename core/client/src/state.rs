@@ -115,7 +115,7 @@ pub struct Slot {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
-    /// PINGTEST routing state; hidden only until explicitly added or written to.
+    /// PING routing state; hidden only until explicitly added or written to.
     pub probe_service: bool,
     pub probe_reply_tag: [u8; 32],
     pub probe_pending: Option<[u8; 32]>,

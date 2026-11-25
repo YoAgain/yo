@@ -71,25 +71,11 @@ impl Yo {
         json
     }
 
-    /// A skill (`skills/NAME/NAME.py`) on this directory, `username` registered by hand first if it has none (a skill
-    /// never registers).
-    pub fn skill(&self, name: &str, username: &str, args: &[&str], env: &[(&str, &str)]) -> Process {
-        self.registered_as(username);
-        Process::spawn(self.skill_command(name, args, env))
-    }
-
     /// `yo register username`, unless the directory has an account.
     pub fn registered_as(&self, username: &str) {
         if self.run(&["whoami"]).0 == 4 {
             self.ok(&["register", username]);
         }
-    }
-
-    pub fn skill_command(&self, name: &str, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../skills/{name}/{name}.py"));
-        let mut python = Command::new("python3");
-        python.arg(script).args(args).envs(self.envs()).envs(env.iter().copied());
-        python
     }
 }
 

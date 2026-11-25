@@ -1,0 +1,7 @@
+[Unit]
+Description=All Yo scripts together: the hub stays undisturbed
+
+[Slice]
+MemoryMax=512M
+CPUQuota=50%
+TasksMax=256

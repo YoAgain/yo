@@ -51,8 +51,8 @@ pub const HELP: &str =
                                     receive: one JSON line per event, until stopped
   sync [--wait S] [--drain-media]   receive once (no listener running)
   ack                               acknowledge what `listen --manual-ack` handed out
-  echo-probe USER TOKEN             answer a round-trip probe (the PINGTEST service)
-  probe [--timeout-ms N]            measure the round trip to PINGTEST
+  echo-probe USER TOKEN             answer a round-trip probe (the PING service)
+  probe [--timeout-ms N]            measure the round trip to PING
 environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated),
   YO_RECOVERY_LOOKUPS (roster lookups a day for messages from replaced phones; default 10, a bot raises it)";
 

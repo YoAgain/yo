@@ -177,7 +177,7 @@ The foreground inbox already long-polled without a successful-pass sleep. Empty 
 state saves. `warm_app_send_is_one_request_without_an_active_inbox_poll` covers the app binding with pending
 receive housekeeping, sending to the pinned contact id, without requiring inbox freshness. Explicitly
 typed names still discover their current owner, so a name changing hands cannot redirect an existing contact.
-The tests cover visible PING contact Yos, migration from the old PING probe state, and silent PINGTEST probes
+The tests cover visible PING contact Yos, migration from the old PING probe state, and silent PING probes
 with matched, late and overlapping replies, closed requests, restore and failed-probe outbox preservation. Encrypted ratchet/outbox state still saves before any delivery.
 
 With a receipt still arriving during initial session setup, the original measurement was 3 → 1 requests

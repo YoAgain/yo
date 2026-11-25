@@ -1,0 +1,14 @@
+# Installed as yo-script-BOT.socket (install.sh), %j the bot.
+[Unit]
+Description=Yo service script, one process per connection (%j)
+
+[Socket]
+ListenStream=/run/yo-script/%j.sock
+SocketUser=yo-service-%j
+SocketMode=0600
+Accept=yes
+MaxConnections=20
+TriggerLimitIntervalSec=0
+
+[Install]
+WantedBy=sockets.target

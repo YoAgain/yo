@@ -268,7 +268,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 /* ===== Database ===== */
 #tables > .card-head h2 { font-size: 13px; color: var(--text); }
 .tables { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
-.tside { display: flex; flex-direction: column; gap: 1px; position: sticky; top: 12px; max-height: calc(100vh - 40px); overflow: auto; }
+.tside { display: flex; flex-direction: column; gap: 1px; }
 .tside h3 { display: flex; align-items: center; gap: 6px; margin: 18px 10px 4px; font-size: 9.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); opacity: .75; }
 .tside h3:first-child { margin-top: 0; }
 .tside button { display: flex; justify-content: space-between; gap: 8px; border: 0; background: transparent; color: var(--muted); text-align: left; padding: 6px 10px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer; }
@@ -298,7 +298,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .switch.on i { transform: translateX(18px); }
 .ghost-x { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 8px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
 .ghost-x:hover { color: var(--bad); border-color: var(--bad); }
-@media (max-width: 760px) { .tables { grid-template-columns: minmax(0, 1fr); } .tside { position: static; max-height: 220px; } }
+@media (max-width: 760px) { .tables { grid-template-columns: minmax(0, 1fr); } }
 
 /* Popup and footer */
 #pop { width: min(560px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 18px; padding: 22px; }

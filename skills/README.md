@@ -1,12 +1,10 @@
 # skills
 
-Bots as small scripts driving [yo](../app/cli) (Python 3, standard library only): each reads `yo listen` and answers
-with `yo send …`, which runs inside the listener. One directory, unit and environment file per bot and hub; the
-server switch from `yo-gpt` is in [app/cli/README.md](../app/cli/README.md).
+PING and YoGPT are [services](../services) now; here is what is left.
 
-- [yogpt](yogpt): YoGPT, answers every Yo, photo or video with a reply picture
-- [ping](ping): PING, the echo contact: Yos, photos and videos back as they came
-- [pingtest](pingtest): PINGTEST, the round-trip probe the apps measure
+Bots as small scripts driving [yo](../app/cli) (Python 3, standard library only): each reads `yo listen` and answers
+with `yo send …`, which runs inside the listener. One directory, unit and environment file per bot and hub.
+
 - [status](status): the server's numbers as a picture, sent only to the one user fixed on the server, at the rhythm set on the admin page (Pillow); answers nobody
 
 `yocli.py` holds what they share (running `yo`, the volatile limits); `python3 -m unittest discover skills` checks

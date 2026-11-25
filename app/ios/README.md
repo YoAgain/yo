@@ -258,17 +258,17 @@ conversion stays off the main actor. HitchMonitor only samples callback interval
 own utility queue; it does not gate the wipe or wait for camera readiness. Physical presentation smoothness
 still needs an on-device swipe check; a successful compile cannot measure it.
 
-The Account title and Status → Server share a user-triggered, ten-second PINGTEST probe and a volatile last result.
+The Account title and Status → Server share a user-triggered, ten-second PING probe and a volatile last result.
 The title flies a small Yo out and back, bounces on landing and gives success/warning feedback; Reduce Motion
 uses fades. The existing account client selects the same hub as `Hub.home` (including the dev test override).
 Foreground inbox reception continuously long-polls; warm sends post without first fetching the inbox. Signed
 and anonymous connection pools remain separate, with anonymous warm-up on launch and foreground. Empty
 polls do not save full core state. Durable encrypted send state is still saved before delivery.
 
-PING can be added as a normal echo contact for Yos, photos and videos. PINGTEST probes and their replies
+PING can be added as a normal echo contact for Yos, photos and videos. Probes to it and their replies
 create no visible Yo, notification, stats, contact, request or Account Sync entry. Probes have no copy to
 another device. See
-[operator deployment and privacy](../../skills/pingtest/README.md).
+[operator deployment and privacy](../../services/README.md).
 
 
 Send Feedback (Settings) is a support conversation with the Yo team, not end-to-end encrypted (the chat says so).

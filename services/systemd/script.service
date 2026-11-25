@@ -1,0 +1,54 @@
+[Unit]
+Description=Yo service script (%j)
+CollectMode=inactive-or-failed
+
+# Installed as yo-script-BOT@.service (install.sh), %j the bot.
+# One event in, one answer out: no network, no keys, nobody's files, no other process.
+[Service]
+Slice=yo-scripts-%j.slice
+DynamicUser=yes
+ExecStart=/usr/bin/python3 -I -B @SCRIPT@
+StandardInput=socket
+StandardOutput=socket
+StandardError=null
+# One is started ahead and used within 30 s, an answer takes 10 s at most.
+RuntimeMaxSec=45s
+LimitCPU=5
+LimitNOFILE=32
+LimitCORE=0
+LimitFSIZE=0
+MemoryMax=96M
+MemorySwapMax=0
+TasksMax=4
+UMask=0777
+PrivateNetwork=yes
+PrivateIPC=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=none
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+TemporaryFileSystem=/var:ro /opt:ro /srv:ro /run:ro /etc:ro
+BindReadOnlyPaths=/opt/yo-services /etc/ld.so.cache -/etc/localtime -/etc/alternatives
+NoExecPaths=/
+ExecPaths=/usr/bin/python3 /usr/lib -/usr/lib64 -/lib -/lib64
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @keyring @network-io
+SystemCallErrorNumber=EPERM

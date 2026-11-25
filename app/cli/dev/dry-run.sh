@@ -1,5 +1,5 @@
 #!/bin/sh
-# Dry run of `yo` on a copy of a live state directory (app/cli/README.md, "Server switch"): the copy is opened offline,
+# Dry run of `yo` on a copy of a live state directory: the copy is opened offline,
 # never the directory itself, and nothing reaches a hub, so nothing registers and no session moves on.
 #
 #   app/cli/dev/dry-run.sh DIR [YO_BINARY]     (as root on the server: DIR under /var/lib/private/)

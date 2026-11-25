@@ -1,18 +1,25 @@
 # services: security
 
-The design the gatekeeper is built to. A script is taken as hostile, reviewed or not.
+A script is taken as hostile, reviewed or not.
 
-| | Gatekeeper | Script |
+| | Executor | Script |
 |-|-|-|
-| Account keys, decryption | yes | no |
-| Who the sender is | a user id | a handle, the same for every Yo of that sender |
-| Network | the hub | none |
-| Files | its own state | Python and this repository, read-only |
-| Who may be answered, how often | decides (limits are its own, the same for all) | asks |
+| Account keys, decryption | yes (`yo listen`) | no |
+| Who the sender is | a user id | nothing, not even a number |
+| Network | the hub, on localhost | none |
+| Files | its account, the book | Python and yo-services, read-only |
+| Processes | its own | one per event, gone after 45 s |
+| To whom, how often | decides | cannot say |
 
-- `service.toml` is read by the gatekeeper from a read-only checkout; an unknown entry stops the service.
-- A photo goes back through a reference; the script never has its key.
-- A service whose `name` is not its account's does not start.
+- The TOML is read before anything of the script runs; a wrong one, or another account, stops the service.
+- An answer is at most 1 MB, 10 s, 4 actions: one to send, one reminder at least a minute ahead. Anything else in it and
+  none of it happens. A probe only comes back.
+- One answer to a Yo, one reminder for it, and none out of a reminder: no bot writes on after the user stops.
+- A photo goes back by a word; its key never reaches the script.
+- Per sender 1 a second (3 at once), per group one in 30 s, per bot 2000 an hour, also over a restart.
+- Each bot's scripts have their own memory and processes; together at most half a processor, so the hub is undisturbed.
+- Kept of anyone: a user id on a reminder, one per service with `"cron"`; 7 days after it ended, or at once
+  on `forget`, it is gone.
 
-A script taken over can still answer those who wrote to it, up to the limits. Not covered: a hole in the
-gatekeeper, the CLI or the kernel.
+A script taken over can still send those who wrote to it something else within the limits. The executors share one book:
+one taken over could read the others' reminders. Not covered: a hole in the executor, the CLI, systemd or the kernel.
