@@ -88,6 +88,9 @@ input[type=search]:focus, .add input:focus, select:focus { outline: none; border
 .pill:hover { border-color: var(--amethyst); }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: rgba(255, 255, 255, .06); color: var(--muted); white-space: nowrap; }
 .tag.release { color: var(--release-color); background: color-mix(in srgb, var(--release-color) 12%, transparent); }
+.tag.devs { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; }
+.tag.app-pill { display: inline-flex; align-items: center; gap: 4px; }
+.tag.devs .ico, .tag.app-pill .ico { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .tag.ok { color: var(--ok); background: rgba(46, 204, 113, .12); }
 .tag.warn { color: var(--warn); background: rgba(241, 196, 15, .12); }
 .tag.bad { color: var(--bad); background: rgba(231, 76, 60, .14); }

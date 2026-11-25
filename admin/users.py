@@ -140,6 +140,17 @@ def attestation(db, now):
     return counts
 
 
+def attested_days(db, midnight):
+    """Per sign-up UTC day, the last 14 (today last): [accounts made that day, those of them attested now] (spec 6.11),
+    as secured_days for backups; None on a hub without the table."""
+    if not has_table(db, "attestation"):
+        return None
+    return [list(db.execute(
+        "SELECT count(*), count(a.user_id) FROM users u LEFT JOIN attestation a ON a.user_id = u.id AND a.state = 'attested'"
+        " WHERE u.created_at >= ? AND u.created_at < ?", (midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS)).fetchone())
+        for i in range(13, -1, -1)]
+
+
 def has_table(db, table: str) -> bool:
     return db.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()[0] > 0
 
@@ -492,6 +503,8 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
         "build_levels": builds,
         # {hour: [phones seen within 24 hours, of them with an error or crash report in those 24 hours, then the same for iOS and Android]}: the error-free share.
         "error_free_levels": error_free,
+        # {hour: accounts attested} (`attested`, once the hub samples it); empty until then.
+        "attested_levels": {str(h): v for h, v in rows.get("attested", {}).items()},
     }
 
 
@@ -530,6 +543,14 @@ def hub(name: str, path: str) -> dict:
             if has_table(db, "request_hours") else [], []))
         for u in users:
             u["requests_24h"] = requests.get(bytes.fromhex(u["id"]), 0)
+        # Each account's attestation verdict (spec 6.11), measured only: "attested", "failed" (with its reason), none.
+        # attest_at is the latest verdict's time: the Attested row's line is derived from it as Secured's is from
+        # backup_at, so an account attested again moves to the later time (the hub's `attested` level has no such drift).
+        verdicts = {uid: (state, reason, at) for uid, state, reason, at in part("user_attestation", lambda: db.execute(
+            "SELECT user_id, state, reason, at_ms FROM attestation").fetchall() if has_table(db, "attestation") else [], [])}
+        for u in users:
+            state, reason, at = verdicts.get(bytes.fromhex(u["id"]), (None, None, None))
+            u["attest"], u["attest_reason"], u["attest_at"] = state, text(reason) if reason else None, at
         # Each user's devices, for the user panel: when added, last seen (to the day), push service, app build.
         device_list = part("device_list", lambda: [
             (uid.hex(), {"created": created, "last_seen": seen, "push": PUSH.get(platform, str(platform)) if has_token else None,
@@ -630,6 +651,10 @@ def hub(name: str, path: str) -> dict:
                 "SELECT count(*), count(b.user_id) FROM users u LEFT JOIN backups b ON b.user_id = u.id"
                 " WHERE u.created_at >= ? AND u.created_at < ?", (midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS)).fetchone())
                 for i in range(13, -1, -1)] if has_table(db, "backups") else None),
+            # Accounts attested now (spec 6.11, measured only), and per sign-up day as secured_days; None before the table.
+            "attested": part("attested", lambda: one("SELECT count(*) FROM attestation WHERE state = 'attested'")
+                if has_table(db, "attestation") else None),
+            "attested_days": part("attested_days", lambda: attested_days(db, midnight)),
             # Groups on the hub now.
             "groups": part("groups", lambda: one("SELECT count(*) FROM zk_groups") if has_table(db, "zk_groups") else None),
             # The hub's per-minute event counts (no identifiers): per kind, the last 24 hours, the last 14 UTC days

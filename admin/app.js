@@ -318,12 +318,6 @@ if (document.body.classList.contains("login")) {
     const i = appInfo(app);
     return i ? `${i.title}${belowMin(app) ? " · below the hub's minimum: refused, must update" : ""}` : "";
   };
-  const appTag = (app, uid) => {
-    const i = appInfo(app), a = appState(app, uid);
-    const t = el("span", a ? `app-${a}` : i ? null : "muted", i ? i.label : "–");
-    hint(t, appTitle(app, uid));
-    return t;
-  };
 
   // ---- small charts (SVG, drawn to the size of their viewBox) ---------------------------------------------------
   const SVG = "http://www.w3.org/2000/svg";
@@ -964,6 +958,9 @@ if (document.body.classList.contains("login")) {
     yogpt: '<rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 7V4"/><path d="M9 12.5v1M15 12.5v1"/>',
     cli: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 10 3 2.5L7 15"/><path d="M12.5 15h4"/>',
     lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>',
+    shield: '<path d="M12 3 5 6v5.5c0 4.2 3 7.8 7 9.5 4-1.7 7-5.3 7-9.5V6z"/>',
+    devices: '<rect x="3" y="7" width="12" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-4"/>',
+    "shield-check": '<path d="M12 3 5 6v5.5c0 4.2 3 7.8 7 9.5 4-1.7 7-5.3 7-9.5V6z"/><path d="m9 12 2 2 4-4"/>',
   };
   const icon = (name, cls, title) => {
     const s = svg("svg", { viewBox: "0 0 24 24", class: `ico ${cls || ""}`.trim() });
@@ -1319,9 +1316,9 @@ if (document.body.classList.contains("login")) {
 
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
   let allSort = { key: "created", dir: -1 };  // newest sign-ups first
-  const allValue = (u, key, releases) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
-    : key === "update" ? (releases.get(u.app)?.behind ?? -1)
-    : key === "secured" || key === "push" ? Number(!!u[key]) : u[key] ?? 0;
+  const allValue = (u, key, releases) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? -(releases.get(u.app)?.ageH ?? Infinity)
+    : key === "secured" ? 2 * Number(!!u.secured) + ({ attested: 1, failed: 0 }[u.attest] ?? 0.5)
+    : key === "push" ? Number(!!u[key]) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
     th.tabIndex = 0;
     const go = () => {
@@ -1348,27 +1345,41 @@ if (document.body.classList.contains("login")) {
     for (const u of list) {
       // No click: a name opens nothing (the support chat is reached from its own table).
       const tr = body.insertRow();
-      cell(tr, pii(u.name ?? "–"), "name", u.id);
+      // Two or more devices: a pill after the name with the count; each device (build, push, added, last seen) in its hover.
+      const who = el("span", "uicons");
+      who.append(pii(u.name ?? "–"));
+      if (u.devices >= 2) {
+        const many = tag("", "devs");
+        many.append(icon("devices"), String(u.devices));
+        hint(many, { head: `${num(u.devices)} devices`, rows: (u.device_list || []).map((d) => ({ ico: ICONS[(d.app || "").split("/")[0]] ? (d.app || "").split("/")[0] : "chart",
+          label: appInfo(d.app)?.label || "unknown build", value: `seen ${d.last_seen ? seenDay(d.last_seen) : "never"}${d.push ? ` · push ${d.push}` : ""}${d.created ? ` · added ${date(d.created)}` : ""}` })) });
+        who.append(many);
+      }
+      cell(tr, who, "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
-      // The platform's icon coloured by its build (green current, yellow an update out), the lock when secured.
-      const platform = (u.app || "").split("/")[0], st = appState(u.app, u.id), app = el("span", "uicons");
-      if (ICONS[platform] && platform !== "lock") app.append(icon(platform, st ? `app-${st}` : "", appTitle(u.app, u.id)));
-      app.append(appTag(u.app, u.id));
+      // App: one pill, the platform's icon and the build's age (its id is its time), coloured as in the App card;
+      // its hover names the build (label, version, state, below the hub's minimum).
+      const platform = (u.app || "").split("/")[0], band = releases.get(u.app), info = appInfo(u.app);
+      const age = band && (band.ageH < 24 ? `${Math.floor(band.ageH)} h` : `${Math.floor(band.ageH / 24)} d`);
+      const app = tag(band ? age : info?.label ?? "–", `app-pill ${band ? "release" : { update: "warn", current: "ok", fresh: "ok" }[appState(u.app, u.id)] || "muted"}`);
+      if (band) app.style.setProperty("--release-color", band.color);
+      if (ICONS[platform] && platform !== "lock") app.prepend(icon(platform));
+      hint(app, info ? [info.label, appTitle(u.app, u.id), band?.behind ? `${num(band.behind)} builds behind the newest` : ""].filter(Boolean).join(" · ") : "Unknown build");
       cell(tr, app);
-      const band = releases.get(u.app);
-      const upd = tag(band ? (band.behind ? `−${band.behind}` : "current") : "?", band ? "release" : "muted");
-      if (band) upd.style.setProperty("--release-color", band.color);
-      upd.title = appTitle(u.app, u.id) || "Unknown build";
-      cell(tr, upd);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
-      cell(tr, u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : el("span", "muted", "–"));
-      cell(tr, num(u.devices), "num");
+      // Secured: the lock (a backup), then the shield (attestation, spec 6.11, measured, never enforced): checked green
+      // when attested, grey when failed (the reason in its hover), none when not measured yet.
+      const sec = el("span", "uicons");
+      if (u.secured) sec.append(icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured"));
+      if (u.attest === "attested") sec.append(icon("shield-check", "secured", `attested${u.attest_at ? " " + date(u.attest_at) : ""}`));
+      else if (u.attest === "failed") sec.append(icon("shield", "", `attestation failed${u.attest_reason ? ": " + u.attest_reason : ""}${u.attest_at ? " " + date(u.attest_at) : ""}`));
+      cell(tr, sec.childElementCount ? sec : el("span", "muted", "–"));
       cell(tr, u.queued ? num(u.queued) : "–", "num muted");
       // Signed requests to strangers in 24 h (spec 4.10): a flood by a stranger stands out; contacts' are never counted.
       cell(tr, u.requests_24h ? num(u.requests_24h) : "–", u.requests_24h >= 100 ? "num bad" : "num muted");
     }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 10;
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 8;
   };
 
   // ---- reports: handled is kept by the admin page (done.json); ticked in a user's details
@@ -2832,8 +2843,8 @@ if (document.body.classList.contains("login")) {
     };
     // Accounts: activity (who is active, how many stay, how much they send) and the accounts' properties (secured,
     // deleted), as the overview's rows: a label, its value, a sparkline where there is a history, a popup per slot.
-    // The Accounts stats card: account metrics as the overview's rows (secured bar, new accounts secured,
-    // Yos per user), each with its history in the hover.
+    // The Accounts stats card: account metrics as the overview's rows (active, the secured and attested bars, and
+    // Yos per user, which drawUsageRows puts at the top of the right card), each with its history in the hover.
     const statsRows = (h) => {
       const mau = h.active_month || 0, dau = h.active_today ?? 0, t = today0();
       const days = range || 30, ds = Array.from({ length: days }, (_, i) => t - days + 1 + i), kept = h.active_days || {}, yo = year(h.events?.["yo-in"]?.year);
@@ -2848,22 +2859,34 @@ if (document.body.classList.contains("login")) {
         rows: [{ label: "Mean", value: mean(yos, users) }, { label: "Median", value: "Unavailable" },
           { color: "var(--ok)", label: "Accepted Yos", value: num(yos) }, { ico: "user", label: "Active accounts", value: num(users) }] });
       const ret = Object.fromEntries((areaSub.yc || []).map(([l, v]) => [String(l).replace(/^Retention /, ""), v]));
-      const sc = sparkData.sc, gone = evSlots("account-gone");
-      const wk = (h.secured_days || []).slice(-7).filter(Boolean), made = wk.reduce((n, d) => n + d[0], 0), withKey = wk.reduce((n, d) => n + d[1], 0);
+      const gone = evSlots("account-gone");
+      // A share of all accounts (Secured: a backup; Attested: an attested device, spec 6.11) as one bar. Its hover: the
+      // line of the share over the days (derived from each account's sign-up and the time it got there: `at`), from 30
+      // days back or, `tracked`, from the first one recorded (by the hour in its first three days; `levels`, the hub's own
+      // counts per hour, go before what is derived); the bars the share per sign-up day, the last
+      // 14 (`days`: [made, of them with it now]); today's value and the last 7 days' new accounts.
+      const shareRow = ({ ico, label, head, n, days, at, tracked, levels = {} }) => {
+        const us = h.users || [], HOUR = 3600000, DAY = 86400000, wall = Date.now();
+        const since = !tracked ? (t - 29) * DAY : [...us.map(at).filter((v) => v != null), ...Object.keys(levels).map((x) => x * HOUR)].reduce((a, b) => Math.min(a, b), wall);
+        const step = wall - since < 3 * DAY ? HOUR : DAY, last = Math.floor(wall / step), end = (d) => (d + 1) * step;
+        // At least three points, what a plot needs: nothing was attested before the first.
+        const from = Math.max(last - (step === DAY ? 29 : 71), Math.min(last - 2, Math.floor(since / step)));
+        const dd = Array.from({ length: last - from + 1 }, (_, i) => from + i);
+        const name = (d) => step === DAY ? dayName(d) : `${dayName(Math.floor(d / 24))}, ${new Date(d * HOUR).toLocaleTimeString(undefined, { timeStyle: "short" })}`;
+        const share = dd.map((d) => { const made = us.filter((u) => u.created < end(d)); return made.length ? Math.min(100, (100 * (levels[end(d) / HOUR] ?? made.filter((u) => at(u) != null && at(u) < end(d)).length)) / made.length) : null; });
+        const now = h.total && n != null ? (100 * n) / h.total : null;
+        const wk = (days || []).slice(-7).filter(Boolean), made = wk.reduce((s, d) => s + d[0], 0), withIt = wk.reduce((s, d) => s + d[1], 0);
+        const bars = days ? historyPlot(days.map((d) => (d?.[0] ? Math.round((100 * d[1]) / d[0]) : null)), days14().map(dayName), "") : null;
+        return { ico, label, value: pctText(now), bar: (now || 0) / 100,
+          title: { cap: 1, head, nodes: [historyPlot(share, dd.map(name), "", true), bars], rows: [{ label: `${name(dd[0])} – today`, value: pctText(now) }, { section: "New accounts, the bars above" },
+            { label: `${label}, last 7 days`, value: made ? pctText((100 * withIt) / made) : "–" }] } };
+      };
       return [
           { ico: "chart", label: "Active", value: pctText(mau ? (100 * dau) / mau : null), bar: mau ? dau / mau : 0,
             title: { cap: 1, head: "Active users", nodes: [historyPlot(days14().map(d => d === t || kept[d] != null ? activeOn(d) : null), days14().map(dayName), "")], note: "Bars: users seen per day, the last 14 days", rows: [{ label: "DAU (last 24 h)", value: num(dau) }, { label: "MAU (last 30 days)", value: num(mau) }, { label: "Stickiness DAU / MAU", value: pctText(mau ? (100 * dau) / mau : null) },
               { label: "Deleted in range", value: num(rangeCount("account-gone", gone)) }, { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: ret[k] ?? "–" }))] } },
-          (() => {
-            // Secured: accounts with a backup as a share of all accounts (the bar); its line over the last 30 days in the hover.
-            const us = h.users || [], dd = Array.from({ length: 30 }, (_, i) => t - 29 + i), end = (d) => (d + 1) * 86400000;
-            const share = dd.map((d) => { const made = us.filter((u) => u.created < end(d)); return made.length ? (100 * made.filter((u) => u.backup_at != null && u.backup_at < end(d)).length) / made.length : null; });
-            const now = h.total ? (100 * (h.secured || 0)) / h.total : null;
-            const g = historyPlot(share, dd.map(dayName), "", true);
-            return { ico: "lock", label: "Secured", value: pctText(now), bar: (now || 0) / 100,
-              title: { cap: 1, head: "Secured, all accounts", nodes: [g, ...(sc?.values?.length ? [historyPlot(sc.values.map((v, i) => h.secured_days?.[i]?.[0] ? v : null), sc.names, "")] : [])], rows: [{ label: `${dayName(dd[0])} – today`, value: pctText(now) }, { section: "New accounts, the bars above" },
-                { label: "Secured, last 7 days", value: made ? pctText((100 * withKey) / made) : "–" }] } };
-          })(),
+          shareRow({ ico: "lock", label: "Secured", head: "Secured, all accounts", n: h.secured, days: h.secured_days, at: (u) => u.backup_at }),
+          shareRow({ ico: "shield", label: "Attested", head: "Attested, all accounts", n: h.attested, days: h.attested_days, at: (u) => u.attest === "attested" ? u.attest_at : null, tracked: true, levels: h.attested_levels }),
           { ico: "user", label: "Yos / user", keepValueColumn: true, value: mean(yoN, usersInRange), values: per.some(v => v != null) ? per : null,
             title: { ...meanTip(spanWord(), yoN, usersInRange), note: !range ? "The hub has no all-time count of distinct active accounts." :
               daily ? "Accepted Yos divided by distinct active accounts in the range. Each bar uses that day’s counts." :
@@ -2884,8 +2907,10 @@ if (document.body.classList.contains("login")) {
       };
       const media = row("image", "Media", "media-in", h.events?.["media-in"]?.total ?? 0, true);
       const groups = row("user", "Groups", "group-create", h.groups ?? 0, false);
-      $("uc-rows").replaceChildren(sparkRows([...statsRows(h), deviceRow(), groups, ...(pushData ? [pushRow(h)] : [])], true));
-      $("delivery-rows").replaceChildren(sparkRows([...perfRows(h), media, ...botCards(h)], true));
+      // Yos / user heads the right card, above Speed.
+      const [active, secured, attested, yos] = statsRows(h);
+      $("uc-rows").replaceChildren(sparkRows([active, secured, attested, deviceRow(), groups, ...(pushData ? [pushRow(h)] : [])], true));
+      $("delivery-rows").replaceChildren(sparkRows([yos, ...perfRows(h), media, ...botCards(h)], true));
     };
     // Secured: accounts with a backup, this week's new ones, and the share per sign-up day.
     const securedCard = () => {

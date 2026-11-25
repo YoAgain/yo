@@ -52,6 +52,8 @@ CREATE TABLE backups (user_id BLOB PRIMARY KEY, locator BLOB UNIQUE, record BLOB
     auth_passkey BLOB, auth_code BLOB) WITHOUT ROWID;
 CREATE TABLE reports (reporter BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
     created_at INTEGER NOT NULL, PRIMARY KEY (reporter, reported_id)) WITHOUT ROWID;
+CREATE TABLE attestation (user_id BLOB PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('attested','failed')),
+    platform TEXT NOT NULL CHECK(platform IN ('ios','android')), reason TEXT, level TEXT, at_ms INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE deliveries_hourly (hour INTEGER PRIMARY KEY, n INTEGER NOT NULL);
 CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY, current BLOB NOT NULL, requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
 CREATE TABLE storage (user_id BLOB PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID;
@@ -234,6 +236,19 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             db.execute("INSERT INTO backups VALUES (?,?,?,?,?,?)", (uid, rid(rng), rid(rng, 120),
                        created + rng.randint(60_000, max(120_000, now - created)), rid(rng, 32), None))
         users.append(uid)
+    # Attestation verdicts (spec 6.11), measured since three days ago, from a generator of their own so the rest of
+    # the made-up world stays as it was.
+    at_rng, since = random.Random(611), now - 3 * DAY
+    for uid, app in db.execute("SELECT user_id, min(app) FROM devices GROUP BY user_id").fetchall():
+        platform = app.split("/")[0]
+        if platform in ("ios", "android") and app != "ios/1" and at_rng.random() < 0.7:
+            failed = at_rng.random() < 0.1
+            reason = ("device_integrity" if platform == "android" else "invalid_assertion") if failed else None
+            level = at_rng.choice(["strong", "device", "basic"]) if platform == "android" else None
+            created = db.execute("SELECT created_at FROM users WHERE id = ?", (uid,)).fetchone()[0]
+            start = max(since, created)
+            db.execute("INSERT INTO attestation VALUES (?,?,?,?,?,?)", (uid, "failed" if failed else "attested", platform,
+                       reason, level, start + at_rng.randint(0, max(1, now - start))))
     # The bots.
     for name, app in (("YoGPT", "yogpt/" + time.strftime("%Y%m%d%H%M", time.gmtime((now - 26 * HOUR) / 1000))), ("STATUS", "cli/7")):
         uid = rid(rng)
