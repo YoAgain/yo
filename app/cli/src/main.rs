@@ -168,7 +168,8 @@ const HELP_EXIT: &str =
 4 no account · 5 hub refused the signature: try again later · 130 stopped (Ctrl-C)";
 
 const HELP_ENV: &str = "Environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, YO_OHTTP_KEYS (lists
-comma separated), YO_JSON=1, NO_COLOR, YO_SMALL_ENVELOPES=1, YO_RECOVERY_LOOKUPS (default 10; a bot raises it)";
+comma separated), YO_JSON=1, NO_COLOR, YO_SMALL_ENVELOPES=1, YO_RECOVERY_LOOKUPS (default 10; a bot raises it),
+YO_TIMING=1 (timing notes on stderr)";
 
 /// The words that are commands: anything else as the first word is a friend to send a Yo to.
 const VERBS: &[&str] = &[

@@ -36,6 +36,7 @@ pub mod statedb;
 pub mod storage;
 #[cfg(any(test, feature = "test-support"))]
 mod testing;
+pub mod timing;
 #[cfg(any(test, feature = "test-support"))]
 pub use testing::{Memory, Saved};
 
@@ -1381,7 +1382,11 @@ impl Client {
 
     fn persist(&self) -> Result<()> {
         if let Some((store, _)) = &self.store {
+            let started = std::time::Instant::now();
             store.save_state(&self.state, self.records.export()).map_err(Error::Save)?;
+            if timing::on() {
+                timing::note(&format!("persist {:?}", started.elapsed()));
+            }
         }
         self.envelopes_unsaved.set(false);
         Ok(())

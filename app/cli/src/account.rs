@@ -2,16 +2,20 @@
 //! directory), the hub connection, and opening or registering the account in it.
 
 use crate::Failure;
+use rustls_platform_verifier::Verifier;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use yo_core::statedb::{DbStore, Loaded, StateDb};
 use yo_core::{Client, Error, Push, Response, Transport};
 
 /// An answer from the hub, at most: a full inbox fetch (100 envelopes of at most 65 KiB) fits.
 const MAX_RESPONSE: u64 = 16 << 20;
+
+/// A PING frame keeps each pool warm for the first Yo after a pause, without a hub request or sharing connections (spec 1.1).
+const KEEPALIVE: Duration = Duration::from_secs(20);
 
 /// Its `Yo-App`: "yogpt/" (what the admin page knows the bots by) and the build's UTC minute (YYYYMMDDHHMM, `YO_BUILD`).
 const BUILD: &str = match option_env!("YO_BUILD") {
@@ -212,20 +216,38 @@ fn control_path(state: &Path, runtime: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Signed requests and anonymous ones (sealed deliveries, blob fetches) on separate clients: never one connection for
-/// both (spec 1.1). Over OHTTP each line is an `Http` of its own (`yo_core::ohttp::Ohttp`).
+/// Direct requests use separate pools and TLS session caches (spec 1.1).
 struct Http {
-    client: reqwest::blocking::Client,
-    anonymous: reqwest::blocking::Client,
-    base: String,
+    signed: Line,
+    anonymous: Line,
 }
 
-/// One line of OHTTP: its own client, so its connections are its own.
-struct Line(Http);
+/// One client per line, built on its first request.
+struct Line {
+    base: String,
+    client: OnceLock<Result<reqwest::blocking::Client, String>>,
+}
+
+/// Load the system roots once. Each line builds its own config for a separate TLS session cache (spec 1.1).
+fn line_tls() -> Result<rustls::ClientConfig, String> {
+    static VERIFIER: OnceLock<Result<Arc<Verifier>, String>> = OnceLock::new();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let verifier = VERIFIER
+        .get_or_init(|| Verifier::new(provider.clone()).map(Arc::new).map_err(|e| format!("http: {e}")))
+        .clone()?;
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("http: {e}"))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec!["h2".into(), "http/1.1".into()];
+    Ok(tls)
+}
 
 impl Transport for Line {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
-        self.0.send(&self.0.client, false, method, path, headers, body)
+        self.send(false, method, path, headers, body)
     }
 }
 
@@ -234,21 +256,40 @@ impl Transport for Http {
         // Only what names nobody goes anonymously; a registration or a backup's fetch names the account (spec 1).
         let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device"));
         let anonymous = !signed && yoip::net::api::anonymous(method, path);
-        let client = if anonymous { &self.anonymous } else { &self.client };
-        self.send(client, signed, method, path, headers, body)
+        let line = if anonymous { &self.anonymous } else { &self.signed };
+        line.send(signed, method, path, headers, body)
     }
 }
 
-impl Http {
+impl Line {
+    fn new(base: String) -> Self {
+        Self { base, client: OnceLock::new() }
+    }
+
     fn send(
         &self,
-        client: &reqwest::blocking::Client,
         signed: bool,
         method: &str,
         path: &str,
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, String> {
+        let client = self
+            .client
+            .get_or_init(|| {
+                reqwest::blocking::Client::builder()
+                    .tls_backend_preconfigured(line_tls()?)
+                    .timeout(Duration::from_secs(60))
+                    .pool_idle_timeout(None)
+                    .http2_keep_alive_interval(Some(KEEPALIVE))
+                    .http2_keep_alive_while_idle(true)
+                    .http2_keep_alive_timeout(Duration::from_secs(10))
+                    .tcp_keepalive(KEEPALIVE)
+                    .build()
+                    .map_err(|e| format!("http: {e}"))
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
         let url = format!("{}{}", self.base, path);
         let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
@@ -259,6 +300,7 @@ impl Http {
             request = request.header(yoip::net::api::HEADER_APP, format!("yogpt/{BUILD}"));
         }
         // Without the URL: a blob's path is its capability (spec 4.3), never for an error or a log.
+        let started = std::time::Instant::now();
         let response = request.send().map_err(|e| {
             if e.is_timeout() {
                 "no answer in time".to_owned()
@@ -269,6 +311,12 @@ impl Http {
             }
         })?;
         let status = response.status().as_u16();
+        yo_core::timing::note(&format!(
+            "http {method} {} {:?} {:?}",
+            yo_core::timing::route(path),
+            response.version(),
+            started.elapsed()
+        ));
         let mut body = Vec::new();
         response.take(MAX_RESPONSE + 1).read_to_end(&mut body).map_err(|_| "the answer broke off")?;
         if body.len() as u64 > MAX_RESPONSE {
@@ -280,27 +328,20 @@ impl Http {
 
 pub(crate) fn transport(config: &Config) -> Result<Arc<dyn Transport>, Failure> {
     let base = config.hub.clone().ok_or_else(|| Failure::usage("no hub: use --hub URL or YO_HUB"))?;
-    let client = || {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|e| Failure::new(format!("http: {e}")))
-    };
+    yo_core::timing::note("transport: building");
+    let signed = Line::new(base.clone());
+    let anonymous = Line::new(base);
     if config.direct {
-        return Ok(Arc::new(Http { client: client()?, anonymous: client()?, base }));
+        return Ok(Arc::new(Http { signed, anonymous }));
     }
     // Oblivious HTTP by default (spec 4.1), never falling back to direct requests.
     let keys = match config.ohttp_keys.is_empty() {
-        true => yo_core::ohttp::pinned(&base),
+        true => yo_core::ohttp::pinned(&signed.base),
         false => config.ohttp_keys.clone(),
     };
     // None pinned for this hub: every request fails (never direct), until `--ohttp-key` or `--direct` is given.
-    let line = |http: Http| -> Arc<dyn Transport> { Arc::new(Line(http)) };
-    let (signed, anonymous) = (
-        line(Http { client: client()?, anonymous: client()?, base: base.clone() }),
-        line(Http { client: client()?, anonymous: client()?, base }),
-    );
-    Ok(Arc::new(Named(yo_core::ohttp::Ohttp::new(signed, anonymous, keys))))
+    yo_core::timing::note("transport: built");
+    Ok(Arc::new(Named(yo_core::ohttp::Ohttp::new(Arc::new(signed), Arc::new(anonymous), keys))))
 }
 
 /// Its build on a signed request, inside the wrapping, as `Http` does directly.
@@ -482,15 +523,23 @@ fn configure(client: &mut Client, config: &Config) -> Result<(), Failure> {
 
 /// Opens the registered account; a registration under way when it stopped is finished first.
 pub fn open(config: &Config) -> Result<Open, Failure> {
+    let note = yo_core::timing::note;
+    note("open: begins");
     let Some((lock, _, key)) = lock(config, false)? else { return Ok(Open::Busy) };
+    note("open: locked");
     let db = database(config, key)?;
+    note("open: database");
     let transport = transport(config)?;
     match db.load(None, &key).map_err(Failure::from)? {
         Loaded::Newer { word, state, records } => {
+            note("open: loaded");
             let (mut client, _) = Client::from_snapshot(transport, *state, records, false)?;
+            note("open: client");
             client.persist_to(Arc::new(DbStore::new(db, Some(word), None)), key)?;
+            note("open: persist_to");
             configure(&mut client, config)?;
             client.finish_registration()?;
+            note("open: done");
             Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))
         }
         _ => Err(Failure::not_registered()),

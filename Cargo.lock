@@ -5739,6 +5739,8 @@ dependencies = [
  "qrcode",
  "ratatui",
  "reqwest",
+ "rustls",
+ "rustls-platform-verifier",
  "serde_json",
  "yo-core",
  "yo-hub",

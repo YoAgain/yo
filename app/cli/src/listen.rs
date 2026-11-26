@@ -144,6 +144,7 @@ impl Listener<'_> {
         let command: Option<Vec<String>> = read.ok().and_then(|_| serde_json::from_str(&line).ok());
         let outcome = match command {
             Some(command) if !matches!(command.first().map(String::as_str), Some("register" | "listen") | None) => {
+                yo_core::timing::note(&format!("socket: {} begins", command[0]));
                 let emit = |events| self.emit(events);
                 let context = Context { client: self.client, config: self.config, listening: true, emit: &emit };
                 commands::run(&context, &command)
@@ -250,6 +251,7 @@ fn receive(listener: &Listener) -> ! {
             let wait = listener.client().sync_begin(WAIT_S);
             wait.and_then(|wait| {
                 let response = wait.send();
+                yo_core::timing::note("listen: inbox answered");
                 // Printed before they are saved: a bot's answer goes first (`sync_end_unsaved`), the save after.
                 listener.client().sync_end_unsaved(&wait, response)
             })
@@ -262,6 +264,7 @@ fn receive(listener: &Listener) -> ! {
                 let message = events.iter().any(|e| matches!(e, Event::Message { .. } | Event::GroupMessage { .. }));
                 let begun = listener.begun.load(Ordering::SeqCst);
                 listener.print_events(&events);
+                yo_core::timing::note(&format!("listen: {} events printed", events.len()));
                 let probed = !probes.is_empty();
                 for (user, token) in probes {
                     listener.line(&commands::probe(&user, &token));
@@ -277,6 +280,7 @@ fn receive(listener: &Listener) -> ! {
                     eprintln!("yo: {}", crate::reason(&error));
                 }
                 listener.acknowledge(&events);
+                yo_core::timing::note("listen: round done");
             }
             Err(error) if crate::gone(&error) => {
                 eprintln!("yo: this device was removed for good (replaced, or the name released)");

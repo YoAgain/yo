@@ -70,15 +70,29 @@ impl Ohttp {
         if self.configs.is_empty() {
             return Err("no OHTTP key pinned for this hub".into());
         }
+        let started = std::time::Instant::now();
         let plain = encode_request(method, path, headers, body)?;
         let outer = [("content-type".to_owned(), api::OHTTP_REQUEST_TYPE.to_owned())];
         for config in &self.configs {
             let client = ::ohttp::ClientRequest::from_encoded_config(config).map_err(|e| format!("ohttp: {e}"))?;
             let (request, opener) = client.encapsulate(&plain).map_err(|e| format!("ohttp: {e}"))?;
+            let wrapped = started.elapsed();
             let response = line.request("POST", api::OHTTP, &outer, &request)?;
+            let answered = started.elapsed();
             match response.status {
                 200 => {
                     let plain = opener.decapsulate(&response.body).map_err(|_| "ohttp: the answer does not open")?;
+                    if crate::timing::on() {
+                        crate::timing::note(&format!(
+                            "ohttp {method} {} wrap {:?} http {:?} unwrap {:?} out {} in {}",
+                            crate::timing::route(path),
+                            wrapped,
+                            answered - wrapped,
+                            started.elapsed() - answered,
+                            request.len(),
+                            response.body.len()
+                        ));
+                    }
                     return decode_response(&plain);
                 }
                 422 => continue,
