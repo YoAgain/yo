@@ -31,8 +31,8 @@ const BUSY_WAIT: Duration = Duration::from_secs(30);
 
 pub const HELP: &str =
     "usage: yo [--state DIR] [--hub URL] [--hub-key KEY]... [--trust-root KEY]... [--zk-params P] COMMAND
-  register NAME [--bot] [--force]   register the account (once; again finishes an interrupted one); --bot: as a
-                                    bot, which everyone who looks it up is told; --force only to replace this directory's device when its state is lost
+  register NAME [--no-bot] [--force]  register the account (once; again finishes an interrupted one) as a bot,
+                                    which everyone who looks it up is told, for good; --no-bot: not; --force only to replace this directory's device when its state is lost
   whoami | status                   who this is; status adds counts and whether a listener runs
   friends | contacts                the friend list; everyone this account has a chat with
   whois NAME                        a username's user id
@@ -175,10 +175,10 @@ fn run(config: &Config, command: &[String]) -> i32 {
     loop {
         let opened = match name.as_str() {
             "register" => match command {
-                [_, username, flags @ ..] if flags.iter().all(|f| f == "--force" || f == "--bot") => {
+                [_, username, flags @ ..] if flags.iter().all(|f| matches!(f.as_str(), "--force" | "--bot" | "--no-bot")) => {
                     account::register(config, username, flags.iter().any(|f| f == "--force"))
                 }
-                _ => return print(Err(Failure::usage("register NAME [--bot] [--force]"))),
+                _ => return print(Err(Failure::usage("register NAME [--no-bot] [--force]"))),
             },
             _ => account::open(config),
         };
@@ -188,7 +188,7 @@ fn run(config: &Config, command: &[String]) -> i32 {
                 let client = std::sync::Mutex::new(opened.client);
                 let context = commands::Context { client: &client, config, listening: false, emit: &|_| {} };
                 return print(match name.as_str() {
-                    "register" if command.iter().skip(2).any(|f| f == "--bot") => {
+                    "register" if !command.iter().skip(2).any(|f| f == "--no-bot") => {
                         commands::run(&context, &["bot".into(), "on".into()])
                             .and_then(|_| commands::whoami(&context, false))
                     }

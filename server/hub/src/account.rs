@@ -237,14 +237,16 @@ pub(crate) async fn put_push(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `PUT /v1/bot` (spec 4.1): whether the account is a bot, for everyone who looks it up.
+/// `PUT /v1/bot` (spec 2.1, 4.1): marks the account a bot for everyone who looks it up; never cleared (`409`).
 pub(crate) async fn put_bot(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
     let bot = match body[..] {
         [0] => false,
         [1] => true,
         _ => return Err(bad()),
     };
-    hub.db.set_bot(&device.device_id, bot)?.done()?;
+    if !hub.db.set_bot(&device.device_id, bot)?.done()? {
+        return Err(refuse(StatusCode::CONFLICT));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

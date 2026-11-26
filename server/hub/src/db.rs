@@ -744,12 +744,16 @@ impl Db {
         })
     }
 
-    /// A user's profile key check (spec 3.3), at once: the one before does no more.
+    /// Marks the account a bot (spec 2.1), one-way: false only if it is none; false for a bot gives `false` (`409`).
     /// Written as `device`, which must still be there (a replaced one is `410`).
-    pub fn set_bot(&self, device: &DeviceId, bot: bool) -> rusqlite::Result<Write<()>> {
+    pub fn set_bot(&self, device: &DeviceId, bot: bool) -> rusqlite::Result<Write<bool>> {
         self.as_device(device, |tx, user| {
-            tx.execute("UPDATE account SET bot = ?2 WHERE id = ?1", params![user, bot])?;
-            Ok(Write::Done(()))
+            if bot {
+                tx.execute("UPDATE account SET bot = 1 WHERE id = ?1", params![user])?;
+                return Ok(Write::Done(true));
+            }
+            let is: bool = tx.query_row("SELECT bot FROM account WHERE id = ?1", params![user], |r| r.get(0))?;
+            Ok(Write::Done(!is))
         })
     }
 
@@ -3156,6 +3160,16 @@ mod tests {
             .deliver(&[Incoming { user: bot, devices_hash, from: None, copies: Copies::Legacy(b"envelope") }], 0, 10)
             .unwrap();
         assert!(matches!(&delivered[..], [Delivered::Stored(devices)] if devices.iter().all(|w| w.bot)));
+    }
+
+    #[test]
+    fn the_bot_mark_is_one_way() {
+        let db = Db::open(":memory:").unwrap();
+        register(&db, b"BOT", 1, 1, 0);
+        assert!(db.set_bot(&[1; 16], false).unwrap().done().unwrap(), "0 on a non-bot is fine");
+        assert!(db.set_bot(&[1; 16], true).unwrap().done().unwrap());
+        assert!(!db.set_bot(&[1; 16], false).unwrap().done().unwrap(), "0 on a bot is refused");
+        assert!(db.set_bot(&[1; 16], true).unwrap().done().unwrap(), "1 again stays fine");
     }
 
     #[test]
