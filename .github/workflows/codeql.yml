@@ -1,4 +1,4 @@
-# CodeQL without a build: every language from the sources (Kotlin too, which the default setup tried to build).
+# CodeQL without a build: every language from the sources. Kotlin is left out: build-mode none reads only Java.
 name: CodeQL
 
 on:
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, java-kotlin, javascript-typescript, python, rust]
+        language: [actions, javascript-typescript, python, rust]
     steps:
       - uses: actions/checkout@v7
       - uses: github/codeql-action/init@v4.39.5
