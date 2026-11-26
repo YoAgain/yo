@@ -487,7 +487,7 @@ impl Client {
         let message = Message::decode(plain.content.as_slice())?;
         if user == self.state.user_id {
             if self.first_time(&user, &payload.device_key, &plaintext) {
-                self.receive_sibling(payload.device_key, plain, message)?;
+                self.receive_sibling(plain, message)?;
             }
             return Ok(());
         }

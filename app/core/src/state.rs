@@ -293,10 +293,10 @@ pub struct State {
     /// This account's other devices, as the hub lists them (spec 3.2).
     #[serde(default)]
     pub siblings: Vec<Slot>,
-    /// Siblings that joined after this device and have not written to it yet: no sync goes while one is (a device
-    /// the hub lists again after it was replaced gets nothing from here).
+    /// Own devices the roster dropped (removed or replaced), the newest 64: one the hub lists again gets nothing from
+    /// here, its keys gone. (A save's `siblings_held`, devices linked later and held until they wrote, is let go.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub siblings_held: Vec<Key>,
+    pub siblings_retired: Vec<Key>,
     /// When the own roster was last asked for, and whether it ever was: the first answer is the account as it was
     /// when this device joined, its devices trusted.
     #[serde(default)]

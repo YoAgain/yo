@@ -55,7 +55,7 @@ impl Device {
             own_roster_at: 0,
             seen_through: Default::default(),
             seen_due: Default::default(),
-            siblings_held: Vec::new(),
+            siblings_retired: Vec::new(),
             own_roster_known: false,
             last_in: Default::default(),
             contacts: Default::default(),

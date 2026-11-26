@@ -204,17 +204,17 @@ fn a_sent_message_is_a_transcript_on_the_sibling() {
     receive(&mut b, for_device(&payloads, 2)).unwrap();
     assert!(b.state.events.is_empty() && !b.state.contacts.contains_key(&hex(&stranger)));
 
-    // A held sibling gets none.
+    // A sibling the roster dropped before gets none.
     a.state.outbox.clear();
-    a.state.siblings_held = vec![b.state.device_key];
+    a.state.siblings_retired = vec![b.state.device_key];
     a.queue(std::slice::from_ref(&peer), None, Content::Yo).unwrap();
     assert!(a.state.outbox.iter().all(|o| o.user != user));
 }
 
-/// A device the hub lists for this account after this one joined (a new one, or one replaced and listed again)
-/// is told to the app and gets no sync until it has written here itself.
+/// A device the hub lists for this account after this one joined is told to the app and gets syncs at once, before
+/// it has written here; one the roster dropped gets none even when the hub lists it again.
 #[test]
-fn a_later_sibling_is_announced_and_held_until_it_writes() {
+fn a_later_sibling_is_announced_and_served_a_dropped_one_never() {
     let mut a = phone(1, 1);
     let mut b = phone(1, 2);
     let user = a.user_id().to_owned();
@@ -222,21 +222,29 @@ fn a_later_sibling_is_announced_and_held_until_it_writes() {
     a.take_devices(&user, a.my_account_key(), &[rostered(&a)], None).unwrap();
     a.take_devices(&user, a.my_account_key(), &[rostered(&a), rostered(&b)], None).unwrap();
     assert_eq!(a.state.events, [Event::DeviceAdded { user: user.clone() }]);
-    assert_eq!(a.state.siblings_held, [b.state.device_key]);
-    a.queue_sync(SyncMessage::StorageChanged).unwrap();
-    assert!(a.state.outbox.is_empty(), "nothing for a held device");
+    assert!(a.state.siblings_retired.is_empty());
+    assert!(a.queue_sync(SyncMessage::StorageChanged).unwrap());
+    assert_eq!(a.state.outbox.len(), 1);
+    assert_eq!(a.state.outbox[0].audience, [b.state.device_key]);
+    a.state.outbox.clear();
 
-    // B joined with A listed: A is trusted there, and B's first word releases it at A.
+    // B joined with A listed: A is trusted there too, no event.
     b.take_devices(&user, b.my_account_key(), &[rostered(&a), rostered(&b)], None).unwrap();
-    assert!(b.state.siblings_held.is_empty() && b.state.events.is_empty());
+    assert!(b.state.siblings_retired.is_empty() && b.state.events.is_empty());
     b.take_bundles(&user, a.my_account_key(), &[bundle(&mut a)]).unwrap();
     let (payloads, _) =
         b.encrypt_for(&user, &plaintext(None, Content::Sync(SyncMessage::StorageChanged)), false, &[]).unwrap();
     receive(&mut a, for_device(&payloads, 1)).unwrap();
-    assert!(a.state.siblings_held.is_empty());
     assert!(!a.state.storage_fetched, "the storage is read after the batch, not in it");
-    a.queue_sync(SyncMessage::StorageChanged).unwrap();
-    assert_eq!(a.state.outbox.len(), 1);
+
+    // B is dropped, then listed again: told again, and nothing goes to it.
+    a.state.events.clear();
+    a.take_devices(&user, a.my_account_key(), &[rostered(&a)], None).unwrap();
+    assert_eq!(a.state.siblings_retired, [b.state.device_key]);
+    a.take_devices(&user, a.my_account_key(), &[rostered(&a), rostered(&b)], None).unwrap();
+    assert_eq!(a.state.events, [Event::DeviceAdded { user: user.clone() }]);
+    assert!(!a.queue_sync(SyncMessage::StorageChanged).unwrap());
+    assert!(a.state.outbox.is_empty(), "nothing for a dropped device");
 
     // A contact's roster that grows, or one device in place of another, is no event: only this account's own.
     let peer = hex(&[2; 16]);
@@ -358,7 +366,7 @@ fn sibling_storage_changed_is_read_after_the_batch_and_merges_dirty_fields() {
     b.transport = Arc::new(StorageRead(encode(&api::Storage { version: 3, data })));
     let plain: Plain = decode(&plaintext(None, Content::Sync(SyncMessage::StorageChanged))).unwrap();
     let message = Message::decode(plain.content.as_slice()).unwrap();
-    b.receive_sibling([1; 32], plain, message).unwrap();
+    b.receive_sibling(plain, message).unwrap();
     assert!(!b.state.storage_fetched && b.after_due);
     b.read_storage().unwrap();
     assert_eq!(b.app_icon().as_deref(), Some("Original"));

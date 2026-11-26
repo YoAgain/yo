@@ -1602,15 +1602,16 @@ impl Client {
             let added: Vec<Key> =
                 devices.iter().filter(|d| !known.iter().any(|k| k.key == d.key)).map(|d| d.key).collect();
             if own {
-                // The account as it was when this device joined is trusted; a device listed later gets no sync until
-                // it has written here (`receive_sibling`), and the app is told (Signal's "new device linked").
-                if self.state.own_roster_known {
-                    self.state.siblings_held.extend(added.iter().copied());
-                    if !added.is_empty() {
-                        self.push_event(Event::DeviceAdded { user: user.to_owned() });
+                // A device listed after this one joined gets syncs and transcripts at once, and the app is told
+                // (Signal's "new device linked"); one dropped from the roster gets nothing from here again.
+                if self.state.own_roster_known && !added.is_empty() {
+                    self.push_event(Event::DeviceAdded { user: user.to_owned() });
+                }
+                for old in &known {
+                    if !devices.iter().any(|d| d.key == old.key) {
+                        self.retire_sibling(old.key);
                     }
                 }
-                self.state.siblings_held.retain(|held| devices.iter().any(|d| d.key == *held));
                 self.state.siblings = devices;
             } else {
                 let wall = self.wall();
@@ -1671,7 +1672,7 @@ impl Client {
             Ok(()) => {
                 self.state.own_roster_at = (self.clock)().max(1);
                 if !std::mem::replace(&mut self.state.own_roster_known, true) {
-                    // Joined an account with devices: they hold this one until it writes to them.
+                    // Joined an account with devices: they read the storage, and learn of this one if they had not.
                     self.queue_sync(yoip::protocol::content::SyncMessage::StorageChanged)?;
                 }
             }

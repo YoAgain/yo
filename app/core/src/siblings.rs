@@ -1,24 +1,24 @@
 //! What one device of an account tells its other devices (spec 3.2, Signal's sync messages): the threads it showed
-//! and that the storage changed. A device that joined after this one gets nothing from here until it has written
-//! here itself (`siblings_held`): one the hub lists again after it was replaced, its keys gone, never does. (One
-//! whose keys someone has can write: against that, as in Signal, the app is told of every device added.) None of it
-//! is an app event.
+//! and that the storage changed. Every device the own roster lists gets them, one linked after this one too: as in
+//! Signal, the app is told of every device added. One the roster dropped (removed or replaced, `siblings_retired`)
+//! gets nothing from here even if the hub lists it again. None of it is an app event.
 use super::*;
 use yoip::protocol::content::{Read, SyncMessage, MAX_READ};
 
 /// The most threads whose newest message is kept (`last_in`).
 const KEPT_THREADS: usize = 1000;
+/// The most own devices kept as dropped from the roster (`siblings_retired`).
+const KEPT_RETIRED: usize = 64;
 
 impl Client {
-    /// A sync to this account's other devices but the held ones; `false`: none to take it.
+    /// A sync to this account's other devices; `false`: none to take it.
     pub(super) fn queue_sync(&mut self, sync: SyncMessage) -> Result<bool> {
         self.queue_own(Content::Sync(sync))
     }
 
-    /// Content for this account's other devices but the held ones (a sync, or a receipt that starts a new session).
+    /// Content for this account's other devices (a sync, or a receipt that starts a new session).
     pub(super) fn queue_own(&mut self, content: Content) -> Result<bool> {
-        let held = &self.state.siblings_held;
-        let audience: Vec<Key> = self.state.siblings.iter().map(|d| d.key).filter(|k| !held.contains(k)).collect();
+        let audience = self.own_audience();
         if audience.is_empty() {
             return Ok(false);
         }
@@ -32,8 +32,7 @@ impl Client {
     /// A copy of a 1:1 message just queued for `user`, for this account's other devices (Signal's sent transcript):
     /// the same message, `to` naming whom it went to.
     pub(super) fn queue_transcript(&mut self, user: &str, message: Vec<u8>) -> Result<()> {
-        let held = &self.state.siblings_held;
-        let audience: Vec<Key> = self.state.siblings.iter().map(|d| d.key).filter(|k| !held.contains(k)).collect();
+        let audience = self.own_audience();
         if audience.is_empty() {
             return Ok(());
         }
@@ -42,6 +41,22 @@ impl Client {
         self.enqueue_with_urgency(&own, encode(&Plain { to: Some(to), content: message.into() }), true);
         self.state.outbox.back_mut().expect("enqueued").audience = audience;
         Ok(())
+    }
+
+    /// This account's other devices as the roster lists them, but one it dropped before (`siblings_retired`).
+    fn own_audience(&self) -> Vec<Key> {
+        let retired = &self.state.siblings_retired;
+        self.state.siblings.iter().map(|d| d.key).filter(|k| !retired.contains(k)).collect()
+    }
+
+    /// Notes an own device the roster dropped: nothing goes to it from here again.
+    pub(super) fn retire_sibling(&mut self, key: Key) {
+        let retired = &mut self.state.siblings_retired;
+        if !retired.contains(&key) {
+            retired.push(key);
+        }
+        let over = retired.len().saturating_sub(KEPT_RETIRED);
+        retired.drain(..over);
     }
 
     /// This account's devices as the hub lists them (number, registered, last seen, app), for the owner to choose one
@@ -56,6 +71,9 @@ impl Client {
     pub fn remove_device(&mut self, number: u8) -> Result<()> {
         expect(self.signed("DELETE", &api::device_path(number), &[])?, status::NO_CONTENT)?;
         // Asked again with the next roster refresh: its sessions go then.
+        if let Some(gone) = self.state.siblings.iter().find(|d| d.slot == number).map(|d| d.key) {
+            self.retire_sibling(gone);
+        }
         self.state.siblings.retain(|d| d.slot != number);
         self.persist()
     }
@@ -122,9 +140,7 @@ impl Client {
     }
 
     /// A message from another device of this account, opened in its session.
-    pub(super) fn receive_sibling(&mut self, device: Key, plain: Plain, message: Message) -> Result<()> {
-        // It wrote here with its keys: it gets this device's syncs from now on.
-        self.state.siblings_held.retain(|held| *held != device);
+    pub(super) fn receive_sibling(&mut self, plain: Plain, message: Message) -> Result<()> {
         // A copy of what it sent to someone (Signal's sent transcript): the thread shows it as sent from here, and
         // writing accepted the contact. Only a 1:1 message of a contact this device knows (a new chat is not made
         // from it: its keys come with the next lookup); a group's is not taken yet.

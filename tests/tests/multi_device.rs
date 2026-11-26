@@ -25,16 +25,16 @@ fn exercise(http: Arc<dyn Transport>) {
     a2.maintenance().unwrap();
 
     // A1 joins the account: A2, there before it, is trusted at once; A1's first word (a storage hint) tells A2 of
-    // the new device and lets A2's syncs go to it.
+    // the new device.
     let mut a1 = register("First", Some(a2.account_secret()));
     assert_eq!(a1.user_id(), a2.user_id());
     assert_eq!(a1.saved().state.siblings.len(), 1);
-    assert!(a1.saved().state.siblings_held.is_empty());
+    assert!(a1.saved().state.siblings_retired.is_empty());
     a1.maintenance().unwrap();
     let events = a2.sync(0).unwrap();
     assert_eq!(added(&events), 1, "{events:?}");
     assert_eq!(a2.saved().state.siblings.len(), 1);
-    assert!(a2.saved().state.siblings_held.is_empty());
+    assert!(a2.saved().state.siblings_retired.is_empty());
 
     // B has only the first slot. Its next delivery sees a signed 409 and opens the added session; each device gets
     // its own copy.
@@ -98,7 +98,7 @@ fn exercise(http: Arc<dyn Transport>) {
     assert!(!a2.sync(0).unwrap().iter().any(|e| matches!(e, Event::GroupMessage { .. })));
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
 
-    // A3 joins: told on A1 and A2 once it writes, and their syncs go to it from then on. (A roster is asked at most
+    // A3 joins: told on A1 and A2 once it writes. (A roster is asked at most
     // once a minute a user, and A2 asked for A1's: a minute on.)
     let mut a3 = register("First", Some(a1.account_secret()));
     a3.maintenance().unwrap();
@@ -107,7 +107,7 @@ fn exercise(http: Arc<dyn Transport>) {
         let events = a.sync(0).unwrap();
         assert_eq!(added(&events), 1, "{events:?}");
         assert_eq!(a.saved().state.siblings.len(), 2);
-        assert!(a.saved().state.siblings_held.is_empty());
+        assert!(a.saved().state.siblings_retired.is_empty());
     }
     // A3 restored the account's storage (its groups); no message of A1's reached it.
     let left = a3.sync(0).unwrap();
@@ -169,4 +169,69 @@ fn siblings_at_the_hub_router() {
     let hub = Hub::new(config(), Arc::new(yo_hub::push::Recorder::default())).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     exercise(Arc::new(Local(hub.router(), runtime)));
+}
+
+/// Sent transcripts reach every own device the roster lists, also one linked after the sender and one that has not
+/// written to it yet (spec 2.5): a device linked later is told to the app, not held.
+#[test]
+fn transcripts_reach_every_own_device() {
+    let hub = TestHub::start_with(config(), "127.0.0.1:0");
+    let http = Http::new(hub.url());
+    let register = |name, secret| {
+        let mut c = Client::register_username(http.clone(), name, secret, None, Push::none()).unwrap();
+        c.set_hub_keys(vec![yo_tests::hub_key()]);
+        c
+    };
+    let sent_to = |events: &[Event], to: &str| {
+        events.iter().filter(|e| matches!(e, Event::Sent { user, content: Content::Yo, .. } if user == to)).count()
+    };
+    let mut a = register("First", None);
+    let mut c = register("Second", None);
+    c.send_yo(a.user_id()).unwrap();
+    a.sync(0).unwrap();
+    a.accept(c.user_id()).unwrap();
+    a.send_yo(c.user_id()).unwrap();
+    c.sync(0).unwrap();
+    let to = c.user_id().to_owned();
+
+    // (a) B is linked: its first send shows on A as sent.
+    let mut b = register("First", Some(a.account_secret()));
+    b.sync(0).unwrap();
+    b.send_yo(&to).unwrap();
+    let events = a.sync(0).unwrap();
+    assert_eq!(sent_to(&events, &to), 1, "{events:?}");
+
+    // (b) D is linked and its first word (the storage hint) is lost: once A's roster lists it, A's send reaches it.
+    let mut d = register("First", Some(a.account_secret()));
+    let mut saved = d.saved();
+    saved.state.outbox.clear();
+    d.reload(&saved).unwrap();
+    d.sync(0).unwrap();
+    a.set_clock(Arc::new(|| yo_hub::now_ms() + 25 * 3600 * 1000));
+    a.sync(0).unwrap();
+    assert_eq!(a.saved().state.siblings.len(), 2);
+    a.send_yo(&to).unwrap();
+    let events = d.sync(0).unwrap();
+    assert_eq!(sent_to(&events, &to), 1, "{events:?}");
+
+    // (c) B and D both joined after A: transcripts go between them both ways.
+    for x in [&mut b, &mut d] {
+        x.set_clock(Arc::new(|| yo_hub::now_ms() + 25 * 3600 * 1000));
+        x.sync(0).unwrap();
+        assert_eq!(x.saved().state.siblings.len(), 2);
+    }
+    b.send_yo(&to).unwrap();
+    let events = d.sync(0).unwrap();
+    assert_eq!(sent_to(&events, &to), 1, "{events:?}");
+    d.send_yo(&to).unwrap();
+    let events = b.sync(0).unwrap();
+    assert_eq!(sent_to(&events, &to), 1, "{events:?}");
+    for x in [&mut a, &mut b, &mut d] {
+        x.sync(0).unwrap();
+    }
+    a.send_yo(&to).unwrap();
+    for x in [&mut b, &mut d] {
+        let events = x.sync(0).unwrap();
+        assert_eq!(sent_to(&events, &to), 1, "{events:?}");
+    }
 }
