@@ -1,0 +1,7 @@
+Forty-fourth release candidate — names, bots and quieter problems.
+
+• Sign-up: the name field checks as you type, with a quiet hint ("Minimum 12 characters", "No spaces") and no flicker
+• Bots show "/" before their name, like groups show "#", right after adding them
+• A sign-up interrupted on this phone resumes with the same name
+• Fewer false problem reports: bad networks, cancelled media and a second sign-in tap are no longer reported
+• Android ships again on Google Play
