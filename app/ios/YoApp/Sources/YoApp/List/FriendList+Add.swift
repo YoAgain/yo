@@ -139,7 +139,7 @@ extension FriendList {
     case .unreachable(let why):
       Problems.shared.report(why)  // the hub did not answer: said, and asked again later
       return false
-    case .new(let spelled, let user):
+    case .new(let spelled, let user, _):
       inviting = Invitation(name: spelled, user: user, known: false)
     }
     return true
@@ -192,9 +192,9 @@ extension FriendList {
         position.scrollTo(id: known.key.uuidString, anchor: .center)
       }
       showSent(to: known, productText(text: .alreadyAdded, lang: .english))
-    case .new(let spelled, let user):
+    case .new(let spelled, let user, let bot):
       withAnimation(.snappy) {
-        friends.add(spelled, user: user)
+        friends.add(spelled, user: user, bot: bot)
       }
       if let bar = friends.all.first(where: { !$0.gone && $0.group == nil && $0.user == user }) {
         Task { await yoNow(bar) }
@@ -209,7 +209,7 @@ extension FriendList {
     case problem(String)
     case known(Friend)
     /// Not on the list yet: as its owner spells it, with its user id.
-    case new(String, user: String)
+    case new(String, user: String, bot: Bool)
     /// The hub did not answer (never added unchecked: the name could be nobody's): why.
     case unreachable(ProductProblem)
   }
@@ -223,11 +223,13 @@ extension FriendList {
     guard client === accounts.client else { return .signedOut }
     var user: String?
     var spelled = name
+    var bot = false
     var unreachable: ProductProblem?
     switch answer {
     case .noSuchUser: return .problem(ProductText.noSuchUser.english)
-    case .found(let found, let owners):
+    case .found(let found, let owners, let isBot):
       user = found
+      bot = isBot
       spelled = owners ?? spelled
     case .unknown(let why): unreachable = why
     }
@@ -239,7 +241,7 @@ extension FriendList {
       return .known(known)
     }
     guard let user else { return .unreachable(unreachable ?? .failed) }
-    return .new(spelled, user: user)
+    return .new(spelled, user: user, bot: bot)
   }
 
   /// A hint in the empty field for a moment; then the bar closes unless something is typed.

@@ -236,7 +236,7 @@ final class Inbox {
 
   enum Lookup {
     /// The name as its owner writes it ("YoGPT").
-    case found(user: String, name: String?)
+    case found(user: String, name: String?, bot: Bool)
     case noSuchUser
     /// No answer (offline, the server): why, for the banner.
     case unknown(ProductProblem)
@@ -246,7 +246,7 @@ final class Inbox {
     guard let client = await accounts.clientSoon(seconds: 3) else { return .unknown(.failed) }
     do {
       guard let found = try await Hub.run({ try client.whois(name: name) }) else { return .noSuchUser }
-      return .found(user: found.user, name: found.username)
+      return .found(user: found.user, name: found.username, bot: found.bot)
     } catch {
       return .unknown(Problems.problem(of: error))
     }
@@ -255,7 +255,7 @@ final class Inbox {
   /// Friends added by a typed name while offline, asked now so each shows as its owner writes it.
   func identify(_ names: [String], accounts: AccountStore, friends: Friends) async {
     for name in names {
-      if case .found(let user, let spelled) = await lookUp(name, accounts: accounts) {
+      if case .found(let user, let spelled, _) = await lookUp(name, accounts: accounts) {
         friends.found(name, user: user, spelled: spelled)
       }
     }

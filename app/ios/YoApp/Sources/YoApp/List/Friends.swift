@@ -212,7 +212,7 @@ final class Friends {
   /// Adds a name at the bottom (the Yo the add sends lifts it, `yo_ui::list`); an empty or known one (in any
   /// spelling) is ignored. A gone friend gives its place to the name's new owner. Where both user ids are known, they
   /// decide.
-  func add(_ typed: String, user: String? = nil) {
+  func add(_ typed: String, user: String? = nil, bot: Bool = false) {
     let name = Username.clean(typed)
     let skeleton = Username.skeleton(name)
     func same(_ friend: Friend) -> Bool {
@@ -222,7 +222,9 @@ final class Friends {
     }
     guard !name.isEmpty, !all.contains(where: { !$0.gone && same($0) }) else { return }
     var list = all.filter { !same($0) }  // gone ones only
-    list.append(Friend(name: name, color: nextColor, user: user))
+    var friend = Friend(name: name, color: nextColor, user: user)
+    friend.bot = bot  // the lookup said so: "/" at once, not first with the next contacts sync
+    list.append(friend)
     all = list
   }
 

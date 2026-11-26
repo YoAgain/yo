@@ -761,17 +761,18 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (c !== client) return
         val known = known(found.username ?: name, found.user)
         if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return }
-        addFriend(c, found.username ?: name, found.user)
+        addFriend(c, found.username ?: name, found.user, found.bot)
         // Its Yo goes on its own, the field free meanwhile; a failure says so on the bar, as any tap's.
         if (yo) known(found.username ?: name, found.user)?.let { friend -> command { send(friend) } }
     }
     private fun known(spelled: String, user: String?) = state.value.friends.firstOrNull { it.group == null && !it.gone &&
         ((user != null && it.user == user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
-    private suspend fun addFriend(c: YoClient, spelled: String, user: String?) {
+    private suspend fun addFriend(c: YoClient, spelled: String, user: String?, bot: Boolean = false) {
         changes.withLock {
             if (known(spelled, user) != null) return@withLock
             user?.let { removedUsers.remove(it) }
-            val friend = Friend(name = spelled, color = nextColor(state.value.friends), user = user)
+            // The lookup said whether it is a bot: "/" at once, not first with the next refresh.
+            val friend = Friend(name = spelled, color = nextColor(state.value.friends), user = user, bot = bot)
             if (friend.user != null) c.setFriend(friend.user, friend.name, friend.color.toUByte())
             mutable.update { it.copy(friends = it.friends + friend) }; listFriends(); persist()
         }
