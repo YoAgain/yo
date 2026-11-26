@@ -353,16 +353,16 @@ Bridge    other service ──► api.justyo.app/NAME/… ──► entrance ─
 ### 4.1 Transport
 The hub is reached only over HTTPS (plain HTTP redirects, HSTS 6 months).
 
-**Oblivious HTTP.** Clients that support it MUST wrap every request to the hub's `🔐 OHTTP key` (RFC 9458 with Binary HTTP, RFC 9292) and `POST` it to `/v1/ohttp`. Only key discovery and ticket transfers stay direct. A failing OHTTP path or pin MUST NOT fall back to direct requests. The TLS proxy then sees only IP, time and size; the hub still sees the IP (limits, §1.1).
+**Oblivious HTTP.** Clients that support it MUST wrap every request to the hub's `🔐 OHTTP key` (RFC 9458 with Binary HTTP, RFC 9292) and `POST` it to `/v1/ohttp`. Only key discovery and ticket transfers stay direct. A failing OHTTP path or pin MUST NOT fall back to direct requests. Yo uses OHTTP in a simplified form, without a separate relay: it hides from the TLS proxy what a request is (which inbox, which name, which account), not the IP from the hub. The proxy then sees only IP, time and size. The hub still sees the IP and uses it for rate limits (§1.1, §4.1 limits).
 - **Suite.** DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM. The key config is served at `/.well-known/yo-ohttp` (`application/ohttp-keys`); apps pin current and spare by app update, discovery never adds a pin.
-- **Dispatch.** The hub serves only the YoIP routes of the endpoint table inside OHTTP (no admin, support, discovery, ticket or nested OHTTP), with their usual signatures, signed answers and limits. Once unwrapped, every answer, errors included, goes back padded and wrapped in an outer `200`; only failures before unwrapping use outer errors.
+- **Dispatch.** The hub serves only the YoIP routes of the endpoint table inside OHTTP (no admin, support, discovery, ticket or nested OHTTP), with their usual signatures and limits. An answer the client unwraps is authentic and fresh: only the holder of the pinned key can wrap it to that request, so OHTTP clients send no `Yo-Nonce` and take answers unsigned. Once unwrapped, every answer, errors included, goes back padded and wrapped in an outer `200`; only failures before unwrapping use outer errors; an unknown key id is an outer `422`, after which the client MAY retry once with its spare.
 - **Replay.** Each request carries an inner `Date`; the hub MUST refuse dates off by more than 5 minutes and any `enc` it accepted within that window. Clients MUST NOT retry a wrapped request automatically unless they know it was not processed.
-- **Padding.** Both directions MUST be padded with Binary HTTP zero padding to fixed buckets of the whole wrapped body (`net/limits.rs`). A one-device Yo MUST fit the smallest bucket.
-- **Tickets.** Media does not go through OHTTP. Inside OHTTP the client asks for a ticket for one blob and one direction (`PUT` with length and digest bound by the signed request, `GET` with the blob capability); it is ≥ 128 random bits, works once and expires after 5 minutes. The transfer is `PUT` or `GET /v1/blobs/t/{ticket}`, direct, `Cache-Control: no-store`; the hub checks length and digest before keeping an upload. Logs MUST NOT keep tickets.
+- **Padding.** Both directions MUST be padded with Binary HTTP zero padding to fixed buckets of the whole wrapped body: 1, 4, 8, 16, 64, 256 KiB, 1, 4, 16 MiB (`net/limits.rs`). A one-device Yo in a 736 B envelope fits the 1 KiB bucket.
+- **Tickets.** Media does not go through OHTTP. Inside OHTTP the client asks for a ticket for one blob and one direction by sending the blob `PUT` (with `Yo-Blob-Length`, length and digest bound by the signed request) or `GET` (with the blob capability) with `Yo-Ticket: 1`; the answer body is the ticket, base64url; it is ≥ 128 random bits, works once and expires after 5 minutes. The transfer is `PUT` or `GET /v1/blobs/t/{ticket}`, direct, `Cache-Control: no-store`; the hub checks length and digest before keeping an upload. Logs MUST NOT keep tickets.
 - **Connections.** The separate connections of §1.1 hold for OHTTP too: anonymous and signed requests use separate connection pools to the proxy that never coalesce, so connection reuse links nothing. IP, size and timing can still be correlated (§5.1).
 - **Limits.** Before unwrapping, the hub MUST limit `/v1/ohttp` per IP (§4.1 limits) and by body size, taking the IP only from the proxy.
-- **Rotation.** A new key gets a new key id; the old one stays accepted for the config's cache lifetime. A compromised key is dropped at once. Retired private keys MUST be erased everywhere, backups included.
-- **Migration.** Direct routes stay for older apps until at least 80 % of devices active over 30 days use OHTTP (§5.2); then only discovery, `/v1/ohttp` and ticket transfers remain direct.
+- **Rotation.** The hub holds the key in use; the spare stays offline until a rotation. A new key gets a new key id; the old one stays accepted for the config's cache lifetime. A compromised key is dropped at once. Retired private keys MUST be erased everywhere, backups included.
+- **Migration.** Direct routes stay for older apps until at least 80 % of devices active over 30 days use OHTTP (§5.2); then only discovery, support, admin, `/v1/ohttp` and ticket transfers remain direct, and former direct YoIP routes answer `426` so older apps show their update notice. With them go signed answers and the `🔐 hub key`.
 
 Contact deliveries use unsigned, padded, sealed envelopes. The hub sees inbox and size. Without a valid 24 h `🎟️ sender certificate`, send once identified and fetch one.
 ```
@@ -370,7 +370,7 @@ Padded { uint8 version = 1; uint32 length; opaque payload[length]; opaque zeros[
 envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
     type plaintext, SenderCertificate, contents = Padded(Payload) })
 ```
-- Envelope: padded to 1, 4, 16 or 64 KiB; first byte sealed `0x11`, identified `1`; the hub MUST reject others with `400`. Identified fallback: signed `Padded`, `Yo-Access` if known.
+- Envelope: padded to 736 B, 1, 4, 16 or 64 KiB (736 B only once receivers accept it; senders keep 1 KiB until then); first byte sealed `0x11`, identified `1`; the hub MUST reject others with `400`. Identified fallback: signed `Padded`, `Yo-Access` if known.
 - Certificates bind ACI, device number and `🔐 account key` under an offline Curve25519 root; apps pin current and spare roots. Clients SHOULD fetch one at registration and when < 2 h of 23 h remain, ≤ 1/min. Receivers MUST verify root, key, number and user at inbox `received_ms` and MUST drop on failure.
 
 **Hub keys.** The hub holds these secrets, each for live and dev; apps pin the public halves marked as pinned. Losing a pinned key without its spare strands every app, so each lives offline in the operator's vault as well.
@@ -462,6 +462,7 @@ Status: `404` unknown · `409` devices changed or name/locator/blob id taken · 
 | signed, per device | 1200/min, every signed request | `429 device` |
 | `🔐 prekeys`, per device | 50/day, lookups handing out `🔐 prekeys` | `429` |
 | lookups, per device | 1000/day, identity lookups | `429` |
+| OHTTP, per IP | 3000/min, body 1 MiB | `429 ip`, `413` |
 | name checks, per IP | 60/min | `429` |
 | storage, per user | 120 writes/h | `429` |
 | blobs, per IP | 120 PUT/min, 600 GET + DELETE/min | `429` |
