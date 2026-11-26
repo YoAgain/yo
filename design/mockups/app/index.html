@@ -4,113 +4,148 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Yo App Mockup</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@700&display=swap">
 <style>
-  :root { --amethyst:#9b59b6; --field:rgba(255,255,255,.16); --bg:#f2f2f7; --card:#fff; --sep:#c6c6c8; --sub:#8e8e93; --blue:#007aff; --red:#ff3b30; --green:#34c759; }
+  /* Measured from Yo Dev in the iOS 26 Simulator (iPhone 17 Pro, 402×874 pt) and the SwiftUI sources:
+     Brand.swift (rows, amethyst, Montserrat-Bold, row height 89 / font 36), Settings.swift (half sheet 520,
+     Yodentity), SettingsRows.swift (Tile 29 pt, radius 7, gap 14). */
+  :root { --amethyst:#9b59b6; --alizarin:#e74c3c; --grouped:#f2f2f7; --label:#000; --sub:#8a8a8e; --sep:#e3e3e8; --chev:#c4c4c7;
+          --blue:#007aff; --green:#34c759; --red:#ff3b30; --gray:#8e8e93; --yo:'Montserrat', system-ui, sans-serif;
+          --sys:-apple-system, 'SF Pro Text', 'Inter', system-ui, sans-serif; --page:#e5e5ea; --panel:#fff; --ink:#111; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --page:#1c1c1e; --panel:#2c2c2e; --ink:#f2f2f7; } }
+  :root[data-theme="dark"] { --page:#1c1c1e; --panel:#2c2c2e; --ink:#f2f2f7; }
   * { box-sizing:border-box; }
-  body { margin:0; background:#e5e5ea; font:16px -apple-system, "SF Pro Text", system-ui, sans-serif; color:#000; }
+  body { margin:0; background:var(--page); font:15px var(--sys); color:var(--ink); }
   .stage { display:flex; gap:24px; justify-content:center; align-items:flex-start; padding:24px 16px; flex-wrap:wrap; }
+  /* sidebar: jump to every screen */
+  .side { width:220px; max-width:100%; background:var(--panel); border-radius:16px; padding:14px 10px; position:sticky; top:24px; max-height:calc(100vh - 48px); overflow:auto; }
+  .side h2 { font-size:13px; text-transform:uppercase; color:#8e8e93; margin:12px 8px 4px; }
+  .side h2:first-child { margin-top:0; }
+  .side a { display:block; padding:5px 8px; border-radius:8px; cursor:pointer; font-size:14px; color:var(--ink); text-decoration:none; }
+  .side a:hover { background:rgba(155,89,182,.15); } .side a.on { background:var(--amethyst); color:#fff; }
+  .side a.sub { padding-left:22px; }
   .phonewrap { display:flex; flex-direction:column; align-items:center; gap:8px; }
-  .phonewrap > .tag { font-size:13px; font-weight:600; color:#555; }
-  .phone { width:390px; height:844px; max-width:calc(100vw - 32px); border-radius:48px; background:var(--amethyst); position:relative; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.25); border:10px solid #111; }
-  .scr { position:absolute; inset:0; display:flex; flex-direction:column; }
-  .status { height:44px; flex:none; display:flex; justify-content:space-between; align-items:center; padding:0 28px; font-size:15px; font-weight:600; color:#fff; }
-  .light .status { color:#000; }
-  .light { background:var(--bg); color:#000; }
-  .purple { background:var(--amethyst); color:#fff; align-items:center; padding:0 28px; }
-  .purple .status { width:calc(100% + 56px); }
-  .logo { font-weight:800; font-size:96px; margin:46px 0 40px; letter-spacing:-2px; }
-  .field { width:100%; height:64px; border-radius:32px; background:var(--field); position:relative; display:flex; align-items:center; }
-  .field input { all:unset; width:100%; text-align:center; font-size:30px; font-weight:600; padding:0 56px; caret-color:#fff; color:#fff; }
-  .field input.small { font-size:17px; padding:0 20px; }
-  .mark { position:absolute; right:16px; width:30px; height:30px; display:flex; align-items:center; justify-content:center; color:#fff; }
-  .ok { background:var(--green); border-radius:50%; } .warn { background:#ff9500; border-radius:50%; font-weight:800; }
-  .spin { width:22px; height:22px; border:3px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:r .8s linear infinite; display:inline-block; }
-  .spin.dark { border-color:rgba(0,0,0,.15); border-top-color:#000; }
-  @keyframes r { to { transform:rotate(360deg) } }
-  .hint { min-height:22px; margin-top:10px; font-size:15px; font-weight:600; color:rgba(255,255,255,.75); text-align:center; }
-  .spacer { flex:1; }
-  .msg { min-height:44px; font-size:15px; font-weight:600; text-align:center; margin-bottom:10px; }
-  .msg a, .link { color:#fff; text-decoration:underline; cursor:pointer; }
-  .wbtn { width:100%; height:56px; border-radius:28px; background:#fff; color:#000; font-size:19px; font-weight:700; border:0; display:flex; align-items:center; justify-content:center; cursor:pointer; margin-bottom:12px; font-family:inherit; }
-  .wbtn.ghost { background:transparent; color:#fff; font-weight:600; font-size:17px; }
-  .wbtn:disabled { opacity:.5; cursor:default; }
-  .terms { font-size:12px; color:rgba(255,255,255,.7); margin-bottom:28px; text-align:center; }
-  .shake { animation:s .35s; } @keyframes s { 25%{transform:translateX(-8px)} 75%{transform:translateX(8px)} }
-  .ptext { font-size:17px; line-height:1.4; text-align:center; color:rgba(255,255,255,.9); }
-  .ptitle { font-size:28px; font-weight:800; margin:24px 0 8px; text-align:center; }
-  .qr { background:#fff; padding:14px; border-radius:20px; margin:18px 0; }
-  .mono { font:13px ui-monospace, Menlo, monospace; word-break:break-all; }
-  /* nav + lists */
-  .nav { height:52px; flex:none; display:flex; align-items:center; justify-content:space-between; padding:0 12px; }
-  .nav .t { font-weight:600; font-size:17px; }
-  .nav button { all:unset; color:var(--blue); font-size:17px; cursor:pointer; min-width:60px; }
-  .nav button:last-child { text-align:right; }
-  .large { font-size:34px; font-weight:700; padding:0 16px 8px; }
-  .body { flex:1; overflow-y:auto; padding-bottom:24px; }
-  .sect { margin:0 16px 22px; background:var(--card); border-radius:10px; overflow:hidden; }
-  .sh { font-size:13px; color:var(--sub); text-transform:uppercase; margin:0 32px 6px; }
-  .sf { font-size:13px; color:var(--sub); margin:-16px 32px 22px; line-height:1.35; }
-  .row { display:flex; align-items:center; gap:12px; min-height:44px; padding:10px 16px; border-bottom:.5px solid var(--sep); cursor:pointer; }
-  .row:last-child { border-bottom:0; }
-  .row .ic { width:29px; height:29px; border-radius:7px; background:var(--amethyst); color:#fff; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none; }
-  .row .tx { flex:1; min-width:0; } .row .tx small { display:block; color:var(--sub); font-size:13px; }
-  .row .val { color:var(--sub); } .row .chev::after { content:"›"; color:#c4c4c6; font-size:22px; }
-  .row.red { color:var(--red); } .row.blue { color:var(--blue); }
-  .row.static { cursor:default; }
-  .pill { font-size:12px; background:var(--amethyst); color:#fff; border-radius:8px; padding:1px 7px; margin-left:6px; }
-  /* friend list */
-  .list { flex:1; overflow-y:auto; background:var(--amethyst); }
-  .bar { height:96px; display:flex; align-items:center; padding:0 20px; color:#fff; font-weight:800; font-size:30px; cursor:pointer; gap:12px; white-space:nowrap; user-select:none; position:relative; }
-  .bar .lead { flex:none; }            /* "!" first, then Yo and counts: never shrink */
-  .bar .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:right; }
-  .bar.req { flex-direction:column; align-items:stretch; justify-content:center; height:auto; padding:16px 20px; gap:10px; font-size:22px; }
-  .bar.req .btns { display:flex; gap:8px; }
-  .bar.req button { flex:1; height:40px; border-radius:20px; border:0; background:#fff; color:#000; font-weight:700; font-size:15px; cursor:pointer; font-family:inherit; }
-  .bar.add { background:rgba(0,0,0,.18); justify-content:center; }
-  .bar.add input { all:unset; flex:1; color:#fff; font-size:28px; font-weight:800; text-align:center; }
-  .bar.add input::placeholder { color:rgba(255,255,255,.6); }
-  .listtop { position:absolute; top:44px; right:12px; z-index:2; }
-  .round { width:40px; height:40px; border-radius:20px; border:0; background:#fff; color:#000; font-size:20px; cursor:pointer; }
-  .banner { margin:8px 12px; background:#fff; color:#000; border-radius:14px; padding:12px 14px; font-size:15px; display:flex; gap:10px; align-items:center; box-shadow:0 4px 18px rgba(0,0,0,.2); }
-  .banner b { flex:1; } .banner a { color:var(--blue); cursor:pointer; font-weight:600; }
-  .banner .x { cursor:pointer; color:var(--sub); }
+  .phonewrap > .tag { font-size:13px; font-weight:600; color:#888; }
+  .phone { width:422px; height:894px; border-radius:62px; border:10px solid #111; background:var(--amethyst); position:relative; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.25); }
+  .phone > .in { position:absolute; inset:0; overflow:hidden; border-radius:52px; font-family:var(--sys); }
+  .island { position:absolute; top:11px; left:50%; margin-left:-63px; width:126px; height:37px; border-radius:19px; background:#000; z-index:50; }
+  .status { position:absolute; top:0; left:0; right:0; height:54px; display:flex; justify-content:space-between; align-items:center; padding:4px 50px 0 56px; font:600 17px var(--sys); color:#fff; z-index:40; pointer-events:none; }
+  .status.dark { color:#000; } .status i { font-style:normal; font-size:13px; letter-spacing:1px; }
+  .yo { font-family:var(--yo); font-weight:700; }
+  /* the list: full-width bars, no gaps, no corners */
+  .list { position:absolute; inset:0; background:var(--amethyst); overflow-y:auto; scrollbar-width:none; padding-top:62px; }
+  .list::-webkit-scrollbar { display:none; }
+  .bar { display:flex; align-items:center; justify-content:center; color:#fff; font:700 36px var(--yo); cursor:pointer; white-space:nowrap; user-select:none; padding:0 20px; gap:12px; position:relative; }
+  .bar .lead { flex:none; } .bar .name { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .bar.has-lead { justify-content:space-between; }
+  .bar.add input { all:unset; width:100%; text-align:center; font:700 36px var(--yo); color:#fff; caret-color:#fff; }
+  .bar.add input::placeholder { color:rgba(255,255,255,.45); }
+  .choices { display:flex; height:89px; } .choices > div { display:flex; align-items:center; justify-content:center; color:#fff; font:700 36px var(--yo); cursor:pointer; }
+  .duo { display:flex; height:89px; } .duo > div { flex:1; display:flex; align-items:center; justify-content:center; gap:8px; color:#fff; font:700 22px var(--yo); cursor:pointer; }
+  .glass { position:absolute; bottom:32px; width:52px; height:52px; border-radius:26px; background:rgba(255,255,255,.18); backdrop-filter:blur(8px); box-shadow:inset 0 0 0 .5px rgba(255,255,255,.35), 0 2px 8px rgba(0,0,0,.12); color:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:15; }
+  .glass.gl { left:32px; } .glass.gr { right:32px; }
+  .glass .yo { font-size:22px; letter-spacing:-1px; }
+  .banner { position:absolute; top:58px; left:10px; right:10px; z-index:35; background:rgba(255,255,255,.92); backdrop-filter:blur(20px); border-radius:26px; padding:12px 16px; display:flex; gap:10px; align-items:center; box-shadow:0 8px 30px rgba(0,0,0,.18); color:#000; font-size:15px; }
+  .banner b { flex:1; font-weight:600; } .banner a { color:var(--amethyst); cursor:pointer; font-weight:600; } .banner .x { cursor:pointer; color:var(--sub); }
   /* sheets */
-  .dim { position:absolute; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:flex-end; z-index:10; }
-  .sheet { width:100%; background:var(--bg); border-radius:14px 14px 0 0; padding:20px 16px 34px; color:#000; }
-  .sheet h3 { margin:0 0 6px; font-size:20px; text-align:center; } .sheet p { margin:0 0 16px; text-align:center; color:#3c3c43; font-size:15px; line-height:1.4; }
-  .sbtn { width:100%; height:50px; border-radius:12px; border:0; font-size:17px; font-weight:600; margin-top:8px; cursor:pointer; font-family:inherit; background:#fff; color:var(--blue); }
-  .sbtn.pri { background:#000; color:#fff; } .sbtn.red { color:var(--red); }
-  .alert { position:absolute; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center; z-index:11; }
-  .alert > div { width:270px; background:rgba(242,242,247,.97); border-radius:14px; text-align:center; overflow:hidden; color:#000; }
-  .alert h4 { margin:18px 16px 4px; font-size:17px; } .alert p { margin:0 16px 16px; font-size:13px; }
-  .alert .ab { display:flex; border-top:.5px solid var(--sep); }
-  .alert .ab button { all:unset; flex:1; padding:11px; color:var(--blue); font-size:17px; cursor:pointer; }
-  .alert .ab button + button { border-left:.5px solid var(--sep); font-weight:600; }
-  .alert .ab button.red { color:var(--red); }
-  .toast { position:absolute; left:50%; bottom:40px; transform:translateX(-50%); background:rgba(0,0,0,.8); color:#fff; padding:10px 16px; border-radius:20px; font-size:14px; z-index:12; white-space:nowrap; }
+  .dim { position:absolute; inset:0; background:rgba(0,0,0,.48); z-index:20; }
+  .sheet { position:absolute; left:8px; right:8px; bottom:8px; border-radius:38px; background:var(--grouped); z-index:21; overflow:hidden; display:flex; flex-direction:column; color:var(--label); }
+  .sheet.half { top:334px; } .sheet.full { top:62px; left:0; right:0; bottom:0; border-radius:38px 38px 0 0; }
+  .sheet.purple { background:var(--amethyst); color:#fff; }
+  .grab { position:absolute; top:5px; left:50%; margin-left:-18px; width:36px; height:5px; border-radius:3px; background:#c4c4c8; z-index:2; }
+  .purple .grab { background:rgba(255,255,255,.55); }
+  .shead { height:72px; margin-bottom:29px; flex:none; display:flex; align-items:center; justify-content:center; position:relative; font:600 17px var(--sys); }
+  .full .shead { height:96px; padding-top:20px; margin-bottom:0; }
+  .circ { position:absolute; left:15px; top:17px; width:42px; height:42px; border-radius:21px; background:#fff; box-shadow:0 1px 6px rgba(0,0,0,.08); display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:20px; color:#000; }
+  .full .circ { left:12px; top:30px; width:44px; height:44px; }
+  .purple .circ { background:rgba(255,255,255,.25); color:#fff; box-shadow:none; }
+  .circ.rt { left:auto; right:12px; }
+  .sbody { flex:1; overflow-y:auto; padding:0 15px 24px; scrollbar-width:none; }
+  .full .sbody { padding:0 16px 24px; }
+  .card { background:#fff; border-radius:26px; overflow:hidden; margin-bottom:12px; }
+  .cap { font:600 15px var(--sys); color:var(--sub); margin:14px 12px 6px; }
+  .foot { font-size:13px; color:var(--sub); margin:-4px 18px 14px; line-height:1.35; }
+  .foot a { color:var(--amethyst); cursor:pointer; }
+  .r { display:flex; align-items:center; gap:14px; min-height:56px; padding:0 18px; position:relative; cursor:pointer; font-size:17px; }
+  .r + .r::before { content:""; position:absolute; top:0; left:61px; right:18px; border-top:.5px solid var(--sep); }
+  .r.plain + .r.plain::before, .r.plain + .r::before { left:18px; }
+  .r .t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .r .t small { display:block; font-size:13px; color:var(--sub); }
+  .r .v { color:var(--sub); } .r .ch::after { content:""; display:inline-block; width:8px; height:8px; border-right:2px solid var(--chev); border-top:2px solid var(--chev); transform:rotate(45deg); margin-right:4px; }
+  .r.static { cursor:default; } .r.red { color:var(--red); }
+  .tile { width:29px; height:29px; border-radius:7px; flex:none; display:flex; align-items:center; justify-content:center; color:#fff; }
+  .tile svg { width:17px; height:17px; fill:#fff; }
+  .badge { min-width:20px; height:20px; border-radius:10px; background:var(--red); color:#fff; font-size:13px; display:inline-flex; align-items:center; justify-content:center; font-weight:600; }
+  .sw { width:60px; height:26px; border-radius:13px; background:#e3e3e8; position:relative; flex:none; transition:.2s; }
+  .sw::after { content:""; position:absolute; top:2px; left:2px; width:36px; height:22px; border-radius:11px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.2); transition:.2s; }
+  .sw.on { background:var(--green); } .sw.on::after { left:22px; }
+  .avatar { width:56px; height:56px; border-radius:28px; color:#fff; font:700 26px var(--sys); display:flex; align-items:center; justify-content:center; flex:none; }
+  .qrbtn { width:42px; height:42px; border-radius:21px; background:#e8e8ed; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  .icons { display:grid; grid-template-columns:repeat(3,1fr); gap:16px 0; padding:18px 8px; text-align:center; font-size:13px; }
+  .icons > div { cursor:pointer; } .icons .ic { width:56px; height:56px; margin:0 auto 6px; border-radius:13px; display:flex; align-items:center; justify-content:center; font:700 24px var(--yo); color:#fff; }
+  .icons .sel .ic { outline:3px solid var(--blue); outline-offset:3px; }
+  /* purple onboarding */
+  .signup { position:absolute; inset:0; background:var(--amethyst); color:#fff; }
+  .logo { position:absolute; left:0; right:0; text-align:center; font:700 104px var(--yo); letter-spacing:-3px; top:196px; }
+  .tagline { position:absolute; left:0; right:0; top:330px; text-align:center; font:700 13px var(--yo); }
+  .field { position:absolute; left:28px; right:28px; top:607px; height:62px; border-radius:31px; background:rgba(255,255,255,.16); display:flex; align-items:center; }
+  .field input { all:unset; width:100%; text-align:center; font:700 30px var(--yo); padding:0 56px; color:#fff; caret-color:#fff; }
+  .field input::placeholder { color:rgba(255,255,255,.4); font-size:36px; }
+  .mark { position:absolute; right:16px; width:24px; height:24px; border-radius:12px; display:flex; align-items:center; justify-content:center; color:#fff; font-size:14px; font-weight:700; }
+  .ok { background:var(--green); } .warn { background:#ff9500; }
+  .hint { position:absolute; left:0; right:0; top:677px; text-align:center; font:600 14px var(--sys); color:rgba(255,255,255,.75); }
+  .msg { position:absolute; left:28px; right:28px; top:556px; text-align:center; font:600 15px var(--sys); }
+  .msg a { color:#fff; text-decoration:underline; cursor:pointer; }
+  .pill { height:53px; border-radius:27px; background:#fdebfd; color:#000; font:600 21px var(--sys); border:0; display:flex; align-items:center; justify-content:center; gap:8px; cursor:pointer; width:100%; }
+  .pill.ghost { background:rgba(255,255,255,.2); color:#fff; } .pill:disabled { opacity:.5; cursor:default; }
+  .pill.w { background:#fff; justify-content:flex-start; padding:0 10px; font:700 18px var(--sys); }
+  .signup .go { position:absolute; left:28px; right:28px; top:712px; width:auto; }
+  .gotyo { position:absolute; left:0; right:0; top:778px; text-align:center; font:600 16px var(--sys); color:rgba(255,255,255,.85); cursor:pointer; }
+  .gotyo b { font:700 21px var(--yo); color:#fff; }
+  .terms { position:absolute; left:0; right:0; top:818px; text-align:center; font-size:12px; color:rgba(255,255,255,.7); }
+  .terms span { text-decoration:underline; cursor:pointer; }
+  .ptitle { font:700 22px var(--yo); text-align:center; margin:22px 0 14px; }
+  .ptitle.big { font-size:28px; }
+  .ptext { font-size:14px; text-align:center; color:rgba(255,255,255,.85); line-height:1.4; margin:0 8px 14px; }
+  .notlisted { text-align:center; font-size:13px; color:rgba(255,255,255,.85); margin:16px 0; cursor:pointer; } .notlisted b { color:#fff; font-size:15px; }
+  .or { display:flex; align-items:center; gap:10px; margin:10px 0; font-size:12px; color:rgba(255,255,255,.7); } .or::before, .or::after { content:""; flex:1; border-top:1px solid rgba(255,255,255,.35); }
+  .kfield { width:100%; border:0; border-radius:27px; background:rgba(255,255,255,.2); color:#fff; padding:15px 18px; font:600 15px ui-monospace, Menlo, monospace; resize:none; height:53px; }
+  .kfield::placeholder { color:rgba(255,255,255,.55); font:700 18px var(--sys); }
+  .qr { background:#fff; padding:14px; border-radius:6px; margin:4px auto 14px; width:max-content; }
+  .qr svg { display:block; fill:var(--amethyst); }
+  .mono { font:12px ui-monospace, Menlo, monospace; word-break:break-all; background:rgba(255,255,255,.2); padding:10px; border-radius:14px; margin-bottom:10px; }
+  .spin { width:20px; height:20px; border:3px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:rot .8s linear infinite; display:inline-block; vertical-align:middle; }
+  .spin.dark { border-color:rgba(0,0,0,.15); border-top-color:#000; }
+  @keyframes rot { to { transform:rotate(360deg) } }
+  .shake { animation:shk .35s; } @keyframes shk { 25%{transform:translateX(-8px)} 75%{transform:translateX(8px)} }
+  .yellow { background:#f1c40f; font:700 36px var(--yo); text-align:center; padding:22px 0; margin:0 -16px; color:#fff; }
+  /* alert, iOS 26 */
+  .alert { position:absolute; inset:0; z-index:60; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.2); }
+  .alert > div { width:300px; background:rgba(250,250,252,.97); border-radius:34px; padding:22px 18px 16px; color:#000; box-shadow:0 10px 40px rgba(0,0,0,.25); }
+  .alert h4 { margin:0 4px 6px; font-size:17px; } .alert p { margin:0 4px 16px; font-size:14px; color:#555; line-height:1.35; }
+  .alert .ab { display:flex; gap:8px; } .alert button { flex:1; height:48px; border-radius:24px; border:0; background:#e9e9ee; font:600 17px var(--sys); cursor:pointer; color:#000; }
+  .alert button.red { color:var(--red); }
+  .toast { position:absolute; left:50%; bottom:96px; transform:translateX(-50%); background:rgba(0,0,0,.8); color:#fff; padding:10px 16px; border-radius:20px; font-size:14px; z-index:70; white-space:nowrap; }
   .cam { flex:1; background:#111; display:flex; flex-direction:column; align-items:center; justify-content:center; color:#fff; gap:16px; padding:24px; text-align:center; }
   .finder { width:240px; height:240px; border:4px solid #fff; border-radius:28px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.6); font-size:14px; padding:20px; }
-  .keybox { margin:0 16px 22px; background:#fff; border-radius:10px; padding:16px; font:17px ui-monospace, Menlo, monospace; line-height:1.7; word-spacing:6px; text-align:center; }
-  textarea { width:100%; height:90px; border-radius:16px; border:0; padding:12px; font:15px ui-monospace, Menlo, monospace; background:var(--field); color:#fff; resize:none; }
-  textarea::placeholder { color:rgba(255,255,255,.6); }
   /* panel */
-  .panel { width:320px; max-width:calc(100vw - 32px); background:#fff; border-radius:16px; padding:20px; color:#111; position:sticky; top:24px; }
+  .panel { width:300px; max-width:100%; background:var(--panel); border-radius:16px; padding:20px; position:sticky; top:24px; }
   .panel h2 { font-size:17px; margin:0 0 12px; } .panel label { display:block; margin:10px 0; font-size:14px; }
-  .panel p { font-size:13px; color:#555; line-height:1.4; } .panel select, .panel input[type=range] { width:100%; }
-  .panel button { font:inherit; font-size:14px; padding:6px 10px; margin:4px 4px 0 0; border-radius:8px; border:1px solid #ccc; background:#f7f7f7; cursor:pointer; }
-  .panel button:disabled { opacity:.4; cursor:default; }
-  code { background:#f2f2f7; padding:1px 4px; border-radius:4px; }
-  @media (max-width:440px) { .stage { padding:12px 8px; gap:16px; } .phone { border-width:6px; border-radius:36px; height:780px; } }
+  .panel p { font-size:13px; opacity:.75; line-height:1.4; } .panel select, .panel input[type=range] { width:100%; }
+  .panel button { font:inherit; font-size:14px; padding:6px 10px; margin:4px 4px 0 0; border-radius:8px; border:1px solid #ccc; background:#f7f7f7; color:#111; cursor:pointer; }
+  code { background:rgba(127,127,127,.15); padding:1px 4px; border-radius:4px; }
+  @media (max-width:500px) { .stage { padding:12px 16px; } .phone { transform:scale(.82); transform-origin:top center; margin-bottom:-160px; } .side { position:static; max-height:none; width:100%; } }
 </style>
 </head>
 <body>
 <div class="stage">
+  <nav class="side" id="side"></nav>
   <div class="phonewrap"><div class="tag" id="tagA">This phone</div><div class="phone" id="A"></div></div>
-  <div class="phonewrap" id="wrapB" style="display:none"><div class="tag">Second device</div><div class="phone" id="B"></div></div>
+  <div class="phonewrap" id="wrapB" style="display:none"><div class="tag">New device</div><div class="phone" id="B"></div></div>
   <div class="panel">
     <h2>Simulate</h2>
     <label>Device check
-      <select id="att"><option value="ok">attested → min 4</option><option value="no">not verifiable → min 12</option></select></label>
+      <select id="att"><option value="ok">attested → min 3</option><option value="no">not verifiable → min 12</option></select></label>
     <label>Network delay: <b id="dl">600</b> ms<input type="range" id="delay" min="50" max="3000" step="50" value="600"></label>
     <label><input type="checkbox" id="off"> Offline</label>
     <label>Devices on the account: <b id="nd">1</b><input type="range" id="ndev" min="1" max="16" value="1"></label>
@@ -122,16 +157,17 @@
       <button id="remoteRemove">Other device removes this one</button>
     </div>
     <p><button id="reset">Reset everything</button></p>
-    <p><b>Sign-up:</b> taken <code>anna</code> <code>peter</code> <code>chris</code>; reserved <code>apple</code> <code>admin</code>. Forbidden characters show quietly under the field (“No spaces”). While a check runs only the spinner shows; a result appears only for exactly this text.</p>
-    <p><b>Linking (§2.5):</b> turn on “Second device”. Right phone: Got Yo? Sign In › Link from Another Device shows a QR. Left phone (signed in): Settings › Devices › Link a Device › scan. One confirming tap, then the new device registers. At 16 devices the new device picks one to replace. No old device: “Use a key” (§2.4).</p>
-    <p><b>Bars:</b> “!” first, Yo and counts never shrink, the name comes last and is the only thing that gets cut. Bots <code>/NAME</code>, groups <code>#NAME</code>.</p>
+    <p><b>Sign-up:</b> taken <code>anna</code> <code>peter</code> <code>chris</code>; reserved <code>apple</code> <code>admin</code>. After Sign Up the app lands on the list.</p>
+    <p><b>Linking (§2.5):</b> turn on “Second device”. Right: Got Yo? Sign In › Link from Another Device shows a QR. Left: Settings › Account › Devices › Link a Device › scan. One confirming tap. At 16 devices the new one picks one to replace.</p>
+    <p><b>Settings (proposal):</b> Devices moved into Account; App Icon and Left-Handed grouped under Appearance; Sign Out on the top level.</p>
   </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 const TAKEN = ['anna','peter','chris'], RESERVED = ['apple','admin'];
-const COLORS = ['#1abc9c','#2ecc71','#3498db','#34495e','#16a085','#27ae60','#2980b9','#8e44ad','#2c3e50','#f39c12','#e67e22','#e74c3c','#c0392b'];
+// Brand.swift Color.rows, in order
+const ROWS = ['#1abc9c','#2ecc71','#3498db','#34495e','#16a085','#f1c40f','#2980b9','#8e44ad'];
 const KEYCH = 'abcdefghijklmnopqrstuvwxyz0123456789';
 const rnd = n => Array.from({length:n}, () => KEYCH[Math.random()*36|0]).join('');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -139,15 +175,34 @@ const delay = () => +$('delay').value;
 async function net(ms) { await sleep(ms ?? delay()); if ($('off').checked) throw new Error('offline'); }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const PLATFORMS = [['iPad','iPadOS'],['MacBook','macOS'],['Pixel 8','Android'],['yo (CLI)','Linux'],['iPhone 12','iOS'],['Galaxy Tab','Android']];
+const ICON = {
+  person:'<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 8c0-3.3 3.1-6 7-6s7 2.7 7 6z"/>',
+  people:'<path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zm7.5 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2 19c0-3 3.1-5.5 7-5.5s7 2.5 7 5.5zm15 0c0-1.9-.8-3.6-2.1-4.8 3.6-.4 7.1 1.4 7.1 4.8z"/>',
+  hand:'<path d="M7 12V5.5a1.5 1.5 0 0 1 3 0V11h.5V3.5a1.5 1.5 0 0 1 3 0V11h.5V5a1.5 1.5 0 0 1 3 0v8.5l1.2-2a1.5 1.5 0 0 1 2.6 1.5L18 18c-1.2 2.3-3.4 4-6.5 4C8.5 22 6 19.5 6 16.5V9a1.5 1.5 0 0 1 3 0z"/>',
+  shield:'<path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5z"/>',
+  out:'<path d="M5 3h9v4h-2V5H7v14h5v-2h2v4H5zm11 4l5 5-5 5v-3.5h-7v-3h7z"/>',
+  help:'<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 15.5a1.3 1.3 0 1 1 0-2.6 1.3 1.3 0 0 1 0 2.6zm1.2-4.4v.6h-2.4v-1c0-2 2.6-2.3 2.6-3.7 0-.7-.6-1.2-1.4-1.2-.9 0-1.5.6-1.6 1.5L8 9c.2-2.1 1.9-3.4 4.1-3.4 2.3 0 3.9 1.3 3.9 3.2 0 2.3-2.8 2.7-2.8 4.3z"/>',
+  mail:'<path d="M3 5h18v14H3zm2 2v.5l7 4.5 7-4.5V7z"/>',
+  plus:'<path d="M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 9c0-3.3 3.1-6 7-6s7 2.7 7 6zM19 8v3h3v2h-3v3h-2v-3h-3v-2h3V8z"/>',
+  paint:'<path d="M12 3a9 9 0 0 0 0 18c1.2 0 2-.8 2-1.8 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4c0-4.4-4-8-9-8zM6.5 12a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3-4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm3 4a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/>',
+  phone:'<path d="M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 3v13h10V5z"/>',
+  laptop:'<path d="M4 5h16v10H4zm-2 12h20v2H2z"/>',
+  term:'<path d="M3 4h18v16H3zm3 4l3 3-3 3 1.4 1.4L11.8 11 7.4 6.6zm6 7h6v-2h-6z"/>',
+  qr:'<path d="M3 3h8v8H3zm2 2v4h4V5zm8-2h8v8h-8zm2 2v4h4V5zM3 13h8v8H3zm2 2v4h4v-4zm8-2h3v3h-3zm5 0h3v3h-3zm-5 5h3v3h-3zm5 0h3v3h-3z"/>',
+  link:'<path d="M10.6 13.4a1 1 0 0 0 1.4 0l4-4a3 3 0 0 0-4.2-4.2l-1.5 1.5 1.4 1.4 1.5-1.5a1 1 0 0 1 1.4 1.4l-4 4a1 1 0 0 0 0 1.4zm2.8-2.8a1 1 0 0 0-1.4 0l-4 4a3 3 0 0 0 4.2 4.2l1.5-1.5-1.4-1.4-1.5 1.5a1 1 0 0 1-1.4-1.4l4-4a1 1 0 0 0 0-1.4z"/>',
+  gear:'<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm9 5.5v-3l-2.4-.6a7 7 0 0 0-.7-1.6l1.3-2.1-2.1-2.1-2.1 1.3a7 7 0 0 0-1.6-.7L13.5 2h-3l-.6 2.4a7 7 0 0 0-1.6.7L6.2 3.8 4.1 5.9l1.3 2.1a7 7 0 0 0-.7 1.6L2 10.5v3l2.4.6c.2.6.4 1.1.7 1.6l-1.3 2.1 2.1 2.1 2.1-1.3c.5.3 1 .5 1.6.7l.6 2.4h3l.6-2.4c.6-.2 1.1-.4 1.6-.7l2.1 1.3 2.1-2.1-1.3-2.1c.3-.5.5-1 .7-1.6z"/>',
+  cam:'<path d="M4 7h3l2-2h6l2 2h3v12H4zm8 3a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/>',
+  info:'<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1 8h2v7h-2zm0-4h2v2h-2z"/>',
+  pulse:'<path d="M2 13h4l2-6 4 12 3-9 2 3h5v2h-6l-1-1.5-3 9-4-12-1 3.5H2z"/>',
+};
+const svg = (k, s = 17, fill) => `<svg viewBox="0 0 24 24" width="${s}" height="${s}" ${fill ? `fill="${fill}"` : ''}>${ICON[k]}</svg>`;
+const tile = (k, color) => `<span class="tile" style="background:linear-gradient(${color}e6,${color})">${svg(k)}</span>`;
+const avatarColor = n => ROWS[[...n].reduce((a, c) => a + c.charCodeAt(0), 0) % ROWS.length];
 
 /* ---------- hub (shared server state) ---------- */
 let hub;
-function freshHub() {
-  hub = { account:null, links:{}, seq:1 };
-}
-function newAccount(name) {
-  hub.account = { name, key:rnd(64), passkey:false, devices:[] };
-}
+function freshHub() { hub = { account:null, links:{}, seq:1 }; }
+function newAccount(name) { hub.account = { name, key:rnd(64), passkey:false, devices:[], blocked:[] }; }
 function addDevice(phoneId, name, platform) {
   const d = { id:hub.seq++, name, platform, last:'now', phone:phoneId };
   hub.account.devices.push(d); syncSlider(); return d;
@@ -157,55 +212,77 @@ function syncSlider() { const n = hub.account ? hub.account.devices.length : 1; 
 /* ---------- friends ---------- */
 function freshFriends() {
   return [
-    { name:'ANNA', kind:'friend', count:0, bang:false },
-    { name:'YOGPT', kind:'bot', count:0, bang:false },
-    { name:'FAMILY', kind:'group', count:2, bang:false },
-    { name:'PETER', kind:'friend', count:0, bang:true },
-    { name:'MAXIMILIANVONHOHENZOLLERN', kind:'friend', count:12, bang:false },
+    { name:'PING', kind:'bot', count:0, bang:false, color:1 },
+    { name:'YoGPT', kind:'bot', count:0, bang:false, color:0, plain:true },
   ];
 }
-// mirrors core list_bar_title: bots "/NAME", groups "#NAME"
-const barTitle = f => (f.kind === 'bot' ? '/' : f.kind === 'group' ? '#' : '') + f.name;
+function demoFriends() {
+  return [
+    { name:'Anna', kind:'friend', count:0, bang:false, color:2 },
+    { name:'PING', kind:'bot', count:0, bang:false, color:1 },
+    { name:'Family', kind:'group', count:2, bang:false, color:3 },
+    { name:'Peter', kind:'friend', count:0, bang:true, color:4 },
+    { name:'YoGPT', kind:'bot', count:0, bang:false, color:0, plain:true },
+  ];
+}
+// core list_bar_title: bots "/NAME", groups "#NAME" (YoGPT, the built-in, shows as is)
+const barTitle = f => (f.plain ? '' : f.kind === 'bot' ? '/' : f.kind === 'group' ? '#' : '') + f.name;
 
 /* ---------- phones ---------- */
 const phones = {};
 function Phone(id) {
   const p = { id, el:$(id), screen:'intro', stack:[], overlay:null, toast:null, deviceId:null,
-    friends:freshFriends(), requests:[], banner:null, sent:{}, adding:null,
+    friends:freshFriends(), requests:[], banner:null, sent:{}, adding:null, left:false, icon:'Yo', keyOpen:false,
     su:{ seq:0, result:null, checking:false, pending:false, attest:null, name:'' },
     link:null, recovery:{ text:'', err:'', busy:false }, busy:null, err:'' };
   phones[id] = p; return p;
 }
-const isPurple = s => ['intro','signin','linkqr','linkwait','replace','recover','removed','welcome'].includes(s);
+// Each screen: what lies under it (signup or list), and its sheet (half pushes inside Settings' half sheet, full is a
+// sheet of its own at full height, purple ones are Yo's own pages).
+const KIND = {
+  intro:['intro'], signin:['intro','phalf'], recover:['intro','phalf'], linkqr:['intro','pfull'], linkwait:['intro','pfull'],
+  replace:['intro','pfull'], removed:['intro','pfull'],
+  list:['list'], settings:['list','half'], account:['list','half'], appearance:['list','half'], blocked:['list','half'],
+  devices:['list','full'], scan:['list','full'], linked:['list','full'], contacts:['list','full'], help:['list','full'],
+  rkey:['list','pfull'], code:['list','pfull'],
+};
 
 function go(p, screen) { p.stack.push(p.screen); p.screen = screen; p.err = ''; render(p); }
 function back(p) { p.screen = p.stack.pop() || (p.deviceId ? 'list' : 'intro'); p.err = ''; render(p); }
 function home(p, screen) { p.stack = []; p.screen = screen; p.err = ''; render(p); }
+// a full sheet closes back to the half sheet it came from, or the list
+function close(p) { while (p.stack.length && KIND[p.screen][1] === KIND[p.stack[p.stack.length - 1]]?.[1] && KIND[p.screen][1] !== 'half') p.screen = p.stack.pop(); back(p); }
 function toast(p, text) { p.toast = text; render(p); setTimeout(() => { if (p.toast === text) { p.toast = null; render(p); } }, 1800); }
 function me(p) { return hub.account && hub.account.devices.find(d => d.id === p.deviceId); }
 
 /* ---------- screens ---------- */
 const S = {};
-const status = () => `<div class="status"><span>9:41</span><span>●●● ▮</span></div>`;
+const dark = s => ['half','full'].includes(KIND[s][1]);
 
-S.intro = p => `${status()}
-  <div class="logo">Yo</div>
-  <div class="field" data-f="field"><input data-in="name" placeholder="" autocomplete="off" spellcheck="false" value="${esc(p.su.name)}"><div class="mark" data-f="mark"></div></div>
-  <div class="hint" data-f="hint"></div>
-  <div class="spacer"></div>
+S.intro = p => `<div class="signup">
+  <div class="logo">Yo</div><div class="tagline">It’s that simple.</div>
   <div class="msg" data-f="msg"></div>
-  <button class="wbtn" data-a="signup" data-f="go">Sign Up</button>
-  <button class="wbtn ghost" data-a="toSignin">Got Yo? Sign In</button>
-  <div class="terms">By continuing you agree to the <span class="link" data-a="terms">Terms</span>.</div>`;
+  <div class="field" data-f="field"><input data-in="name" placeholder="Username" autocomplete="off" spellcheck="false" value="${esc(p.su.name)}"><div class="mark" data-f="mark"></div></div>
+  <div class="hint" data-f="hint"></div>
+  <button class="pill go" data-a="signup" data-f="go">Sign Up</button>
+  <div class="gotyo" data-a="toSignin">Got Yo? <b>Sign In</b></div>
+  <div class="terms">By continuing you agree to the <span data-a="terms">Terms</span>.</div></div>`;
 
-S.signin = p => `${status()}
-  <div class="ptitle" style="margin-top:60px">Sign In</div>
-  <div class="ptext">Have Yo on another phone or computer? Link this device to it. No old device? Use your passkey or recovery key.</div>
-  <div class="spacer"></div>
-  <div class="msg">${esc(p.err)}</div>
-  <button class="wbtn" data-a="startLink">${p.busy === 'link' ? '<span class="spin dark"></span>' : 'Link from Another Device'}</button>
-  <button class="wbtn" data-a="toRecover">Use a Key: Passkey or Recovery Key</button>
-  <button class="wbtn ghost" data-a="back" style="margin-bottom:28px">Back</button>`;
+S.signin = p => `<div class="grab"></div><div style="padding:28px 15px 30px">
+  <div class="ptitle" style="margin-top:0">Sign In</div>
+  <button class="pill w" data-a="startLink">${p.busy === 'link' ? '<span class="spin dark" style="margin:0 auto"></span>' : `<span class="avatar" style="width:32px;height:32px;font-size:15px;background:var(--amethyst)">${svg('qr', 17)}</span>Link from Another Device`}</button>
+  <div class="notlisted" data-a="toRecover">No other device? <b>Use a Key</b></div>
+  <div class="ptext" style="color:#fff;margin:0">${esc(p.err)}</div></div>`;
+
+S.recover = p => { const r = p.recovery; return `<div class="grab"></div><div style="padding:28px 15px 30px">
+  <div class="ptitle" style="margin-top:0">Sign In</div>
+  <button class="pill w" data-a="back"><span class="avatar" style="width:32px;height:32px;font-size:15px;background:var(--amethyst)">${svg('qr', 17)}</span>Link from Another Device</button>
+  <div class="notlisted" data-a="back">No other device? <b>Use a Key</b></div>
+  <button class="pill ghost" data-a="usePasskey" style="justify-content:flex-start;padding:0 14px;font-weight:700;font-size:18px">${r.busy === 'pk' ? '<span class="spin" style="margin:0 auto"></span>' : `<span class="avatar" style="width:30px;height:30px;background:rgba(255,255,255,.25)">${svg('person', 16)}</span>Passkey`}</button>
+  <div class="or">or</div>
+  <textarea class="kfield" data-in="rkey" placeholder="Recovery Key">${esc(r.text)}</textarea>
+  <div class="ptext" style="margin:8px 0;min-height:18px;color:#fff">${esc(r.err)}</div>
+  <div style="display:flex;gap:8px"><button class="pill ghost" data-a="demoKey" style="font-size:15px">Paste</button><button class="pill ghost" data-a="scanKey" style="font-size:15px">Scan</button><button class="pill" data-a="useKey" style="font-size:17px">${r.busy === 'key' ? '<span class="spin dark"></span>' : 'Sign In'}</button></div></div>`; };
 
 function qrSvg(seed) {
   let h = 0; for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
@@ -216,165 +293,164 @@ function qrSvg(seed) {
     let on; if (finder(x, y)) on = fon(x, y); else { h = (h * 1103515245 + 12345) >>> 0; on = (h >> 16) & 1; }
     if (on) r += `<rect x="${x*cell}" y="${y*cell}" width="${cell}" height="${cell}"/>`;
   }
-  return `<svg width="200" height="200" viewBox="0 0 ${n*cell} ${n*cell}">${r}</svg>`;
+  return `<svg width="190" height="190" viewBox="0 0 ${n*cell} ${n*cell}">${r}</svg>`;
 }
-S.linkqr = p => { const l = p.link; return `${status()}
-  <div class="ptitle">Link This Device</div>
-  <div class="ptext">On your other device open Yo › Settings › Devices › Link a Device and scan this code.</div>
+const xbtn = (a = 'close') => `<div class="circ" data-a="${a}">✕</div>`;
+const backbtn = () => `<div class="circ" data-a="back">‹</div>`;
+
+S.linkqr = p => { const l = p.link; return `<div class="shead">${xbtn('cancelLink')}</div><div class="sbody" style="text-align:center">
+  <div class="ptitle big" style="margin-top:0">Link This Device</div>
+  <div class="ptext">On your other device open Yo › Settings › Account › Devices › Link a Device and scan this code.</div>
   <div class="qr">${qrSvg(l.code)}</div>
-  <div class="ptext" style="font-size:15px"><span class="spin"></span>&nbsp; Waiting for your other device… · expires in ${l.left}</div>
-  ${p.showCode ? `<div class="mono" style="margin-top:12px;background:var(--field);padding:10px;border-radius:12px">${esc(l.code)}</div>` : ''}
-  <div class="spacer"></div>
-  <button class="wbtn" data-a="showCode">${p.showCode ? 'Copy Code' : 'Can’t Scan? Show Code'}</button>
-  <button class="wbtn ghost" data-a="cancelLink" style="margin-bottom:28px">Cancel</button>`; };
+  <div class="ptext"><span class="spin"></span>&nbsp; Waiting for your other device… · expires in <span data-f="left">${l.left}</span></div>
+  ${p.showCode ? `<div class="mono">${esc(l.code)}</div>` : ''}
+  <button class="pill" data-a="showCode" style="margin-top:20px">${p.showCode ? 'Copy Code' : 'Can’t Scan? Show Code'}</button></div>`; };
 
-S.linkwait = p => `${status()}
-  <div class="spacer"></div><div class="spin" style="width:44px;height:44px"></div>
-  <div class="ptitle">Linking…</div><div class="ptext">Getting your account from your other device.</div>
-  <div class="spacer"></div>`;
+S.linkwait = p => `<div class="sbody" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center">
+  <div class="spin" style="width:44px;height:44px"></div><div class="ptitle big">Linking…</div><div class="ptext">Getting your account from your other device.</div></div>`;
 
-S.replace = p => `${status()}
-  <div class="ptitle" style="margin-top:40px">16 Devices</div>
+S.replace = p => `<div class="shead">${xbtn('cancelLink')}</div><div class="sbody">
+  <div class="ptitle big" style="margin-top:0">16 Devices</div>
   <div class="ptext">Your account has the most devices it can have. Choose one to remove; it gets signed out.</div>
-  <div style="width:100%;flex:1;overflow:auto;margin:16px 0">
-    ${hub.account.devices.map(d => `<button class="wbtn" style="justify-content:space-between;padding:0 20px;font-size:16px;${p.pick === d.id ? 'outline:4px solid #000' : ''}" data-a="pick" data-id="${d.id}"><span>${esc(d.name)}</span><span style="color:#8e8e93;font-weight:500">${esc(d.platform)} · ${esc(d.last)}</span></button>`).join('')}
-  </div>
-  <div class="msg">${esc(p.err)}</div>
-  <button class="wbtn" data-a="doReplace" ${p.pick ? '' : 'disabled'}>${p.busy === 'replace' ? '<span class="spin dark"></span>' : 'Remove and Link'}</button>
-  <button class="wbtn ghost" data-a="cancelLink" style="margin-bottom:28px">Cancel</button>`;
+  <div class="card" style="color:#000">${hub.account.devices.map(d => `<div class="r" data-a="pick" data-id="${d.id}">${devTile(d)}<span class="t">${esc(d.name)}<small>${esc(d.platform)} · last seen ${esc(d.last)}</small></span>${p.pick === d.id ? '<span style="color:var(--amethyst);font-weight:700">✓</span>' : ''}</div>`).join('')}</div>
+  <div class="ptext" style="color:#fff">${esc(p.err)}</div>
+  <button class="pill" data-a="doReplace" ${p.pick ? '' : 'disabled'}>${p.busy === 'replace' ? '<span class="spin dark"></span>' : 'Remove and Link'}</button></div>`;
 
-S.recover = p => { const r = p.recovery; return `${status()}
-  <div class="ptitle" style="margin-top:40px">Recovery Key</div>
-  <div class="ptext">Type or paste the 64 characters. Case, spaces and dashes don’t matter.</div>
-  <div style="width:100%;margin-top:20px"><textarea data-in="rkey" placeholder="abcd efgh …">${esc(r.text)}</textarea></div>
-  <div class="hint">${esc(r.err)}</div>
-  <span class="link" data-a="demoKey" style="font-size:14px">Paste the account’s key</span>
-  <div class="spacer"></div>
-  <button class="wbtn" data-a="useKey">${r.busy === 'key' ? '<span class="spin dark"></span>' : 'Sign In'}</button>
-  <button class="wbtn" data-a="usePasskey">${r.busy === 'pk' ? '<span class="spin dark"></span>' : 'Use Passkey'}</button>
-  <button class="wbtn" data-a="scanKey">Scan Recovery Key</button>
-  <button class="wbtn ghost" data-a="back" style="margin-bottom:28px">Back</button>`; };
-
-S.removed = p => `${status()}
-  <div class="spacer"></div><div class="logo" style="margin:0 0 20px">Yo</div>
-  <div class="ptitle">Signed Out</div>
+S.removed = p => `<div class="sbody" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center">
+  <div class="yo" style="font-size:72px">Yo</div><div class="ptitle big">Signed Out</div>
   <div class="ptext">This device was removed from your account on another device.</div>
-  <div class="spacer"></div>
-  <button class="wbtn" data-a="toIntro" style="margin-bottom:40px">OK</button>`;
+  <button class="pill" data-a="toIntro" style="margin-top:24px">OK</button></div>`;
 
-S.welcome = p => `${status()}
-  <div class="spacer"></div><div class="logo" style="margin:0">Yo</div>
-  <div class="ptitle">Welcome, ${esc(hub.account.name.toUpperCase())} 👋</div>
-  <div class="ptext">${p.welcomeText || ''}</div>
-  <div class="spacer"></div>
-  <button class="wbtn" data-a="toList" style="margin-bottom:40px">Start</button>`;
-
-function bar(f, i, p) {
-  const sent = p.sent[f.name];
-  const lead = [f.bang ? '!' : '', f.count ? `Yo ${f.count}` : ''].filter(Boolean).join(' ');
-  return `<div class="bar" style="background:${COLORS[i % COLORS.length]}" data-a="yo" data-n="${esc(f.name)}">
-    ${sent ? `<span class="name" style="text-align:center">${sent === 'busy' ? '<span class="spin"></span>' : esc(sent)}</span>`
-      : `${lead ? `<span class="lead">${lead}</span>` : ''}<span class="name" style="${lead ? '' : 'text-align:center'}">${esc(barTitle(f))}</span>`}</div>`;
+/* the list (FriendList.swift): bars full width, no gaps; the bars share the height above Group/Invite, at least 89 */
+function bar(f, i, p, h) {
+  const sent = p.sent[f.name], color = ROWS[f.color % ROWS.length];
+  const lead = [f.bang ? '!' : '', f.count ? `Yo${'!'.repeat(Math.min(f.count, 1))} ${f.count}` : ''].filter(Boolean).join(' ');
+  const inner = sent ? `<span class="name">${sent === 'busy' ? '<span class="spin"></span>' : esc(sent)}</span>`
+    : `${lead ? `<span class="lead">${lead}</span>` : ''}<span class="name">${esc(barTitle(f))}</span>`;
+  return `<div class="bar ${lead && !sent ? 'has-lead' : ''}" style="height:${h}px;background:${color}" data-a="yo" data-n="${esc(f.name)}">${inner}</div>`;
 }
 S.list = p => {
-  const b = p.banner ? `<div class="banner"><span>📱</span><b>${esc(p.banner)}</b><a data-a="toDevices">Devices</a><span class="x" data-a="closeBanner">✕</span></div>` : '';
-  const reqs = p.requests.map(r => `<div class="bar req" style="background:#34495e">
-    <div><b>${esc(r)}</b> <span style="font-weight:600;opacity:.8">wants to Yo</span></div>
-    <div class="btns"><button data-a="accept" data-n="${esc(r)}">Accept and Yo</button><button data-a="decline" data-n="${esc(r)}">Decline</button><button data-a="block" data-n="${esc(r)}">Block</button></div></div>`).join('');
+  const n = p.friends.length + p.requests.length * 2 + 1;
+  const h = Math.max(89, Math.floor((699 - 62) / n));
+  const reqs = p.requests.map((r, i) => `<div class="bar" style="height:${h}px;background:${ROWS[3]}">${esc(r)}</div>
+    <div class="choices"><div style="width:33.4%;background:var(--alizarin)" data-a="decline" data-n="${esc(r)}">No</div><div style="flex:1;background:${ROWS[3]}" data-a="accept" data-n="${esc(r)}">Yo</div></div>`).join('');
+  const addColor = ROWS[(p.friends.length + 2 * p.requests.length) % ROWS.length];
   const add = p.adding !== null
-    ? `<div class="bar add"><input data-in="addname" placeholder="Name…" value="${esc(p.adding)}"><button class="round" data-a="addGo">${p.busy === 'add' ? '<span class="spin dark"></span>' : '→'}</button></div>
-       ${p.err ? `<div class="bar add" style="font-size:18px;height:48px">${esc(p.err)}</div>` : ''}`
-    : `<div class="bar add" data-a="addOpen">+ Add Friend</div>`;
-  return `${status()}<div class="listtop"><button class="round" data-a="toSettings" title="Settings">⚙︎</button></div>
-    <div class="list" style="padding-top:8px">${b}${reqs}${p.friends.map((f, i) => bar(f, i, p)).join('')}${add}
-    <div style="text-align:center;color:rgba(255,255,255,.7);font-size:13px;padding:14px">Tap to Send Yo · ${esc(hub.account.name.toUpperCase())}</div></div>`;
+    ? `<div class="bar add" style="height:${h}px;background:${addColor}"><input data-in="addname" placeholder="${p.busy === 'add' ? '' : 'Name'}" value="${esc(p.adding)}">${p.busy === 'add' ? '<span class="spin" style="position:absolute"></span>' : ''}</div>
+       ${p.err ? `<div class="bar" style="height:56px;font-size:20px;background:var(--alizarin)">${esc(p.err)}</div>` : ''}`
+    : `<div class="bar add" style="height:${h}px;background:${addColor}" data-a="addOpen">+</div>`;
+  const b = p.banner ? `<div class="banner">${svg('phone', 20, '#9b59b6')}<b>${esc(p.banner)}</b><a data-a="toDevices">Devices</a><span class="x" data-a="closeBanner">✕</span></div>` : '';
+  return `<div class="list">${reqs}${p.friends.map((f, i) => bar(f, i, p, h)).join('')}${add}
+    <div class="duo"><div style="background:#3498db" data-a="toast" data-t="New Group">${svg('people', 26, '#fff')} Group</div><div style="background:var(--amethyst)" data-a="toast" data-t="Invite: justyo.co/${esc(hub.account ? hub.account.name : '')}">${svg('out', 22, '#fff')} Invite</div></div>
+    <div style="height:110px"></div></div>${b}
+    <div class="glass ${p.left ? 'gr' : 'gl'}" data-a="toSettings" title="Settings"><span class="yo">Yo</span></div>
+    <div class="glass ${p.left ? 'gl' : 'gr'}" data-a="toast" data-t="Camera">${svg('cam', 22, '#fff')}</div>`;
 };
 
-const nav = (title, left = 'Back', right = '') => `${status()}<div class="nav"><button data-a="back">${left ? '‹ ' + left : ''}</button><span class="t">${title}</span><button data-a="${right ? 'navRight' : 'back'}">${right}</button></div>`;
-S.settings = p => `${nav('', 'Yo', 'Done')}<div class="large">Settings</div><div class="body">
-  <div class="sect">
-    <div class="row" data-a="go" data-s="account"><span class="ic">👤</span><span class="tx">${esc(hub.account.name.toUpperCase())}<small>Account, Recovery Key, Passkey</small></span><span class="chev"></span></div>
-    <div class="row" data-a="toDevices"><span class="ic">📱</span><span class="tx">Devices</span><span class="val">${hub.account.devices.length}</span><span class="chev"></span></div>
-  </div>
-  <div class="sect">
-    <div class="row" data-a="toast" data-t="App icon chosen"><span class="ic">🎨</span><span class="tx">App Icon</span><span class="chev"></span></div>
-    <div class="row" data-a="toggleLeft"><span class="ic">✋</span><span class="tx">Left-Handed</span><span class="val">${p.left ? 'On' : 'Off'}</span></div>
-  </div>
-  <div class="sect">
-    <div class="row" data-a="toast" data-t="Opened Help & About"><span class="ic">?</span><span class="tx">Help &amp; About</span><span class="chev"></span></div>
-    <div class="row" data-a="toast" data-t="Feedback sent"><span class="ic">✉︎</span><span class="tx">Send Feedback</span><span class="chev"></span></div>
-  </div>
-  <div class="sect"><div class="row red" data-a="askSignOut">Sign Out</div></div></div>`;
+/* Settings (Settings.swift): half sheet "Yodentity". Proposal: Account › Devices; Appearance groups App Icon and
+   Left-Handed; Sign Out on the top level. */
+const chev = '<span class="ch"></span>';
+S.settings = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">Yodentity</div><div class="sbody">
+  <div class="card"><div class="r" data-a="go" data-s="account" style="min-height:124px;align-items:flex-start;flex-direction:column;justify-content:center;gap:8px">
+    <div style="display:flex;align-items:center;gap:14px;width:100%"><span class="avatar" style="background:${avatarColor(a.name)}">${esc(a.name[0].toUpperCase())}</span>${a.passkey ? '' : '<span class="badge">1</span>'}<span style="flex:1"></span><span class="qrbtn" data-a="go" data-s="code">${svg('qr', 20, '#9b59b6')}</span>${chev}</div>
+    <div class="yo" style="font-size:26px;color:#000">${esc(a.name)}</div></div></div>
+  <div class="card"><div class="r" data-a="go" data-s="appearance">${tile('paint', '#9b59b6')}<span class="t">Appearance</span>${chev}</div></div>
+  <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">Help &amp; About</span>${chev}</div>
+    <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Send Feedback</span>${chev}</div></div>
+  <div class="card"><div class="r" data-a="askSignOut">${tile('out', '#8e8e93')}<span class="t">Sign Out</span></div></div></div>`; };
 
-S.account = p => `${nav('Account')}<div class="body" style="padding-top:12px">
-  <div class="sect"><div class="row static"><span class="tx">Username</span><span class="val">${esc(hub.account.name.toUpperCase())}</span></div>
-    <div class="row" data-a="toast" data-t="Your code: 3141 5926 5358"><span class="tx">Show Your Code</span><span class="chev"></span></div></div>
-  <div class="sh">Account Backup</div>
-  <div class="sect">
-    <div class="row" data-a="go" data-s="rkey"><span class="ic">🔑</span><span class="tx">Recovery Key</span><span class="chev"></span></div>
-    <div class="row" data-a="passkey"><span class="ic">🔐</span><span class="tx">Passkey</span><span class="val">${p.busy === 'pk' ? '<span class="spin dark"></span>' : hub.account.passkey ? 'On' : 'Set Up'}</span></div>
-  </div>
-  <div class="sf">Either one brings your account back on a new phone when you have no other device.${p.err ? ' <b style="color:var(--red)">' + esc(p.err) + '</b>' : ''}</div>
-  <div class="sect"><div class="row" data-a="toast" data-t="How Account Recovery Works: see §2.4"><span class="tx blue" style="color:var(--blue)">How Account Recovery Works</span></div></div>
-  <div class="sect"><div class="row red" data-a="askDelete">Delete Your Account</div></div></div>`;
+S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Appearance</div><div class="sbody">
+  <div class="card"><div class="icons">${[['Yo','#9b59b6','Yo'],['Yo!','#f5f0f7','Yo'],['Just Yo','#9b59b6',''],['2014','#8e44ad',''],['2015','#a569bd','']].map(([n, c, t]) =>
+    `<div class="${p.icon === n ? 'sel' : ''}" data-a="icon" data-n="${n}"><div class="ic" style="background:${c};color:${c === '#f5f0f7' ? '#9b59b6' : '#fff'}">${t}</div>${n}</div>`).join('')}</div></div>
+  <div class="card"><div class="r" data-a="toggleLeft">${tile('hand', '#007aff')}<span class="t">Left-Handed</span><span class="sw ${p.left ? 'on' : ''}"></span></div></div>
+  <div class="foot">Left-Handed swaps the bars’ sides and moves Settings to the bottom right.</div></div>`;
 
-S.rkey = p => `${nav('Recovery Key')}<div class="body" style="padding-top:12px">
-  <div class="keybox">${hub.account.key.match(/.{4}/g).join(' ')}</div>
-  <div class="sf" style="margin-top:-12px">Write it down or keep it in your password manager. Anyone with it can take over your account.</div>
-  <div class="sect">
-    <div class="row blue" data-a="toast" data-t="Copied">Copy</div>
-    <div class="row blue" data-a="toast" data-t="Saved to iCloud Keychain">Save Recovery Key Again</div>
-    <div class="row blue" data-a="newKey">${p.busy === 'key' ? '<span class="spin dark"></span>' : 'New Recovery Key'}</div>
-  </div><div class="sf">${esc(p.err)}</div></div>`;
+S.account = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">${backbtn()}<span class="yo" style="font:600 17px var(--sys)">${esc(a.name)}</span>&nbsp;<span style="width:8px;height:8px;border-radius:4px;background:var(--green)"></span></div><div class="sbody">
+  <div class="card"><div class="r" data-a="go" data-s="contacts">${tile('people', '#34c759')}<span class="t">Contacts</span>${chev}</div>
+    <div class="r" data-a="go" data-s="blocked">${tile('hand', '#ff3b30')}<span class="t">Blocked</span>${chev}</div></div>
+  <div class="card"><div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Devices</span><span class="v">${a.devices.length}</span>${chev}</div>
+    <div class="r" data-a="go" data-s="rkey">${tile('shield', '#9b59b6')}<span class="t">Account Security</span>${a.passkey ? '<span style="color:var(--green)">✓</span>' : '<span class="badge">1</span>'}${chev}</div></div>
+  <div class="foot">Leaving Yo for good? <a data-a="askDelete">Delete Your Account</a></div></div>`; };
 
-S.devices = p => { const a = hub.account; return `${nav('Devices')}<div class="body" style="padding-top:12px">
-  <div class="sh">${a.devices.length} of 16 devices</div>
-  <div class="sect">${a.devices.map(d => `<div class="row ${d.id === p.deviceId ? 'static' : ''}" ${d.id === p.deviceId ? '' : `data-a="askRemove" data-id="${d.id}"`}>
-     <span class="ic">${/Android/.test(d.platform) ? '🤖' : /Linux/.test(d.platform) ? '⌨︎' : '📱'}</span>
-     <span class="tx">${esc(d.name)}${d.id === p.deviceId ? '<span class="pill">This Device</span>' : ''}<small>${esc(d.platform)} · last seen ${esc(d.last)}</small></span>
+S.blocked = p => `<div class="grab"></div><div class="shead">${backbtn()}Blocked</div><div class="sbody">
+  <div class="card"><div class="r plain" data-a="toggleReq"><span class="t">Allow Yo Requests</span><span class="sw ${p.noReq ? '' : 'on'}"></span></div>
+    <div class="r plain" data-a="toast" data-t="Block Contact…"><span class="t">Block Contact…</span>${chev}</div></div>
+  <div class="cap">Blocked Contacts</div>
+  <div class="card">${hub.account.blocked.length ? hub.account.blocked.map(n => `<div class="r plain static"><span class="t">${esc(n)}</span></div>`).join('') : '<div class="r plain static"><span class="t" style="color:var(--sub)">No Blocked Contacts</span></div>'}</div></div>`;
+
+S.contacts = p => `<div class="shead">${xbtn()}Contacts</div><div class="sbody">
+  <div class="card">${p.friends.filter(f => f.kind !== 'group').map(f => `<div class="r plain" data-a="toast" data-t="${esc(f.name)}: compare code"><span class="avatar" style="width:24px;height:24px;font-size:12px;background:${ROWS[f.color % ROWS.length]}">${esc(f.name[0].toUpperCase())}</span><span class="t">${esc(f.name)}</span></div>`).join('')}</div></div>`;
+
+S.help = p => `<div class="shead">${xbtn()}Help &amp; About</div><div class="sbody">
+  <div class="card" style="background:var(--amethyst);height:340px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:34px"><span class="yo" style="color:#fff;font-size:22px">Tap to Send Yo</span></div>
+  <div class="card"><div class="r" data-a="toast" data-t="Status">${tile('pulse', '#34c759')}<span class="t">Status</span><span class="v">Online <span style="color:var(--green)">●</span></span>${chev}</div>
+    <div class="r" data-a="toast" data-t="About & Licenses">${tile('info', '#8e8e93')}<span class="t">About &amp; Licenses</span><span class="v">1.0.0</span>${chev}</div></div></div>`;
+
+S.code = p => `<div class="shead">${xbtn()}</div><div class="sbody" style="text-align:center">
+  <div class="yellow">${esc(hub.account.name)}</div><div class="yo" style="font-size:17px;margin:16px 0 12px">wants to Yo</div>
+  <div class="qr">${qrSvg(hub.account.name).replace(/190/g, '268')}</div><div class="yo" style="font-size:14px">justyo.co/${esc(hub.account.name)}</div>
+  <div style="display:flex;gap:8px;margin:96px 18px 0"><button class="pill" data-a="toast" data-t="Copied" style="font-size:17px">Link</button><button class="pill" data-a="toast" data-t="Share" style="font-size:17px">Share</button></div></div>`;
+
+S.rkey = p => `<div class="shead">${xbtn()}</div><div class="sbody" style="display:flex;flex-direction:column;text-align:center">
+  <div style="margin-top:160px">${svg('shield', 64, '#fff')}</div><div class="ptitle big" style="margin:14px 0 6px">Recovery Key</div>
+  <div class="ptext">Keep it safe. It brings your account back.</div>
+  ${p.showKey ? `<div class="mono">${hub.account.key.match(/.{4}/g).join(' ')}</div>` : ''}
+  <div style="flex:1"></div>
+  <button class="pill" data-a="saveKey" style="font-size:17px">${p.busy === 'key' ? '<span class="spin dark"></span>' : 'Save Recovery Key'}</button>
+  <div class="notlisted" data-a="showKey"><b style="font-size:13px">${p.showKey ? 'Hide Key' : 'Show Key'}</b></div>
+  <div class="notlisted" data-a="passkey" style="margin-top:0">${p.busy === 'pk' ? '<span class="spin"></span>' : hub.account.passkey ? 'Passkey: on' : '<b style="font-size:13px">Set Up a Passkey</b>'}</div></div>`;
+
+const devTile = d => tile(/Android|iOS|iPadOS/.test(d.platform) ? 'phone' : /Linux/.test(d.platform) ? 'term' : 'laptop', /Android/.test(d.platform) ? '#34c759' : /Linux/.test(d.platform) ? '#34495e' : '#007aff');
+S.devices = p => { const a = hub.account; return `<div class="shead">${xbtn()}Devices</div><div class="sbody">
+  <div class="cap">${a.devices.length} of 16 Devices</div>
+  <div class="card">${a.devices.map(d => `<div class="r ${d.id === p.deviceId ? 'static' : ''}" ${d.id === p.deviceId ? '' : `data-a="askRemove" data-id="${d.id}"`}>
+     ${devTile(d)}<span class="t">${esc(d.name)}<small>${d.id === p.deviceId ? 'This Device' : `${esc(d.platform)} · last seen ${esc(d.last)}`}</small></span>
      ${d.id === p.deviceId ? '' : '<span style="color:var(--red);font-size:15px">Remove</span>'}</div>`).join('')}</div>
-  <div class="sect"><div class="row blue" data-a="toScan">＋ Link a Device</div></div>
-  <div class="sf">A new phone or computer shows a code; scan it here. ${a.devices.length >= 16 ? 'At 16 devices the new one picks which to replace.' : ''}</div></div>`; };
+  <div class="card"><div class="r" data-a="toScan">${tile('qr', '#9b59b6')}<span class="t">Link a Device</span>${chev}</div></div>
+  <div class="foot">A new phone or computer shows a code under Got Yo? Sign In; scan it here.${a.devices.length >= 16 ? ' At 16 devices the new one picks which to replace.' : ''}</div></div>`; };
 
-S.scan = p => `${nav('Link a Device', 'Back')}
+S.scan = p => `<div class="shead">${backbtn()}Link a Device</div>
   <div class="cam"><div class="finder">${p.busy === 'scan' ? '<span class="spin"></span>' : 'Point the camera at the code on your new device'}</div>
   <div style="font-size:14px;opacity:.8">${esc(p.err)}</div>
-  <button class="wbtn" data-a="doScan">Scan Code (simulated)</button>
-  <button class="wbtn" data-a="pasteOpen" style="background:transparent;color:#fff;border:1px solid #fff">Paste Code Instead</button>
-  ${p.pasting ? `<textarea data-in="paste" placeholder="yo-link:…" style="height:60px">${esc(p.paste || '')}</textarea><button class="wbtn" data-a="pasteGo">Link</button>` : ''}</div>`;
+  <button class="pill" data-a="doScan" style="font-size:17px">Scan Code (simulated)</button>
+  <button class="pill ghost" data-a="pasteOpen" style="font-size:17px">Paste Code Instead</button>
+  ${p.pasting ? `<textarea class="kfield" data-in="paste" placeholder="yo-link:…">${esc(p.paste || '')}</textarea><button class="pill" data-a="pasteGo" style="font-size:17px">Link</button>` : ''}</div>`;
 
-S.linked = p => `${nav('Linked', '', 'Done')}<div class="body" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px">
-  <div style="font-size:64px;color:var(--green)">✓</div><h2>${esc(p.linkedName)} is linked</h2>
-  <p style="color:var(--sub)">It now has your friends and Yos. You can remove it any time in Devices.</p>
-  <button class="sbtn" data-a="toDevices">Show Devices</button></div>`;
+S.linked = p => `<div class="shead">${xbtn('toList')}</div><div class="sbody" style="text-align:center;padding-top:120px">
+  <div style="font-size:64px;color:var(--green)">✓</div><h2 style="font-size:22px">${esc(p.linkedName)} is linked</h2>
+  <p style="color:var(--sub)">It now has your friends and Yos. You can remove it any time in Account › Devices.</p>
+  <div class="card"><div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Show Devices</span>${chev}</div></div></div>`;
 
 /* ---------- render ---------- */
 function render(p) {
-  const s = p.screen, cls = isPurple(s) ? 'purple' : s === 'list' ? '' : 'light';
+  const s = p.screen, [base, sheet] = KIND[s];
   const fresh = p.el.dataset.screen !== s || s !== 'intro';
   if (fresh) {
     const focus = document.activeElement && p.el.contains(document.activeElement) ? document.activeElement.dataset.in : null;
-    p.el.innerHTML = `<div class="scr ${cls}">${S[s](p)}</div>${overlay(p)}${p.toast ? `<div class="toast">${esc(p.toast)}</div>` : ''}`;
+    const under = S[base](p);
+    const top = sheet ? `<div class="dim"></div><div class="sheet ${sheet.endsWith('half') ? 'half' : 'full'} ${sheet[0] === 'p' ? 'purple' : ''}" ${sheet === 'phalf' ? `style="top:${s === 'recover' ? 400 : 649}px"` : ''}>${S[s](p)}</div>` : '';
+    p.el.innerHTML = `<div class="in">${under}${top}<div class="island"></div><div class="status ${sheet === 'full' && false ? 'dark' : ''}"><span>9:41</span><i>●●●● ▮</i></div>${overlay(p)}${p.toast ? `<div class="toast">${esc(p.toast)}</div>` : ''}</div>`;
     p.el.dataset.screen = s;
     if (focus) { const i = p.el.querySelector(`[data-in="${focus}"]`); if (i) { i.focus(); const v = i.value; i.setSelectionRange?.(v.length, v.length); } }
   } else {
-    p.el.querySelectorAll('.dim,.alert,.toast').forEach(e => e.remove());
-    p.el.insertAdjacentHTML('beforeend', overlay(p) + (p.toast ? `<div class="toast">${esc(p.toast)}</div>` : ''));
+    p.el.querySelectorAll('.alert,.toast').forEach(e => e.remove());
+    p.el.firstChild.insertAdjacentHTML('beforeend', overlay(p) + (p.toast ? `<div class="toast">${esc(p.toast)}</div>` : ''));
   }
-  if (s === 'intro') renderSignup(p);
+  if (base === 'intro' && s === 'intro') renderSignup(p);
+  if (p.id === 'A') markSide();
 }
 function overlay(p) {
   const o = p.overlay; if (!o) return '';
   if (o.type === 'alert') return `<div class="alert"><div><h4>${o.title}</h4><p>${o.text}</p><div class="ab"><button data-a="closeOverlay">Cancel</button><button class="${o.red ? 'red' : ''}" data-a="${o.act}">${o.ok}</button></div></div></div>`;
-  if (o.type === 'confirmLink') return `<div class="dim"><div class="sheet">
-    <div style="text-align:center;font-size:40px">📱</div><h3>Link this device?</h3>
-    <p><b>This device gets access to your account</b>: your name, friends and Yos. Only continue if the code is on a device in front of you.</p>
-    <button class="sbtn pri" data-a="confirmLink">${p.busy === 'confirm' ? '<span class="spin" style="border-color:rgba(255,255,255,.3);border-top-color:#fff"></span>' : 'Link Device'}</button>
-    <button class="sbtn" data-a="closeOverlay">Cancel</button>${p.err ? `<p style="color:var(--red);margin-top:10px">${esc(p.err)}</p>` : ''}</div></div>`;
+  if (o.type === 'confirmLink') return `<div class="alert"><div style="text-align:center">
+    <div style="margin:4px 0 6px">${svg('phone', 40, '#9b59b6')}</div><h4>Link This Device?</h4>
+    <p><b>It gets access to your account</b>: your name, friends and Yos. Only continue if the code is on a device in front of you.</p>
+    ${p.err ? `<p style="color:var(--red)">${esc(p.err)}</p>` : ''}
+    <div class="ab"><button data-a="closeOverlay">Cancel</button><button data-a="confirmLink" style="background:var(--amethyst);color:#fff">${p.busy === 'confirm' ? '<span class="spin"></span>' : 'Link'}</button></div></div></div>`;
   return '';
 }
 
-/* ---------- sign-up name field (from the signup-name mockup, unchanged logic) ---------- */
+/* ---------- sign-up name field (logic unchanged from the signup-name mockup) ---------- */
 function renderSignup(p) {
   const q = f => p.el.querySelector(`[data-f="${f}"]`), su = p.su, name = su.name;
   const mark = q('mark'), hint = q('hint'), msg = q('msg'), btn = q('go');
@@ -401,7 +477,7 @@ function renderSignup(p) {
 }
 function suAnswer(p, name) {
   if ($('off').checked) return { kind:'offline' };
-  const min = p.su.attest === 'ok' ? 4 : 12, len = [...name].length;
+  const min = p.su.attest === 'ok' ? 3 : 12, len = [...name].length;
   const bad = [...new Set(name.match(/[\s@.,!?#/\\]/g) || [])];
   if (bad.length) return { kind:'invalid', min, bad };
   if (RESERVED.includes(name.toLowerCase())) return { kind:'reserved', min };
@@ -409,18 +485,15 @@ function suAnswer(p, name) {
   if (len < min) return { kind:'short', min };
   return { kind:'ok', min };
 }
-function deviceCheck(p) {   // runs once, in parallel with the first name check
-  if (p.su.attest) return Promise.resolve();
-  return sleep(delay()).then(() => { p.su.attest = $('att').value; });
-}
+function deviceCheck(p) { if (p.su.attest) return Promise.resolve(); return sleep(delay()).then(() => { p.su.attest = $('att').value; }); }
 async function suCheck(p) {
   const su = p.su, my = ++su.seq, name = su.name;
   su.result = null; su.checking = !!name; su.err = ''; renderSignup(p);
   if (!name) { su.pending = false; renderSignup(p); return; }
-  await sleep(300);                                       // typing pause
+  await sleep(300);
   if (my !== su.seq) return;
   await Promise.all([deviceCheck(p), sleep(delay())]);
-  if (my !== su.seq) return;                              // a newer text: drop this answer
+  if (my !== su.seq) return;
   su.result = suAnswer(p, name); su.checking = false;
   if (su.pending) { su.pending = false; suFinish(p); }
   if (p.screen === 'intro') renderSignup(p);
@@ -433,11 +506,10 @@ async function suFinish(p) {
     su.pending = false;
     if (hub.account) { su.result = { kind:'taken', min:su.result.min }; renderSignup(p); return; }
     newAccount(su.name);
-    const d = addDevice(p.id, 'iPhone 15', 'iOS 18'); p.deviceId = d.id;
+    const d = addDevice(p.id, 'iPhone 17 Pro', 'iOS 26'); p.deviceId = d.id;
     for (let i = 1; i < +$('ndev').value; i++) addDevice(null, ...PLATFORMS[(i - 1) % PLATFORMS.length]);
     syncSlider();
-    p.welcomeText = 'Save your recovery key in Settings › Account. It brings your account back if you lose this phone.';
-    home(p, 'welcome');
+    home(p, 'list');   // the app lands on the list, no welcome page
   } else { const f = p.el.querySelector('[data-f="field"]'); f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake'); }
 }
 
@@ -454,15 +526,15 @@ async function startLink(p) {
 function tickLink(p) {
   clearInterval(p.timer);
   p.timer = setInterval(() => {
-    if (p.screen !== 'linkqr' || !p.link) { clearInterval(p.timer); return; }
+    if (p.screen !== 'linkqr' || !p.link || !hub.links[p.link.id]) { clearInterval(p.timer); return; }
     const s = 600 - Math.floor((Date.now() - hub.links[p.link.id].created) / 1000);
     if (s <= 0) { delete hub.links[p.link.id]; p.link = null; clearInterval(p.timer); p.err = 'The code expired. Make a new one.'; home(p, 'signin'); return; }
     p.link.left = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-    const t = p.el.querySelector('.ptext span.spin'); if (t) t.parentNode.lastChild.textContent = ` Waiting for your other device… · expires in ${p.link.left}`;
+    const t = p.el.querySelector('[data-f="left"]'); if (t) t.textContent = p.link.left;
   }, 1000);
 }
 function waitingPhone() { return Object.values(phones).find(q => q.screen === 'linkqr' && q.link && hub.links[q.link.id]); }
-async function oldDeviceScanned(old, code) {   // old device has the code; ask once
+async function oldDeviceScanned(old, code) {
   const m = /^yo-link:([a-z0-9]+)\.[a-z0-9]+$/.exec(code.trim());
   if (!m || !hub.links[m[1]]) { old.err = 'That isn’t a current Yo link code.'; render(old); return; }
   old.scanned = m[1]; old.err = ''; old.overlay = { type:'confirmLink' }; render(old);
@@ -473,9 +545,9 @@ async function confirmLink(old) {
   old.busy = null; old.overlay = null;
   const l = hub.links[old.scanned]; if (!l) { old.err = 'The code expired.'; render(old); return; }
   l.bundle = { by:old.id };                      // PUT /v1/link/{id}: sealed LinkBundle
-  const nw = phones[l.from]; old.linkedName = nw ? 'iPhone 13' : 'New device';
+  const nw = phones[l.from]; old.linkedName = 'iPhone 13';
   go(old, 'linked');
-  if (nw) newDeviceReceives(nw); else { addDevice(null, 'iPhone 13', 'iOS 18'); delete hub.links[old.scanned]; bannerAll('New device linked: iPhone 13'); }
+  if (nw) newDeviceReceives(nw); else { addDevice(null, 'iPhone 13', 'iOS 26'); delete hub.links[old.scanned]; bannerAll('New device linked: iPhone 13'); }
 }
 async function newDeviceReceives(nw) {           // GET /v1/link/{id} returns, open bundle, register
   delete hub.links[nw.link.id]; clearInterval(nw.timer);
@@ -486,14 +558,12 @@ async function newDeviceReceives(nw) {           // GET /v1/link/{id} returns, o
 }
 async function registerNew(nw) {
   try { await net(); } catch { nw.err = 'No connection. Try again when connected.'; home(nw, 'signin'); return; }
-  const d = addDevice(nw.id, 'iPhone 13', 'iOS 18'); nw.deviceId = d.id;
-  nw.friends = phones.A.friends.map(f => ({ ...f })); nw.link = null;
+  const d = addDevice(nw.id, 'iPhone 13', 'iOS 26'); nw.deviceId = d.id;
+  nw.friends = (phones.A.deviceId ? phones.A.friends : freshFriends()).map(f => ({ ...f })); nw.link = null;
   bannerAll('New device linked: iPhone 13', nw);
-  nw.welcomeText = 'This device is linked. Your friends and Yos are here.'; home(nw, 'welcome');
+  home(nw, 'list');
 }
-function bannerAll(text, except) {
-  Object.values(phones).forEach(q => { if (q !== except && q.deviceId && me(q)) { q.banner = text; render(q); } });
-}
+function bannerAll(text, except) { Object.values(phones).forEach(q => { if (q !== except && q.deviceId && me(q)) { q.banner = text; render(q); } }); }
 async function removeDevice(p, id) {
   p.overlay = null; p.busy = 'rm'; render(p);
   try { await net(); } catch { p.busy = null; toast(p, 'No connection'); return; }
@@ -515,8 +585,7 @@ const A = {
   },
   toSignin: p => go(p, 'signin'),
   terms: p => toast(p, 'justyo.co/p/terms'),
-  back: p => back(p),
-  navRight: p => home(p, 'list'),
+  back: p => back(p), close: p => close(p),
   startLink, toRecover: p => { p.recovery = { text:'', err:'', busy:false }; go(p, 'recover'); },
   showCode: p => { if (p.showCode) toast(p, 'Copied'); else { p.showCode = true; render(p); } },
   cancelLink: p => { if (p.link) delete hub.links[p.link.id]; p.link = null; clearInterval(p.timer); home(p, 'intro'); },
@@ -551,12 +620,16 @@ const A = {
   toIntro: p => home(p, 'intro'),
   toList: p => home(p, 'list'),
   toSettings: p => go(p, 'settings'),
-  toDevices: p => { p.banner = null; if (p.screen !== 'devices') { if (p.screen === 'list' || p.screen === 'linked') { p.stack = ['list', 'settings']; p.screen = 'devices'; render(p); } else go(p, 'devices'); } },
+  toDevices: p => { p.banner = null; if (p.screen !== 'devices') { p.stack = ['list', 'settings', 'account']; p.screen = 'devices'; render(p); } },
   closeBanner: p => { p.banner = null; render(p); },
-  go: (p, e) => go(p, e.dataset.s),
+  go: (p, e) => { event?.stopPropagation?.(); go(p, e.dataset.s); },
   toast: (p, e) => toast(p, e.dataset.t),
   toggleLeft: p => { p.left = !p.left; render(p); },
-  askSignOut: p => { p.overlay = { type:'alert', title:'Sign Out?', text:'Your other devices stay signed in. Without them you need your recovery key to come back.', ok:'Sign Out', act:'signOut', red:true }; render(p); },
+  toggleReq: p => { p.noReq = !p.noReq; render(p); },
+  icon: (p, e) => { p.icon = e.dataset.n; render(p); },
+  showKey: p => { p.showKey = !p.showKey; render(p); },
+  saveKey: p => toast(p, 'Saved to iCloud Keychain'),
+  askSignOut: p => { p.overlay = { type:'alert', title:'Sign Out?', text:hub.account.passkey ? 'Your other devices stay signed in.' : 'Your account isn’t secured. Set up recovery methods to access your account.', ok:'Sign Out', act:'signOut', red:true }; render(p); },
   signOut: p => { hub.account.devices = hub.account.devices.filter(d => d.id !== p.deviceId); syncSlider(); p.deviceId = null; p.overlay = null; resetSignup(p); home(p, 'intro'); },
   askDelete: p => { p.overlay = { type:'alert', title:'Delete Your Account?', text:'Can’t be undone. Friends can’t reach you anymore and all your devices are signed out.', ok:'Delete', act:'doDelete', red:true }; render(p); },
   async doDelete(p) { p.overlay = null; render(p); try { await net(); } catch { toast(p, 'No connection'); return; }
@@ -565,12 +638,11 @@ const A = {
   closeOverlay: p => { p.overlay = null; p.err = ''; render(p); },
   async passkey(p) {
     if (hub.account.passkey) { p.overlay = { type:'alert', title:'Turn Off Passkey?', text:'Delete the passkey yourself in your password manager.', ok:'Turn Off', act:'pkOff', red:true }; render(p); return; }
-    p.busy = 'pk'; p.err = ''; render(p);
-    try { await net(); hub.account.passkey = true; } catch { p.err = 'No connection.'; }
+    p.busy = 'pk'; render(p);
+    try { await net(); hub.account.passkey = true; } catch { toast(p, 'No connection'); }
     p.busy = null; render(p);
   },
   pkOff: p => { hub.account.passkey = false; p.overlay = null; render(p); },
-  async newKey(p) { p.busy = 'key'; render(p); try { await net(); hub.account.key = rnd(64); p.err = ''; } catch { p.err = 'No connection. Your old key still works.'; } p.busy = null; render(p); },
   askRemove(p, e) { const d = hub.account.devices.find(x => x.id === +e.dataset.id);
     p.overlay = { type:'alert', title:`Remove ${esc(d.name)}?`, text:'It gets signed out and can’t send or get Yos until it’s linked again.', ok:'Remove', act:'doRemove', red:true }; p.rmId = d.id; render(p); },
   doRemove: p => removeDevice(p, p.rmId),
@@ -579,7 +651,6 @@ const A = {
     p.busy = 'scan'; p.err = ''; render(p); await sleep(700); p.busy = null;
     const w = waitingPhone();
     if (w && w !== p) return oldDeviceScanned(p, w.link.code);
-    // no second phone frame: a simulated new device shows its code
     const id = rnd(26); hub.links[id] = { from:null, created:Date.now() };
     oldDeviceScanned(p, `yo-link:${id}.${rnd(43)}`);
   },
@@ -590,30 +661,29 @@ const A = {
     const n = e.dataset.n, f = p.friends.find(x => x.name === n);
     if (p.sent[n]) return;
     p.sent[n] = 'busy'; render(p);
-    try { await net(); p.sent[n] = 'Sent Yo'; f.count = 0; f.bang = false; } catch { p.sent[n] = 'Failed'; }
+    try { await net(); p.sent[n] = 'Sent Yo!'; f.count = 0; f.bang = false; } catch { p.sent[n] = 'Not Sent'; }
     render(p); setTimeout(() => { delete p.sent[n]; render(p); }, 1200);
   },
   addOpen: p => { p.adding = ''; p.err = ''; render(p); p.el.querySelector('[data-in="addname"]').focus(); },
   async addGo(p) {
-    const n = (p.adding || '').trim().toUpperCase();
+    const n = (p.adding || '').trim();
     if (!n) { p.adding = null; render(p); return; }
     p.busy = 'add'; p.err = ''; render(p);
-    try { await net(); } catch { p.busy = null; p.err = 'No connection'; render(p); return; }
+    try { await net(); } catch { p.busy = null; p.err = 'No Connection'; render(p); return; }
     p.busy = null;
-    if (['NOBODY','XYZ'].includes(n) || n.length < 3) { p.err = 'No Such User'; render(p); return; }
-    const kind = /BOT$|GPT$/.test(n) ? 'bot' : 'friend';
-    p.friends.unshift({ name:n, kind, count:0, bang:false }); p.adding = null; render(p); toast(p, `Sent Yo to ${kind === 'bot' ? '/' : ''}${n}`);
+    if (['nobody','xyz'].includes(n.toLowerCase()) || n.length < 3) { p.err = 'No Such User'; render(p); return; }
+    const kind = /bot$|gpt$|^ping$/i.test(n) ? 'bot' : 'friend';
+    const c = p.friends.length ? (p.friends[0].color + 7) % ROWS.length : 1;
+    p.friends.unshift({ name:kind === 'bot' ? n.toUpperCase() : n, kind, count:0, bang:false, color:c }); p.adding = null; render(p); A.yo(p, { dataset:{ n:p.friends[0].name } });
   },
-  accept: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); p.friends.unshift({ name:e.dataset.n, kind:'friend', count:0, bang:false }); render(p); A.yo(p, { dataset:{ n:e.dataset.n } }); },
+  accept: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); p.friends.unshift({ name:e.dataset.n, kind:'friend', count:0, bang:false, color:3 }); render(p); A.yo(p, { dataset:{ n:e.dataset.n } }); },
   decline: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); render(p); },
-  block: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); render(p); toast(p, `${e.dataset.n} blocked`); },
 };
 function recovered(p) {
-  const old = hub.account.devices.filter(d => d.phone === null);
   if (hub.account.devices.length >= 16) { p.pick = null; p.link = null; home(p, 'replace'); return; }
-  const d = addDevice(p.id, 'iPhone 15', 'iOS 18'); p.deviceId = d.id;
-  bannerAll('New device linked: iPhone 15', p);
-  p.welcomeText = 'Your account is back. Friends see a new safety code for you.'; home(p, 'welcome');
+  const d = addDevice(p.id, 'iPhone 17 Pro', 'iOS 26'); p.deviceId = d.id;
+  bannerAll('New device linked: iPhone 17 Pro', p);
+  home(p, 'list'); toast(p, 'Your account is back');
 }
 
 /* ---------- wiring ---------- */
@@ -644,37 +714,82 @@ $('ndev').addEventListener('input', e => {
   while (a.devices.length > n) { const i = a.devices.map(d => d.phone).lastIndexOf(null); if (i < 0) break; a.devices.splice(i, 1); }
   syncSlider(); Object.values(phones).forEach(render);
 });
-$('second').addEventListener('change', e => {
-  $('wrapB').style.display = e.target.checked ? '' : 'none'; $('tagA').textContent = e.target.checked ? 'Old device' : 'This phone';
-  if (e.target.checked && !phones.B) { wire(Phone('B')); render(phones.B); }
-  if (!e.target.checked && phones.B) { const b = phones.B; if (b.deviceId && hub.account) hub.account.devices = hub.account.devices.filter(d => d.id !== b.deviceId); clearInterval(b.timer); delete phones.B; $('B').innerHTML = ''; delete $('B').dataset.screen; syncSlider(); render(phones.A); }
-});
+function setSecond(on) {
+  $('second').checked = on;
+  $('wrapB').style.display = on ? '' : 'none'; $('tagA').textContent = on ? 'Old device' : 'This phone';
+  if (on && !phones.B) { wire(Phone('B')); render(phones.B); }
+  if (!on && phones.B) { const b = phones.B; if (b.deviceId && hub.account) hub.account.devices = hub.account.devices.filter(d => d.id !== b.deviceId); clearInterval(b.timer); delete phones.B; $('B').innerHTML = ''; delete $('B').dataset.screen; syncSlider(); }
+}
+$('second').addEventListener('change', e => { setSecond(e.target.checked); render(phones.A); });
 $('incoming').addEventListener('click', () => { const p = Object.values(phones).find(q => q.screen === 'list') || phones.A;
-  if (!p.deviceId) return toast(p, 'Sign up first'); const n = ['LUKAS','SOPHIE','JONAS'][p.requests.length % 3]; if (!p.requests.includes(n)) p.requests.push(n); home(p, 'list'); });
-$('friendyo').addEventListener('click', () => Object.values(phones).forEach(p => { if (!p.deviceId) return toast(p, 'Sign up first'); const f = p.friends.find(x => x.name === 'ANNA'); if (f) { f.count++; f.bang = true; } render(p); }));
+  if (!p.deviceId) return toast(p, 'Sign up first'); const n = ['lukas','sophie','jonas'][p.requests.length % 3]; if (!p.requests.includes(n)) p.requests.push(n); home(p, 'list'); });
+$('friendyo').addEventListener('click', () => Object.values(phones).forEach(p => { if (!p.deviceId) return toast(p, 'Sign up first'); const f = p.friends.find(x => x.name === 'Anna'); if (f) { f.count++; f.bang = true; } else p.friends.unshift({ name:'Anna', kind:'friend', count:1, bang:true, color:2 }); render(p); }));
 $('approve').addEventListener('click', () => { const w = waitingPhone(); const p = phones.A;
-  if (!w) return toast(p, 'No device is showing a link code. Open Sign In › Link from Another Device.');
+  if (!w) return toast(p, 'No device is showing a link code');
   if (!hub.account) { newAccount('chris'); for (let i = 0; i < +$('ndev').value; i++) addDevice(null, ...PLATFORMS[i % PLATFORMS.length]); }
   hub.links[w.link.id].bundle = { by:'simulated' }; newDeviceReceives(w); });
 $('remoteRemove').addEventListener('click', () => { const p = Object.values(phones).find(q => q.deviceId); if (!p) return toast(phones.A, 'No signed-in device'); hub.account.devices = hub.account.devices.filter(d => d.id !== p.deviceId); syncSlider(); signedOut(p); });
-$('reset').addEventListener('click', () => {
+function resetAll() {
   Object.values(phones).forEach(p => clearInterval(p.timer));
-  freshHub(); for (const k in phones) delete phones[k]; $('A').innerHTML = ''; $('B').innerHTML = ''; delete $('A').dataset.screen; delete $('B').dataset.screen;
-  $('off').checked = false; wire(Phone('A')); render(phones.A);
-  if ($('second').checked) { wire(Phone('B')); render(phones.B); }
-});
-freshHub(); wire(Phone('A')); render(phones.A);
-// deep links for reviews: #list, #devices, #link (two phones mid-linking)
-(function deep(h) {
-  if (!h) return; const a = phones.A;
-  newAccount('chris'); a.deviceId = addDevice('A', 'iPhone 15', 'iOS 18').id;
-  if (h !== 'list') { $('ndev').value = 4; $('ndev').dispatchEvent(new Event('input')); }
-  a.friends[0].count = 3; a.friends[0].bang = true; a.requests = ['LUKAS'];
-  if (h === 'list') return home(a, 'list');
-  a.stack = ['list', 'settings']; a.screen = 'devices'; if (h === 'devices') { a.banner = null; return render(a); }
-  $('delay').value = 50; $('second').checked = true; $('second').dispatchEvent(new Event('change'));
-  const b = phones.B; b.stack = ['intro']; b.screen = 'signin'; startLink(b).then(() => { a.stack.push('devices'); a.screen = 'scan'; render(a); A.doScan(a); });
-})(location.hash.slice(1));
+  freshHub(); for (const k in phones) delete phones[k]; $('A').innerHTML = ''; $('B').innerHTML = ''; delete $('A').dataset.screen; delete $('B').dataset.screen; delete $('A').dataset.wired; delete $('B').dataset.wired;
+  $('off').checked = false; $('ndev').value = 1; $('nd').textContent = 1; setSecond(false);
+  wire(Phone('A')); render(phones.A);
+}
+$('reset').addEventListener('click', () => { history.replaceState(null, '', location.pathname); resetAll(); });
+
+/* ---------- sidebar: every screen and state, one click ---------- */
+const JUMPS = [
+  ['Start', [['signup','Sign-up'],['signin','Sign In'],['recover','Sign In with a key',1]]],
+  ['List', [['list','List'],['list-new','List, just signed up',1],['adding','Add a friend',1],['requests','Request (Yo / No)',1],['yos','Yos waiting (! Yo 3)',1],['banner','“New device linked”',1]]],
+  ['Settings', [['settings','Settings'],['account','Account',1],['contacts','Contacts',2],['blocked','Blocked',2],['devices','Devices',2],['rkey','Account Security',2],['code','Your Code',1],['appearance','Appearance',1],['lefthanded','Left-Handed on',2],['help','Help & About',1],['signout','Sign Out?',1],['delete','Delete Your Account?',1]]],
+  ['Devices & Linking (§2.5)', [['scan','Old device: scan',1],['confirm','Old device: confirm',1],['linked','Old device: linked',1],['linkqr','New device: QR',1],['link2','Both phones linking',1],['replace','16-device limit',1],['removed','Removed elsewhere',1]]],
+];
+function side() {
+  $('side').innerHTML = JUMPS.map(([h, items]) => `<h2>${h}</h2>` + items.map(([k, t, sub]) =>
+    `<a href="#${k}" data-j="${k}" class="${sub ? 'sub' : ''}" style="${sub === 2 ? 'padding-left:36px' : ''}">${t}</a>`).join('')).join('');
+}
+let current = '';
+function markSide() { document.querySelectorAll('.side a').forEach(a => a.classList.toggle('on', a.dataset.j === current)); }
+function signedIn(a, { friends = 'demo', ndev = 4 } = {}) {
+  newAccount('chris'); a.deviceId = addDevice('A', 'iPhone 17 Pro', 'iOS 26').id;
+  $('ndev').value = ndev; $('ndev').dispatchEvent(new Event('input'));
+  a.friends = friends === 'demo' ? demoFriends() : freshFriends();
+}
+function jump(h) {
+  resetAll(); current = h; const a = phones.A;
+  const at = (screen, stack) => { a.stack = stack; a.screen = screen; render(a); };
+  switch (h) {
+    case 'signup': return render(a);
+    case 'signin': return at('signin', ['intro']);
+    case 'recover': return at('recover', ['intro', 'signin']);
+    case 'linkqr': $('delay').value = 50; return startLink(a);
+    case 'replace': signedIn(phones.A, { ndev:16 }); a.deviceId = null; a.pick = null; return at('replace', []);
+    case 'removed': return at('removed', []);
+    case 'link2': { signedIn(a); $('delay').value = 50; setSecond(true); const b = phones.B; b.stack = ['intro']; b.screen = 'signin';
+      return startLink(b).then(() => { a.stack = ['list','settings','account','devices']; a.screen = 'scan'; render(a); }); }
+  }
+  signedIn(a, { friends: h === 'list-new' ? 'fresh' : 'demo', ndev: h === 'list-new' ? 1 : 4 });
+  switch (h) {
+    case 'list': case 'list-new': return at('list', []);
+    case 'adding': a.adding = ''; at('list', []); return a.el.querySelector('[data-in="addname"]').focus();
+    case 'requests': a.requests = ['lukas']; return at('list', []);
+    case 'yos': a.friends[0].count = 3; a.friends[0].bang = true; return at('list', []);
+    case 'banner': a.banner = 'New device linked: iPhone 13'; return at('list', []);
+    case 'settings': return at('settings', ['list']);
+    case 'account': case 'appearance': case 'help': case 'code': return at(h, ['list', 'settings']);
+    case 'lefthanded': a.left = true; return at('appearance', ['list', 'settings']);
+    case 'contacts': case 'blocked': case 'devices': case 'rkey': return at(h, ['list', 'settings', 'account']);
+    case 'signout': at('settings', ['list']); return A.askSignOut(a);
+    case 'delete': at('account', ['list', 'settings']); return A.askDelete(a);
+    case 'scan': return at('scan', ['list', 'settings', 'account', 'devices']);
+    case 'confirm': { $('delay').value = 50; at('scan', ['list', 'settings', 'account', 'devices']); const id = rnd(26); hub.links[id] = { from:null, created:Date.now() }; return oldDeviceScanned(a, `yo-link:${id}.${rnd(43)}`); }
+    case 'linked': a.linkedName = 'iPhone 13'; return at('linked', ['list', 'settings', 'account', 'devices']);
+  }
+}
+side();
+$('side').addEventListener('click', e => { const t = e.target.closest('[data-j]'); if (!t) return; e.preventDefault(); history.replaceState(null, '', '#' + t.dataset.j); jump(t.dataset.j); });
+freshHub(); wire(Phone('A'));
+if (location.hash.length > 1) jump(location.hash.slice(1)); else { current = 'signup'; render(phones.A); }
 </script>
 </body>
 </html>
