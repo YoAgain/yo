@@ -177,6 +177,9 @@ pub struct Registering {
     pub request: Vec<u8>,
     /// Sent before: the hub may have taken it, so it is asked first.
     pub sent: bool,
+    /// The unsigned challenge the registration's attestation is over, named in `Yo-Attest-Challenge` (spec 4.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attest_challenge: Option<String>,
 }
 
 /// A message for one user, waiting for the hub to take it (spec 3.2).

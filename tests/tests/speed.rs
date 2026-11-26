@@ -42,8 +42,8 @@ impl HttpTransport for App {
         let answer = yo_core::Transport::request(self.http.as_ref(), &method, &path, &headers, &body);
         std::thread::sleep(self.rtt / 2);
         match answer {
-            Ok(r) => HttpResult { status: r.status, body: r.body, error: None },
-            Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e) },
+            Ok(r) => HttpResult { status: r.status, body: r.body, error: None, headers: Vec::new() },
+            Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e), headers: Vec::new() },
         }
     }
 }
@@ -100,6 +100,7 @@ fn client(app: Arc<App>, file: Arc<File>, name: &str, token: &str) -> Arc<YoClie
         None,
         platform,
         token.into(),
+        None,
     )
     .unwrap()
 }
@@ -119,6 +120,7 @@ fn db_client(app: Arc<App>, disk: &Disk, name: &str, token: &str) -> Arc<YoClien
         None,
         platform,
         token.into(),
+        None,
     )
     .unwrap()
 }

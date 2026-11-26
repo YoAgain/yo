@@ -141,7 +141,27 @@ impl Push {
 pub struct Register {
     /// The username as its owner writes it (NFC): the account's only handle.
     pub username: VLBytes,
+    /// An attestation over an unsigned challenge (spec 2.2, 4.2): with it a new name may be shorter.
+    pub attest: Option<Attest>,
     pub device: NewDevice,
+}
+
+/// `Register` as clients before attestation send it: no `attest`.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct RegisterLegacy {
+    pub username: VLBytes,
+    pub device: NewDevice,
+}
+
+impl Register {
+    /// A `Register` of either form: the current one, else the legacy one without `attest`. Decoding is exact,
+    /// so a body only ever fits one of them.
+    pub fn decode_any(bytes: &[u8]) -> Result<Self, crate::Error> {
+        crate::decode::<Register>(bytes).or_else(|_| {
+            let old: RegisterLegacy = crate::decode(bytes)?;
+            Ok(Register { username: old.username, attest: None, device: old.device })
+        })
+    }
 }
 
 /// A device as it registers.
@@ -723,6 +743,12 @@ pub const ATTEST_CHALLENGE: &str = "/v1/attest/challenge";
 /// `POST`, signed, `Attest`: the platform's attestation over the device's last challenge. Answered `AttestResult`;
 /// nothing is ever refused for a missing or failed attestation.
 pub const ATTEST: &str = "/v1/attest";
+/// Header on `GET /v1/username/{name}` and `POST /v1/register`: the unsigned challenge (base64url) the client
+/// attests over. The name check answers `HEADER_NAME_MIN` 4 while that challenge is open, and the registration
+/// verifies `Register::attest` against it.
+pub const HEADER_ATTEST_CHALLENGE: &str = "Yo-Attest-Challenge";
+/// Header on name checks: the fewest characters of a new name for this caller (spec 2.2).
+pub const HEADER_NAME_MIN: &str = "Yo-Name-Min";
 /// How long a challenge may be used.
 pub const ATTEST_CHALLENGE_TTL_MS: u64 = 5 * 60 * 1000;
 /// The length of a challenge.
@@ -759,4 +785,31 @@ pub struct Attest {
 pub struct AttestResult {
     /// `ATTEST_ATTESTED`, `ATTEST_FAILED` or `ATTEST_UNJUDGED`.
     pub verdict: u8,
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+
+    /// An old client's `Register` (no `attest`) still decodes; the current one round-trips with or without it.
+    #[test]
+    fn register_of_both_forms_decodes() {
+        let device = NewDevice {
+            device_id: [7; 16],
+            device_key: [1; KEY_LEN],
+            certificate: vec![2; 3].into(),
+            auth_key: [3; KEY_LEN],
+            push: Push { platform: 0, token: vec![].into() },
+            registration_id: 9,
+            prekeys: Prekeys { signed: None, last_resort: None, one_time: vec![], kyber: vec![] },
+            proof: [4; 64],
+        };
+        let old = RegisterLegacy { username: b"Abcde".to_vec().into(), device: device.clone() };
+        let decoded = Register::decode_any(&crate::encode(&old)).unwrap();
+        assert_eq!((decoded.attest, decoded.device), (None, device.clone()));
+        for attest in [None, Some(Attest { platform: ATTEST_IOS, payload: vec![5].into() })] {
+            let new = Register { username: b"Abcde".to_vec().into(), attest, device: device.clone() };
+            assert_eq!(Register::decode_any(&crate::encode(&new)).unwrap(), new);
+        }
+    }
 }

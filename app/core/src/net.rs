@@ -13,6 +13,18 @@ pub struct Response {
 /// `CLOCK_FAILURE` is a TLS handshake that refused the hub's certificate for its dates: the phone's clock is off.
 pub trait Transport: Send + Sync {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String>;
+
+    /// `request` with the answer's headers (lowercase names). Only the name check reads one (`Yo-Name-Min`); a
+    /// transport that cannot see headers answers none.
+    fn request_headers(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(Response, Vec<(String, String)>), String> {
+        self.request(method, path, headers, body).map(|response| (response, Vec::new()))
+    }
 }
 
 /// How a transport's failure starts when TLS refused the hub's certificate for its dates (`Transport`).

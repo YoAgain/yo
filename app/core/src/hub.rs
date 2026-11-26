@@ -170,19 +170,23 @@ impl Client {
 
 impl Request {
     pub fn attest_challenge(&self) -> Result<Option<Vec<u8>>> {
-        let response = self.response()?;
-        if matches!(response.status, status::NO_CONTENT | status::NOT_FOUND) {
-            return Ok(None);
-        }
-        let challenge: api::AttestChallenge = decode(&expect(response, status::OK)?.body)?;
-        if challenge.challenge.as_slice().len() != api::ATTEST_CHALLENGE_LEN {
-            return Err(Error::Protocol("invalid attestation challenge"));
-        }
-        Ok(Some(challenge.challenge.into()))
+        read_challenge(self.response()?)
     }
 
     pub fn attest_send(&self) -> Result<u8> {
         let result: api::AttestResult = decode(&expect(self.response()?, status::OK)?.body)?;
         Ok(result.verdict)
     }
+}
+
+/// A challenge answer; `None`: attestation is off at the hub (`204`, or `404` from a hub before it).
+pub(crate) fn read_challenge(response: Response) -> Result<Option<Vec<u8>>> {
+    if matches!(response.status, status::NO_CONTENT | status::NOT_FOUND) {
+        return Ok(None);
+    }
+    let challenge: api::AttestChallenge = decode(&expect(response, status::OK)?.body)?;
+    if challenge.challenge.as_slice().len() != api::ATTEST_CHALLENGE_LEN {
+        return Err(Error::Protocol("invalid attestation challenge"));
+    }
+    Ok(Some(challenge.challenge.into()))
 }

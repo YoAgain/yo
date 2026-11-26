@@ -1,5 +1,7 @@
 //! Device attestation (spec 4.2). Only the operator sees the measurements.
 //! Challenge: 32 random bytes, only the device's latest valid, for 5 minutes, at most 20 per device and hour.
+//! Unsigned (before `Register`): bound to the challenge itself, single use, 5 minutes, limited per address like
+//! every unsigned request; the client names it in `Yo-Attest-Challenge` on the name check and on `Register`.
 //! Attest: consumes the challenge once; an unknown platform or a payload over 16 KiB is `400`.
 //! Verdicts: attested 1, failed 2, unjudged 3; unjudged leaves the record unchanged, a success persists through
 //! later failures. Challenges, tokens, attestation certificates and key ids are never stored.
@@ -8,17 +10,19 @@ mod android;
 mod ios;
 
 use crate::error::{refuse, Res};
-use crate::request::{bad, Auth, Hubs, HOUR};
-use axum::extract::State;
-use axum::http::{header::CACHE_CONTROL, StatusCode};
+use crate::request::{bad, Auth, Hubs, Peer, HOUR};
+use crate::Hub;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{header::CACHE_CONTROL, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::PoisonError;
 use yoip::{decode, encode, net::api, DeviceId};
 
 type Challenge = [u8; api::ATTEST_CHALLENGE_LEN];
 #[derive(Default)]
-pub(crate) struct Challenges(HashMap<DeviceId, (Challenge, u64)>);
+pub(crate) struct Challenges(HashMap<DeviceId, (Challenge, u64)>, HashMap<Challenge, u64>);
 
 impl Challenges {
     fn issue(&mut self, id: DeviceId, now: u64) -> Res<Challenge> {
@@ -37,15 +41,97 @@ impl Challenges {
     fn take(&mut self, id: &DeviceId, now: u64) -> Option<Challenge> {
         self.0.remove(id).filter(|(_, expiry)| *expiry > now).map(|(c, _)| c)
     }
+
+    /// An unsigned challenge, bound to nothing but itself.
+    fn issue_open(&mut self, now: u64) -> Res<Challenge> {
+        self.1.retain(|_, expires| *expires > now);
+        if self.1.len() >= 8192 {
+            if let Some(oldest) = self.1.iter().min_by_key(|(_, expiry)| **expiry).map(|(c, _)| *c) {
+                self.1.remove(&oldest);
+            }
+        }
+        let mut challenge = [0; api::ATTEST_CHALLENGE_LEN];
+        getrandom::fill(&mut challenge).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+        self.1.insert(challenge, now + api::ATTEST_CHALLENGE_TTL_MS);
+        Ok(challenge)
+    }
+
+    /// Whether an unsigned challenge is issued and unused (the name check looks, it does not consume).
+    pub(crate) fn open(&self, challenge: &[u8], now: u64) -> bool {
+        challenge.try_into().ok().and_then(|c: Challenge| self.1.get(&c).copied()).is_some_and(|e| e > now)
+    }
+
+    /// Consumes an unsigned challenge.
+    pub(crate) fn take_open(&mut self, challenge: &[u8], now: u64) -> Option<Challenge> {
+        let c: Challenge = challenge.try_into().ok()?;
+        self.1.remove(&c).filter(|expiry| *expiry > now).map(|_| c)
+    }
 }
 
-pub(crate) async fn challenge(State(hub): Hubs, Auth(device, _): Auth) -> Res<Response> {
+/// The challenge a client names in `Yo-Attest-Challenge`, if any.
+pub(crate) fn named_challenge(headers: &HeaderMap) -> Option<Vec<u8>> {
+    yoip::unb64(headers.get(api::HEADER_ATTEST_CHALLENGE)?.to_str().ok()?).ok()
+}
+
+/// A checked attestation: its platform, Android level, and the failure reason if it does not hold.
+pub(crate) struct Checked {
+    pub platform: &'static str,
+    pub level: Option<&'static str>,
+    pub result: Result<(), &'static str>,
+}
+
+/// Verifies an attestation over `challenge` as `POST /attest` does: `Err` `400` for a malformed one, `Ok(None)`
+/// when it cannot be judged (Android without keys).
+pub(crate) fn check(hub: &Hub, att: &api::Attest, challenge: Option<Challenge>, now: u64) -> Res<Option<Checked>> {
+    if att.payload.as_slice().len() > api::MAX_ATTEST_PAYLOAD {
+        return Err(bad());
+    }
+    let platform = match att.platform {
+        api::ATTEST_IOS => "ios",
+        api::ATTEST_ANDROID => "android",
+        _ => return Err(bad()),
+    };
+    let Some(challenge) = challenge else { return Ok(None) };
+    let mut level = None;
+    let result = if att.platform == api::ATTEST_IOS {
+        ios::verify(att.payload.as_slice(), &yoip::sha256(&challenge), &hub.config.apple_app_ids, ios::ROOT, now)
+    } else {
+        let Some(keys) = &hub.config.play_keys else { return Ok(None) };
+        android::verify(att.payload.as_slice(), keys, &challenge, &hub.config.play_package, now, &mut level)
+    };
+    Ok(Some(Checked { platform, level, result }))
+}
+
+/// Reports a failed attestation to the operator's diagnostics.
+pub(crate) fn report(hub: &Hub, checked: &Checked, app: Option<&str>, now: u64) -> Res<()> {
+    if let Err(reason) = checked.result {
+        let payload = serde_json::json!({"severity":"expected","domain":"attest","code":reason,"place":checked.platform,"app":app.unwrap_or("hub")});
+        hub.db.diagnostic("error", &payload, None, now)?;
+    }
+    Ok(())
+}
+
+/// `GET /attest/challenge`: signed for the signing device, unsigned (no `Yo-Device`) before `Register`.
+pub(crate) async fn challenge(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<Response> {
     if !hub.config.attest {
         return Ok((StatusCode::NO_CONTENT, [(CACHE_CONTROL, "no-store")]).into_response());
     }
-    hub.limit_signed(&device, "attest", &device.device_id, 20, HOUR)?;
-    let challenge =
-        hub.challenges.lock().unwrap_or_else(PoisonError::into_inner).issue(device.device_id, hub.clock_ms())?;
+    let challenges = || hub.challenges.lock().unwrap_or_else(PoisonError::into_inner);
+    let challenge = if headers.contains_key(yoip::net::request::HEADER_DEVICE) {
+        let device = hub.authenticate(&method, &uri, &headers, &body)?;
+        hub.limit_signed(&device, "attest", &device.device_id, 20, HOUR)?;
+        challenges().issue(device.device_id, hub.clock_ms())?
+    } else {
+        hub.limit_anonymous(peer, &headers)?;
+        challenges().issue_open(hub.clock_ms())?
+    };
     Ok(([(CACHE_CONTROL, "no-store")], encode(&api::AttestChallenge { challenge: challenge.to_vec().into() }))
         .into_response())
 }
@@ -58,29 +144,13 @@ pub(crate) async fn submit(State(hub): Hubs, Auth(device, body): Auth) -> Res<Ve
     let now = hub.clock_ms();
     let challenge = hub.challenges.lock().unwrap_or_else(PoisonError::into_inner).take(&device.device_id, now);
     let att: api::Attest = decode(&body)?;
-    if att.payload.as_slice().len() > api::MAX_ATTEST_PAYLOAD {
-        return Err(bad());
-    }
-    let platform = match att.platform {
-        api::ATTEST_IOS => "ios",
-        api::ATTEST_ANDROID => "android",
-        _ => return Err(bad()),
-    };
-    let Some(challenge) = challenge else { return Ok(answer(api::ATTEST_UNJUDGED)) };
-    let mut level = None;
-    let result = if att.platform == api::ATTEST_IOS {
-        ios::verify(att.payload.as_slice(), &yoip::sha256(&challenge), &hub.config.apple_app_ids, ios::ROOT, now)
-    } else {
-        let Some(keys) = &hub.config.play_keys else { return Ok(answer(api::ATTEST_UNJUDGED)) };
-        android::verify(att.payload.as_slice(), keys, &challenge, &hub.config.play_package, now, &mut level)
-    };
-    if let Err(reason) = result {
+    let Some(checked) = check(&hub, &att, challenge, now)? else { return Ok(answer(api::ATTEST_UNJUDGED)) };
+    if checked.result.is_err() {
         let app = hub.db.device(&device.device_id)?.and_then(|d| d.app);
-        let payload = serde_json::json!({"severity":"expected","domain":"attest","code":reason,"place":platform,"app":app.as_deref().unwrap_or("hub")});
-        hub.db.diagnostic("error", &payload, None, now)?;
+        report(&hub, &checked, app.as_deref(), now)?;
     }
-    hub.db.record_attestation(&device.device_id, platform, result.err(), level, now)?;
-    Ok(answer(if result.is_ok() { api::ATTEST_ATTESTED } else { api::ATTEST_FAILED }))
+    hub.db.record_attestation(&device.device_id, checked.platform, checked.result.err(), checked.level, now)?;
+    Ok(answer(if checked.result.is_ok() { api::ATTEST_ATTESTED } else { api::ATTEST_FAILED }))
 }
 
 #[cfg(test)]
@@ -110,7 +180,10 @@ mod tests {
         for enabled in [false, true] {
             let hub = Hub::new(Config { attest: enabled, ..Config::for_tests() }, Arc::new(push::Recorder::default()))
                 .unwrap();
-            let response = challenge(State(hub.clone()), auth(vec![])).await.unwrap();
+            let peer = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 1)));
+            let uri: Uri = api::ATTEST_CHALLENGE.parse().unwrap();
+            let response =
+                challenge(State(hub.clone()), peer, Method::GET, uri, HeaderMap::new(), Bytes::new()).await.unwrap();
             let status = response.status();
             let challenge = axum::body::to_bytes(response.into_body(), 128).await.unwrap();
             let body = if enabled {
@@ -166,6 +239,7 @@ mod tests {
                 .header(request::HEADER_TIME, time.to_string())
                 .header(request::HEADER_SIGNATURE, b64(&sig))
                 .header("Yo-App", "ios/2")
+                .extension(ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 1))))
                 .body(Body::from(body))
                 .unwrap();
             hub.router().oneshot(req)

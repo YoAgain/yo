@@ -159,16 +159,25 @@ fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
     http.fault("/v1/register", Fault::LoseAnswer);
     http.fault("/v1/lookup", Fault::Answer(503));
     let disk = Arc::new(Disk::default());
-    let gone = Client::register_username_saved(http, disk.clone(), KEY, &taken, None, None, None, Push::none());
+    let gone = Client::register_username_saved(http, disk.clone(), KEY, &taken, None, None, None, Push::none(), None);
     assert_eq!(gone.err(), Some(Error::Refused(503)));
     // Never at the hub: the same device registers when started again.
     let lost = format!("Never{n}");
     let http = Http::new(hub.url());
     http.fault("/v1/register", Fault::Answer(503));
     let other_disk = Arc::new(Disk::default());
-    assert!(
-        Client::register_username_saved(http, other_disk.clone(), KEY, &lost, None, None, None, Push::none()).is_err()
-    );
+    assert!(Client::register_username_saved(
+        http,
+        other_disk.clone(),
+        KEY,
+        &lost,
+        None,
+        None,
+        None,
+        Push::none(),
+        None
+    )
+    .is_err());
     let mut sender = by_name(Http::new(hub.url()), &format!("Hello{n}"));
     for (disk, name) in [(disk, &taken), (other_disk, &lost)] {
         let blob = disk.saved.lock().unwrap().clone();
@@ -188,7 +197,7 @@ fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
     full.full.store(true, Ordering::Relaxed);
     let free = format!("Free{n}");
     let http = Http::new(hub.url());
-    let refused = Client::register_username_saved(http.clone(), full, KEY, &free, None, None, None, Push::none());
+    let refused = Client::register_username_saved(http.clone(), full, KEY, &free, None, None, None, Push::none(), None);
     assert!(matches!(refused, Err(Error::Save(_))));
     assert!(Client::username_free(http.as_ref(), &free).unwrap());
 }

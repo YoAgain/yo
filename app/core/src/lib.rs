@@ -722,6 +722,21 @@ fn shown(content: &Content) -> bool {
     )
 }
 
+/// A device attestation for `Register` (spec 4.2): the platform's payload over an unsigned challenge.
+#[derive(Debug, Clone)]
+pub struct Attested {
+    pub platform: u8,
+    pub payload: Vec<u8>,
+    pub challenge: Vec<u8>,
+}
+
+/// A name check's answer (`Client::username_check`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameCheck {
+    pub status: u16,
+    pub name_min: Option<u32>,
+}
+
 impl Client {
     // ---- registration and state ----
 
@@ -734,7 +749,7 @@ impl Client {
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
-        let mut client = Client::registering(transport, username, account_secret, None, name, push)?;
+        let mut client = Client::registering(transport, username, account_secret, None, name, push, None)?;
         client.finish_registration()?;
         Ok(client)
     }
@@ -751,8 +766,10 @@ impl Client {
         legacy_storage_key: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
+        attest: Option<Attested>,
     ) -> Result<Client> {
-        let mut client = Client::registering(transport, username, account_secret, legacy_storage_key, name, push)?;
+        let mut client =
+            Client::registering(transport, username, account_secret, legacy_storage_key, name, push, attest)?;
         client.persist_to(store, key)?;
         client.finish_registration()?;
         Ok(client)
@@ -766,6 +783,7 @@ impl Client {
         legacy_storage_key: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
+        attest: Option<Attested>,
     ) -> Result<Client> {
         let handle = Handle::parse(username)?;
         if handle.kind != KIND_USERNAME {
@@ -773,8 +791,14 @@ impl Client {
         }
         let account = identity::account_pair(&account_secret.unwrap_or_else(identity::new_account_secret))?;
         let (mut client, device) = Client::new_device(transport, &handle, account, name, push)?;
-        let request = api::Register { username: handle.value.clone(), device };
-        client.state.registering = Some(Registering { request: encode(&request), sent: false });
+        let (attest, attest_challenge) = match attest {
+            Some(a) => {
+                (Some(api::Attest { platform: a.platform, payload: a.payload.into() }), Some(yoip::b64(&a.challenge)))
+            }
+            None => (None, None),
+        };
+        let request = api::Register { username: handle.value.clone(), attest, device };
+        client.state.registering = Some(Registering { request: encode(&request), sent: false, attest_challenge });
         client.state.username = Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned());
         // A restored account fetches its storage once registered, so its blocks hold before the first message.
         client.state.storage_fetched = account_secret.is_none();
@@ -820,7 +844,9 @@ impl Client {
                 pending.sent = true;
                 self.persist()?;
             }
-            match self.registered(api::REGISTER, &registering.request) {
+            let challenge =
+                registering.attest_challenge.iter().map(|c| (api::HEADER_ATTEST_CHALLENGE.to_owned(), c.clone()));
+            match self.registered(api::REGISTER, &challenge.collect::<Vec<_>>(), &registering.request) {
                 Ok(()) => self.state.registering = None,
                 // The answer may be lost after the hub took it: asked first, next round.
                 Err(Error::Network(_)) if tries < REGISTER_TRIES => tries += 1,
@@ -870,6 +896,29 @@ impl Client {
         }
     }
 
+    /// An unsigned attestation challenge for a registration to come (spec 4.2); `None`: attestation is off at the
+    /// hub (`204`, or `404` from a hub before it). The app attests over it, then names it in `username_check`
+    /// and hands the result to the registration (`Attested`).
+    pub fn attest_open_challenge(transport: &dyn Transport) -> Result<Option<Vec<u8>>> {
+        let response = transport.request("GET", api::ATTEST_CHALLENGE, &[], &[]).map_err(Error::Network)?;
+        crate::hub::read_challenge(response)
+    }
+
+    /// A name check (spec 2.2) with the hub's minimum for this caller (`Yo-Name-Min`, `None` from a hub before
+    /// it). `challenge`: the attested unsigned challenge, so the hub answers the shorter minimum. The status:
+    /// `204` free, `409` taken, `400` no username or too short, `429` asked too often.
+    pub fn username_check(transport: &dyn Transport, username: &str, challenge: Option<&[u8]>) -> Result<NameCheck> {
+        let headers: Vec<_> =
+            challenge.iter().map(|c| (api::HEADER_ATTEST_CHALLENGE.to_owned(), yoip::b64(c))).collect();
+        let (response, answer) =
+            transport.request_headers("GET", &api::username_path(username), &headers, &[]).map_err(Error::Network)?;
+        let name_min = answer
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(api::HEADER_NAME_MIN))
+            .and_then(|(_, value)| value.trim().parse().ok());
+        Ok(NameCheck { status: response.status, name_min })
+    }
+
     /// A device's keys, certificate, first prekeys, and the proof of possession over its handle (spec 4.2).
     fn new_device(
         transport: Arc<dyn Transport>,
@@ -910,8 +959,9 @@ impl Client {
         Ok((client, device))
     }
 
-    fn registered(&mut self, path: &str, body: &[u8]) -> Result<()> {
-        let response = expect(self.transport.request("POST", path, &[], body).map_err(Error::Network)?, status::OK)?;
+    fn registered(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<()> {
+        let response =
+            expect(self.transport.request("POST", path, headers, body).map_err(Error::Network)?, status::OK)?;
         let registered: api::Registered = decode(&response.body)?;
         self.state.user_id = hex(&registered.user_id);
         self.state.attestation.at_registration = true;
@@ -2528,7 +2578,8 @@ mod handle_tests {
 
     #[test]
     fn decryption_error_resends_remain_silent_after_reload() {
-        let mut client = Client::registering(Arc::new(Offline), "RESEND", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(Arc::new(Offline), "RESEND", None, None, None, Push::none(), None).unwrap();
         let message = Message { sent_at_ms: 1, group: None, content: Content::Yo }.encode().unwrap();
         let plain = encode(&yoip::protocol::envelope::Plain { to: None, content: message.into() });
         client.enqueue_with_urgency("other", plain, true);
@@ -2562,7 +2613,7 @@ mod handle_tests {
             }
         }
         let transport = Arc::new(FailedLookup(AtomicUsize::new(0)));
-        let mut client = Client::registering(transport.clone(), "RETRY", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(transport.clone(), "RETRY", None, None, None, Push::none(), None).unwrap();
         let user = hex(&[7; 16]);
         let key = [8; 32];
         client.state.contacts.insert(user.clone(), Contact { account_key: key, ..Contact::default() });
@@ -2600,7 +2651,7 @@ mod handle_tests {
     #[test]
     fn a_clock_off_by_an_hour_is_corrected_by_the_hubs_time() {
         let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
-        let mut client = Client::registering(transport.clone(), "CLOCK", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(transport.clone(), "CLOCK", None, None, None, Push::none(), None).unwrap();
         for skew in [3_600_000i64, -3_600_000, 0] {
             client.set_clock_skew(skew);
             let before = transport.0.lock().unwrap().len();
@@ -2617,7 +2668,7 @@ mod handle_tests {
         }
         // A hub whose time never fits: no silent `401`, the typed error the apps show, and "try again later".
         let lying = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 3_600_000));
-        let mut client = Client::registering(lying, "LIAR", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(lying, "LIAR", None, None, None, Push::none(), None).unwrap();
         let error = client.set_push(Push::none()).unwrap_err();
         assert_eq!(error, Error::Clock);
         assert!(retryable(&error));
@@ -2639,7 +2690,7 @@ mod handle_tests {
     #[test]
     fn unknown_content_is_dropped_and_legacy_profiles_still_name() {
         let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
-        let mut client = Client::registering(transport, "SILENT", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(transport, "SILENT", None, None, None, Push::none(), None).unwrap();
         let user = hex(&[7; 16]);
         client.state.contacts.insert(user.clone(), Contact::default());
         let message = Message { sent_at_ms: 1, group: None, content: Content::Unknown(999) };
@@ -2657,7 +2708,7 @@ mod handle_tests {
     #[test]
     fn what_waits_in_memory_is_timed_by_the_monotonic_clock() {
         let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
-        let mut client = Client::registering(transport, "MONO", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(transport, "MONO", None, None, None, Push::none(), None).unwrap();
         let user = hex(&[9; 16]);
         client.state.request_wait.insert(user.clone(), (client.monotonic() + 60_000, false));
         // The phone's clock set back an hour during the wait: it ends after the wait all the same.
@@ -2691,7 +2742,8 @@ mod handle_tests {
             }
         }
         let transport = Arc::new(CutOff(std::sync::Mutex::new(Vec::new())));
-        let mut client = Client::registering(transport.clone(), "CUTOFF", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(transport.clone(), "CUTOFF", None, None, None, Push::none(), None).unwrap();
         client.state.storage_fetched = true;
         client.set_clock(Arc::new(|| 1_000));
         let error = client.sync(25).unwrap_err();
@@ -2715,7 +2767,8 @@ mod handle_tests {
 
     #[test]
     fn outbox_retention_survives_restore_and_keeps_recipients_separate() {
-        let mut client = Client::registering(Arc::new(Offline), "RETENTION", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(Arc::new(Offline), "RETENTION", None, None, None, Push::none(), None).unwrap();
         client.set_clock(Arc::new(|| 100));
         client.enqueue("other", vec![2]);
         for n in 0..OUTBOX_PER_RECIPIENT + 3 {
@@ -2736,7 +2789,8 @@ mod handle_tests {
 
     #[test]
     fn permanent_delivery_rejections_leave_the_outbox_but_transient_ones_wait() {
-        let mut client = Client::registering(Arc::new(Offline), "REFUSALS", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(Arc::new(Offline), "REFUSALS", None, None, None, Push::none(), None).unwrap();
         for status in [202, 400, 403, 404, 413, 429, 500, 503, 507] {
             client.state.outbox.clear();
             client.enqueue("recipient", vec![]);
@@ -2788,7 +2842,8 @@ mod handle_tests {
     /// next send asked whether something waits.
     #[test]
     fn a_receipt_or_a_yo_on_its_way_is_no_waiting_banner() {
-        let mut client = Client::registering(Arc::new(Offline), "INFLIGHT", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(Arc::new(Offline), "INFLIGHT", None, None, None, Push::none(), None).unwrap();
         let receipt = Message { sent_at_ms: 1, group: None, content: Content::Receipt }.encode().unwrap();
         client.enqueue("bot", encode(&yoip::protocol::envelope::Plain { to: None, content: receipt.into() }));
         assert_eq!((client.waiting(), client.waiting_unheld()), (1, 0), "a receipt is nothing the user sent");
@@ -2802,7 +2857,7 @@ mod handle_tests {
     /// One friend's full inbox (`507`, a phone off for weeks) is said on their row, not with every send to others.
     #[test]
     fn a_full_inbox_waits_on_its_row() {
-        let mut client = Client::registering(Arc::new(Offline), "FULL", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(Arc::new(Offline), "FULL", None, None, None, Push::none(), None).unwrap();
         client.enqueue("full", yo());
         for status in [507, 503] {
             let deliveries = one_delivery(&client, "full", None);
@@ -2834,7 +2889,8 @@ mod handle_tests {
             }
         }
         let transport = Arc::new(Refusing(AtomicUsize::new(0)));
-        let mut client = Client::registering(transport.clone(), "SESSIONS", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(transport.clone(), "SESSIONS", None, None, None, Push::none(), None).unwrap();
         let user = hex(&[7; 16]);
         client.enqueue(&user, yo());
         client.prepare().unwrap();
@@ -2867,7 +2923,8 @@ mod handle_tests {
             }
         }
         let transport = Arc::new(Limited(AtomicUsize::new(0)));
-        let mut client = Client::registering(transport.clone(), "LOOKUPS", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(transport.clone(), "LOOKUPS", None, None, None, Push::none(), None).unwrap();
         client.enqueue(&hex(&[7; 16]), vec![]);
         client.enqueue(&hex(&[8; 16]), vec![]);
         client.prepare().unwrap();
@@ -2883,7 +2940,7 @@ mod handle_tests {
     /// banner does not stay on for it while everyone else's Yos go.
     #[test]
     fn what_a_contact_holds_waits_without_the_banner() {
-        let mut client = Client::registering(Arc::new(Offline), "QUIET", None, None, None, Push::none()).unwrap();
+        let mut client = Client::registering(Arc::new(Offline), "QUIET", None, None, None, Push::none(), None).unwrap();
         client.state.contacts.insert("changed".into(), Contact { unconfirmed: true, ..Contact::default() });
         client.state.contacts.insert("old".into(), Contact { outdated_at: 5, ..Contact::default() });
         client.enqueue("changed", yo());
@@ -2897,7 +2954,8 @@ mod handle_tests {
     /// storm of `429`s a client hammering a limit makes), then it goes by itself.
     #[test]
     fn a_rate_limit_holds_for_its_time_and_never_at_once() {
-        let mut client = Client::registering(Arc::new(Offline), "LIMITED", None, None, None, Push::none()).unwrap();
+        let mut client =
+            Client::registering(Arc::new(Offline), "LIMITED", None, None, None, Push::none(), None).unwrap();
         let limited = |body: &str| Some(Ok(Response { status: 429, body: body.as_bytes().to_vec() }));
         client.enqueue("a", vec![]);
         let deliveries = one_delivery(&client, "a", None);

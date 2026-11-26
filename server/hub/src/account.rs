@@ -14,11 +14,23 @@ use yoip::net::limits::{self, MAX_DEVICES, MAX_PREKEYS_PER_UPLOAD, PREKEY_TARGET
 use yoip::{decode, encode, net::api, sha256, UserId};
 
 impl Hub {
-    /// A username at least `YO_NAME_MIN` long (spec 2.2); shorter is `400`. Only new names are measured: a name
-    /// someone has from before a higher least stays theirs.
-    fn long_enough(&self, name: &[u8]) -> Res<()> {
+    /// The fewest characters of a new name (spec 2.2): `YO_NAME_MIN` while `YO_NAME_ATTEST` is off; with it on,
+    /// `NAME_MIN_ATTESTED` for a client with a valid attestation, `NAME_MIN_UNATTESTED` for everyone else (old
+    /// apps, F-Droid, CLI, bots; old apps just see `400` as for any name too short).
+    pub(crate) fn name_min(&self, attested: bool) -> usize {
+        use crate::config::{NAME_MIN_ATTESTED, NAME_MIN_UNATTESTED};
+        match (self.config.name_attest, attested) {
+            (false, _) => self.config.name_min,
+            (true, true) => NAME_MIN_ATTESTED,
+            (true, false) => NAME_MIN_UNATTESTED,
+        }
+    }
+
+    /// A username at least `least` long; shorter is `400`. Only new names are measured: a name someone has from
+    /// before a higher least stays theirs.
+    fn long_enough(name: &[u8], least: usize) -> Res<()> {
         let name = std::str::from_utf8(name).map_err(|_| bad())?;
-        match yoip::net::handle::username_len(name) >= self.config.name_min {
+        match yoip::net::handle::username_len(name) >= least {
             true => Ok(()),
             false => Err(bad()),
         }
@@ -69,7 +81,7 @@ pub(crate) async fn post_register(
     body: Bytes,
 ) -> Res<Vec<u8>> {
     hub.limit_expensive(peer, &headers)?;
-    let request: api::Register = decode(&body)?;
+    let request = api::Register::decode_any(&body).map_err(|_| bad())?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
     let device = &request.device;
@@ -85,8 +97,20 @@ pub(crate) async fn post_register(
         return Err(bad());
     }
     // A known account key restores its user and keeps its name; only a new user's name is measured.
+    // The attestation, if any, over the unsigned challenge named in `Yo-Attest-Challenge`, consumed once.
+    let now = now_ms();
+    let checked = match &request.attest {
+        Some(att) if hub.config.attest => {
+            let challenge = crate::attest::named_challenge(&headers).and_then(|c| {
+                hub.challenges.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take_open(&c, hub.clock_ms())
+            });
+            crate::attest::check(&hub, att, challenge, hub.clock_ms())?
+        }
+        _ => None,
+    };
+    let attested = checked.as_ref().is_some_and(|c| c.result.is_ok());
     if hub.db.user_of_account_key(&account_key)?.is_none() {
-        hub.long_enough(request.username.as_slice())?;
+        Hub::long_enough(request.username.as_slice(), hub.name_min(attested))?;
     }
     Hub::check_prekeys(&device.prekeys, true)?;
 
@@ -105,27 +129,44 @@ pub(crate) async fn post_register(
     let spelling = std::str::from_utf8(handle.value.as_slice()).map_err(|_| bad())?;
     let skeleton = hub.stored_handle(&handle);
     let most = PREKEY_TARGET * 2;
-    let registered =
-        hub.db.register(&skeleton, spelling, &fresh, &account_key, &new, &device.prekeys, most, now_ms())?;
+    let registered = hub.db.register(&skeleton, spelling, &fresh, &account_key, &new, &device.prekeys, most, now)?;
     let (user_id, username, device_id) = registered.done()?;
+    // Recorded as the account's attestation, as `POST /attest` would.
+    if let Some(checked) = checked {
+        crate::attest::report(&hub, &checked, new.app.as_deref(), now)?;
+        hub.db.record_attestation(&new.device_id, checked.platform, checked.result.err(), checked.level, now)?;
+    }
     Ok(encode(&api::Registered { user_id, username: username.map(|name| name.into_bytes().into()), device_id }))
 }
 
-/// `GET /v1/username/{name}` (spec 2.2): `204` free, `409` taken or reserved, `400` no username; by skeleton.
+/// `GET /v1/username/{name}` (spec 2.2): `204` free, `409` taken or reserved, `400` no username or too short; by
+/// skeleton. Every answer carries `Yo-Name-Min`, the minimum for this caller: with `YO_NAME_ATTEST` on, 4 while the
+/// unsigned challenge it names in `Yo-Attest-Challenge` is open (the client attests over it and sends the result
+/// with `Register`, which decides), else 12.
 pub(crate) async fn get_username(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
     headers: HeaderMap,
     Path(name): Path<String>,
-) -> Res<StatusCode> {
-    hub.limit_anonymous(peer, &headers)?;
-    yoip::net::handle::check_username_form(&name)?;
-    // Taken before too short: a name someone has from before a higher least is found, not refused.
-    if hub.db.username_taken(yoip::net::handle::skeleton(&name).as_bytes())? {
-        return Err(refuse(StatusCode::CONFLICT));
-    }
-    hub.long_enough(name.as_bytes())?;
-    Ok(StatusCode::NO_CONTENT)
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let open = crate::attest::named_challenge(&headers).is_some_and(|c| {
+        hub.challenges.lock().unwrap_or_else(std::sync::PoisonError::into_inner).open(&c, hub.clock_ms())
+    });
+    let least = hub.name_min(open);
+    let answer = (|| {
+        hub.limit_anonymous(peer, &headers)?;
+        yoip::net::handle::check_username_form(&name)?;
+        // Taken before too short: a name someone has from before a higher least is found, not refused.
+        if hub.db.username_taken(yoip::net::handle::skeleton(&name).as_bytes())? {
+            return Err(refuse(StatusCode::CONFLICT));
+        }
+        Hub::long_enough(name.as_bytes(), least)?;
+        Ok(StatusCode::NO_CONTENT)
+    })();
+    let mut response = answer.into_response();
+    response.headers_mut().insert(api::HEADER_NAME_MIN, least.into());
+    response
 }
 
 /// `PUT /v1/prekeys` (spec 4.2).

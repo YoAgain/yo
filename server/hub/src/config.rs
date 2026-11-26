@@ -182,6 +182,10 @@ impl std::fmt::Debug for PlayKeys {
 /// The fewest characters (grapheme clusters) of a new username when `YO_NAME_MIN` sets none (spec 2.2). Only the hub
 /// has a least: the apps show its `400`.
 pub const NAME_MIN: usize = 3;
+/// The fewest characters of a new name with a valid attestation in `Register`, when `YO_NAME_ATTEST` is on.
+pub const NAME_MIN_ATTESTED: usize = 4;
+/// The fewest without one, when `YO_NAME_ATTEST` is on.
+pub const NAME_MIN_UNATTESTED: usize = 12;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -213,6 +217,8 @@ pub struct Config {
     pub min_app: Vec<(String, u64)>,
     /// The fewest grapheme clusters of a username (`YO_NAME_MIN`, default `NAME_MIN`, spec 2.2): new names only.
     pub name_min: usize,
+    /// `YO_NAME_ATTEST=on`: the name minimum depends on attestation (4 with, 12 without); off by default.
+    pub name_attest: bool,
     /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`): it signs answers handing out keys (spec 4.1).
     pub hub_key: [u8; 32],
     /// The server key and its certificate by the trust root (`YO_SERVER_CERT_FILE`, spec 4.1).
@@ -362,6 +368,7 @@ impl Config {
             blobs: BlobConfig::for_tests(),
             min_app: Vec::new(),
             name_min: NAME_MIN,
+            name_attest: false,
             hub_key: TEST_HUB_KEY,
             server_certificate: crate::certificate::test_file(),
             zk_params: {

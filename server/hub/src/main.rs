@@ -7,6 +7,7 @@
 //!                         diagnostics are answered 204 and dropped; default Firebase Test Lab's (config::ROBOT_RANGES)
 //!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
 //!   YO_ATTEST             1: measure device attestation; off by default
+//!   YO_NAME_ATTEST        on: new names 4+ with attestation in Register, 12+ without; off (default): YO_NAME_MIN
 //!   YO_PLAY_INTEGRITY_DECRYPT_KEY, YO_PLAY_INTEGRITY_VERIFY_KEY, YO_PLAY_PACKAGE (see README)
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE, YO_ASSET_LINKS_FILE
@@ -176,6 +177,7 @@ fn config() -> Result<(Config, String), String> {
         fcm,
         blobs,
         min_app: var("YO_MIN_APP").map(|text| parse_min_app(&text)).transpose()?.unwrap_or_default(),
+        name_attest: var("YO_NAME_ATTEST").as_deref() == Some("on"),
         name_min: parsed("YO_NAME_MIN", yo_hub::config::NAME_MIN, |n| (1..=16).contains(n), "1 to 16")?,
         hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
         server_certificate: bytes("YO_SERVER_CERT_FILE")?,

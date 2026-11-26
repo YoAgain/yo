@@ -10,8 +10,8 @@ impl HttpTransport for App {
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         let headers: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
         match yo_core::Transport::request(self.0.as_ref(), &method, &path, &headers, &body) {
-            Ok(r) => HttpResult { status: r.status, body: r.body, error: None },
-            Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e) },
+            Ok(r) => HttpResult { status: r.status, body: r.body, error: None, headers: Vec::new() },
+            Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e), headers: Vec::new() },
         }
     }
 }
@@ -565,6 +565,7 @@ fn shared_client(transport: Arc<App>, disk: &Arc<Disk>, username: &str, name: Op
         name.map(Into::into),
         0,
         String::new(),
+        None,
     )
     .unwrap()
 }
@@ -643,7 +644,7 @@ impl HttpTransport for Watch {
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if method == "POST" && path.starts_with("/v1/inbox/") && path != yoip::net::api::INBOX_ACK {
             if self.offline.load(std::sync::atomic::Ordering::Relaxed) {
-                return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()) };
+                return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()), headers: Vec::new() };
             }
             self.held.lock().unwrap().push(self.disk.is_held());
         }
@@ -678,6 +679,7 @@ fn the_app_layer_syncs_its_outbox_without_holding_the_turn() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
     )
     .unwrap();
     let b = client(&hub, &pb, "BOB", Disk::new());
@@ -725,6 +727,7 @@ fn the_app_layer_maintains_without_holding_the_turn_for_its_outbox() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
     )
     .unwrap();
     let b = client(&hub, &pb, "BOB", Disk::new());
@@ -810,6 +813,7 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
     )
     .unwrap();
     let b = client(&hub, &pb, "BOB", Disk::new());
@@ -1016,7 +1020,7 @@ struct NoBlobs(App);
 impl HttpTransport for NoBlobs {
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if method == "PUT" && path.starts_with("/v1/blobs/") {
-            return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()) };
+            return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()), headers: Vec::new() };
         }
         self.0.request(method, path, headers, body)
     }
@@ -1138,6 +1142,7 @@ fn a_refused_shared_turn_can_be_retried() {
         None,
         0,
         String::new(),
+        None,
     )
     .unwrap();
     lock.refused.store(true, Ordering::Relaxed);
@@ -1192,6 +1197,7 @@ fn a_turn_taken_back_writes_nothing_and_the_next_step_starts_from_the_database()
         None,
         0,
         String::new(),
+        None,
     )
     .unwrap();
     let b = client(&hub, &username(n + 1), "BOB", Disk::new());
@@ -1309,7 +1315,7 @@ struct LostAnswer {
 
 impl HttpTransport for LostAnswer {
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
-        let lost = || HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()) };
+        let lost = || HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()), headers: Vec::new() };
         if !self.down.load(std::sync::atomic::Ordering::Relaxed) {
             return self.app.request(method, path, headers, body);
         }

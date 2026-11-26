@@ -63,6 +63,7 @@ fn an_icloud_item_of_before_brings_the_friends_back() {
             legacy,
             None,
             Push::none(),
+            None,
         )
         .unwrap()
     };
@@ -153,9 +154,18 @@ fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_k
         let db = Arc::new(StateDb::open_fresh(&path, KEY, report.clone()).unwrap());
         assert!(matches!(db.load(None, &KEY).unwrap(), Loaded::Gone));
         let store = Arc::new(DbStore::new(db, None, None));
-        let client =
-            Client::register_username_saved(http.clone(), store, KEY, "Jo", Some(secret), legacy, None, Push::none())
-                .unwrap();
+        let client = Client::register_username_saved(
+            http.clone(),
+            store,
+            KEY,
+            "Jo",
+            Some(secret),
+            legacy,
+            None,
+            Push::none(),
+            None,
+        )
+        .unwrap();
         assert_eq!(client.user_id(), ids().0);
         assert!(!client.is_registering());
         drop(client);

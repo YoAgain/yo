@@ -324,7 +324,7 @@ fn register_new(
 ) -> Result<Open, Failure> {
     let store = Arc::new(DbStore::new(db, None, None));
     let mut client =
-        Client::register_username_saved(transport, store, key, username, account, None, None, Push::none())?;
+        Client::register_username_saved(transport, store, key, username, account, None, None, Push::none(), None)?;
     configure(&mut client, config)?;
     Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))
 }

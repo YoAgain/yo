@@ -28,11 +28,11 @@ impl HttpTransport for App {
         if crash.as_ref().is_some_and(|(pattern, _)| path.contains(pattern.as_str())) {
             let (_, file) = crash.take().unwrap();
             file.freeze();
-            return HttpResult { status: 0, body: Vec::new(), error: Some("crashed".into()) };
+            return HttpResult { status: 0, body: Vec::new(), error: Some("crashed".into()), headers: Vec::new() };
         }
         match result {
-            Ok(r) => HttpResult { status: r.status, body: r.body, error: None },
-            Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e) },
+            Ok(r) => HttpResult { status: r.status, body: r.body, error: None, headers: Vec::new() },
+            Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e), headers: Vec::new() },
         }
     }
 }
@@ -74,6 +74,7 @@ impl Phone {
             shown.map(str::to_owned),
             0,
             String::new(),
+            None,
         )
         .unwrap();
         Phone { client, app, http, file, name: name.into() }
@@ -871,6 +872,7 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
     )
     .unwrap();
     let b = Phone::new(&hub, &username(n + 1), Some("BOB"));

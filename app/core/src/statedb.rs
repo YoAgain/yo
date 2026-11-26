@@ -368,7 +368,7 @@ mod tests {
 
     fn initial() -> crate::state::State {
         let push = yoip::net::api::Push::none();
-        crate::Client::registering(Arc::new(Offline), "JO", None, None, None, push).unwrap().saved().state
+        crate::Client::registering(Arc::new(Offline), "JO", None, None, None, push, None).unwrap().saved().state
     }
 
     fn write(db: &StateDb, known: Option<&str>, state: &crate::state::State) -> Result<String> {

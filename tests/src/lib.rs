@@ -715,6 +715,7 @@ pub fn register_on(
         name,
         platform,
         token,
+        None,
     )
 }
 

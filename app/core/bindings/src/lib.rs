@@ -127,6 +127,9 @@ pub struct HttpResult {
     /// No answer: why. `clock: …` (`yo_core::net::CLOCK_FAILURE`) when TLS refused the hub's certificate for its
     /// dates, so the app can say to check the phone's date and time.
     pub error: Option<String>,
+    /// The answer's headers; only the name check reads one (`Yo-Name-Min`). Empty from an app that passes none.
+    #[uniffi(default = [])]
+    pub headers: Vec<Header>,
 }
 
 /// HTTP to the hub, implemented by the app (URLSession, OkHttp). `path` is relative to the hub's base URL.
@@ -264,11 +267,24 @@ impl yo_core::Transport for Http {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<yo_core::Response, String> {
+        self.request_headers(method, path, headers, body).map(|(response, _)| response)
+    }
+
+    fn request_headers(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(yo_core::Response, Vec<(String, String)>), String> {
         let headers = headers.iter().map(|(name, value)| Header { name: name.clone(), value: value.clone() }).collect();
         let result = self.0.request(method.to_owned(), path.to_owned(), headers, body.to_vec());
         match result.error {
             Some(error) => Err(error),
-            None => Ok(yo_core::Response { status: result.status, body: result.body }),
+            None => Ok((
+                yo_core::Response { status: result.status, body: result.body },
+                result.headers.into_iter().map(|h| (h.name, h.value)).collect(),
+            )),
         }
     }
 }
@@ -683,6 +699,58 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
     Ok(Client::username_free(&Http(transport), &username)?)
 }
 
+/// A device attestation for `Register` (spec 4.2): the platform's payload (1 App Attest, 2 Play Integrity) over
+/// the unsigned challenge from `attest_open_challenge`.
+#[derive(uniffi::Record)]
+pub struct YoAttest {
+    pub platform: u8,
+    pub payload: Vec<u8>,
+    pub challenge: Vec<u8>,
+}
+
+/// Where the device check of a new name stands, for the name field: `Checking` while the challenge and the
+/// platform attestation run; then `Attested` (the hub's shorter minimum, 4) or `NotVerifiable` (12).
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum YoDeviceCheck {
+    Checking,
+    Attested,
+    NotVerifiable,
+}
+
+/// The device check once the attestation is done: `payload` is the platform's result, `None` when it had none.
+#[uniffi::export]
+pub fn device_check_of(payload: Option<Vec<u8>>) -> YoDeviceCheck {
+    match payload.is_some_and(|p| !p.is_empty()) {
+        true => YoDeviceCheck::Attested,
+        false => YoDeviceCheck::NotVerifiable,
+    }
+}
+
+/// A name check: `status` 204 free, 409 taken, 400 no username or too short, 429 asked too often; `name_min` the
+/// hub's minimum for this caller (`Yo-Name-Min`), `None` from a hub before it.
+#[derive(uniffi::Record)]
+pub struct YoNameCheck {
+    pub status: u16,
+    pub name_min: Option<u32>,
+}
+
+/// An unsigned attestation challenge before registering (spec 4.2); `None`: attestation is off at the hub.
+#[uniffi::export]
+pub fn attest_open_challenge(transport: Arc<dyn HttpTransport>) -> Result<Option<Vec<u8>>, YoError> {
+    Ok(Client::attest_open_challenge(&Http(transport))?)
+}
+
+/// A name check with the hub's minimum (spec 2.2). `challenge`: the attested unsigned challenge, `None` without.
+#[uniffi::export]
+pub fn username_check(
+    transport: Arc<dyn HttpTransport>,
+    username: String,
+    challenge: Option<Vec<u8>>,
+) -> Result<YoNameCheck, YoError> {
+    let check = Client::username_check(&Http(transport), &username, challenge.as_deref())?;
+    Ok(YoNameCheck { status: check.status, name_min: check.name_min })
+}
+
 /// A new install id (128 random bits, 32 hex digits) for help: the support thread, reports, crash and error reports
 /// (spec 4). The app keeps it on the phone alone and sends it with nothing else; Send Crashes off deletes it.
 #[uniffi::export]
@@ -944,7 +1012,7 @@ impl YoClient {
 
     /// Registers a username into `db` under the turn, replacing what is there; saved before the request leaves. The
     /// same account's registration still unanswered there is finished instead, with the device it made.
-    #[uniffi::constructor]
+    #[uniffi::constructor(default(attest = None))]
     #[allow(clippy::too_many_arguments)]
     pub fn register_username_db(
         transport: Arc<dyn HttpTransport>,
@@ -958,8 +1026,11 @@ impl YoClient {
         name: Option<String>,
         push_platform: u8,
         push_token: String,
+        attest: Option<YoAttest>,
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
+        let attest =
+            attest.map(|a| yo_core::Attested { platform: a.platform, payload: a.payload, challenge: a.challenge });
         let account = account_secret.map(key_of).transpose()?;
         let seed = legacy_seed.map(key_of).transpose()?;
         let legacy = legacy_storage_key.map(key_of).transpose()?.or(seed.map(|seed| yo_core::storage::key(&seed)));
@@ -986,7 +1057,7 @@ impl YoClient {
             turn.store = Some(shared.store.clone());
         }
         let store = shared.store.clone();
-        let client = Client::register_username_saved(http, store, key, &username, account, legacy, name, push)?;
+        let client = Client::register_username_saved(http, store, key, &username, account, legacy, name, push, attest)?;
         drop(turn);
         Ok(Self::on(client, shared))
     }

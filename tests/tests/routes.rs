@@ -406,6 +406,41 @@ fn the_least_name_length_is_the_hubs_switch() {
     assert_eq!(new.err(), Some(Error::Refused(status::BAD_REQUEST)), "a new two-letter name");
 }
 
+/// Spec 2.2, 4.2: with `YO_NAME_ATTEST` on, a `Register` without attestation (old apps, CLI) still gets a plain
+/// `400` under 12 and goes through at 12; the name check says `Yo-Name-Min` 12, or 4 while the caller's unsigned
+/// challenge is open. Off, `YO_NAME_MIN` holds for everyone.
+#[test]
+fn short_names_need_attestation_when_switched_on() {
+    let min_of = |hub: &TestHub, headers: &[(&str, String)]| {
+        let response = headers
+            .iter()
+            .fold(
+                reqwest::blocking::Client::new().get(format!("{}{}", hub.url(), api::username_path("Abcde"))),
+                |r, (n, v)| r.header(*n, v),
+            )
+            .send()
+            .unwrap();
+        (response.status().as_u16(), response.headers()[api::HEADER_NAME_MIN].to_str().unwrap().to_owned())
+    };
+    let off = TestHub::start_with(Config::for_tests(), "127.0.0.1:0");
+    assert_eq!(min_of(&off, &[]), (status::NO_CONTENT, "3".into()));
+
+    let mut config = Config::for_tests();
+    config.name_attest = true;
+    config.attest = true;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    assert_eq!(min_of(&hub, &[]), (status::BAD_REQUEST, "12".into()));
+    let (code, body) = raw(&hub, "GET", api::ATTEST_CHALLENGE, &[], Vec::new());
+    assert_eq!(code, 200, "unsigned challenge");
+    let challenge = yoip::decode::<api::AttestChallenge>(&body).unwrap().challenge;
+    let named = [(api::HEADER_ATTEST_CHALLENGE, yoip::b64(challenge.as_slice()))];
+    assert_eq!(min_of(&hub, &named), (status::NO_CONTENT, "4".into()));
+    let new = Client::register_username(Http::new(hub.url()), "Abcde", None, None, yo_core::Push::none());
+    assert_eq!(new.err(), Some(Error::Refused(status::BAD_REQUEST)), "no attestation: under 12 is 400");
+    let name = format!("Abcdefghijk{}", random_u64() % 10);
+    assert!(Client::register_username(Http::new(hub.url()), &name, None, None, yo_core::Push::none()).is_ok());
+}
+
 /// Spec 2.2: a name from before a higher least stays its owner's: found (`409`), sent to, restored.
 #[test]
 fn a_short_name_from_before_stays() {
