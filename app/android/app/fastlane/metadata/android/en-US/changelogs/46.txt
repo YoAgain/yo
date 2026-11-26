@@ -1,0 +1,4 @@
+Forty-sixth release candidate.
+
+• Privacy: every request now goes through Oblivious HTTP, so Cloudflare sees only IP, time and size
+• Android: sign-up and sign-in with a recovery key work again
