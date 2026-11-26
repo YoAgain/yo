@@ -88,6 +88,7 @@ impl Bot {
             .env("YO_HUB_KEYS", yoip::b64(&yo_tests::hub_key()))
             .env("YO_TRUST_ROOTS", yoip::b64(&yo_tests::trust_root()))
             .env("YO_ZK_PARAMS", yoip::b64(&yo_tests::zk_params()))
+            .env("YO_OHTTP_KEYS", yoip::b64(&yo_tests::ohttp_config()))
             .env("YO_BIN", yo())
             .env("SCRIPT_SOCKET", self.dir.join("script.sock"))
             .env("SERVICES_DB", self.dir.join("book.sqlite"))
