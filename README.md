@@ -9,7 +9,7 @@ Tap a name to send an encrypted Yo, photo or video.</p>
 
 ## Under the hood
 
-Yo is based on Signal encryption, see the [spec](yoip/SPEC.md).<br>
+Yo is based on Signal encryption, see the [YoIP spec](yoip/SPEC.md).<br>
 All apps share one [Rust core](app/core). Services are defined in [yo-services](https://github.com/YoAgain/yo-services).
 
 <details>
