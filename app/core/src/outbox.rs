@@ -334,7 +334,9 @@ impl Client {
                 .iter()
                 .map(|p| {
                     let envelope = match sealed {
-                        Some(certificate) => sealed::seal(certificate, &own, &identity, &p.payload, self.small_envelopes)?,
+                        Some(certificate) => {
+                            sealed::seal(certificate, &own, &identity, &p.payload, self.small_envelopes)?
+                        }
                         None => yoip::protocol::envelope::pad(&p.payload, &yoip::protocol::envelope::BUCKETS)?,
                     };
                     Ok(api::CopyFor { device: p.device, envelope: envelope.into() })
