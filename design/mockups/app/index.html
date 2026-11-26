@@ -159,7 +159,7 @@
     <p><button id="reset">Reset everything</button></p>
     <p><b>Sign-up:</b> taken <code>anna</code> <code>peter</code> <code>chris</code>; reserved <code>apple</code> <code>admin</code>. After Sign Up the app lands on the list.</p>
     <p><b>Linking (§2.5):</b> turn on “Second device”. Right: Got Yo? Sign In › Link from Another Device shows a QR. Left: Settings › Account › Devices › Link a Device › scan. One confirming tap. At 16 devices the new one picks one to replace.</p>
-    <p><b>Settings (proposal):</b> Devices moved into Account; App Icon and Left-Handed grouped under Appearance; Sign Out on the top level.</p>
+    <p><b>Settings (proposal):</b> Devices moved into Account; App Icon and Left-Handed grouped under Appearance; Sign Out in Account.</p>
   </div>
 </div>
 
@@ -348,7 +348,7 @@ S.list = p => {
 };
 
 /* Settings (Settings.swift): half sheet "Yodentity". Proposal: Account › Devices; Appearance groups App Icon and
-   Left-Handed; Sign Out on the top level. */
+   Left-Handed; Sign Out in Account. */
 const chev = '<span class="ch"></span>';
 S.settings = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">Yodentity</div><div class="sbody">
   <div class="card"><div class="r" data-a="go" data-s="account" style="min-height:124px;align-items:flex-start;flex-direction:column;justify-content:center;gap:8px">
@@ -356,8 +356,7 @@ S.settings = p => { const a = hub.account; return `<div class="grab"></div><div 
     <div class="yo" style="font-size:26px;color:#000">${esc(a.name)}</div></div></div>
   <div class="card"><div class="r" data-a="go" data-s="appearance">${tile('paint', '#9b59b6')}<span class="t">Appearance</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">Help &amp; About</span>${chev}</div>
-    <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Send Feedback</span>${chev}</div></div>
-  <div class="card"><div class="r" data-a="askSignOut">${tile('out', '#8e8e93')}<span class="t">Sign Out</span></div></div></div>`; };
+    <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Send Feedback</span>${chev}</div></div></div>`; };
 
 S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Appearance</div><div class="sbody">
   <div class="card"><div class="icons">${[['Yo','#9b59b6','Yo'],['Yo!','#f5f0f7','Yo'],['Just Yo','#9b59b6',''],['2014','#8e44ad',''],['2015','#a569bd','']].map(([n, c, t]) =>
@@ -370,6 +369,7 @@ S.account = p => { const a = hub.account; return `<div class="grab"></div><div c
     <div class="r" data-a="go" data-s="blocked">${tile('hand', '#ff3b30')}<span class="t">Blocked</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Devices</span><span class="v">${a.devices.length}</span>${chev}</div>
     <div class="r" data-a="go" data-s="rkey">${tile('shield', '#9b59b6')}<span class="t">Account Security</span>${a.passkey ? '<span style="color:var(--green)">✓</span>' : '<span class="badge">1</span>'}${chev}</div></div>
+  <div class="card"><div class="r" data-a="askSignOut">${tile('out', '#8e8e93')}<span class="t">Sign Out</span></div></div>
   <div class="foot">Leaving Yo for good? <a data-a="askDelete">Delete Your Account</a></div></div>`; };
 
 S.blocked = p => `<div class="grab"></div><div class="shead">${backbtn()}Blocked</div><div class="sbody">
@@ -779,7 +779,7 @@ function jump(h) {
     case 'account': case 'appearance': case 'help': case 'code': return at(h, ['list', 'settings']);
     case 'lefthanded': a.left = true; return at('appearance', ['list', 'settings']);
     case 'contacts': case 'blocked': case 'devices': case 'rkey': return at(h, ['list', 'settings', 'account']);
-    case 'signout': at('settings', ['list']); return A.askSignOut(a);
+    case 'signout': at('account', ['list', 'settings']); return A.askSignOut(a);
     case 'delete': at('account', ['list', 'settings']); return A.askDelete(a);
     case 'scan': return at('scan', ['list', 'settings', 'account', 'devices']);
     case 'confirm': { $('delay').value = 50; at('scan', ['list', 'settings', 'account', 'devices']); const id = rnd(26); hub.links[id] = { from:null, created:Date.now() }; return oldDeviceScanned(a, `yo-link:${id}.${rnd(43)}`); }
