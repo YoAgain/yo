@@ -1,0 +1,4 @@
+[env]
+# The OS random source seeds aws-lc instead of its CPU jitter sampler: that costs every process ~16 ms of CPU
+# before its first handshake (a `yo NAME`, an app start). The OS source is what BoringSSL and ring use.
+AWS_LC_SYS_NO_JITTER_ENTROPY = "1"
