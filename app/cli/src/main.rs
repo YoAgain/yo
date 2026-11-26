@@ -481,7 +481,7 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
             );
         }
         ["link", text @ ..] => match signin::confirm_link(text.first().copied()) {
-            Ok(text) => vec!["link-approve".into(), text],
+            Ok(text) => return print("link-approve", signin::approve_link(config, &text)),
             Err(failure) => return print("", Err(failure)),
         },
         ["friends"] | ["friends", "list"] if human => words(&["friends-view"]),

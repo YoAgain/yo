@@ -259,7 +259,15 @@ impl Http {
             request = request.header(yoip::net::api::HEADER_APP, format!("yogpt/{BUILD}"));
         }
         // Without the URL: a blob's path is its capability (spec 4.3), never for an error or a log.
-        let response = request.send().map_err(|e| e.without_url().to_string())?;
+        let response = request.send().map_err(|e| {
+            if e.is_timeout() {
+                "no answer in time".to_owned()
+            } else if e.is_connect() {
+                "no connection".to_owned()
+            } else {
+                e.without_url().to_string()
+            }
+        })?;
         let status = response.status().as_u16();
         let mut body = Vec::new();
         response.take(MAX_RESPONSE + 1).read_to_end(&mut body).map_err(|_| "the answer broke off")?;

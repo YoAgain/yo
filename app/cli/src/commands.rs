@@ -178,7 +178,13 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         ["recovery", "rotate"] => rotate_recovery(context),
         ["link-approve", text] => {
             let offer = yo_core::link::offer(text).map_err(|_| Failure::usage("not a Yo link"))?;
-            context.client().link_approve(&offer)?;
+            context.client().link_approve(&offer).map_err(|e| match e {
+                yo_core::Error::Refused(404) => {
+                    Failure::new("the link is over (expired or taken): start again on the new device")
+                }
+                yo_core::Error::Refused(409) => Failure::new("this link was answered already"),
+                other => other.into(),
+            })?;
             Ok(json!({ "linked": true }))
         }
         ["probe", rest @ ..] => {
@@ -492,7 +498,15 @@ pub fn event(event: &Event, refs: bool) -> Value {
         Event::GroupChanged { group } => json!({ "type": "group_changed", "group": group }),
         Event::DeviceAdded { user } => json!({ "type": "device_added", "user": user }),
         Event::ConnectionChanged { user } => json!({ "type": "connection_changed", "user": user }),
-        Event::Sent { user, sent_at_ms, .. } => json!({ "type": "sent", "user": user, "sent_at_ms": sent_at_ms }),
+        Event::Sent { user, sent_at_ms, content } => {
+            let kind = match content {
+                Content::Yo => "yo",
+                Content::Photo(_) => "photo",
+                Content::Video { .. } => "video",
+                _ => "other",
+            };
+            json!({ "type": "sent", "user": user, "sent_at_ms": sent_at_ms, "content": kind })
+        }
     }
 }
 

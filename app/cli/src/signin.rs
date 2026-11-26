@@ -116,7 +116,8 @@ pub fn link_cli(config: &Config) -> Result<Value, Failure> {
     }
     let started = Instant::now();
     while started.elapsed() < LINK_WAIT {
-        if let Some(done) = link_step(config, &request, 60)? {
+        // Under the transport's 60 s timeout: the hub's 204 comes back before the request gives up.
+        if let Some(done) = link_step(config, &request, 45)? {
             return Ok(done);
         }
     }
@@ -168,6 +169,39 @@ pub fn confirm_link(text: Option<&str>) -> Result<String, Failure> {
     match answer.trim() {
         "y" | "Y" | "yes" => Ok(text),
         _ => Err(Failure::new("not linked")),
+    }
+}
+
+/// How long the old device waits, after the approval, for the new device to take the bundle and register.
+const LINK_TAKEN_WAIT: Duration = Duration::from_secs(75);
+
+/// Approves a link (`link-approve`), then waits until the new device shows up in the account's devices: the hub
+/// keeps a link 10 minutes, so a device that stopped waiting never takes it, and that is said, not "linked".
+pub fn approve_link(config: &Config, text: &str) -> Result<Value, Failure> {
+    let devices = || -> Result<Vec<Value>, Failure> {
+        Ok(crate::execute(config, &["devices".into()])?.as_array().cloned().unwrap_or_default())
+    };
+    let before: Vec<Value> = devices()?.iter().map(|d| d["number"].clone()).collect();
+    crate::execute(config, &["link-approve".into(), text.to_owned()])?;
+    let started = Instant::now();
+    let mut found = None;
+    while started.elapsed() < LINK_TAKEN_WAIT {
+        std::thread::sleep(Duration::from_secs(2));
+        let Ok(now) = devices() else { continue };
+        if let Some(new) = now.into_iter().find(|d| !before.contains(&d["number"])) {
+            // Its app is known with its first signed request; a little later at most.
+            let named = new["app"].as_str().is_some_and(|a| !a.is_empty());
+            found = Some(new);
+            if named || started.elapsed() > Duration::from_secs(20) {
+                break;
+            }
+        }
+    }
+    match found {
+        Some(device) => Ok(json!({ "linked": true, "device": device })),
+        None => Err(Failure::new(
+            "not linked: the new device did not take the link (it stopped waiting); start again there",
+        )),
     }
 }
 

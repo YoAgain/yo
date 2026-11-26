@@ -74,6 +74,31 @@ fn a_new_phone_gets_friends_blocks_and_icon_back_before_the_first_message() {
     assert_eq!(new.app_icon().as_deref(), Some("Negative"));
 }
 
+/// A stranger's request blocked: the block is kept, but they never become a friend, not after the unblock and not on
+/// a new phone; what they send then is a request again.
+#[test]
+fn a_blocked_stranger_stays_off_the_friend_list() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let mut me = by_name(&hub, &format!("Me{n}"), None);
+    let mut pest = by_name(&hub, &format!("Pest{n}"), None);
+    pest.send(me.user_id(), yo_tests::tagged("hi".into())).unwrap();
+    me.sync(0).unwrap();
+    me.set_blocked(pest.user_id(), true).unwrap();
+    me.maintenance().unwrap();
+    assert!(me.friends().iter().all(|f| f.user != pest.user_id()), "blocked, not a friend");
+    let mut new = by_name(&hub, &format!("Me{n}"), Some(me.account_secret()));
+    assert!(new.friends().iter().all(|f| f.user != pest.user_id()));
+    assert!(new.contacts().iter().any(|c| c.user == pest.user_id() && c.blocked && !c.accepted));
+    // The new phone (the old one is replaced) unblocks: still a stranger, here and on the next phone.
+    new.set_blocked(pest.user_id(), false).unwrap();
+    new.maintenance().unwrap();
+    assert!(new.friends().iter().all(|f| f.user != pest.user_id()), "unblocked, still not a friend");
+    let next = by_name(&hub, &format!("Me{n}"), Some(me.account_secret()));
+    assert!(next.friends().iter().all(|f| f.user != pest.user_id()));
+    assert!(next.contacts().iter().all(|c| c.user != pest.user_id() || !c.accepted), "a stranger");
+}
+
 #[test]
 fn two_writers_merge_and_converge() {
     let hub = TestHub::start();

@@ -57,7 +57,10 @@ enum Job {
     Send(String, Option<String>),
     Change(Vec<String>),
     Connections,
-    Details { target: String, name: String },
+    Details {
+        target: String,
+        name: String,
+    },
     Diagnostics,
     Add(String),
     Request(&'static str, String),
@@ -68,6 +71,14 @@ enum Job {
     RemoveDevice(u64),
     Rotate,
     LinkApprove(String),
+    /// A group's members, for the add or remove picker.
+    Members {
+        title: &'static str,
+        words: Vec<String>,
+        group: Option<String>,
+        remove: bool,
+    },
+    Probe,
     Signup,
     Recovery,
     Link,
@@ -105,11 +116,34 @@ fn bar_menu(group: bool, blocked: bool) -> &'static [&'static str] {
 }
 
 enum Dialog {
-    Menu { items: &'static [&'static str], target: String, cursor: usize },
-    Prompt { title: &'static str, words: Vec<String> },
-    Members { title: &'static str, words: Vec<String>, friends: Vec<(String, String, bool)>, cursor: usize },
-    Confirm { title: &'static str, text: String, words: Vec<String> },
-    Report { title: &'static str, target: String, lines: Vec<String>, scroll: usize },
+    Menu {
+        items: &'static [&'static str],
+        target: String,
+        cursor: usize,
+    },
+    Prompt {
+        title: &'static str,
+        words: Vec<String>,
+    },
+    Members {
+        title: &'static str,
+        words: Vec<String>,
+        friends: Vec<(String, String, bool)>,
+        cursor: usize,
+        /// What it says with nobody to pick.
+        empty: &'static str,
+    },
+    Confirm {
+        title: &'static str,
+        text: String,
+        words: Vec<String>,
+    },
+    Report {
+        title: &'static str,
+        target: String,
+        lines: Vec<String>,
+        scroll: usize,
+    },
 }
 
 fn words(parts: &[&str]) -> Vec<String> {
@@ -253,6 +287,16 @@ struct App {
     shown_key: String,
     confirm_rotate: bool,
     help: bool,
+    /// How far the help is scrolled (a small window shows it in parts).
+    help_scroll: usize,
+    /// How far it scrolls at most, as the last frame had it.
+    help_max: std::cell::Cell<usize>,
+    /// The settings row a sub-screen was opened from: back on it after.
+    settings_at: usize,
+    /// Bars whose "Sent" is a photo's or a video's, not a Yo's.
+    photos: HashMap<String, Kind>,
+    /// The Status card's PING line, once the probe answered.
+    ping: Option<Vec<String>>,
     clipboard: Option<Vec<&'static str>>,
     cancel_link: Arc<AtomicBool>,
     child: Option<Child>,
@@ -331,6 +375,11 @@ impl App {
             shown_key: String::new(),
             confirm_rotate: false,
             help: false,
+            help_scroll: 0,
+            help_max: std::cell::Cell::new(0),
+            settings_at: 0,
+            photos: HashMap::new(),
+            ping: None,
             clipboard: clipboard(),
             cancel_link: Arc::new(AtomicBool::new(false)),
             child: None,
@@ -395,9 +444,10 @@ impl App {
             while let Ok(msg) = rx.try_recv() {
                 self.message(msg, globals);
             }
-            if self.external && self.screen == Screen::Main && self.polled.elapsed() > POLL {
+            // Changes the listener has no event for (a friend added from another shell): the list asked again.
+            if self.screen == Screen::Main && self.polled.elapsed() > POLL {
                 self.polled = Instant::now();
-                if std::os::unix::net::UnixStream::connect(self.config.control()).is_err() {
+                if self.external && std::os::unix::net::UnixStream::connect(self.config.control()).is_err() {
                     self.start_listener(globals);
                 } else {
                     self.job(Job::Refresh);
@@ -421,7 +471,10 @@ impl App {
         let input = self.input.trim().to_owned();
         let human = self.human;
         let cancel = self.cancel_link.clone();
-        if matches!(job, Job::Signup | Job::Recovery | Job::Link | Job::Send(..) | Job::Add(_) | Job::Rotate) {
+        if matches!(
+            job,
+            Job::Signup | Job::Recovery | Job::Link | Job::Send(..) | Job::Add(_) | Job::Rotate | Job::LinkApprove(_)
+        ) {
             self.busy = true;
         }
         self.jobs += 1;
@@ -439,7 +492,6 @@ impl App {
                 Job::RemoveDevice(n) => Some(command(&["devices", "remove", &n.to_string()])),
                 Job::Devices => Some(command(&["devices"])),
                 Job::Rotate => Some(command(&["recovery", "rotate"])),
-                Job::LinkApprove(text) => Some(command(&["link-approve", text])),
                 _ => None,
             };
             let outcome = match (&job, words) {
@@ -454,15 +506,15 @@ impl App {
                             .find(|g| g["id"] == id)
                             .ok_or_else(|| Failure::new("Group not found"))?;
                         Ok(json!([
-                            group["name"],
-                            format!("{} members", group["members"].as_array().map_or(0, Vec::len))
+                            format!("Name      {}", upper(&group["name"])),
+                            format!("Members   {}", group["members"].as_array().map_or(0, Vec::len))
                         ]))
                     } else {
                         let user = crate::execute(&config, &command(&["whois", name]))?;
                         Ok(json!([
-                            format!("User ID  {}", user["user"].as_str().unwrap_or("—")),
-                            format!("Username  {}", user["username"].as_str().unwrap_or("—")),
-                            format!("Bot  {}", if user["bot"] == true { "yes" } else { "no" })
+                            format!("User ID   {}", user["user"].as_str().unwrap_or("—")),
+                            format!("Username  {}", user["username"].as_str().map_or("—".into(), str::to_uppercase)),
+                            format!("Bot       {}", if user["bot"] == true { "yes" } else { "no" })
                         ]))
                     }
                 })(),
@@ -491,6 +543,21 @@ impl App {
                     }
                     Ok(Value::Null)
                 }
+                (Job::LinkApprove(text), _) => signin::approve_link(&config, text),
+                (Job::Members { group, .. }, _) => (|| {
+                    let members = match group {
+                        Some(id) => crate::execute(&config, &command(&["groups", "list"]))?
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|g| g["id"] == id.as_str())
+                            .map_or(json!([]), |g| g["members"].clone()),
+                        None => json!([]),
+                    };
+                    let contacts = crate::execute(&config, &command(&["contacts"]))?;
+                    Ok(json!({ "members": members, "contacts": contacts }))
+                })(),
+                (Job::Probe, _) => Ok(probe_and_checks(&config)),
                 (Job::Signup, _) => crate::signup_run(&config, &input, human, false, true),
                 (Job::Recovery, _) => signin::recovery(&config, &input),
                 (_, None) => link(&config, &tx, &cancel),
@@ -568,26 +635,7 @@ impl App {
         match msg {
             Msg::LinkOffer(text) => self.link_text = text,
             Msg::Event(pid, _) if self.child.as_ref().is_none_or(|child| child.id() != pid) => {}
-            Msg::Event(_, event) => match event["type"].as_str() {
-                Some("ready") => {
-                    self.listener_status.clear();
-                    self.job(Job::Refresh);
-                    self.job(Job::Whoami);
-                }
-                Some("message") => {
-                    if event["reply_to"].as_str().is_some_and(|id| self.items.contains_key(id)) {
-                        self.received(&event);
-                    } else {
-                        self.pending.push(event);
-                        self.job(Job::Refresh);
-                    }
-                }
-                Some("sent") => {}
-                Some(_) => {
-                    self.job(Job::Refresh);
-                }
-                None => {}
-            },
+            Msg::Event(_, event) => self.event(event),
             Msg::ListenerEnded(pid, last) => {
                 if self.child.as_ref().is_none_or(|child| child.id() != pid) {
                     return;
@@ -655,20 +703,40 @@ impl App {
                         self.job(Job::Blocked);
                         self.job(Job::Refresh);
                     }
-                    (Job::Change(args), Ok(_)) => match args[0].as_str() {
-                        "connect" | "decline" | "disconnect" => self.job(Job::Connections),
-                        "bot" => self.job(Job::Whoami),
-                        _ => self.job(Job::Refresh),
-                    },
+                    (Job::Change(args), Ok(_)) => {
+                        let n = args.len().saturating_sub(3);
+                        let people = |n: usize| if n == 1 { "1 member".to_owned() } else { format!("{n} members") };
+                        self.status = match (args[0].as_str(), args.get(1).map(String::as_str)) {
+                            ("connect", _) => "Connecting: waiting for the service".into(),
+                            ("decline", _) => "Declined".into(),
+                            ("disconnect", _) => "Disconnected".into(),
+                            ("groups", Some("add")) => format!("Added {}", people(n)),
+                            ("groups", Some("remove")) => format!("Removed {}", people(n)),
+                            ("groups", Some("create")) => "Group made".into(),
+                            ("groups", Some("rename")) => "Renamed".into(),
+                            ("groups", Some("leave")) => "Left the group".into(),
+                            ("block", _) => "Blocked".into(),
+                            ("remove", _) => "Removed".into(),
+                            _ => String::new(),
+                        };
+                        match args[0].as_str() {
+                            "connect" | "decline" | "disconnect" => self.job(Job::Connections),
+                            "bot" => self.job(Job::Whoami),
+                            _ => self.job(Job::Refresh),
+                        }
+                    }
                     (Job::Details { target, .. }, result) => self.report(&target, result),
-                    (Job::Diagnostics, result) => self.report("", result),
+                    (Job::Diagnostics, result) => {
+                        self.report("", result);
+                        self.show_ping();
+                    }
                     (Job::Send(to, path), Ok(_)) => {
-                        self.apply(Input::SendFinished {
-                            id: to,
-                            kind: if path.is_some() { Kind::Photo } else { Kind::Yo },
-                        });
+                        let kind = if path.is_some() { Kind::Photo } else { Kind::Yo };
+                        self.media_sent(&to, kind);
+                        self.apply(Input::SendFinished { id: to, kind });
                     }
                     (Job::Send(to, _), Err(f)) => {
+                        self.photos.remove(&to);
                         self.apply(Input::SendFailed { id: to, text: format!("Not sent: {}", f.error) });
                     }
                     (Job::Add(_), Ok(v)) => {
@@ -709,9 +777,33 @@ impl App {
                         self.confirm_rotate = false;
                         self.status = "New Recovery Key. The old one no longer works.".into();
                     }
-                    (Job::LinkApprove(_), Ok(_)) => {
-                        self.status = "Linked".into();
+                    (Job::LinkApprove(_), Ok(v)) => {
+                        let device = &v["device"];
+                        self.status = format!(
+                            "Linked: {} ({})",
+                            device_label(device["app"].as_str().unwrap_or("")),
+                            device["number"]
+                        );
                         self.go(Screen::Settings);
+                    }
+                    (Job::LinkApprove(_), Err(f)) => {
+                        self.status = format!("Not linked: {}", f.error.trim_start_matches("not linked: "));
+                        self.go(Screen::Settings);
+                    }
+                    (Job::Members { title, words, remove, .. }, Ok(v)) => self.members_loaded(title, words, remove, &v),
+                    (Job::Probe, result) => {
+                        let ping = match result {
+                            Ok(v) => v
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect(),
+                            Err(f) => vec![format!("PING: {}", f.error)],
+                        };
+                        self.ping = Some(ping);
+                        self.show_ping();
                     }
                     (Job::Signup | Job::Recovery | Job::Link, Ok(me)) => {
                         self.shown_key = me["recovery_key"].as_str().unwrap_or("").to_owned();
@@ -726,6 +818,47 @@ impl App {
                     (_, Err(f)) => self.status = format!("Error: {}", f.error),
                 }
             }
+        }
+    }
+
+    /// A line of the listener.
+    fn event(&mut self, event: Value) {
+        match event["type"].as_str() {
+            Some("ready") => {
+                self.listener_status.clear();
+                self.job(Job::Refresh);
+                self.job(Job::Whoami);
+            }
+            Some("message") => {
+                if event["reply_to"].as_str().is_some_and(|id| self.items.contains_key(id)) {
+                    self.received(&event);
+                } else {
+                    self.pending.push(event);
+                    self.job(Job::Refresh);
+                }
+            }
+            // Another device of this account sent it: the bar says so and rises, as after a send here.
+            Some("sent") => match event["user"].as_str() {
+                Some(user) if self.items.contains_key(user) => {
+                    let kind = match event["content"].as_str() {
+                        Some("photo") => Kind::Photo,
+                        Some("video") => Kind::Video,
+                        _ => Kind::Yo,
+                    };
+                    self.media_sent(user, kind);
+                    self.apply(Input::SendFinished { id: user.to_owned(), kind });
+                }
+                _ => self.job(Job::Refresh),
+            },
+            Some(kind) => {
+                match kind {
+                    "connection_changed" => self.job(Job::Connections),
+                    "device_added" => self.job(Job::Devices),
+                    _ => {}
+                }
+                self.job(Job::Refresh);
+            }
+            None => {}
         }
     }
 
@@ -785,6 +918,7 @@ impl App {
         }
         self.learned = true;
         if let Some(user) = self.greet.take_if(|user| self.items.contains_key(user.as_str())) {
+            self.media_sent(&user, Kind::Yo);
             self.apply(Input::SendStarted { id: user.clone(), kind: Kind::Yo, undo_ms: 0 });
             self.job(Job::Send(user, None));
         }
@@ -833,7 +967,11 @@ impl App {
     }
 
     fn go(&mut self, screen: Screen) {
-        self.selected = 0;
+        if self.screen == Screen::Settings {
+            self.settings_at = self.selected;
+        }
+        // Back in Settings from one of its pages: on the row it was opened from.
+        self.selected = if screen == Screen::Settings && self.screen != Screen::Main { self.settings_at } else { 0 };
         self.confirm_rotate = false;
         self.reveal = false;
         self.show_code = false;
@@ -851,9 +989,19 @@ impl App {
         }
     }
 
+    /// What a bar's "Sent" is of: a Yo, or a photo or video (the bar then says "Sent 📷!").
+    fn media_sent(&mut self, id: &str, kind: Kind) {
+        if kind == Kind::Yo {
+            self.photos.remove(id);
+        } else {
+            self.photos.insert(id.to_owned(), kind);
+        }
+    }
+
     fn send(&mut self, i: usize) {
         if let Some(row) = self.snapshot.rows.get(i).filter(|r| !r.request) {
             let target = row.id.clone();
+            self.media_sent(&target, Kind::Yo);
             self.apply(Input::SendStarted { id: target.clone(), kind: Kind::Yo, undo_ms: 0 });
             self.job(Job::Send(target, None));
         }
@@ -903,23 +1051,66 @@ impl App {
         self.dialog = Some(Dialog::Confirm { title, text, words });
     }
 
-    fn members(&mut self, title: &'static str, words: Vec<String>) {
-        let friends = self
-            .snapshot
-            .rows
-            .iter()
-            .filter(|r| !r.request)
-            .filter_map(|r| {
-                let item = self.items.get(&r.id)?;
-                (item["kind"] == "friend").then(|| (r.id.clone(), upper(&item["name"]), false))
-            })
-            .collect();
-        self.dialog = Some(Dialog::Members { title, words, friends, cursor: 0 });
+    /// The member picker: adding lists the friends not in the group yet, removing the group's members.
+    fn members(&mut self, title: &'static str, words: Vec<String>, group: Option<&str>, remove: bool) {
+        self.dialog =
+            Some(Dialog::Members { title, words: words.clone(), friends: Vec::new(), cursor: 0, empty: "Loading…" });
+        self.job(Job::Members { title, words, group: group.map(str::to_owned), remove });
+    }
+
+    fn members_loaded(&mut self, title: &'static str, words: Vec<String>, remove: bool, v: &Value) {
+        if !matches!(&self.dialog, Some(Dialog::Members { title: t, .. }) if *t == title) {
+            return;
+        }
+        let me = self.me["user"].as_str().unwrap_or("");
+        let members: Vec<&str> = v["members"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let (friends, empty) = if remove {
+            let contacts = v["contacts"].as_array().cloned().unwrap_or_default();
+            let name = |id: &str| {
+                self.items
+                    .get(id)
+                    .and_then(|item| item["name"].as_str())
+                    .or_else(|| {
+                        let c = contacts.iter().find(|c| c["user"] == id)?;
+                        c["handles"][0].as_str().or(c["name"].as_str())
+                    })
+                    .map_or_else(|| id.chars().take(8).collect(), str::to_uppercase)
+            };
+            let list = members.iter().filter(|id| **id != me).map(|id| ((*id).to_owned(), name(id), false)).collect();
+            (list, "No one else is in the group")
+        } else {
+            let list = self
+                .snapshot
+                .rows
+                .iter()
+                .filter(|r| !r.request && !members.contains(&r.id.as_str()))
+                .filter_map(|r| {
+                    let item = self.items.get(&r.id)?;
+                    let can = item["kind"] == "friend"
+                        && item["blocked"] != true
+                        && item["bot"] != true
+                        && item["gone"] != true;
+                    can.then(|| (r.id.clone(), upper(&item["name"]), false))
+                })
+                .collect();
+            (list, if words[1] == "add" { "Every friend is in it already" } else { "No friends yet" })
+        };
+        self.dialog = Some(Dialog::Members { title, words, friends, cursor: 0, empty });
     }
 
     fn open_report(&mut self, title: &'static str, target: &str) {
         self.dialog =
             Some(Dialog::Report { title, target: target.into(), lines: vec!["Loading…".into()], scroll: 0 });
+    }
+
+    /// The probe's answer on the Status card, in the line that waits for it.
+    fn show_ping(&mut self) {
+        let Some(ping) = self.ping.clone() else { return };
+        if let Some(Dialog::Report { target, lines, .. }) = &mut self.dialog {
+            if let Some(at) = lines.iter().position(|l| target.is_empty() && l == "PING …") {
+                lines.splice(at..=at, ping);
+            }
+        }
     }
 
     fn report(&mut self, id: &str, result: Result<Value, Failure>) {
@@ -944,8 +1135,8 @@ impl App {
             }
             "New Group" => self.prompt("New Group", words(&["groups", "create"])),
             "Rename" => self.prompt("Rename Group", words(&["groups", "rename", id])),
-            "Add Members" => self.members(choice, words(&["groups", "add", id])),
-            "Remove Members" => self.members(choice, words(&["groups", "remove", id])),
+            "Add Members" => self.members(choice, words(&["groups", "add", id]), Some(id), false),
+            "Remove Members" => self.members(choice, words(&["groups", "remove", id]), Some(id), true),
             "Remove Friend" | "Leave Group" => {
                 let label = self.items.get(target).map(|v| upper(&v["name"])).unwrap_or_else(|| target.into());
                 let command =
@@ -982,6 +1173,7 @@ impl App {
                     match words[0].as_str() {
                         "send" => {
                             let id = words[1].clone();
+                            self.media_sent(&id, Kind::Photo);
                             self.apply(Input::SendStarted { id: id.clone(), kind: Kind::Photo, undo_ms: 0 });
                             self.job(Job::Send(id, Some(input)));
                         }
@@ -998,7 +1190,7 @@ impl App {
                         _ => {
                             words.push(input);
                             if words[1] == "create" {
-                                self.members("New Group · Members", std::mem::take(words));
+                                self.members("New Group · Members", std::mem::take(words), None, false);
                             } else {
                                 self.job(Job::Change(std::mem::take(words)));
                             }
@@ -1023,7 +1215,9 @@ impl App {
                         self.job(Job::Change(std::mem::take(words)));
                         return;
                     }
-                    self.status = "Choose at least one friend".into();
+                    if !friends.is_empty() {
+                        self.status = "Choose at least one with space".into();
+                    }
                 }
                 _ => {}
             },
@@ -1054,7 +1248,7 @@ impl App {
         let room = usize::from(area.height.saturating_sub(2)).max(1);
         let (title, lines) = match dialog {
             Dialog::Menu { items, target, cursor } => {
-                let title = self.items.get(target).and_then(|i| i["name"].as_str()).unwrap_or("Add");
+                let title = self.items.get(target).map_or_else(|| "Add".to_owned(), |i| upper(&i["name"]));
                 let first = (cursor + 1).saturating_sub(room);
                 (
                     title,
@@ -1067,9 +1261,12 @@ impl App {
                         .collect(),
                 )
             }
-            Dialog::Prompt { title, .. } => (*title, vec![self.field("", &self.input)]),
-            Dialog::Confirm { title, text, .. } => (*title, wrap_card(text, area.width)),
-            Dialog::Members { title, friends, cursor, .. } => {
+            Dialog::Prompt { title, .. } => (
+                (*title).to_owned(),
+                vec![self.field("", &tail(&self.input, usize::from(area.width.min(72).saturating_sub(9))))],
+            ),
+            Dialog::Confirm { title, text, .. } => ((*title).to_owned(), wrap_card(text, area.width)),
+            Dialog::Members { title, friends, cursor, empty, .. } => {
                 let first = (cursor + 1).saturating_sub(room);
                 let mut lines: Vec<_> = friends
                     .iter()
@@ -1081,25 +1278,26 @@ impl App {
                     })
                     .collect();
                 if lines.is_empty() {
-                    lines.push(Line::from("No friends yet"));
+                    lines.push(Line::from(*empty).style(self.dim()));
                 }
-                (*title, lines)
+                ((*title).to_owned(), lines)
             }
             Dialog::Report { title, lines, scroll, .. } => {
-                (*title, lines.iter().skip(*scroll).flat_map(|s| wrap_card(s, area.width)).collect())
+                ((*title).to_owned(), lines.iter().skip(*scroll).flat_map(|s| wrap_card(s, area.width)).collect())
             }
         };
-        self.card(f, area, title, lines);
+        self.card(f, area, &title, lines);
     }
 
     fn setting(&mut self, i: usize) {
+        self.settings_at = i;
         let item = match selectable_settings(self.devices.len(), self.connections.len()).nth(i) {
             Some(SettingsRow::Item(item)) => item,
             Some(SettingsRow::Connection(i)) => {
                 let c = &self.connections[i];
                 self.confirm(
                     "Disconnect?",
-                    c["name"].as_str().unwrap_or("").to_owned(),
+                    upper(&c["name"]),
                     words(&["disconnect", c["user"].as_str().unwrap_or("")]),
                 );
                 return;
@@ -1147,7 +1345,9 @@ impl App {
             }
             "status" => {
                 self.open_report("Status", "");
+                self.ping = None;
                 self.job(Job::Diagnostics);
+                self.job(Job::Probe);
             }
             "profile" => self.show_code = !self.show_code,
             "about" | "feedback" => self.screen = Screen::Info(item.id),
@@ -1209,7 +1409,15 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) {
-        if self.signing_out || self.help || self.dialog.is_some() {
+        if self.help {
+            match mouse.kind {
+                MouseEventKind::ScrollDown => self.help_scroll = (self.help_scroll + 1).min(self.help_max.get()),
+                MouseEventKind::ScrollUp => self.help_scroll = self.help_scroll.saturating_sub(1),
+                _ => {}
+            }
+            return;
+        }
+        if self.signing_out || self.dialog.is_some() {
             return;
         }
         let hit = self
@@ -1269,6 +1477,16 @@ impl App {
             self.quit = true;
             return;
         }
+        // A new recovery key: only y makes it, any other key cancels (the old key and passkeys stop working).
+        if self.screen == Screen::Recovery && self.confirm_rotate {
+            self.confirm_rotate = false;
+            if key.code == KeyCode::Char('y') {
+                self.job(Job::Rotate);
+            } else {
+                self.status = "No new key".into();
+            }
+            return;
+        }
         self.status.clear();
         if self.dialog.is_some() {
             self.dialog_key(key.code);
@@ -1295,11 +1513,20 @@ impl App {
         }
         if key.code == KeyCode::Char('?') {
             self.help = !self.help;
+            self.help_scroll = 0;
             return;
         }
         if self.help {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                self.help = false;
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.help = false,
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown => {
+                    self.help_scroll = (self.help_scroll + 1).min(self.help_max.get())
+                }
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::Home => self.help_scroll = 0,
+                _ => {}
             }
             return;
         }
@@ -1374,7 +1601,8 @@ impl App {
             (Screen::Main, KeyCode::Char(key @ ('p' | 'i' | 'm'))) if !request => self.bar_action(key),
             (Screen::Settings, KeyCode::Enter | KeyCode::Char(' ')) => self.setting(self.selected),
             (Screen::Recovery, KeyCode::Char('R')) => self.confirm_rotate = true,
-            (Screen::Recovery, KeyCode::Char('y')) if self.confirm_rotate => self.job(Job::Rotate),
+            // Waiting for the new device to take it: keys wait too.
+            (Screen::LinkConfirm, _) if self.busy => {}
             (Screen::LinkConfirm, KeyCode::Char('y')) => {
                 let text = std::mem::take(&mut self.input);
                 self.job(Job::LinkApprove(text));
@@ -1577,7 +1805,7 @@ impl App {
             Screen::Recovery => self.draw_recovery(f, body),
             Screen::LinkInput => {
                 let lines = vec![
-                    self.field("Link", &self.input),
+                    self.field("Link", &tail(&self.input, usize::from(body.width.saturating_sub(7)))),
                     Line::from(""),
                     Line::from("Paste the link the new device shows (yo signin --link).").style(self.dim()),
                 ];
@@ -1862,18 +2090,24 @@ impl App {
                 f.buffer_mut(),
                 rect,
                 color,
-                row_text(row, usize::from(rect.width.saturating_sub(6))),
-                i == self.selected,
+                row_text(row, usize::from(rect.width.saturating_sub(6)), self.photos.get(&row.id).copied()),
+                i == self.selected && self.screen == Screen::Main,
                 flash,
             );
             self.hits.borrow_mut().push((rect, Hit::Bar(i)));
             y += height;
             if row.request && i == self.selected && self.screen == Screen::Main && y < area.bottom() {
-                let no = Rect::new(area.x, y, area.width / 2, 1);
-                let yes = Rect::new(no.right(), y, area.width - no.width, 1);
-                for (rect, color, label, verb) in
-                    [(no, ALIZARIN, "No  x", "decline"), (yes, color, "Yo  enter", "accept")]
-                {
+                // A person's request can be blocked too (b); a group's not.
+                let block = !row.id.starts_with(yo_core::shared::GROUP_PREFIX);
+                let parts = if block { 3 } else { 2 };
+                let no = Rect::new(area.x, y, area.width / parts, 1);
+                let mid = Rect::new(no.right(), y, if block { area.width / parts } else { 0 }, 1);
+                let yes = Rect::new(mid.right(), y, area.width - no.width - mid.width, 1);
+                let mut choices = vec![(no, ALIZARIN, "No  x", "decline"), (yes, color, "Yo  enter", "accept")];
+                if block {
+                    choices.insert(1, (mid, 0x5c5c5c, "Block  b", "block"));
+                }
+                for (rect, color, label, verb) in choices {
                     self.bar(f.buffer_mut(), rect, color, BarText::Center(label.into()), false, 0.0);
                     self.hits.borrow_mut().push((rect, Hit::Choice(i, verb)));
                 }
@@ -1884,7 +2118,10 @@ impl App {
             let rect = Rect { x: area.x, y, width: area.width, height };
             let color = BAR_COLORS[self.snapshot.rows.len() % BAR_COLORS.len()];
             let text = if self.screen == Screen::Add {
-                BarText::Center(format!("{}▏", self.input.to_uppercase()))
+                BarText::Center(format!(
+                    "{}▏",
+                    tail(&self.input.to_uppercase(), usize::from(area.width.saturating_sub(8)))
+                ))
             } else {
                 BarText::Center("+ ADD".into())
             };
@@ -1990,7 +2227,7 @@ impl App {
                 .unwrap_or("");
             let gutter = if i == self.selected { "▌ " } else { "  " };
             let rect = Rect { y, height: 1, ..area };
-            f.render_widget(Paragraph::new(format!("{gutter}{name}")), rect);
+            f.render_widget(Paragraph::new(format!("{gutter}{}", name.to_uppercase())), rect);
             self.hits.borrow_mut().push((rect, Hit::Blocked(i)));
         }
     }
@@ -2097,7 +2334,7 @@ impl App {
                     .into_iter()
                     .find(|k| c[*k] == true)
                     .unwrap_or("disconnected");
-                (format!("{} · {state}", c["name"].as_str().unwrap_or("")), "›".into())
+                (format!("{} · {state}", upper(&c["name"])), "›".into())
             }
             SettingsRow::Device(d) => {
                 let device = &self.devices[d];
@@ -2174,25 +2411,47 @@ impl App {
             ])
         };
         let head = |t: &str| Line::from(Span::styled(format!("{t:<39}"), self.accent()));
-        let lines = vec![
-            head("Friends"),
-            key("enter", "send a Yo (or click a bar)"),
-            key("p / i / m", "photo / info / menu"),
-            key("a +", "add a friend or group"),
-            key("↑↓ j k", "move"),
-            Line::from(""),
-            head("Requests"),
-            key("enter", "accept the selected request"),
-            key("x / b", "decline / block"),
-            key("click", "select a request"),
-            Line::from(""),
-            head("Settings"),
-            key("s", "Settings"),
-            key("enter", "open a row or toggle requests"),
-            key("?", "this help"),
-            key("esc q", "back, quit"),
-        ];
-        self.card(f, area, "Keys", lines)
+        let lines = if !self.signed() {
+            vec![
+                head("Welcome"),
+                key("1 s", "sign up"),
+                key("2 r", "sign in with the recovery key"),
+                key("3 l", "sign in with another device"),
+                Line::from(""),
+                key("tab", "person/bot, when signing up"),
+                key("esc", "back"),
+                key("?", "this help"),
+                key("q", "quit"),
+            ]
+        } else {
+            vec![
+                head("Friends"),
+                key("enter", "send a Yo (or click a bar)"),
+                key("p / i / m", "photo / info / menu"),
+                key("a +", "add a friend or group"),
+                key("↑↓ j k", "move"),
+                Line::from(""),
+                head("Requests"),
+                key("enter", "accept the selected request"),
+                key("x / b", "decline / block"),
+                key("click", "select a request"),
+                Line::from(""),
+                head("Settings"),
+                key("s", "Settings"),
+                key("enter", "open a row or toggle"),
+                key("?", "this help"),
+                key("esc q", "back, quit"),
+            ]
+        };
+        // Scrolled in a small window (↑↓, the wheel): the card shows what fits from there.
+        let room = usize::from(area.height.saturating_sub(4)).max(1);
+        self.help_max.set(lines.len().saturating_sub(room));
+        let first = self.help_scroll.min(self.help_max.get());
+        let mut shown: Vec<Line> = lines.into_iter().skip(first).collect();
+        if first > 0 && !shown.is_empty() {
+            shown[0] = Line::from("↑ more").style(self.dim());
+        }
+        self.card(f, area, "Keys", shown)
     }
 }
 
@@ -2200,17 +2459,25 @@ fn diagnostics(config: &Config) -> Value {
     let mut lines = match crate::execute(config, &words(&["status"])) {
         Ok(s) => vec![
             if s["listening"] == true { "Receiving" } else { "Not receiving" }.into(),
-            format!("Hub  {}", s["hub"].as_str().unwrap_or("—")),
-            format!("{} contacts · {} friends · {} groups", s["contacts"], s["friends"], s["groups"]),
-            format!("{} unsent · {} dropped", s["waiting"], s["dropped"]),
-            format!("Bot  {}", if s["bot"] == true { "yes" } else { "no" }),
+            format!("Hub       {}", s["hub"].as_str().unwrap_or("—")),
+            format!("Contacts  {} · {} friends · {} groups", s["contacts"], s["friends"], s["groups"]),
+            format!("Unsent    {} · {} dropped", s["waiting"], s["dropped"]),
+            format!("Bot       {}", if s["bot"] == true { "yes" } else { "no" }),
         ],
         Err(f) => vec![format!("Status: {}", f.error)],
     };
-    lines.push(match crate::execute(config, &words(&["probe"])) {
-        Ok(v) => format!("PING answered in {} ms", v["ms"]),
+    // Asked after (Job::Probe): the PING and the checks can take seconds.
+    lines.push("PING …".into());
+    json!(lines)
+}
+
+/// The Status card's slow part: the PING's answer, then the checks.
+fn probe_and_checks(config: &Config) -> Value {
+    let mut lines = vec![match crate::execute(config, &words(&["probe", "--timeout-ms", "5000"])) {
+        Ok(v) if v["ms"].is_number() => format!("PING answered in {} ms", v["ms"]),
+        Ok(_) => "PING: no answer".to_owned(),
         Err(f) => format!("PING: {}", f.error),
-    });
+    }];
     for check in crate::doctor(config)["checks"].as_array().into_iter().flatten() {
         let mark = if check["ok"] == true { "✓" } else { "✗" };
         lines.push(format!(
@@ -2223,7 +2490,12 @@ fn diagnostics(config: &Config) -> Value {
 }
 
 fn wrap_card(text: &str, width: u16) -> Vec<Line<'static>> {
-    let width = usize::from(width.min(72).saturating_sub(2)).max(1);
+    // Inside the card's border with a little room on each side.
+    let width = usize::from(width.min(72).saturating_sub(6)).max(1);
+    // A line that fits keeps its spacing (labels and values in columns).
+    if text.chars().count() <= width {
+        return vec![Line::from(text.to_owned())];
+    }
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -2288,7 +2560,10 @@ fn render_card(f: &mut Frame, area: Rect, title: &str, mut lines: Vec<Line>, bor
             *last = Line::from("…");
         }
     }
-    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    // Left-aligned in a column centred in the card: labels and values line up.
+    let column = lines.iter().map(Line::width).max().unwrap_or(0).min(usize::from(inner.width)) as u16;
+    let inner = Rect { x: inner.x + (inner.width - column) / 2, width: column, ..inner };
+    f.render_widget(Paragraph::new(lines), inner);
     inner
 }
 
@@ -2304,11 +2579,17 @@ fn upper(value: &Value) -> String {
 
 /// A bar's line as the core gives it: the name or a send's words, else the Yos ("2× Yo from" first, never cut; the
 /// name last, cut first), a photo's or video's sign after them.
-fn row_text(row: &Row, room: usize) -> BarText {
+fn row_text(row: &Row, room: usize, media: Option<Kind>) -> BarText {
     use yo_ui::list::Line;
     let (mut lead, words) = match &row.line {
+        // A photo's or video's send says so ("Sent 📷!"), as the app's bar shows its picture.
         Line::Title if row.title == yo_ui::Text::SentYo.get(English) => {
-            (String::new(), yo_ui::send_words(&yo_ui::counted(row.count.into()), row.sending, English))
+            let mark = match media {
+                Some(Kind::Photo) => "📷".to_owned(),
+                Some(Kind::Video) => "🎥".to_owned(),
+                _ => yo_ui::counted(row.count.into()),
+            };
+            (String::new(), yo_ui::send_words(&mark, row.sending, English))
         }
         Line::Title => (String::new(), row.title.clone()),
         Line::Arrival { count, name } => {
@@ -2351,6 +2632,15 @@ fn short_path(path: &std::path::Path, room: usize) -> String {
         return text;
     }
     "…".to_owned() + &text.chars().skip(n + 1 - room).collect::<String>()
+}
+
+/// The end of a text being typed, in `room` columns: what is cut goes at its start ("…the end").
+fn tail(text: &str, room: usize) -> String {
+    let n = text.chars().count();
+    if n <= room {
+        return text.to_owned();
+    }
+    "…".to_owned() + &text.chars().skip(n + 1 - room.max(1)).collect::<String>()
 }
 
 /// The text cut to `room` columns, an ellipsis where it was cut.
@@ -2561,7 +2851,11 @@ mod tests {
         assert_eq!(app.selected, 1);
         assert_eq!(app.jobs, 0);
         screen(&app, 80, 24);
-        assert_eq!(app.hits.borrow().iter().filter(|(_, hit)| matches!(hit, Hit::Choice(1, _))).count(), 2);
+        assert_eq!(
+            app.hits.borrow().iter().filter(|(_, hit)| matches!(hit, Hit::Choice(1, _))).count(),
+            3,
+            "no, block, yo"
+        );
         for key in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Char('2')] {
             app.key(KeyEvent::new(key, KeyModifiers::NONE));
             assert_eq!(app.screen, Screen::Main);
@@ -2598,12 +2892,62 @@ mod tests {
         let mut list = List::new();
         let friend = Friend { id: "p".into(), name: bar_title("PING", false, true), request: false, group: false };
         let snapshot = list.apply(0, Input::Friends(vec![friend]));
-        assert!(matches!(row_text(&snapshot.rows[0], 40), BarText::Center(t) if t == "/PING"));
+        assert!(matches!(row_text(&snapshot.rows[0], 40, None), BarText::Center(t) if t == "/PING"));
         for token in ["one", "two"] {
             list.apply(1, Input::Received { id: "p".into(), kind: Kind::Yo, token: token.into(), sender: None });
         }
-        assert!(matches!(row_text(&list.snapshot().rows[0], 40),
+        assert!(matches!(row_text(&list.snapshot().rows[0], 40, None),
             BarText::Split(lead, name) if lead == "2× Yo from" && name == "/PING"));
+    }
+
+    #[test]
+    fn test_round_fixes_hold() {
+        let mut app = App::new(&Config::parse(&[]).unwrap().0, channel().0);
+        // The rotate confirmation: any key but y cancels it.
+        app.screen = Screen::Recovery;
+        app.key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(app.confirm_rotate);
+        app.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert!(!app.confirm_rotate);
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert_eq!(app.jobs, 0, "no rotation");
+        // The Welcome help names its own keys.
+        app.screen = Screen::Welcome;
+        app.help = true;
+        let text = screen(&app, 60, 20).join("\n");
+        assert!(text.contains("sign in with the recovery key") && !text.contains("settings"), "{text}");
+        // Signed in, the help scrolls at 60x20 down to its last line.
+        app.screen = Screen::Main;
+        screen(&app, 60, 20);
+        for _ in 0..30 {
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(screen(&app, 60, 20).join("").contains("back, quit"));
+        app.help = false;
+        // A copy from a linked device: "Sent Yo!"; a photo: "Sent 📷!".
+        app.me = json!({"user": "me"});
+        app.refresh(json!([{"target":"f1","kind":"friend","name":"bravo"},{"target":"f2","kind":"friend","name":"carol","blocked":true}]));
+        app.event(json!({"type":"sent","user":"f1","content":"yo"}));
+        let row = app.snapshot.rows.iter().find(|r| r.id == "f1").unwrap().clone();
+        assert!(matches!(row_text(&row, 40, None), BarText::Center(t) if t.starts_with("Sent")), "{row:?}");
+        assert!(matches!(row_text(&row, 40, Some(Kind::Photo)), BarText::Center(t) if t == "Sent 📷!"));
+        // Members: adding offers friends not in the group (never blocked ones), removing only its members.
+        app.dialog =
+            Some(Dialog::Members { title: "Add Members", words: vec![], friends: vec![], cursor: 0, empty: "" });
+        app.members_loaded("Add Members", words(&["groups", "add", "g"]), false, &json!({"members": ["me"]}));
+        let Some(Dialog::Members { friends, .. }) = &app.dialog else { panic!() };
+        assert_eq!(friends.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["f1"]);
+        app.members_loaded("Add Members", words(&["groups", "add", "g"]), false, &json!({"members": ["me", "f1"]}));
+        let Some(Dialog::Members { friends, .. }) = &app.dialog else { panic!() };
+        assert!(friends.is_empty());
+        app.members_loaded(
+            "Add Members",
+            words(&["groups", "remove", "g"]),
+            true,
+            &json!({"members": ["me", "x9"], "contacts": [{"user": "x9", "handles": ["dora"]}]}),
+        );
+        let Some(Dialog::Members { friends, .. }) = &app.dialog else { panic!() };
+        assert_eq!(friends, &[("x9".to_owned(), "DORA".to_owned(), false)]);
     }
 
     #[test]

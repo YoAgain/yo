@@ -167,7 +167,16 @@ impl Client {
 
     /// A block or unblock, kept in the storage too (`set_blocked`).
     pub(crate) fn storage_block(&mut self, user: &str, blocked: bool) {
+        // Blocking someone never on the list (a stranger's request) keeps only the block: the entry is marked
+        // removed, so no device takes them for a friend, now or after the unblock (spec 3.3, 4.3).
+        let stranger = blocked
+            && !self.state.storage.friends.contains_key(user)
+            && self.state.contacts.get(user).is_none_or(|c| !c.accepted);
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
+        if stranger {
+            friend.removed.set(true, crate::wall_ms());
+            self.state.storage_dirty = true;
+        }
         if friend.blocked.value != blocked || friend.blocked.at == 0 {
             friend.blocked.set(blocked, crate::wall_ms());
             self.state.storage_dirty = true;

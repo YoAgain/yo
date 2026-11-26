@@ -180,7 +180,8 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             let friends = p.client.friends();
             let f = friends.iter().find(|f| f.user == friend_id).expect(&ctx);
             assert_eq!((f.name.clone(), f.color), (Some(format!("Friend {cycle}")), Some((cycle % 7) as u8)), "{ctx}");
-            assert!(friends.iter().any(|f| f.user == pest_id && f.blocked), "{ctx}");
+            assert!(friends.iter().all(|f| f.user != pest_id), "{ctx}");
+            assert!(p.client.contacts().iter().any(|c| c.user == pest_id && c.blocked), "{ctx}");
             let icon = if cycle % 2 == 0 { Some("Original".to_owned()) } else { None };
             assert_eq!(p.client.app_icon(), icon, "{ctx}");
             // Both ways, exactly once; the pest not at all.
