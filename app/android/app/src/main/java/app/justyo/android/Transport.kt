@@ -17,14 +17,17 @@ class HubTransport(
 ) : HttpTransport {
     private val stopped = AtomicBoolean(false)
     // Separate pools: anonymous deliveries must carry no connection history from identified requests.
-    private val signed = plain()
-    private val anonymous = plain()
+    private val signed = plain(0)
+    private val anonymous = plain(1)
     // The hub holds a sync up to 25 s without a byte: OkHttp's default 10-s read timeout cut every one of them, so the
     // listener only backed off (up to 30 s between tries) and Status said "Waiting". The call timeout bounds it instead.
     // HTTP/2 pings every 15 s: a connection the network dropped silently (a NAT that forgot it, a suspended phone) fails
     // its ping and is replaced, instead of holding a Yo until the read timeout.
-    private fun plain() = OkHttpClient.Builder().callTimeout(70, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
+    // The play build hands each line's requests to its own Cronet engine once one is there (HTTP/3, Quic.kt); OkHttp's
+    // pool (5 minutes idle) and pings stay the way for the floss build and until then.
+    private fun plain(line: Int) = OkHttpClient.Builder().callTimeout(70, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS).pingInterval(15, TimeUnit.SECONDS)
+        .addInterceptor { chain -> Quic.interceptor(line)?.intercept(chain) ?: chain.proceed(chain.request()) }
         .followRedirects(false).followSslRedirects(false).build()
     override fun request(method: String, path: String, headers: List<Header>, body: ByteArray): HttpResult {
         // A request wrapped in Oblivious HTTP (the core's `use_hub`): its connection and the request inside, for this

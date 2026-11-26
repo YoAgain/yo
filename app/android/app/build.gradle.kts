@@ -124,6 +124,9 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.12.0")
     "playImplementation"("com.google.android.play:integrity:1.6.0")
     "playImplementation"("com.google.firebase:firebase-messaging:26.0.2")
+    // HTTP/3 to the hub: Cronet from Google Play services behind OkHttp (Quic.kt); the floss build stays on OkHttp.
+    "playImplementation"("com.google.android.gms:play-services-cronet:18.1.1")
+    "playImplementation"("com.google.net.cronet:cronet-okhttp:0.1.2")
     implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.material3:material3:1.5.0")

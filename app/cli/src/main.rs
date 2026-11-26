@@ -16,6 +16,7 @@ mod human;
 mod jpeg;
 mod listen;
 mod pins;
+mod quic;
 mod signin;
 mod tui;
 

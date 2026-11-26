@@ -222,10 +222,11 @@ struct Http {
     anonymous: Line,
 }
 
-/// One client per line, built on its first request.
+/// One client per line, built on its first request: HTTP/3 first, HTTP/2 when UDP does not get through.
 struct Line {
     base: String,
     client: OnceLock<Result<reqwest::blocking::Client, String>>,
+    quic: OnceLock<Option<crate::quic::Quic>>,
 }
 
 /// Load the system roots once. Each line builds its own config for a separate TLS session cache (spec 1.1).
@@ -263,7 +264,7 @@ impl Transport for Http {
 
 impl Line {
     fn new(base: String) -> Self {
-        Self { base, client: OnceLock::new() }
+        Self { base, client: OnceLock::new(), quic: OnceLock::new() }
     }
 
     fn send(
@@ -274,6 +275,29 @@ impl Line {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, String> {
+        let mut headers = headers.to_vec();
+        // Its build, as an app names its own (spec 4.1), on what names the account anyway: never on an anonymous one.
+        if signed {
+            headers.push((yoip::net::api::HEADER_APP.to_owned(), format!("yogpt/{BUILD}")));
+        }
+        let quic = self.quic.get_or_init(|| line_tls().ok().and_then(|tls| crate::quic::Quic::new(&self.base, tls)));
+        if let Some(quic) = quic {
+            let started = std::time::Instant::now();
+            match quic.request(method, path, &headers, body, Duration::from_secs(60), MAX_RESPONSE) {
+                Ok((status, body)) => {
+                    yo_core::timing::note(&format!(
+                        "http {method} {} HTTP/3.0 {:?}",
+                        yo_core::timing::route(path),
+                        started.elapsed()
+                    ));
+                    return Ok(Response { status, body });
+                }
+                Err(crate::quic::Failed::Broken(error)) => return Err(error),
+                Err(crate::quic::Failed::Unreachable(error)) => {
+                    yo_core::timing::note(&format!("http3 off, HTTP/2: {error}"));
+                }
+            }
+        }
         let client = self
             .client
             .get_or_init(|| {
@@ -292,12 +316,8 @@ impl Line {
             .map_err(Clone::clone)?;
         let url = format!("{}{}", self.base, path);
         let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
-        for (name, value) in headers {
+        for (name, value) in &headers {
             request = request.header(name, value);
-        }
-        // Its build, as an app names its own (spec 4.1), on what names the account anyway: never on an anonymous one.
-        if signed {
-            request = request.header(yoip::net::api::HEADER_APP, format!("yogpt/{BUILD}"));
         }
         // Without the URL: a blob's path is its capability (spec 4.3), never for an error or a log.
         let started = std::time::Instant::now();
