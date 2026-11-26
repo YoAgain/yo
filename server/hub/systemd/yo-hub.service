@@ -1,6 +1,7 @@
 [Unit]
 Description=Yo hub (with Litestream)
-After=network-online.target
+After=network-online.target yo-hub.socket
+Requires=yo-hub.socket
 Wants=network-online.target
 ConditionPathExists=/opt/yo/yo-hub
 

@@ -1,0 +1,9 @@
+[Unit]
+Description=Yo dev hub socket (holds the port across restarts: a deploy restarts yo-hub-dev.service only)
+
+[Socket]
+ListenStream=127.0.0.1:8090
+NoDelay=yes
+
+[Install]
+WantedBy=sockets.target

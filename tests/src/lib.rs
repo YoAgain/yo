@@ -115,6 +115,13 @@ impl TestHub {
         format!("http://{}", self.addr)
     }
 
+    /// Tells the hub to stop as SIGTERM does (a deploy), without waiting for it.
+    pub fn begin_stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+
     /// Stops serving and closes the database.
     pub fn stop(mut self) {
         if let Some(stop) = self.stop.take() {

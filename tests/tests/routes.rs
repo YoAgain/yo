@@ -1222,3 +1222,16 @@ fn the_live_stream_is_the_operators_and_tells_each_yo_at_once() {
         .collect();
     assert_eq!(events, [r#"data: {"k":"yo"}"#; 3]);
 }
+
+/// A stopping hub (a deploy, #12) answers its long polls at once, so the clients ask the next process.
+#[test]
+fn a_stopping_hub_ends_its_long_polls() {
+    let mut hub = TestHub::start();
+    let (mut a, _, _) = account(&hub);
+    let started = std::time::Instant::now();
+    let poll = std::thread::spawn(move || signed(&mut a, "GET", &api::inbox_path(20), &[]).0);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    hub.begin_stop();
+    assert_eq!(poll.join().unwrap(), status::OK);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "answered in {:?}", started.elapsed());
+}

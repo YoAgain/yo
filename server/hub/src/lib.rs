@@ -212,6 +212,10 @@ pub struct Hub {
 }
 
 /// Yos a live stream may fall behind by before it skips them (`Hub::live`).
+/// How long requests under way may take to finish once the hub stops (a deploy). What lives in memory only is lost on
+/// a stop, by design: rate limits and counters, the replay caches, link mailboxes (spec 2.5, the user starts the link
+/// again), the minute's event counts not yet written.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 const LIVE_QUEUE: usize = 256;
 
 /// Blocking work at once (`Hub::blocking`): the database is one connection, more would only wait for it.
@@ -390,7 +394,19 @@ impl Hub {
             shutdown.await;
             hub.closing.send_replace(true);
         };
-        let served = axum::serve(listener, app).with_graceful_shutdown(shutdown).await;
+        // Once closing: no new connections, long-polls answer at once (`get_inbox`), requests under way get
+        // STOP_GRACE to finish; whatever is still open then (a slow upload) is cut.
+        let mut closed = self.closing.subscribe();
+        let served = tokio::select! {
+            served = axum::serve(listener, app).with_graceful_shutdown(shutdown) => served,
+            _ = async {
+                let _ = closed.wait_for(|closing| *closing).await;
+                tokio::time::sleep(STOP_GRACE).await;
+            } => {
+                eprintln!("yo-hub: requests still open after {}s, cut", STOP_GRACE.as_secs());
+                Ok(())
+            }
+        };
         pruner.abort();
         served
     }

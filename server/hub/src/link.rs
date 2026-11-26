@@ -120,8 +120,13 @@ pub(crate) async fn get_link(
                 return Ok(crate::request::octets(bundle.len() as u64, bundle.into()));
             }
         }
-        if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return Ok(StatusCode::NO_CONTENT.into_response());
+        // A stopping hub answers at once (its links are in memory and go with it).
+        let mut closing = hub.closing.subscribe();
+        tokio::select! {
+            woke = tokio::time::timeout_at(deadline, notified) => if woke.is_err() {
+                return Ok(StatusCode::NO_CONTENT.into_response());
+            },
+            _ = closing.wait_for(|closing| *closing) => return Ok(StatusCode::NO_CONTENT.into_response()),
         }
     }
 }

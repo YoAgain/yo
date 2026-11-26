@@ -1,6 +1,7 @@
 //! yo-hub: reads its configuration from the environment and serves.
 //!
-//!   YO_LISTEN             address, default 127.0.0.1:8080 (behind a Cloudflare Tunnel)
+//!   YO_LISTEN             address, default 127.0.0.1:8080 (behind a Cloudflare Tunnel); a socket from systemd
+//!                         (LISTEN_FDS, `yo-hub.socket`) goes first
 //!   YO_DB                 SQLite file, default yo-hub.sqlite
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
 //!   YO_ROBOT_RANGES       ADDRESS/BITS, comma-separated: test robots, whose support messages, reports and
@@ -291,6 +292,27 @@ fn or_exit<T>(result: Result<T, String>) -> T {
     })
 }
 
+/// The listening socket systemd hands over (socket activation, `yo-hub.socket`): fd 3 when LISTEN_FDS is 1 and
+/// LISTEN_PID names this process or its parent (Litestream runs the live hub with `-exec` and passes the fd on).
+/// None without one: the hub binds YO_LISTEN itself.
+fn from_systemd() -> Result<Option<tokio::net::TcpListener>, String> {
+    use std::os::fd::FromRawFd;
+    let pid = std::env::var("LISTEN_PID").ok().and_then(|pid| pid.parse::<u32>().ok());
+    let fds = std::env::var("LISTEN_FDS").ok().and_then(|fds| fds.parse::<u32>().ok());
+    let ours = pid.is_some_and(|pid| pid == std::process::id() || pid == std::os::unix::process::parent_id());
+    if !ours || fds.is_none_or(|fds| fds == 0) {
+        return Ok(None);
+    }
+    if fds != Some(1) {
+        return Err(format!("systemd passed {} sockets, the hub takes one", fds.unwrap_or(0)));
+    }
+    // SAFETY: under the socket activation protocol fd 3 is a listening socket systemd opened for this process, owned
+    // by nobody else here; it is taken once, at start.
+    let listener = unsafe { std::net::TcpListener::from_raw_fd(3) };
+    listener.set_nonblocking(true).map_err(|error| format!("socket from systemd: {error}"))?;
+    tokio::net::TcpListener::from_std(listener).map(Some).map_err(|error| format!("socket from systemd: {error}"))
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -300,15 +322,35 @@ async fn main() {
     let (config, listen) = or_exit(config());
     let trust_cloudflare = config.trust_cloudflare;
     let hub = or_exit(Hub::new(config, Arc::new(push::Https::default())));
-    let listener = or_exit(tokio::net::TcpListener::bind(&listen).await.map_err(|error| format!("{listen}: {error}")));
-    eprintln!("yo-hub: listening on {listen}");
+    let listener = match or_exit(from_systemd()) {
+        Some(listener) => {
+            eprintln!("yo-hub: listening on the socket from systemd");
+            listener
+        }
+        None => {
+            let listener =
+                or_exit(tokio::net::TcpListener::bind(&listen).await.map_err(|error| format!("{listen}: {error}")));
+            eprintln!("yo-hub: listening on {listen}");
+            listener
+        }
+    };
     if trust_cloudflare && !listener.local_addr().is_ok_and(|a| a.ip().is_loopback()) {
         // CF-Connecting-IP is believed: whoever reaches this address without Cloudflare names any address it likes
         // and passes every per-address limit.
         eprintln!("yo-hub: YO_TRUST_CLOUDFLARE with {listen}, not a loopback address: only cloudflared may reach it");
     }
+    // SIGTERM from systemd (a deploy restarts the service; the socket stays and holds new connections for the next
+    // process), Ctrl-C by hand.
     let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+        let mut term = or_exit(
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| error.to_string()),
+        );
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        eprintln!("yo-hub: stopping");
     };
     if let Err(error) = hub.serve(listener, shutdown).await {
         eprintln!("yo-hub: {error}");

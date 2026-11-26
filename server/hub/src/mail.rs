@@ -303,7 +303,12 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
         // Mail that came between the first fetch and `enable` is found here.
         (items, prekeys_left) = hub.blocking(read).await??;
         if items.is_empty() {
-            let _ = tokio::time::timeout(Duration::from_secs(wait_s), notified).await;
+            // A stopping hub answers at once: the client asks again and reaches the next process.
+            let mut closing = hub.closing.subscribe();
+            tokio::select! {
+                _ = tokio::time::timeout(Duration::from_secs(wait_s), notified) => {}
+                _ = closing.wait_for(|closing| *closing) => {}
+            }
             (items, prekeys_left) = hub.blocking(read).await??;
         }
     }

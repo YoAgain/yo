@@ -1,11 +1,12 @@
 [Unit]
 Description=Yo dev hub
-After=network-online.target
+After=network-online.target yo-hub-dev.socket
+Requires=yo-hub-dev.socket
 Wants=network-online.target
 ConditionPathExists=/opt/yo/yo-hub
 
 [Service]
-ExecStart=/opt/yo/yo-hub
+ExecStart=/opt/yo/yo-hub-dev
 EnvironmentFile=/etc/yo/hub-dev.env
 LoadCredential=apns.p8:/etc/yo/apns.p8
 Environment=YO_DB=/var/lib/yo-dev/yo-hub.sqlite YO_LISTEN=127.0.0.1:8090
