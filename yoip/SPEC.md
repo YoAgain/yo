@@ -133,6 +133,15 @@ struct { uint8 version = 3;
 - The passkey's RP ID is fixed; a new RP ID loses the passkey door. Either door opens `sealed`, which holds the `🔑 recovery key`.
 - Upload: the hub replaces the record and retires the old locator. The hub MUST reject (`400`) unless v3, wraps ≤ 256 B, `sealed` ≤ 60 KiB, canonical `🔐 auth keys` and nonempty `by_code`, `sealed`, `auth_code`. A locator equal to a user id or another account's locator → `409`.
 - Fetch: the hub requires the door's signature; bad signature or no record → `404`; with `Yo-Nonce` it signs the `200` (§4.1). Only clients check wraps.
+### 2.5 Linking a device
+A signed-in device adds a new one by camera; no secret is ever shown, and nothing needs comparing because both devices are in front of the user.
+1. The new device makes a one-time X25519 key `E` and calls `POST /v1/link` (anonymous). The hub answers a link id: ≥ 128 random bits, one use, 10 minutes. The device shows `yo-link:<link id>.<E public>` as a QR code.
+2. The old device scans it. It MUST ask once ("This device gets access to your account") before it seals `LinkBundle { username, 🔐 account key, 🔑 storage key }` with HPKE to `E` (aad = link id) and stores it with `PUT /v1/link/{id}`. A scanned code MUST NOT link without that tap.
+3. The new device waits with `GET /v1/link/{id}` (≤ 60 s), opens the bundle, registers with the current `🔐 account key` as an added device (§4.2) and loads the storage (§4.3).
+4. The hub sees only link id, time and ciphertext. It MUST delete the bundle on fetch or expiry, MUST NOT log link ids and limits `/v1/link` per IP.
+
+Without an old device, recovery (§2.4) remains. A device without a camera path (CLI) shows the `yo-link:` text to paste.
+
 ## 3. Session
 ### 3.1 Sessions
 libsignal handles setup, ratchets, healing and reordering (PQXDH, Double Ratchet, Sesame, §5). Yo defines `🔐 prekeys`, addresses and session start. Each device pair has one session at `ProtocolAddress(ACI(user id), device number)`. Its identity must match the pinned `🔐 account key`. After first contact, use the pinned id and session.
