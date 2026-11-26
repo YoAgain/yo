@@ -1,11 +1,11 @@
-//! Help (spec 6.4): what a phone tells the operator about the app, by a random install id (`Yo-Install`), never by
+//! Help (spec 4): what a phone tells the operator about the app, by a random install id (`Yo-Install`), never by
 //! the account and never signed: messages to the operator and their thread, reports of users, crash and error
-//! reports. Messages are plain text to the hub, not end-to-end encrypted (spec 1). A test robot's (`robot_ranges`)
+//! reports. Messages are plain text to the hub, not end-to-end encrypted (spec 4). A test robot's (`robot_ranges`)
 //! are answered `204` and dropped.
 
 use crate::db::Install;
 use crate::error::{refuse, Res};
-use crate::request::{bad, header, Hubs, Peer, DAY, HOUR};
+use crate::request::{bad, header, Hubs, Peer};
 use crate::{blobs, now_ms, Hub};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -20,11 +20,10 @@ fn install(headers: &HeaderMap) -> Res<Install> {
     header(headers, api::HEADER_INSTALL).filter(|text| api::install_valid(text)).and_then(blobs::unhex).ok_or_else(bad)
 }
 
-/// A message or report: limited by its install id and by its address.
-fn limited(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, per_install: u32) -> Res<Install> {
+/// The install id of a request limited by its address, as every unsigned one (spec 4.1).
+fn limited(hub: &Hub, peer: Peer, headers: &HeaderMap) -> Res<Install> {
     let install = install(headers)?;
-    hub.limit_ip("help", peer.0, headers, hub.config.limits.help_per_ip_day, DAY)?;
-    hub.limit_by(kind, &install, per_install, DAY)?;
+    hub.limit_anonymous(peer.0, headers)?;
     Ok(install)
 }
 
@@ -37,7 +36,7 @@ pub(crate) async fn post_report(State(hub): Hubs, peer: Peer, headers: HeaderMap
     if !(api::REPORT_SPAM..=api::REPORT_OTHER).contains(&request.reason) {
         return Err(bad());
     }
-    let install = limited(&hub, "report", peer, &headers, hub.config.limits.report_per_install_day)?;
+    let install = limited(&hub, peer, &headers)?;
     if !hub.db.report(&install, &request.user_id, request.reason, now_ms())? {
         return Err(refuse(StatusCode::NOT_FOUND));
     }
@@ -51,16 +50,14 @@ pub(crate) async fn post_message(State(hub): Hubs, peer: Peer, headers: HeaderMa
     }
     let request: api::Feedback = decode(&body)?;
     let (text, app_version) = request.check().map_err(|_| bad())?;
-    let install = limited(&hub, "support", peer, &headers, hub.config.limits.support_per_install_day)?;
+    let install = limited(&hub, peer, &headers)?;
     hub.db.support_message(&install, text, app_version, now_ms())?.done()?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// `GET /v1/help/messages`: the install's thread with the operator, empty before its first message.
 pub(crate) async fn get_messages(State(hub): Hubs, peer: Peer, headers: HeaderMap) -> Res<Vec<u8>> {
-    let install = install(&headers)?;
-    hub.limit_ip("help-read", peer.0, &headers, 1200, HOUR)?;
-    hub.limit_by("support-read", &install, 120, HOUR)?;
+    let install = limited(&hub, peer, &headers)?;
     Ok(encode(&hub.db.support_thread(&install)?))
 }
 
@@ -71,8 +68,7 @@ pub(crate) async fn post_read(State(hub): Hubs, peer: Peer, headers: HeaderMap, 
     if request.through > i64::MAX as u64 {
         return Err(bad());
     }
-    hub.limit_ip("help-read", peer.0, &headers, 1200, HOUR)?;
-    hub.limit_by("support-mark", &install, 120, HOUR)?;
+    hub.limit_anonymous(peer.0, &headers)?;
     hub.db.support_read(&install, true, request.through, now_ms())?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -93,15 +89,11 @@ fn diagnostic(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, body: &[u8
     if hub.robot(peer.0, headers) {
         return Ok(StatusCode::NO_CONTENT);
     }
-    let install = install(headers)?;
-    hub.limit_ip("diagnostic", peer.0, headers, hub.config.limits.diagnostics_per_ip_hour, HOUR)?;
-    hub.limit_by("diagnostic", &install, hub.config.limits.diagnostics_per_install_hour, HOUR)?;
+    let install = limited(hub, peer, headers)?;
     if body.len() > MAX_DIAGNOSTIC {
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
-    // Each distinct report is a row of up to `MAX_DIAGNOSTIC` kept 90 days: bytes by address, and the disk's floor.
-    let per = hub.config.limits.diagnostic_bytes_per_ip_hour;
-    hub.limit_ip_bytes_as("diagnostic-bytes", peer.0, headers, body.len(), per)?;
+    // Each distinct report is a row of up to `MAX_DIAGNOSTIC` kept 90 days: the disk's floor.
     hub.db_room()?;
     let payload: serde_json::Value = serde_json::from_slice(body).map_err(|_| bad())?;
     let fields = payload.as_object().ok_or_else(bad)?;

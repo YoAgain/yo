@@ -124,7 +124,7 @@ pub struct GroupEntry {
     /// The master key (base64url): the same for the group's every version, never changed.
     #[serde(default, rename = "k", skip_serializing_if = "String::is_empty")]
     pub key: String,
-    /// Joined (Signal's whitelisted): else a request (spec 3.3).
+    /// Joined (Signal's whitelisted): else a request (spec 3.4).
     #[serde(default, rename = "a", skip_serializing_if = "Field::unset")]
     pub accepted: Field<bool>,
     /// This account is in it no more.

@@ -1,4 +1,4 @@
-//! Help (spec 4.2): the support thread, reports of users, crash and error reports. Each goes by a random install id
+//! Help (spec 4): the support thread, reports of users, crash and error reports. Each goes by a random install id
 //! (`api::HEADER_INSTALL`), made and kept on the phone alone, never by the account and never signed: the hub cannot
 //! tie any of it to an account. Losing the id loses the thread.
 
@@ -27,7 +27,7 @@ fn send(transport: &dyn Transport, install: &str, method: &str, path: &str, body
     transport.request(method, path, &headers, body).map_err(Error::Network)
 }
 
-/// A message to the operator, readable by the hub (spec 1). Empty or too long text is refused here; `Refused(429)`:
+/// A message to the operator, readable by the hub (spec 4). Empty or too long text is refused here; `Refused(429)`:
 /// the day's are used up, or the thread is full.
 pub fn send_message(transport: &dyn Transport, install: &str, text: &str, app_version: &str) -> Result<()> {
     let feedback = api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() };

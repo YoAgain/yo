@@ -106,7 +106,7 @@ fn requests_off_keeps_a_contacts_group_and_hides_a_strangers_request() {
         rounds(c);
     }
     // A stranger's group while requests are on: a request, its Yo shown.
-    let (theirs, _) = s.create_group("SPAM", &[v.user_id().to_owned()]).unwrap();
+    let (theirs, _) = s.create_group("SPAM", &[v.user_id().to_owned(), a.user_id().to_owned()]).unwrap();
     s.send_group(&theirs, Content::Yo).unwrap();
     assert_eq!(group_yos(&take(&mut v), &s), 1);
     assert!(v.groups().iter().any(|g| g.id == theirs && !g.accepted));
@@ -114,6 +114,10 @@ fn requests_off_keeps_a_contacts_group_and_hides_a_strangers_request() {
     assert!(!v.groups().iter().any(|g| g.id == theirs), "hidden while requests are off");
     s.send_group(&theirs, Content::Yo).unwrap();
     assert_eq!(group_yos(&take(&mut v), &s), 0);
+    take(&mut a);
+    a.accept_group(&theirs).unwrap();
+    a.send_group(&theirs, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(&mut v), &a), 0, "a contact in an unaccepted group");
     // Ann's group with Vic and Sam: joined by Vic; Sam's Yo there shows.
     let (ours, _) = a.create_group("CREW", &[v.user_id().to_owned(), s.user_id().to_owned()]).unwrap();
     take(&mut v);
@@ -165,7 +169,7 @@ fn group_requests(of: &Http, id: &str) -> usize {
     of.sent.lock().unwrap().iter().filter(|(_, p, _)| *p == path).count()
 }
 
-/// Audit G2. Spec 3.3: "one a stranger added it to is a request until a yes (leaving says no)". A group left and
+/// Audit G2. Spec 3.4: "one a stranger added it to is a request until a yes (leaving says no)". A group left and
 /// then added back to by a stranger (whose key of this account is old: invited) is a request again, not joined; added
 /// back by a contact it is joined at once.
 #[test]

@@ -45,10 +45,10 @@ fn a_stranger_who_knows_a_device_id_cannot_spend_its_requests() {
 }
 
 #[test]
-fn bytes_stored_without_identity_are_limited_per_address_except_for_the_servers_own() {
+fn anonymous_requests_are_limited_per_address_except_for_the_servers_own() {
     let mut config = Config::for_tests();
-    // Three envelopes of 1 KiB an hour.
-    config.limits.anonymous_bytes_per_ip_hour = 3 * 1024;
+    // Three unsigned requests a minute.
+    config.limits.anonymous_per_ip_minute = 3;
     config.trust_cloudflare = true;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let b = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);

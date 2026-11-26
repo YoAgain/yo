@@ -3,86 +3,55 @@
 use crate::db::{BlobQuota, Reserved};
 use std::path::PathBuf;
 
-/// Rate limits (spec 6.6). Each is a token bucket: this many per window, refilled evenly.
+/// Limits (spec 4.1): five rates, each a token bucket of this many per window, refilled evenly; the rest are
+/// format limits and quotas. A rate's `u32::MAX` is no limit.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Lookups that hand out prekeys: starting sessions.
-    pub lookup_per_device_day: u32,
-    /// Lookups of an account key only: checking who started a chat.
-    pub identity_lookup_per_device_day: u32,
-    /// Signed requests of one device, all routes.
+    /// Expensive requests by address: registrations (first come, first served, spec 4.2) and failed backup fetches
+    /// (unknown records or invalid door signatures, spec 2.4), together, an hour.
+    pub expensive_per_ip_hour: u32,
+    /// Every unsigned request by address, a minute: username checks, sealed deliveries, help, blob fetches,
+    /// anonymous group requests.
+    pub anonymous_per_ip_minute: u32,
+    /// Signed requests of one device, all routes, a minute.
     pub signed_per_device_minute: u32,
-    /// Deliveries per address: they are not signed (spec 6.6).
-    pub deliver_per_ip_minute: u32,
+    /// Lookups that hand out prekeys (starting sessions), by device a day.
+    pub lookup_per_device_day: u32,
     /// Envelopes a device holds before deliveries to its user are refused; no rate a stranger could spend.
     pub max_pending_per_device: u32,
     /// Envelope bytes sealed deliveries bring one recipient, from everyone, as Signal's inbound message bytes: a
-    /// bucket of `recipient_bytes_burst`, `recipient_bytes_per_hour` back an hour (spec 6.6); beyond, `429` with
+    /// bucket of `recipient_bytes_burst`, `recipient_bytes_per_hour` back an hour (spec 4.1); beyond, `429` with
     /// `Retry-After` for that recipient only. It bounds the inflow, never what waits nor fetching: a phone off for a
     /// week still gets everything. Blobs count by their own upload limits.
     pub recipient_bytes_burst: u64,
     pub recipient_bytes_per_hour: u64,
-    /// One push per device at most every this many ms (spec 6.7): what comes meanwhile goes in one push at the end
+    /// One push per device at most every this many ms (spec 4.2): what comes meanwhile goes in one push at the end
     /// of the window; a quiet device's first push goes at once. A contact's delivery (sealed) and a request's (signed,
-    /// 4.10) each have their own window.
+    /// 3.3) each have their own window.
     pub push_window_contact_ms: u64,
     pub push_window_request_ms: u64,
     /// A device with more than this many envelopes waiting (unfetched) gets at most one push per
-    /// `push_backlog_interval_s` until its backlog is down again (spec 6.7): it is offline or flooded.
+    /// `push_backlog_interval_s` until its backlog is down again (spec 4.2): it is offline or flooded.
     pub push_backlog: u32,
     pub push_backlog_interval_s: u64,
-    /// Bytes stored without identity, by address: envelopes stay up to `envelope_ttl_days`.
-    pub anonymous_bytes_per_ip_hour: u64,
     /// Deliveries are refused (`507`) while the database's disk has less than this free.
     pub db_min_free_bytes: u64,
-    /// Registrations by username: first come, first served, this many per address (spec 6.4).
-    pub register_per_ip_hour: u32,
-    /// Whether a username is free, asked while it is typed (spec 6.3).
-    pub name_check_per_ip_minute: u32,
-    /// Requests one sender sends one recipient at once, one more an hour (spec 4.10).
+    /// Requests one sender sends one recipient at once, one more an hour (spec 4.1).
     pub requests_per_pair: u64,
-    /// Recipients new to one sender's requests at once, one more an hour (spec 4.10).
+    /// Recipients new to one sender's requests at once, one more an hour (spec 4.1).
     pub request_recipients_per_sender: u64,
-    /// Requests one recipient takes from everyone at once, as many again a day (spec 4.10).
+    /// Requests one recipient takes from everyone at once, as many again a day (spec 4.1).
     pub requests_per_recipient: u64,
     /// The hour those refill by, ms: an hour; a load test that runs days of use in minutes makes it shorter.
     pub request_hour_ms: u64,
-    /// Failed backup fetches by address: unknown records or invalid door signatures (spec 7).
-    pub backup_per_ip_hour: u32,
-    /// Reports of users, by one install id (spec 6.4).
-    pub report_per_install_day: u32,
-    /// Messages to the operator, by one install id (spec 6.4).
-    pub support_per_install_day: u32,
-    /// Messages and reports from one address a day, whatever install ids it names (spec 6.4).
-    pub help_per_ip_day: u32,
-    /// Crash and error reports by one install id, and from one address, an hour (spec 6.4).
-    pub diagnostics_per_install_hour: u32,
-    pub diagnostics_per_ip_hour: u32,
-    /// Their bytes from one address an hour: each distinct report is a row kept 90 days.
-    pub diagnostic_bytes_per_ip_hour: u64,
-    /// The operator's to-dos from one address a day.
-    pub todo_per_ip_day: u32,
-    pub storage_per_user_hour: u32,
     pub envelope_ttl_days: u64,
-    /// A blob not fetched by all its devices is deleted after this long (spec 6.8).
+    /// A blob not fetched by all its devices is deleted after this long (spec 4.3).
     pub blob_ttl_days: u64,
     /// Photos and videos one user may upload per day (UTC), and their bytes.
     pub blobs_per_user_day: u32,
     pub blob_bytes_per_user_day: u64,
     /// Bytes of one user's blobs waiting for their fetches, at any time.
     pub blob_bytes_stored_per_user: u64,
-    pub blob_put_per_ip_minute: u32,
-    /// Fetches, which name no one: by address only.
-    pub blob_get_per_ip_minute: u32,
-    /// Groups one user makes a day (spec 4.9): each is kept until its last member leaves. Signed requests only
-    /// (apps before 2026-11-24); an anonymous one counts by its address (`groups_per_ip_day`).
-    pub groups_per_user_day: u32,
-    /// Groups made from one address a day, anonymously (spec 4.9: a group request names no account).
-    pub groups_per_ip_day: u32,
-    /// Anonymous group requests (fetch, change) from one address a minute: each makes the hub check proofs.
-    pub group_requests_per_ip_minute: u32,
-    /// Anonymous profile key credentials from one address an hour.
-    pub credentials_per_ip_hour: u32,
     /// Requests with a body read and handled at once from one address (`admit`, of `READING_AT_ONCE`): beyond,
     /// `503` for that address only. The server's own services pass.
     pub reading_per_ip: u32,
@@ -104,10 +73,10 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            lookup_per_device_day: 50,
-            identity_lookup_per_device_day: 1000,
+            expensive_per_ip_hour: 10,
+            anonymous_per_ip_minute: 1000,
             signed_per_device_minute: 1200,
-            deliver_per_ip_minute: 1000,
+            lookup_per_device_day: 50,
             max_pending_per_device: 5000,
             recipient_bytes_burst: 50 * MIB,
             recipient_bytes_per_hour: 50 * MIB,
@@ -115,34 +84,16 @@ impl Default for Limits {
             push_window_request_ms: 10_000,
             push_backlog: 50,
             push_backlog_interval_s: 600,
-            anonymous_bytes_per_ip_hour: 64 * MIB,
             db_min_free_bytes: GIB,
-            register_per_ip_hour: 10,
-            name_check_per_ip_minute: 60,
             requests_per_pair: 10,
             request_recipients_per_sender: 20,
             requests_per_recipient: 1000,
             request_hour_ms: 3_600_000,
-            backup_per_ip_hour: 30,
-            report_per_install_day: 20,
-            support_per_install_day: 10,
-            help_per_ip_day: 200,
-            diagnostics_per_install_hour: 300,
-            diagnostics_per_ip_hour: 3000,
-            diagnostic_bytes_per_ip_hour: 8 * MIB,
-            todo_per_ip_day: 5,
-            storage_per_user_hour: 120,
             envelope_ttl_days: 30,
             blob_ttl_days: 30,
             blobs_per_user_day: 2000,
             blob_bytes_per_user_day: 2 * GIB,
             blob_bytes_stored_per_user: GIB,
-            blob_put_per_ip_minute: 120,
-            blob_get_per_ip_minute: 600,
-            groups_per_user_day: 100,
-            groups_per_ip_day: 200,
-            group_requests_per_ip_minute: 120,
-            credentials_per_ip_hour: 2000,
             reading_per_ip: 64,
         }
     }
@@ -152,44 +103,26 @@ impl Limits {
     /// No rate limit worth the name: for load tests from one address.
     pub fn unlimited() -> Self {
         Limits {
-            lookup_per_device_day: u32::MAX,
-            identity_lookup_per_device_day: u32::MAX,
+            expensive_per_ip_hour: u32::MAX,
+            anonymous_per_ip_minute: u32::MAX,
             signed_per_device_minute: u32::MAX,
-            deliver_per_ip_minute: u32::MAX,
+            lookup_per_device_day: u32::MAX,
             recipient_bytes_burst: u64::MAX,
             // Every push at once: tests count them one by one (pacing has its own tests).
             push_window_contact_ms: 0,
             push_window_request_ms: 0,
             push_backlog: u32::MAX,
-            anonymous_bytes_per_ip_hour: u64::MAX,
             db_min_free_bytes: 0,
-            register_per_ip_hour: u32::MAX,
-            name_check_per_ip_minute: u32::MAX,
             requests_per_pair: u64::MAX,
             request_recipients_per_sender: u64::MAX,
             requests_per_recipient: u64::MAX,
-            backup_per_ip_hour: u32::MAX,
-            report_per_install_day: u32::MAX,
-            support_per_install_day: u32::MAX,
-            help_per_ip_day: u32::MAX,
-            diagnostics_per_install_hour: u32::MAX,
-            diagnostics_per_ip_hour: u32::MAX,
-            diagnostic_bytes_per_ip_hour: u64::MAX,
-            todo_per_ip_day: u32::MAX,
-            storage_per_user_hour: u32::MAX,
-            blob_put_per_ip_minute: u32::MAX,
-            blob_get_per_ip_minute: u32::MAX,
-            groups_per_user_day: u32::MAX,
-            groups_per_ip_day: u32::MAX,
-            group_requests_per_ip_minute: u32::MAX,
-            credentials_per_ip_hour: u32::MAX,
             reading_per_ip: u32::MAX,
             ..Limits::default()
         }
     }
 }
 
-/// Where blobs live and how much room they may take (spec 6.8).
+/// Where blobs live and how much room they may take (spec 4.3).
 #[derive(Debug, Clone)]
 pub struct BlobConfig {
     /// One file per blob in 256 directories, `tmp/` for uploads; not backed up: blobs are fleeting.
@@ -246,7 +179,7 @@ impl std::fmt::Debug for PlayKeys {
     }
 }
 
-/// The fewest characters (grapheme clusters) of a new username when `YO_NAME_MIN` sets none (spec 3.3). Only the hub
+/// The fewest characters (grapheme clusters) of a new username when `YO_NAME_MIN` sets none (spec 2.2). Only the hub
 /// has a least: the apps show its `400`.
 pub const NAME_MIN: usize = 3;
 
@@ -276,15 +209,15 @@ pub struct Config {
     pub apns: Option<ApnsConfig>,
     pub fcm: Option<FcmConfig>,
     pub blobs: BlobConfig,
-    /// The oldest build per platform (`YO_MIN_APP` "ios/202611140619,android/12"): older gets `426` (spec 6.3).
+    /// The oldest build per platform (`YO_MIN_APP` "ios/202611140619,android/12"): older gets `426` (spec 4.1).
     pub min_app: Vec<(String, u64)>,
-    /// The fewest grapheme clusters of a username (`YO_NAME_MIN`, default `NAME_MIN`, spec 3.3): new names only.
+    /// The fewest grapheme clusters of a username (`YO_NAME_MIN`, default `NAME_MIN`, spec 2.2): new names only.
     pub name_min: usize,
-    /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`): it signs answers handing out keys (spec 6.10).
+    /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`): it signs answers handing out keys (spec 4.1).
     pub hub_key: [u8; 32],
-    /// The server key and its certificate by the trust root (`YO_SERVER_CERT_FILE`, spec 6.1).
+    /// The server key and its certificate by the trust root (`YO_SERVER_CERT_FILE`, spec 4.1).
     pub server_certificate: Vec<u8>,
-    /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, spec 4.9).
+    /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, spec 3.4).
     pub zk_params: Vec<u8>,
     /// The operator's bot accounts (`YO_BOT_ACCOUNTS` "YoGPT:USERHEX,PING:USERHEX"), a stopgap: no rate limits per
     /// device or user, and what they send counted apart (`bot-yo`, `bot-media`, `bot-media:LABEL`), out of the Yo counts.
@@ -373,7 +306,7 @@ pub fn app(text: &str) -> Option<(String, u64)> {
     Some((platform.to_owned(), build.parse().ok()?))
 }
 
-/// A `Yo-App` header (spec 6.3): `PLATFORM/BUILD`, then optionally a space and the app's version ("ios/202611241344
+/// A `Yo-App` header (spec 4.1): `PLATFORM/BUILD`, then optionally a space and the app's version ("ios/202611241344
 /// 1.0.0-RC36"): the app and the version, if it is one (1 to 32 of `0-9A-Za-z.+-`; another is left out).
 pub fn app_header(text: &str) -> Option<(&str, Option<&str>)> {
     let (named, version) = match text.split_once(' ') {

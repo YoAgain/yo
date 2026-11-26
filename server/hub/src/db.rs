@@ -23,7 +23,7 @@ const HOUR_MS: u64 = 3600 * 1000;
 pub fn to_the_hour(ms: u64) -> u64 {
     ms - ms % HOUR_MS
 }
-/// How long a crash or error group is kept after it was last seen, and an install's occurrence of one (spec 4.2).
+/// How long a crash or error group is kept after it was last seen, and an install's occurrence of one (spec 4).
 const DIAGNOSTICS_KEPT_DAYS: u64 = 90;
 /// Levels (`levels`) are kept by the hour this long, then one a day for good.
 const LEVELS_HOURLY_DAYS: u64 = 30;
@@ -32,7 +32,7 @@ const NOT_READY_KEPT_MS: u64 = 3600 * 1000;
 
 pub type Key = [u8; KEY_LEN];
 
-/// An install id (spec 4.2): 16 random bytes a phone makes for help, never tied to an account.
+/// An install id (spec 4): 16 random bytes a phone makes for help, never tied to an account.
 pub type Install = [u8; 16];
 
 /// A user's storage (spec 4.3): its version and its sealed bytes.
@@ -108,7 +108,7 @@ pub struct Wake {
     pub device_id: DeviceId,
     pub push_platform: u8,
     pub push_token: Vec<u8>,
-    /// A bot's device (`is_bot_app`): its Yos are counted apart (`yo-in-bot`, 6.6).
+    /// A bot's device (`is_bot_app`): its Yos are counted apart (`yo-in-bot`, 1).
     pub bot: bool,
     /// Envelopes waiting for the device (unfetched) after this delivery: past `push_backlog` its pushes slow down.
     pub waiting: u32,
@@ -325,7 +325,7 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
 }
 
 /// Removes a user and everything about it; its devices answer 410. Reports about it go; help by install ids (spec
-/// 6.4) names no account and stays.
+/// 4) names no account and stays.
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
@@ -396,7 +396,7 @@ fn network_errors_sql() -> String {
     format!("NOT ({})", each.join(" OR "))
 }
 
-/// A problem's identity (spec 4.2), without the build: kind and domain, code and place (errors), or exception, top
+/// A problem's identity (spec 4), without the build: kind and domain, code and place (errors), or exception, top
 /// frames and termination (crashes). The builds it came in are counted apart (`diagnostic_builds`).
 fn diagnostic_signature(kind: &str, payload: &serde_json::Value) -> String {
     let field = |name| payload[name].as_str().unwrap_or("");
@@ -753,36 +753,6 @@ impl Db {
         })
     }
 
-    /// Claims a username for a device's user, giving up its old one; `None` only gives it up.
-    pub fn set_username(&self, device: &DeviceId, name: Option<(&[u8], &str)>) -> rusqlite::Result<Write<()>> {
-        self.as_device(device, |tx, user| {
-            let user = &user;
-            if let Some((skeleton, _)) = name {
-                let owner: Option<UserId> = row(
-                    tx,
-                    "SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2",
-                    params![KIND_USERNAME, skeleton],
-                    |row| array(row.get(0)?),
-                )?;
-                let taken = match owner {
-                    Some(owner) => owner != *user,
-                    None => is_reserved(tx, skeleton)?,
-                };
-                if taken {
-                    return Ok(Write::Refused(Conflict::UsernameTaken));
-                }
-            }
-            tx.execute("DELETE FROM handles WHERE user_id = ?1 AND kind = ?2", params![user, KIND_USERNAME])?;
-            if let Some((skeleton, spelling)) = name {
-                tx.execute(
-                    "INSERT INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
-                    params![KIND_USERNAME, skeleton, user, spelling],
-                )?;
-            }
-            Ok(Write::Done(()))
-        })
-    }
-
     /// A user's profile key check (spec 3.3), at once: the one before does no more.
     /// Written as `device`, which must still be there (a replaced one is `410`).
     pub fn set_bot(&self, device: &DeviceId, bot: bool) -> rusqlite::Result<Write<()>> {
@@ -909,7 +879,7 @@ impl Db {
         })
     }
 
-    /// Deletes a device's account (spec 4.1) with everything about it (`remove_user`).
+    /// Deletes a device's account (spec 4.2) with everything about it (`remove_user`).
     pub fn delete_account(&self, device: &DeviceId, now: u64) -> rusqlite::Result<Write<()>> {
         self.as_device(device, |tx, user| {
             remove_user(tx, &user, now)?;
@@ -1079,7 +1049,7 @@ impl Db {
         Ok(())
     }
 
-    /// One signed request (4.10) a sender sent, counted in its hour; kept 25 hours, for the operator's Users page
+    /// One signed request (3.3) a sender sent, counted in its hour; kept 25 hours, for the operator's Users page
     /// ("Requests 24h"). Only requests: a contact's delivery is sealed and never counted by sender.
     pub fn count_request(&self, sender: &UserId, now: u64) -> rusqlite::Result<()> {
         let hour = (now / 3_600_000) as i64;
@@ -1093,7 +1063,7 @@ impl Db {
         Ok(())
     }
 
-    /// Events counted in the minute of `now`, `(kind, n)`: counts only, nothing of who or what (6.6).
+    /// Events counted in the minute of `now`, `(kind, n)`: counts only, nothing of who or what (1).
     pub fn count_events(&self, now: u64, counts: &[(&str, u64)]) -> rusqlite::Result<()> {
         let minute = (now / 60_000) as i64;
         let conn = self.conn();
@@ -1107,7 +1077,7 @@ impl Db {
         Ok(())
     }
 
-    /// The levels at `now` into its hour (`levels`), counts only, nothing of who or what (6.6): the hourly sample
+    /// The levels at `now` into its hour (`levels`), counts only, nothing of who or what (1): the hourly sample
     /// keeps an hour's first (a restart within the hour takes none); `problems_only` the open problems alone, right
     /// after one is marked done, replacing the hour's.
     pub fn sample_levels(&self, now: u64, problems_only: bool) -> rusqlite::Result<()> {
@@ -1706,7 +1676,7 @@ impl Db {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
         let messages = conn.execute("DELETE FROM messages WHERE received_at < ?1", [before])?;
-        // Crash and error groups not seen for 90 days go, with their uuids and installs (spec 4.2).
+        // Crash and error groups not seen for 90 days go, with their uuids and installs (spec 4).
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
         conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
         conn.execute("DELETE FROM diagnostic_installs WHERE day < ?1", [(kept / DAY_MS) as i64])?;
@@ -1714,7 +1684,7 @@ impl Db {
             "DELETE FROM diagnostic_hours WHERE hour < ?1",
             [(now.saturating_sub(8 * DAY_MS) / 3_600_000) as i64],
         )?;
-        // Levels older than 30 days: the day's last alone (the one at the next midnight, UTC; spec 4.1).
+        // Levels older than 30 days: the day's last alone (the one at the next midnight, UTC; spec 1).
         conn.execute(
             "DELETE FROM levels WHERE hour < ?1 AND EXISTS (SELECT 1 FROM levels l WHERE l.kind = levels.kind
              AND l.hour > levels.hour AND l.hour <= ((levels.hour - 1) / 24 + 1) * 24)",
@@ -2134,7 +2104,7 @@ mod tests {
         assert_eq!(rows[0]["builds"], serde_json::json!([["ios/2", 101, 110], ["ios/3", 1, 111]]));
     }
 
-    /// A problem marked done comes back with a report of a newer build than any it was marked done in (spec 4.2);
+    /// A problem marked done comes back with a report of a newer build than any it was marked done in (spec 4);
     /// the builds it had stay done, an expected one stays a count.
     #[test]
     fn a_done_problem_reopens_in_a_newer_build() {
@@ -2169,7 +2139,7 @@ mod tests {
         assert_eq!(db.diagnostics().unwrap()[0]["done"], true);
     }
 
-    /// Groups of one problem in several builds, from before its identity lost the build, become one (spec 4.2).
+    /// Groups of one problem in several builds, from before its identity lost the build, become one (spec 4).
     #[test]
     fn the_groups_of_one_problem_in_several_builds_become_one() {
         let dir = std::env::temp_dir().join(format!("yo-problems-{}-{}", std::process::id(), crate::now_ms()));
@@ -2335,11 +2305,6 @@ mod tests {
         // A new phone registering the name in another spelling keeps the spelling the user has.
         assert_eq!(user(register(&db, b"yogpt", 1, 3, 0)), gpt);
         assert_eq!(spelling(&db, "YoGPT").as_deref(), Some("YoGPT"));
-        // Its owner may write it otherwise; nobody else may take it.
-        assert!(matches!(db.set_username(&[3; 16], Some((b"YOGPT", "YOgpt"))).unwrap(), Write::Done(())));
-        assert_eq!(spelling(&db, "yogpt").as_deref(), Some("YOgpt"));
-        let mia = user(register(&db, b"Mia", 4, 4, 0));
-        assert!(matches!(db.set_username(&mia, Some((b"YOGPT", "Y0GPT"))).unwrap(), Write::Refused(_)));
     }
 
     #[test]
@@ -2350,9 +2315,9 @@ mod tests {
         db.set_reserved_enabled(false).unwrap();
         assert_eq!(db.reserved_state().unwrap()["names"].as_array().unwrap().len(), 2);
         assert!(!db.username_taken(b"ADMIN").unwrap());
-        let owner = user(register(&db, b"Admin", 1, 1, 0));
+        user(register(&db, b"Admin", 1, 1, 0));
         assert!(db.username_taken(b"ADMIN").unwrap(), "a holder still takes the name while off");
-        assert!(matches!(db.set_username(&owner, Some((b"SUPPORT", "Support"))).unwrap(), Write::Done(())));
+        assert!(matches!(db.delete_account(&[1; 16], 0).unwrap(), Write::Done(())));
         db.set_reserved_enabled(true).unwrap();
         assert!(db.username_taken(b"ADMIN").unwrap());
         assert!(matches!(register(&db, b"Admin", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
@@ -2657,12 +2622,9 @@ mod tests {
             );
             assert!(db.username_taken(yoip::net::handle::skeleton(name).as_bytes()).unwrap(), "{name}");
         }
-        let mia = user(register(&db, b"Mia", 3, 3, 0));
-        assert!(matches!(db.set_username(&mia, Some((b"SUPPORT", "support"))).unwrap(), Write::Refused(_)));
-        // Who had the name before it was reserved keeps it: found, registered again on a new phone, written anew.
+        // Who had the name before it was reserved keeps it: found, registered again on a new phone.
         assert_eq!(spelling(&db, "moderator").as_deref(), Some("Moderator"));
         assert_eq!(user(register(&db, b"Moderator", 1, 4, 0)), mod_user);
-        assert!(matches!(db.set_username(&[4; 16], Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
     }
 
     /// A database of schema 1 (the hubs of MLS chats, also one from before spellings and the backups' auth keys):
@@ -2909,8 +2871,7 @@ mod tests {
     #[test]
     fn a_restore_finds_its_user_by_the_account_key_whatever_name_it_had() {
         let db = Db::open(":memory:").unwrap();
-        let leo = user(register(&db, b"LEO", 1, 1, 0));
-        assert!(matches!(db.set_username(&[1; 16], Some((b"LEON", "Leon"))).unwrap(), Write::Done(())));
+        let leo = user(register(&db, b"Leon", 1, 1, 0));
         // The old name free: the restore does not take it back.
         assert!(
             matches!(register(&db, b"LEO", 1, 2, 0), Write::Done((user, Some(name), _)) if user == leo && name == "Leon")
@@ -2925,7 +2886,7 @@ mod tests {
         assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, mia, "the stranger keeps the name and the device");
         assert!(db.is_gone(&[2; 16]).unwrap());
         // No name at all: the same user, without one.
-        assert!(matches!(db.set_username(&[4; 16], None).unwrap(), Write::Done(())));
+        db.conn().execute("DELETE FROM handles WHERE user_id = ?1", [leo]).unwrap();
         assert!(matches!(register(&db, b"LEON", 1, 5, 0), Write::Done((user, None, _)) if user == leo));
     }
 
@@ -3033,13 +2994,11 @@ mod tests {
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         user(register(&db, b"LEO", 1, 2, 0));
         let gone = |w: Write<()>| matches!(w, Write::Refused(Conflict::DeviceGone));
-        assert!(gone(db.set_username(&[1; 16], Some((b"OLD", "OLD"))).unwrap()));
         assert_eq!(spelling(&db, "LEO").as_deref(), Some("LEO"), "the name stays the new phone's");
         assert!(gone(db.add_prekeys(&[1; 16], &prekeys(1), 100).unwrap()));
         assert!(gone(db.set_push(&[1; 16], 1, b"ab").unwrap()));
         // Deleted: nothing is written for a user that is no more.
         assert!(matches!(db.delete_account(&[2; 16], 1).unwrap(), Write::Done(())));
-        assert!(gone(db.set_username(&[2; 16], Some((b"LEO", "LEO"))).unwrap()));
         assert!(gone(db.add_prekeys(&[2; 16], &prekeys(1), 100).unwrap()));
         assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
         assert!(!db.username_taken(b"LEO").unwrap());

@@ -535,7 +535,7 @@ enum Keychain {
 }
 
 extension Data {
-  /// base64url without padding (spec 4.1).
+  /// base64url without padding (spec 1.3).
   init?(base64URL text: String) {
     var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
     plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)

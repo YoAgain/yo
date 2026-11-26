@@ -75,12 +75,15 @@ fn a_strangers_yo_is_a_request_that_tells_nothing_until_accepted() {
     assert_eq!(accepted(&b, &a), Some(false));
     assert_eq!(deliveries(&hb, &a), 0, "no receipt, no name, no key to a stranger");
     assert!(!named(&a.sync(0).unwrap(), &b));
-    // Accepted: a contact; the name, the receipt and the key go.
+    // Accepted: a contact; the receipt and the key go.
     b.accept(a.user_id()).unwrap();
     assert_eq!(accepted(&b, &a), Some(true));
     assert!(deliveries(&hb, &a) > 0);
     let events = a.sync(0).unwrap();
-    assert!(named(&events, &b), "{events:?}");
+    assert!(!named(&events, &b), "{events:?}");
+    let sent = deliveries(&hb, &a);
+    b.set_name("NEW").unwrap();
+    assert_eq!(deliveries(&hb, &a), sent, "changing the local name sends no Profile");
     // The sender wrote first: B was accepted on A's side all along.
     assert_eq!(accepted(&a, &b), Some(true));
 }
@@ -139,7 +142,7 @@ fn writing_first_accepts_and_a_reply_accepts_too() {
     assert_eq!(accepted(&b, &a), Some(true));
     let events = a.sync(0).unwrap();
     assert_eq!(yos(&events, &b), 1);
-    assert!(named(&events, &b), "{events:?}");
+    assert!(!named(&events, &b), "{events:?}");
 }
 
 #[test]
@@ -207,6 +210,7 @@ fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
     friends(&mut a, &mut b, &pb);
     // A spammer: 3 requests at once to B (its key, then a Yo each), the rest waits with it.
     let (mut s, _, _) = account(&hub, "SPAM");
+    s.maintenance().unwrap();
     for _ in 0..4 {
         s.send_yo(&pb).unwrap();
     }
@@ -235,7 +239,7 @@ fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
     assert_eq!(yos(&d.sync(0).unwrap(), &s), 0);
 }
 
-/// The request limits are buckets that refill evenly (spec 3.3): past them `429` with `Retry-After`, for that
+/// The request limits are buckets that refill evenly (spec 4.1): past them `429` with `Retry-After`, for that
 /// recipient only; after the wait the rest goes, and a key that comes lets it all go at once, as a contact's.
 #[test]
 fn a_request_past_its_bucket_waits_its_retry_after_and_holds_no_one_else() {
@@ -244,13 +248,18 @@ fn a_request_past_its_bucket_waits_its_retry_after_and_holds_no_one_else() {
     let (mut b, _, pb) = account(&hub, "BOB");
     let (mut c, _, pc) = account(&hub, "CAROL");
     let (mut s, hs, _) = account(&hub, "SAM");
-    settle(&mut [&mut b, &mut c]);
+    settle(&mut [&mut s, &mut b, &mut c]);
+    let store = Arc::new(yo_core::Memory::default());
+    s.persist_to(store.clone(), [3; 32]).unwrap();
     // Its key and 2 Yos: 3 requests; the next 2 Yos wait.
     for _ in 0..4 {
         s.send_yo(&pb).unwrap();
     }
     assert_eq!(s.waiting(), 2);
     let refused = hs.recorded.lock().unwrap().len();
+    s = Client::restore(hs.clone(), &store.last().unwrap()).unwrap();
+    s.set_hub_keys(vec![yo_tests::hub_key()]);
+    assert!(s.request_held(b.user_id()));
     // Another recipient is not held; nor is B tried again before its time.
     s.send_yo(&pc).unwrap();
     assert_eq!(yos(&c.sync(0).unwrap(), &s), 1);
@@ -280,7 +289,7 @@ fn a_request_past_its_bucket_waits_its_retry_after_and_holds_no_one_else() {
 fn a_blocked_contact_loses_sealed_delivery_at_once_the_others_keep_it() {
     let hub = TestHub::start();
     let (mut a, _, _) = account(&hub, "ALICE");
-    let (mut b, _, pb) = account(&hub, "BOB");
+    let (mut b, hb, pb) = account(&hub, "BOB");
     let (mut c, hc, _) = account(&hub, "CAROL");
     friends(&mut a, &mut b, &pb);
     friends(&mut c, &mut b, &pb);
@@ -291,7 +300,21 @@ fn a_blocked_contact_loses_sealed_delivery_at_once_the_others_keep_it() {
     assert_eq!(c.waiting(), 1);
     // The block takes the old key at once: the blocked one is refused, then goes as a request, taken by the hub and
     // dropped unseen by B's device.
+    hb.fault(api::ACCESS_KEY, Fault::Answer(503));
+    let before = hb.sent.lock().unwrap().len();
     b.set_blocked(a.user_id(), true).unwrap();
+    assert!(b.deliver_begin().unwrap().is_empty());
+    assert!(!hb.sent.lock().unwrap()[before..].iter().any(|(_, p, _)| p.starts_with("/v1/inbox/")));
+    let before = hb.sent.lock().unwrap().len();
+    b.maintenance().unwrap();
+    {
+        let sent = hb.sent.lock().unwrap();
+        let after = &sent[before..];
+        let published = after.iter().position(|(m, p, _)| m == "PUT" && p == api::ACCESS_KEY).unwrap();
+        let path = api::deliver_path(&user_id(c.user_id()));
+        let delivered = after.iter().position(|(m, p, _)| m == "POST" && p == &path).unwrap();
+        assert!(published < delivered);
+    }
     a.send_yo(&pb).unwrap();
     a.sync(0).unwrap();
     a.after_sync().unwrap();

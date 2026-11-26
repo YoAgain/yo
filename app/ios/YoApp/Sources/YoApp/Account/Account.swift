@@ -1211,7 +1211,7 @@ enum RecoveryWords {
   private static func key(_ data: Data) -> String? { RecoveryCode.parse(String(decoding: data, as: UTF8.self)) }
 }
 
-/// Accounts in the iCloud Keychain (spec 2.4): bring one back after reinstall or on a new iPhone, and list them on Sign
+/// Accounts in the iCloud Keychain (spec 5.1): bring one back after reinstall or on a new iPhone, and list them on Sign
 /// In. One item per hub and user id; signed-out items stay, marked, and are never restored silently.
 enum SyncedAccount {
   typealias Item = SyncedItem

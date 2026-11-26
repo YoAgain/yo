@@ -198,12 +198,12 @@ fn register_add_a_friend_and_yo_both_ways() {
     a.send_yo(b.name.clone()).unwrap();
     let events = b.drain();
     assert!(events.contains(&YoEvent::NewChat { user: a.user() }));
-    assert!(events.contains(&YoEvent::Profile { user: a.user(), name: "ALICE".into() }));
+    assert!(!events.iter().any(|e| matches!(e, YoEvent::Profile { .. })));
     assert_eq!(yos(&events, &a.user()), 1);
     b.send_yo(a.user()).unwrap();
     let events = a.drain();
     assert_eq!(yos(&events, &b.user()), 1);
-    assert!(events.contains(&YoEvent::Profile { user: b.user(), name: "BOB".into() }));
+    assert!(!events.iter().any(|e| matches!(e, YoEvent::Profile { .. })));
     assert!(!events.iter().any(|e| matches!(e, YoEvent::NewChat { .. })), "A wrote first: no new chat for A");
     for (me, peer) in [(&a, &b), (&b, &a)] {
         let sessions = me.sessions_with(peer.user()).unwrap();
@@ -651,13 +651,13 @@ fn silent_receipts_heal_a_one_way_stream() {
     };
     a.send_yo(b.user()).unwrap();
     a.send_yo(b.user()).unwrap();
-    assert_eq!(kinds(&a, &b), [1, 1, 1], "the name and two Yos, unacknowledged: prekey messages");
+    assert_eq!(kinds(&a, &b), [1, 1], "two Yos, unacknowledged: prekey messages");
     assert_eq!(yos(&b.drain(), &a.user()), 2);
     assert!(b.contacts().iter().any(|c| c.user == a.user() && !c.accepted), "a request");
     // B says yes (spec 3.3): from now on receipts. A takes in B's receipt: nothing to show.
     b.accept(a.user()).unwrap();
     let events = a.drain();
-    assert!(events.iter().all(|e| matches!(e, YoEvent::Profile { .. })), "{}", describe(&events));
+    assert!(events.is_empty(), "{}", describe(&events));
     let ratchets = |a: &Phone, b: &Phone| -> Vec<Vec<u8>> {
         posted(&a.http, &b.user())
             .iter()
@@ -796,7 +796,7 @@ fn a_friend_who_must_update_gets_what_waited_once_prekeys_appear() {
     assert!(matches!(a.send_yo(b.name.clone()), Err(YoError::Outdated)));
     assert!(matches!(a.send_yo(b.user()), Err(YoError::Outdated)));
     assert!(a.contacts().iter().any(|c| c.user == b.user() && c.outdated));
-    assert_eq!(a.waiting(), 3, "the name and both Yos wait");
+    assert_eq!(a.waiting(), 2, "both Yos wait");
     assert_eq!(yos(&b.drain(), &a.user()), 0);
     // Updated: its prekeys are there. Asked again at most hourly.
     updated();

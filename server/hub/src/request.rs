@@ -1,4 +1,4 @@
-//! What every route shares: admission of a request, its signature (spec 6.2), its limits (spec 6.6), small parsers.
+//! What every route shares: admission of a request, its signature (spec 4.1), its limits (spec 4.1), small parsers.
 
 use crate::error::{self, refuse, Refusal, Res};
 use crate::{config, Hub};
@@ -31,8 +31,8 @@ const BODY_DEADLINE: Duration = Duration::from_secs(20);
 
 // ---- middleware ----
 
-/// An app older than `YO_MIN_APP` for its platform gets `426` on every request (spec 6.3).
-/// Every answer counted, and its class (4xx, 429, 5xx): counts only, nothing of the request (6.6).
+/// An app older than `YO_MIN_APP` for its platform gets `426` on every request (spec 4.1).
+/// Every answer counted, and its class (4xx, 429, 5xx): counts only, nothing of the request (1).
 /// A `429` is also logged, with what the operator needs to find the limit and nothing of who: the method, the route's
 /// first two parts (`/v1/inbox/*`: never a name or id) and the refusal's scope (`device`, `bytes 12`).
 pub(crate) async fn counted(State(hub): Hubs, request: Request, next: Next) -> Response {
@@ -71,11 +71,11 @@ pub(crate) async fn too_old(State(hub): Hubs, request: Request, next: Next) -> R
     next.run(request).await
 }
 
-/// Before a body is read (spec 6.6): too large is `413` at once, beyond `Limits::reading_per_ip` or `READING_AT_ONCE` `503`,
+/// Before a body is read (spec 4.1): too large is `413` at once, beyond `Limits::reading_per_ip` or `READING_AT_ONCE` `503`,
 /// too slow `408`.
 pub(crate) async fn admit(State(hub): Hubs, request: Request, next: Next) -> Response {
     let said = header(request.headers(), CONTENT_LENGTH).and_then(|v| v.parse::<usize>().ok());
-    // A delivery carries an envelope per device (spec 4.4); its own envelopes are checked there.
+    // A delivery carries an envelope per device (spec 3.2); its own envelopes are checked there.
     let path = request.uri().path();
     let most = if request.method() == axum::http::Method::POST
         && path.starts_with(&format!("{}/", api::INBOX))
@@ -127,7 +127,7 @@ pub(crate) async fn off_workers(State(hub): Hubs, request: Request, next: Next) 
     handled.unwrap_or_else(IntoResponse::into_response)
 }
 
-// ---- signed requests (spec 6.2) ----
+// ---- signed requests (spec 4.1) ----
 
 /// A device that signed its request.
 pub(crate) struct Signed {
@@ -157,7 +157,7 @@ pub(crate) fn signature_of(headers: &HeaderMap, now: u64) -> Option<(u64, [u8; 6
     (now.abs_diff(time) <= limits::MAX_SKEW_MS).then_some((time, signature))
 }
 
-/// `401`; for a time outside the window with the hub's time (spec 6.2), so the device corrects its clock by it.
+/// `401`; for a time outside the window with the hub's time (spec 4.1), so the device corrects its clock by it.
 fn out_of_window(headers: &HeaderMap, now: u64) -> Refusal {
     match header(headers, HEADER_TIME).and_then(|t| t.parse::<u64>().ok()) {
         Some(time) if now.abs_diff(time) > limits::MAX_SKEW_MS => {
@@ -172,7 +172,7 @@ impl Hub {
         self.authenticate_hash(method, uri, headers, &sha256(body))
     }
 
-    /// `authenticate` by the body's hash, before the body is there (a blob, spec 6.8).
+    /// `authenticate` by the body's hash, before the body is there (a blob, spec 4.3).
     pub(crate) fn authenticate_hash(
         &self,
         method: &Method,
@@ -213,7 +213,7 @@ impl Hub {
         self.replay.first_time(*signer, *signature, now, time + limits::MAX_SKEW_MS + 1)
     }
 
-    /// An answer that hands out keys, signed with the hub's key when the request asks with a nonce (spec 6.10).
+    /// An answer that hands out keys, signed with the hub's key when the request asks with a nonce (spec 4.1).
     pub(crate) fn signed_answer(
         &self,
         headers: &HeaderMap,
@@ -230,64 +230,38 @@ impl Hub {
         answer
     }
 
-    // ---- limits (spec 6.6) ----
+    // ---- limits (spec 4.1) ----
 
-    pub(crate) fn limit(&self, key: String, per: u32, window: Duration) -> Res<()> {
-        match self.limiter.allow(key, per, window) {
+    fn limit(&self, key: String, per: u32, window: Duration) -> bool {
+        self.limiter.allow(key, per, window)
+    }
+
+    /// A signed request's limit by `kind` and an id of `signed`'s; none for the operator's bot accounts.
+    pub(crate) fn limit_signed(&self, signed: &Signed, kind: &str, id: &[u8], per: u32, window: Duration) -> Res<()> {
+        match self.bot(&signed.user_id).is_some() || self.limit(format!("{kind}:{}", b64(id)), per, window) {
             true => Ok(()),
             false => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         }
     }
 
-    /// A limit per device or user of a signed request, `id` one of `signed`'s; none for the operator's bot accounts.
-    pub(crate) fn limit_signed(&self, signed: &Signed, kind: &str, id: &[u8], per: u32, window: Duration) -> Res<()> {
-        if self.bot(&signed.user_id).is_some() {
-            return Ok(());
-        }
-        self.limit_by(kind, id, per, window)
-    }
-
-    /// A limit per device or user: `kind` and the id name its bucket.
-    pub(crate) fn limit_by(&self, kind: &str, id: &[u8], per: u32, window: Duration) -> Res<()> {
-        self.limit(format!("{kind}:{}", b64(id)), per, window)
-    }
-
     /// A limit per address, except for the server's own services (YoGPT: one address, many users).
-    pub(crate) fn limit_ip(
-        &self,
-        kind: &str,
-        peer: SocketAddr,
-        headers: &HeaderMap,
-        per: u32,
-        window: Duration,
-    ) -> Res<()> {
-        if self.own_service(peer, headers) {
-            return Ok(());
-        }
-        self.limit(format!("{kind}:ip:{}", self.ip(peer, headers)), per, window)
+    fn limit_ip(&self, kind: &str, peer: SocketAddr, headers: &HeaderMap, per: u32, window: Duration) -> bool {
+        self.own_service(peer, headers) || self.limit(format!("{kind}:ip:{}", self.ip(peer, headers)), per, window)
     }
 
-    /// Bytes stored without identity, per address (deliveries stay up to `envelope_ttl_days`).
-    pub(crate) fn limit_ip_bytes(&self, peer: SocketAddr, headers: &HeaderMap, bytes: usize) -> Res<()> {
-        self.limit_ip_bytes_as("bytes", peer, headers, bytes, self.config.limits.anonymous_bytes_per_ip_hour)
-    }
-
-    /// Bytes per address an hour in the bucket `kind`, `per` of them.
-    pub(crate) fn limit_ip_bytes_as(
-        &self,
-        kind: &str,
-        peer: SocketAddr,
-        headers: &HeaderMap,
-        bytes: usize,
-        per: u64,
-    ) -> Res<()> {
-        if self.own_service(peer, headers) {
-            return Ok(());
-        }
-        let key = format!("{kind}:ip:{}", self.ip(peer, headers));
-        match self.limiter.allow_n(key, bytes as u64, per, HOUR) {
+    /// An unsigned request, of every route, by address: `429` `ip`.
+    pub(crate) fn limit_anonymous(&self, peer: SocketAddr, headers: &HeaderMap) -> Res<()> {
+        match self.limit_ip("anonymous", peer, headers, self.config.limits.anonymous_per_ip_minute, MINUTE) {
             true => Ok(()),
-            false => Err(error::limited("bytes", None)),
+            false => Err(error::limited("ip", None)),
+        }
+    }
+
+    /// An expensive request by address (a registration, a failed backup fetch): `429`.
+    pub(crate) fn limit_expensive(&self, peer: SocketAddr, headers: &HeaderMap) -> Res<()> {
+        match self.limit_ip("expensive", peer, headers, self.config.limits.expensive_per_ip_hour, HOUR) {
+            true => Ok(()),
+            false => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         }
     }
 
@@ -366,7 +340,7 @@ pub(crate) fn query<T: std::str::FromStr>(uri: &Uri, name: &str) -> Option<T> {
     uri.query()?.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))?.parse().ok()
 }
 
-/// The app a request names (`Yo-App`, spec 6.3), if it is one, and its version, if it names one.
+/// The app a request names (`Yo-App`, spec 4.1), if it is one, and its version, if it names one.
 pub(crate) fn named_app(headers: &HeaderMap) -> Option<(&str, Option<&str>)> {
     header(headers, api::HEADER_APP).and_then(config::app_header)
 }

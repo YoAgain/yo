@@ -100,7 +100,7 @@ pub fn take_place(places: &Arc<Places>, key: [u8; 16], most: u32, all: Option<u3
     free.then(|| Place { places: places.clone(), key })
 }
 
-/// Requests' buckets (spec 3.3) by kind (0 pair, 1 new recipients, 2 recipient) and key: tokens, and when (ms).
+/// Requests' buckets (spec 4.1) by kind (0 pair, 1 new recipients, 2 recipient) and key: tokens, and when (ms).
 type Buckets = HashMap<(u8, Vec<u8>), (f64, u64)>;
 
 pub struct Requests {

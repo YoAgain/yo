@@ -1,11 +1,11 @@
-//! Photos and videos (spec 6.8): one file each, streamed in and out, never held whole in memory.
+//! Photos and videos (spec 4.3): one file each, streamed in and out, never held whole in memory.
 
 use crate::config::BlobConfig;
 use crate::db::{BlobPut, Db};
 use crate::error::{refuse, Refusal, Res};
 use crate::limiter::{take_place, Place, Places};
 use crate::now_ms;
-use crate::request::{b64_array, bad, header, octets, path_id, query, Hubs, Peer, DAY_MS, MINUTE};
+use crate::request::{b64_array, bad, header, octets, path_id, query, Hubs, Peer, DAY_MS};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -295,7 +295,6 @@ const UPLOAD_TIME: Duration = Duration::from_secs(300);
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn put_blob(
     State(hub): Hubs,
-    ConnectInfo(peer): Peer,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -316,20 +315,18 @@ pub(crate) async fn put_blob(
     if size < 16 {
         return Err(bad());
     }
-    // As many as the devices it can go to: while each account has one device, a group's and room (spec 6.8).
+    // As many as the devices it can go to: while each account has one device, a group's and room (spec 4.3).
     let most = if hub.config.add_devices { limits::MAX_BLOB_FETCHES } else { limits::MAX_BLOB_FETCHES_ONE_DEVICE };
     let fetches = query(&uri, "fetches").filter(|n| (1..=most).contains(n)).ok_or_else(bad)?;
     let body_hash: [u8; 32] = header(&headers, HEADER_BODY_HASH).and_then(b64_array).ok_or_else(bad)?;
-    let limits = &hub.config.limits;
-    hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;
     let (device, _claim, quota) = hub
         .blocking(move |hub| {
             let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
-            // Held before the body comes, so a second upload of the same id is "later" at once (spec 6.8).
+            // Held before the body comes, so a second upload of the same id is "later" at once (spec 4.3).
             let claim = hub.blobs.claim(id).ok_or_else(|| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
             match hub.db.blob_ready_state(&id)? {
                 Some(true) => return Err(refuse(StatusCode::CONFLICT)),
-                // Another upload of it is not done: "later", not "there" (spec 6.6).
+                // Another upload of it is not done: "later", not "there" (spec 4.3).
                 Some(false) => return Err(refuse(StatusCode::SERVICE_UNAVAILABLE)),
                 None => {}
             }
@@ -420,7 +417,7 @@ pub(crate) async fn get_blob(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Res<Response> {
-    hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    hub.limit_anonymous(peer, &headers)?;
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY_MS;
     let taking = hub.blocking(move |hub| hub.db.take_blob_get(&id, now_ms(), ttl)).await??;
@@ -442,7 +439,7 @@ pub(crate) async fn delete_blob(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Res<StatusCode> {
-    hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    hub.limit_anonymous(peer, &headers)?;
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY_MS;
     hub.blocking(move |hub| -> Res<()> {

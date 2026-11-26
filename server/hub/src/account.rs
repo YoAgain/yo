@@ -1,9 +1,9 @@
-//! An account and what its devices ask for themselves (spec 6.3, 6.4): registration, username, prekeys, lookup,
-//! sender certificates, push token, access key, storage (6.9), backup (7), deletion.
+//! An account and what its devices ask for themselves (spec 4.1, 4.2): registration, username, prekeys, lookup,
+//! sender certificates, push token, access key, storage (4.3), backup (2.4), deletion.
 
 use crate::db::{self, Key, NewDevice};
 use crate::error::{refuse, Refusal, Res};
-use crate::request::{bad, named_app, path_id, signature_of, Auth, Hubs, Peer, DAY, HOUR, MINUTE};
+use crate::request::{bad, named_app, path_id, signature_of, Auth, Hubs, Peer, DAY};
 use crate::{now_ms, Hub};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -14,7 +14,7 @@ use yoip::net::limits::{self, MAX_DEVICES, MAX_PREKEYS_PER_UPLOAD, PREKEY_TARGET
 use yoip::{decode, encode, net::api, sha256, UserId};
 
 impl Hub {
-    /// A username at least `YO_NAME_MIN` long (spec 3.3); shorter is `400`. Only new names are measured: a name
+    /// A username at least `YO_NAME_MIN` long (spec 2.2); shorter is `400`. Only new names are measured: a name
     /// someone has from before a higher least stays theirs.
     fn long_enough(&self, name: &[u8]) -> Res<()> {
         let name = std::str::from_utf8(name).map_err(|_| bad())?;
@@ -24,7 +24,7 @@ impl Hub {
         }
     }
 
-    /// A handle's value as the hub keeps it: a username by its skeleton (spec 3.3), so LE0 finds LEO.
+    /// A handle's value as the hub keeps it: a username by its skeleton (spec 2.2), so LE0 finds LEO.
     fn stored_handle(&self, handle: &Handle) -> Vec<u8> {
         match handle.kind {
             KIND_USERNAME => std::str::from_utf8(handle.value.as_slice())
@@ -54,13 +54,13 @@ impl Hub {
         }
     }
 
-    /// A registration id in libsignal's range (14 bits, not 0) and a canonical Curve25519 auth key (spec 4.1, 6.2).
+    /// A registration id in libsignal's range (14 bits, not 0) and a canonical Curve25519 auth key (spec 3.1, 4.2).
     pub(crate) fn device_keys_usable(registration_id: u32, auth_key: &Key) -> bool {
         (1..=0x3fff).contains(&registration_id) && yoip::curve_key_usable(auth_key)
     }
 }
 
-/// `POST /v1/register` (spec 6.4): first come, first served, limited per address; the current account key
+/// `POST /v1/register` (spec 4.2): first come, first served, limited per address; the current account key
 /// registers its user again.
 pub(crate) async fn post_register(
     State(hub): Hubs,
@@ -68,7 +68,7 @@ pub(crate) async fn post_register(
     headers: HeaderMap,
     body: Bytes,
 ) -> Res<Vec<u8>> {
-    hub.limit_ip("register", peer, &headers, hub.config.limits.register_per_ip_hour, HOUR)?;
+    hub.limit_expensive(peer, &headers)?;
     let request: api::Register = decode(&body)?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
@@ -111,14 +111,14 @@ pub(crate) async fn post_register(
     Ok(encode(&api::Registered { user_id, username: username.map(|name| name.into_bytes().into()), device_id }))
 }
 
-/// `GET /v1/username/{name}` (spec 6.3): `204` free, `409` taken or reserved, `400` no username; by skeleton.
+/// `GET /v1/username/{name}` (spec 2.2): `204` free, `409` taken or reserved, `400` no username; by skeleton.
 pub(crate) async fn get_username(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Res<StatusCode> {
-    hub.limit_ip("name", peer, &headers, hub.config.limits.name_check_per_ip_minute, MINUTE)?;
+    hub.limit_anonymous(peer, &headers)?;
     yoip::net::handle::check_username_form(&name)?;
     // Taken before too short: a name someone has from before a higher least is found, not refused.
     if hub.db.username_taken(yoip::net::handle::skeleton(&name).as_bytes())? {
@@ -128,29 +128,7 @@ pub(crate) async fn get_username(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `PUT /v1/username`: claims or gives up the account's username.
-pub(crate) async fn put_username(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
-    let request: api::SetUsername = decode(&body)?;
-    let spelling = match &request.username {
-        Some(name) => {
-            Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
-            let spelling = std::str::from_utf8(name.as_slice()).map_err(|_| bad())?;
-            // The account's own name in another spelling is no new name.
-            let owner = hub.db.username_owner(yoip::net::handle::skeleton(spelling).as_bytes())?;
-            if owner != Some(device.user_id) {
-                hub.long_enough(name.as_slice())?;
-            }
-            Some(spelling)
-        }
-        None => None,
-    };
-    let skeleton = spelling.map(yoip::net::handle::skeleton);
-    let name = skeleton.as_deref().zip(spelling).map(|(skeleton, spelling)| (skeleton.as_bytes(), spelling));
-    hub.db.set_username(&device.device_id, name)?.done()?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `PUT /v1/prekeys` (spec 4.1).
+/// `PUT /v1/prekeys` (spec 4.2).
 pub(crate) async fn put_prekeys(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
     let request: api::Prekeys = decode(&body)?;
     Hub::check_prekeys(&request, false)?;
@@ -158,7 +136,7 @@ pub(crate) async fn put_prekeys(State(hub): Hubs, Auth(device, body): Auth) -> R
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /v1/lookup` (spec 6.3): who a handle is, signed when asked (6.10).
+/// `POST /v1/lookup` (spec 3.1): who a handle is, signed when asked (4.1).
 pub(crate) async fn post_lookup(
     State(hub): Hubs,
     uri: Uri,
@@ -171,12 +149,9 @@ pub(crate) async fn post_lookup(
         return Err(bad());
     }
     let take = request.flags & api::LOOKUP_PREKEYS != 0;
-    let limits = &hub.config.limits;
-    match take {
-        true => hub.limit_signed(&device, "lookup", &device.device_id, limits.lookup_per_device_day, DAY)?,
-        false => {
-            hub.limit_signed(&device, "identity", &device.device_id, limits.identity_lookup_per_device_day, DAY)?
-        }
+    // One without prekeys counts as any signed request.
+    if take {
+        hub.limit_signed(&device, "lookup", &device.device_id, hub.config.limits.lookup_per_device_day, DAY)?;
     }
     let found = hub
         .db
@@ -201,7 +176,7 @@ pub(crate) async fn post_lookup(
     Ok(hub.signed_answer(&headers, uri.path(), &body, answer))
 }
 
-/// `GET /v1/certificate` (spec 6.1): a sender certificate for the signing device, good for a day.
+/// `GET /v1/certificate` (spec 4.1): a sender certificate for the signing device, good for a day.
 pub(crate) async fn get_certificate(State(hub): Hubs, Auth(device, _): Auth) -> Res<Vec<u8>> {
     let number = hub.db.device_number(&device.device_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
     let account_key = hub.db.account_key(&device.user_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
@@ -211,7 +186,7 @@ pub(crate) async fn get_certificate(State(hub): Hubs, Auth(device, _): Auth) -> 
     })
 }
 
-/// `PUT /v1/push` (spec 6.7).
+/// `PUT /v1/push` (spec 4.2).
 pub(crate) async fn put_push(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
     let request: api::Push = decode(&body)?;
     if request.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
@@ -221,7 +196,7 @@ pub(crate) async fn put_push(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `PUT /v1/bot` (spec 6.3): whether the account is a bot, for everyone who looks it up.
+/// `PUT /v1/bot` (spec 4.1): whether the account is a bot, for everyone who looks it up.
 pub(crate) async fn put_bot(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
     let bot = match body[..] {
         [0] => false,
@@ -232,7 +207,7 @@ pub(crate) async fn put_bot(State(hub): Hubs, Auth(device, body): Auth) -> Res<S
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `PUT /v1/access-key` (spec 4.10): the profile key check, and its commitment for groups (4.9).
+/// `PUT /v1/access-key` (spec 3.3): the profile key check, and its commitment for groups (3.4).
 pub(crate) async fn put_access_key(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
     let request: api::AccessKey = decode(&body)?;
     let commitment = request.commitment.as_slice();
@@ -245,7 +220,7 @@ pub(crate) async fn put_access_key(State(hub): Hubs, Auth(device, body): Auth) -
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `DELETE /v1/account` (spec 6.4): everything the hub holds about the account; its other devices answer `410`.
+/// `DELETE /v1/account` (spec 4.2): everything the hub holds about the account; its other devices answer `410`.
 pub(crate) async fn delete_account(State(hub): Hubs, Auth(device, _): Auth) -> Res<StatusCode> {
     let blobs = hub.db.blobs_of(&device.device_id)?;
     hub.db.delete_account(&device.device_id, now_ms())?.done()?;
@@ -257,11 +232,10 @@ pub(crate) async fn delete_account(State(hub): Hubs, Auth(device, _): Auth) -> R
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---- storage (spec 6.9) ----
+// ---- storage (spec 4.3) ----
 
 /// `GET /v1/storage`: `404` while there is none.
 pub(crate) async fn get_storage(State(hub): Hubs, Auth(device, _): Auth) -> Res<Vec<u8>> {
-    hub.limit_signed(&device, "storage", &device.user_id, hub.config.limits.storage_per_user_hour, HOUR)?;
     let (version, data) = hub.db.storage(&device.user_id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     Ok(encode(&api::Storage { version, data: data.into() }))
 }
@@ -275,7 +249,6 @@ pub(crate) async fn put_storage(State(hub): Hubs, Auth(device, body): Auth) -> R
     if request.data.as_slice().is_empty() {
         return Err(bad());
     }
-    hub.limit_signed(&device, "storage", &device.user_id, hub.config.limits.storage_per_user_hour, HOUR)?;
     let stored = hub.db.put_storage(&device.device_id, request.version, request.data.as_slice(), now_ms())?.done()?;
     if let Err((version, data)) = stored {
         return Err(Refusal(StatusCode::CONFLICT, encode(&api::Storage { version, data: data.into() })));
@@ -283,7 +256,7 @@ pub(crate) async fn put_storage(State(hub): Hubs, Auth(device, body): Auth) -> R
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---- backup (spec 7) ----
+// ---- backup (spec 2.4) ----
 
 /// `PUT /v1/backup`: the account's backup record, replacing the one before.
 pub(crate) async fn put_backup(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
@@ -317,7 +290,7 @@ pub(crate) async fn get_backup(
     Path(id): Path<String>,
 ) -> Res<Vec<u8>> {
     // Only failures spend the address's limit.
-    let not_found = || match hub.limit_ip("backup", peer, &headers, hub.config.limits.backup_per_ip_hour, HOUR) {
+    let not_found = || match hub.limit_expensive(peer, &headers) {
         Ok(()) => refuse(StatusCode::NOT_FOUND),
         Err(limited) => limited,
     };
@@ -337,7 +310,7 @@ pub(crate) async fn get_backup(
     let by_passkey = signed_by(auth.passkey);
     let by_code = signed_by(auth.code);
     match found {
-        // Signed with the hub's key when asked with a nonce (spec 6.10): nobody between hands back an older record.
+        // Signed with the hub's key when asked with a nonce (spec 4.1): nobody between hands back an older record.
         Some((record, _)) if (by_passkey || by_code) && hub.first_time(&id, &signature, time, now) => {
             Ok(hub.signed_answer(&headers, uri.path(), &[], record))
         }

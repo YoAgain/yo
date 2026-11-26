@@ -118,11 +118,11 @@ fn a_name_that_changed_hands_goes_to_its_new_owner() {
     let mut b = by_name(Http::new(hub.url()), &format!("Sender{n}"));
     b.send(&name, text("hi a")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["hi a"]);
-    a.set_username(Some(&format!("Moved{n}"))).unwrap();
+    a.delete_account().unwrap();
     let mut c = by_name(Http::new(hub.url()), &name);
     b.send(&name, text("hi whoever")).unwrap();
     assert_eq!(texts(&c.sync(0).unwrap()), ["hi whoever"]);
-    assert!(texts(&a.sync(0).unwrap()).is_empty());
+    assert_eq!(a.sync(0), Err(Error::Replaced));
     let known = b.contacts();
     assert!(known.iter().any(|k| k.user == c.user_id() && k.handles == [name.clone()]));
     assert!(known.iter().any(|k| k.user == a.user_id() && k.handles.is_empty()), "{known:?}");

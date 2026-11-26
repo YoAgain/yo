@@ -300,7 +300,7 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
 
 /// Copies that do not open, claiming a contact's real device, once a minute all day (anyone can seal them): the
 /// roster checks stay within the day's budget for recovery, the rest of the hub's allowance is left for real
-/// sessions (6.6).
+/// sessions (4.1).
 #[test]
 fn forgeries_cannot_use_up_the_lookups() {
     use std::sync::atomic::{AtomicU64, Ordering};

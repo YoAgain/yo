@@ -1,4 +1,4 @@
-//! The account item in the iCloud Keychain (spec 2.4): its JSON, as the iOS app has always written it.
+//! The account item in the iCloud Keychain (spec 5.1): its JSON, as the iOS app has always written it.
 //! One item per account and hub (name, user id, account key, recovery key); Android keeps the same item in Google
 //! Block Store under the same rules. A phone without an account registers with it at once (new device, new prekeys),
 //! only when exactly one item exists that is neither marked signed out nor the account this phone left. Signing out

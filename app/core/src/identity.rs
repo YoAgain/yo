@@ -63,7 +63,7 @@ pub use crate::migrations::keychain_v1::legacy_account_secret;
 const FINGERPRINT_VERSION: u32 = 2;
 const FINGERPRINT_ITERATIONS: u32 = 5200;
 
-/// libsignal's `Fingerprint` of two users' ids and account keys (4.1), as Signal makes it from ACIs.
+/// libsignal's `Fingerprint` of two users' ids and account keys (2.3), as Signal makes it from ACIs.
 fn fingerprint(me: (&[u8], &Key), them: (&[u8], &Key)) -> Result<Fingerprint> {
     let (mine, theirs) = (identity_of(me.1)?, identity_of(them.1)?);
     Fingerprint::new(FINGERPRINT_VERSION, FINGERPRINT_ITERATIONS, me.0, &mine, them.0, &theirs)

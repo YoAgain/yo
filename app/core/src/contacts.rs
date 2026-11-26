@@ -4,20 +4,17 @@ use super::*;
 type Side = (Vec<u8>, Key);
 
 impl Client {
-    /// Says yes to a request (spec 3.3): a contact from now on, sent the profile key, the name and a receipt.
+    /// Says yes to a request (spec 3.3): a contact from now on, sent the profile key and a receipt.
     pub fn accept(&mut self, who: &str) -> Result<Vec<Event>> {
         let result = (|| {
             let user = self.user_named(&Handle::parse(who)?)?.0;
-            let name = self.state.name.is_some();
             let contact = self.state.contacts.entry(user.clone()).or_default();
             contact.accepted = true;
             contact.key_due = true;
             contact.receipt_due = contact.chat;
-            contact.profile_due = name;
             self.keep_friend(&user);
             self.persist()?;
             self.profile_keys()?;
-            self.send_profiles();
             self.deliver()
         })();
         self.finish(result)
@@ -41,7 +38,7 @@ impl Client {
     pub fn set_requests_open(&mut self, open: bool) -> Result<()> {
         self.state.requests_open = open;
         self.state.access_key_told = false;
-        // One choice for the account: kept in the storage, so its other devices take it too (6.9).
+        // One choice for the account: kept in the storage, so its other devices take it too (4.3).
         self.storage_requests_open(open);
         self.persist()?;
         self.profile_keys()
@@ -72,44 +69,14 @@ impl Client {
         self.key_due_to_all();
     }
 
-    /// Sets the name contacts see, and tells every contact this device writes to.
+    /// Sets the local profile name.
     pub fn set_name(&mut self, name: &str) -> Result<Vec<Event>> {
         let result = (|| {
             Message { sent_at_ms: 0, group: None, content: Content::Profile { name: name.to_owned() } }.encode()?;
             self.state.name = Some(name.to_owned());
-            // Not to a request (spec 3.3): it gets the name with a yes.
-            for contact in self.state.contacts.values_mut().filter(|c| c.chat && c.accepted) {
-                contact.profile_due = true;
-            }
-            self.send_profiles();
             self.deliver()
         })();
         self.finish(result)
-    }
-
-    /// Tells the name to every contact due it that can take a message now: not blocked (4.8), unconfirmed (3.4) or
-    /// gone.
-    pub(super) fn send_profiles(&mut self) {
-        let Some(name) = self.state.name.clone() else { return };
-        let due: Vec<String> = self
-            .state
-            .contacts
-            .iter()
-            .filter(|(_, c)| {
-                c.profile_due && c.accepted && !c.blocked && !c.unconfirmed && !c.gone && !c.devices.is_empty()
-            })
-            .map(|(user, _)| user.clone())
-            .collect();
-        for user in due {
-            let sent = self.atomic(|c| {
-                c.send_message(&user, Content::Profile { name: name.clone() })?;
-                c.state.contacts.get_mut(&user).ok_or(Error::Internal("contact"))?.profile_due = false;
-                Ok(())
-            });
-            if let Err(error) = sent {
-                self.note(format!("name: {error}"));
-            }
-        }
     }
 
     pub fn contacts(&self) -> Vec<ContactInfo> {
@@ -147,7 +114,7 @@ impl Client {
             .collect()
     }
 
-    /// The account key a contact is pinned to (hex): what the safety number is made of (3.4).
+    /// The account key a contact is pinned to (hex): what the safety number is made of (2.3).
     pub fn account_key_of(&self, user: &str) -> Option<String> {
         self.state.contacts.get(user).map(|c| hex(&c.account_key))
     }
@@ -247,9 +214,6 @@ impl Client {
         self.atomic(|c| {
             let contact = c.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?;
             contact.verified = verified;
-            if verified {
-                contact.unconfirmed = false;
-            }
             c.persist()
         })
     }
@@ -269,8 +233,11 @@ impl Client {
         // Saved, or not made at all: a block only in memory would be lost on restart with what came meanwhile.
         self.atomic(|c| {
             c.apply_block(&user, blocked);
-            if blocked && c.state.profile_key.is_some() {
-                c.rotate_profile_key();
+            if blocked {
+                c.state.block_access_due = true;
+                if c.state.profile_key.is_some() {
+                    c.rotate_profile_key();
+                }
             }
             if let Some(shown) = shown {
                 note_handle(c.state.contacts.get_mut(&user).expect("blocked"), shown);
@@ -308,7 +275,7 @@ impl Client {
         }
     }
 
-    /// Reports a user to the operator (spec 4.2): `api::REPORT_*`, by the install id, not by this account. Nothing
+    /// Reports a user to the operator (spec 4): `api::REPORT_*`, by the install id, not by this account. Nothing
     /// they sent goes with it.
     pub fn report(&mut self, who: &str, reason: u8, install: &str) -> Result<()> {
         let (user, _) = self.user_named(&Handle::parse(who)?)?;
@@ -320,28 +287,15 @@ impl Client {
         self.request("GET", api::CERTIFICATE, Vec::new())
     }
 
-    /// Deletes the account at the hub with everything it holds (spec 4.1); the app then forgets its state. `Replaced`:
+    /// Deletes the account at the hub with everything it holds (spec 4.2); the app then forgets its state. `Replaced`:
     /// this device was out already.
     pub fn delete_account(&mut self) -> Result<()> {
         let response = self.signed("DELETE", api::ACCOUNT, &[])?;
         expect(response, status::NO_CONTENT).map(drop)
     }
 
-    /// Claims a username, kept as written ("Chris": found as "chris" and "CHRIS" too), or gives it up with `None`.
-    pub fn set_username(&mut self, name: Option<&str>) -> Result<()> {
-        let canonical = match name {
-            Some(name) => {
-                let handle = Handle::parse(name)?;
-                if handle.kind != KIND_USERNAME {
-                    return Err(Error::Protocol("not a username"));
-                }
-                Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned())
-            }
-            None => None,
-        };
-        let body = encode(&api::SetUsername { username: canonical.as_ref().map(|n| n.as_bytes().to_vec().into()) });
-        expect(self.signed("PUT", api::USERNAME, &body)?, status::NO_CONTENT)?;
-        self.state.username = canonical;
-        self.persist()
+    /// Usernames are fixed at registration.
+    pub fn set_username(&mut self, _name: Option<&str>) -> Result<()> {
+        Err(Error::Protocol("username is fixed"))
     }
 }

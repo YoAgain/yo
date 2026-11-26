@@ -327,7 +327,7 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 );
 CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
 
-// A problem's builds (its reports per build, the last when) and its reports per hour (kept 8 days), spec 4.2.
+// A problem's builds (its reports per build, the last when) and its reports per hour (kept 8 days), spec 4.
 pub(super) const DIAGNOSTIC_BUILDS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_builds (
     diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, app TEXT NOT NULL,
     count INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, app)) WITHOUT ROWID;
@@ -336,7 +336,7 @@ CREATE TABLE IF NOT EXISTS diagnostic_hours (
     count INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, hour)) WITHOUT ROWID;";
 
 // Which install sent a crash or error group on which day (days since the epoch, UTC), so the operator counts
-// installs, not reports (`at` the last report of that day, to the hour; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 4.2).
+// installs, not reports (`at` the last report of that day, to the hour; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 4).
 pub(super) const DIAGNOSTIC_INSTALLS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_installs (
     diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, install BLOB NOT NULL,
     day INTEGER NOT NULL, at INTEGER, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;
@@ -392,7 +392,7 @@ fn from_1(conn: &mut Connection) -> rusqlite::Result<()> {
     })
 }
 
-/// Schema 2 to 3 (the later steps follow): Ed25519 account and auth keys to their Curve25519 form (spec 3.1); word backups go (spec 2.4).
+/// Schema 2 to 3 (the later steps follow): Ed25519 account and auth keys to their Curve25519 form (spec 1.3); word backups go (spec 2.4).
 fn from_2(conn: &mut Connection) -> rusqlite::Result<()> {
     immediate(conn, |tx| {
         let curve = |key: &[u8]| -> Option<Vec<u8>> {
@@ -472,7 +472,7 @@ pub(super) fn migrate_diagnostics(conn: &mut Connection) -> rusqlite::Result<()>
     })
 }
 
-/// A problem's identity lost its build (2026-11-24, spec 4.2): the groups of one problem in several builds become
+/// A problem's identity lost its build (2026-11-24, spec 4): the groups of one problem in several builds become
 /// one, their counts per build in `diagnostic_builds`, its installs and uuids with it; open if any was open, else done
 /// in the newest build per platform it had. Nothing to do where `done_builds` is there.
 fn problems_without_builds(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -637,7 +637,7 @@ pub(super) fn without_feedback(conn: &mut Connection) -> rusqlite::Result<()> {
     })
 }
 
-/// Schema 9: help goes by install id, not by account (spec 4.2). Support threads and the reporters of reports
+/// Schema 9: help goes by install id, not by account (spec 4). Support threads and the reporters of reports
 /// before keep their rows under one random placeholder install id per old account: the account link is gone, and
 /// no phone holds such an id, so those threads are the operator's to read only.
 pub(super) fn with_installs(conn: &mut Connection) -> rusqlite::Result<()> {

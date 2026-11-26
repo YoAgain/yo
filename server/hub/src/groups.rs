@@ -1,10 +1,10 @@
-//! Groups at the hub (spec 4.9): Signal's Groups v2 with zkgroup; every request checked by proof, nothing learned.
+//! Groups at the hub (spec 3.4): Signal's Groups v2 with zkgroup; every request checked by proof, nothing learned.
 
 use crate::error::{refuse, Refusal, Res};
-use crate::request::{bad, path_id, Auth, Hubs, Peer, Signed, DAY, HOUR, MINUTE};
+use crate::request::{bad, path_id, Auth, Hubs, Peer};
 use crate::{now_ms, Hub};
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use bytes::Bytes;
 use libsignal_protocol::{Aci, Pni, ServiceId};
 use yoip::net::api::{self, GroupAction, GroupAnswer, GroupMember, GroupState, NewGroup, NewMember};
@@ -17,8 +17,6 @@ use zkgroup::{ServerSecretParams, Timestamp, SECONDS_PER_DAY};
 
 /// The longest encrypted title the hub keeps (a 32-byte name, padded and sealed, is 65).
 pub const MAX_TITLE: usize = 256;
-/// Profile key credentials a device may ask for a day.
-pub const CREDENTIALS_PER_DAY: u32 = 1000;
 
 /// The hub's zkgroup keys (`YO_ZK_PARAMS_FILE`, `yo-hub zk new`): its `ServerSecretParams`, and their public half.
 pub struct Zk {
@@ -135,8 +133,8 @@ impl Hub {
     }
 
     /// The group, and endorsements for its members with their profile key, today's, if `to` is one of them with its
-    /// own (Signal's full members, spec 4.9). An invited member (no key in its entry: no yes yet) is endorsed for no
-    /// one and to no one: a delivery to it is a request (4.10), so whoever adds anyone to a group reaches them no
+    /// own (Signal's full members, spec 3.4). An invited member (no key in its entry: no yes yet) is endorsed for no
+    /// one and to no one: a delivery to it is a request (3.3), so whoever adds anyone to a group reaches them no
     /// further than by writing to them.
     fn answer(&self, state: GroupState, to: &[u8]) -> Res<GroupAnswer> {
         let keyed = |m: &&GroupMember| !m.profile_key.as_slice().is_empty();
@@ -255,7 +253,7 @@ impl Hub {
         Ok(())
     }
 
-    /// Whether a delivery to `user` carries a good group send token for them (spec 4.9): a contact's then.
+    /// Whether a delivery to `user` carries a good group send token for them (spec 3.4): a contact's then.
     pub(crate) fn endorsed(&self, user: &UserId, token: &str) -> bool {
         let Some(token) = yoip::unb64(token)
             .ok()
@@ -279,13 +277,10 @@ pub(crate) async fn get_group_auth(State(hub): Hubs, Auth(device, _): Auth) -> R
     Ok(encode(&hub.group_auth(&device.user_id)))
 }
 
-/// A group request as it came (spec 4.9): anonymous, on the connection that names no account, the zkgroup proof in
-/// its body all that authorises it, limited by its address; or signed, as apps before 2026-11-24 send it (a device
-/// then, limited by that device or user as before). A signature that is there must hold.
+/// A group request as it came (spec 3.4): anonymous, on the connection that names no account, the zkgroup proof in
+/// its body all that authorises it, limited by its address; or signed, as apps before 2026-11-24 send it (limited
+/// by its device then). A signature that is there must hold.
 pub(crate) struct GroupAsk {
-    signed: Option<Signed>,
-    peer: std::net::SocketAddr,
-    headers: HeaderMap,
     body: Bytes,
 }
 
@@ -302,58 +297,28 @@ impl axum::extract::FromRequest<std::sync::Arc<Hub>> for GroupAsk {
         let body = axum::body::to_bytes(body, yoip::net::limits::MAX_BODY)
             .await
             .map_err(|_| refuse(StatusCode::PAYLOAD_TOO_LARGE))?;
-        let signed = match parts.headers.contains_key(yoip::net::request::HEADER_DEVICE) {
-            true => Some(hub.authenticate(&parts.method, &parts.uri, &parts.headers, &body)?),
-            false => None,
-        };
-        Ok(GroupAsk { signed, peer, headers: parts.headers, body })
-    }
-}
-
-impl GroupAsk {
-    /// The limit of this request: `signed` (its id, how many, in what time) when signed, else `by_ip` per address.
-    fn limit(
-        &self,
-        hub: &Hub,
-        kind: &str,
-        signed: (&[u8], u32, std::time::Duration),
-        by_ip: (u32, std::time::Duration),
-    ) -> Res<()> {
-        match &self.signed {
-            Some(device) => hub.limit_signed(device, kind, signed.0, signed.1, signed.2),
-            None => hub.limit_ip(kind, self.peer, &self.headers, by_ip.0, by_ip.1),
+        match parts.headers.contains_key(yoip::net::request::HEADER_DEVICE) {
+            true => hub.authenticate(&parts.method, &parts.uri, &parts.headers, &body).map(drop)?,
+            // Anonymous: limited by its address, as every unsigned request (spec 4.1).
+            false => hub.limit_anonymous(peer, &parts.headers)?,
         }
-    }
-
-    fn id(&self) -> Option<Vec<u8>> {
-        self.signed.as_ref().map(|s| s.user_id.to_vec())
+        Ok(GroupAsk { body })
     }
 }
 
 /// `POST /v1/group-credential`: a profile key credential for a user whose key the asker holds.
 pub(crate) async fn post_group_credential(State(hub): Hubs, ask: GroupAsk) -> Res<Vec<u8>> {
-    let device = ask.signed.as_ref().map(|s| s.device_id.to_vec()).unwrap_or_default();
-    let by_ip = (hub.config.limits.credentials_per_ip_hour, HOUR);
-    ask.limit(&hub, "credential", (&device, CREDENTIALS_PER_DAY, DAY), by_ip)?;
     hub.profile_credential(&decode(&ask.body)?)
 }
 
-/// `PUT /v1/groups/{id}`: a new group; so many from an address (or a signing user) a day, while the database's disk
-/// has room.
+/// `PUT /v1/groups/{id}`: a new group, while the database's disk has room.
 pub(crate) async fn put_group(State(hub): Hubs, Path(id): Path<String>, ask: GroupAsk) -> Res<Vec<u8>> {
-    let limits = &hub.config.limits;
-    let user = ask.id().unwrap_or_default();
-    ask.limit(&hub, "group", (&user, limits.groups_per_user_day, DAY), (limits.groups_per_ip_day, DAY))?;
     hub.db_room()?;
     Ok(encode(&hub.create_group(&path_id(&id)?, &decode(&ask.body)?)?))
 }
 
-/// `POST /v1/groups/{id}`: a member's request (`GroupRequest`); anonymous ones so many from an address a minute.
+/// `POST /v1/groups/{id}`: a member's request (`GroupRequest`).
 pub(crate) async fn post_group(State(hub): Hubs, Path(id): Path<String>, ask: GroupAsk) -> Res<Vec<u8>> {
-    if ask.signed.is_none() {
-        let per = hub.config.limits.group_requests_per_ip_minute;
-        hub.limit_ip("group-request", ask.peer, &ask.headers, per, MINUTE)?;
-    }
     Ok(encode(&hub.group_request(&path_id(&id)?, &decode(&ask.body)?)?))
 }
 
@@ -448,7 +413,7 @@ mod tests {
         // A stranger's presentation is no member's.
         let fetch = |who: &UserId| api::GroupRequest { auth: auth(&hub, who, &secret), revision: 0, actions: vec![] };
         assert_eq!(hub.group_request(&id, &fetch(&cleo)).unwrap_err().0, StatusCode::FORBIDDEN);
-        // Endorsements for Ann alone, who has her key in: Ben is only invited (spec 4.9), and none is for him.
+        // Endorsements for Ann alone, who has her key in: Ben is only invited (spec 3.4), and none is for him.
         let response: GroupSendEndorsementsResponse = zkgroup::deserialize(made.endorsements.as_slice()).unwrap();
         let both = [aci(&ann).into(), aci(&ben).into()];
         assert!(response
@@ -519,7 +484,7 @@ mod tests {
     }
 
     /// Audit G1: a stranger names any user as an invited member (no profile key, no consent): the hub endorses no one
-    /// for it, so no token admits a sealed delivery to that user; what the stranger sends there is a request (4.10).
+    /// for it, so no token admits a sealed delivery to that user; what the stranger sends there is a request (3.3).
     #[test]
     fn a_stranger_gets_no_send_token_for_anyone_it_invites() {
         let hub = hub();
@@ -614,20 +579,15 @@ mod tests {
         assert_eq!(hub.profile_credential(&request([6; 32])).unwrap_err().0, StatusCode::FORBIDDEN, "another key");
     }
 
-    /// Audit M1: group requests go anonymous (the zkgroup proof all that authorises them, spec 4.9), counted by
-    /// address; a signed one, as apps before send it, is still taken and counted by its device or user, and a
-    /// signature that is there must hold.
+    /// Audit M1: group requests go anonymous (the zkgroup proof all that authorises them, spec 3.4), counted by
+    /// address in the one anonymous bucket (spec 4.1); a signed one, as apps before send it, is still taken and
+    /// counted by its device, and a signature that is there must hold.
     #[tokio::test]
     async fn group_requests_go_anonymous_and_anonymous_ones_count_by_address() {
         use axum::{body::Body, extract::ConnectInfo, http::Request};
         use std::net::SocketAddr;
         use tower::ServiceExt;
-        let limits = crate::config::Limits {
-            groups_per_ip_day: 1,
-            group_requests_per_ip_minute: 3,
-            credentials_per_ip_hour: 2,
-            ..crate::config::Limits::unlimited()
-        };
+        let limits = crate::config::Limits { anonymous_per_ip_minute: 3, ..crate::config::Limits::unlimited() };
         let hub =
             Hub::new(Config { limits, ..Config::for_tests() }, Arc::new(crate::push::Recorder::default())).unwrap();
         // Ann's device, registered, for the signed requests of apps before.
@@ -678,14 +638,14 @@ mod tests {
             || yoip::encode(&api::GroupRequest { auth: auth(&hub, &ann, &secret), revision: 0, actions: vec![] });
         let ip = [192, 0, 2, 1];
         assert_eq!(send("PUT", path.clone(), body, ip, false).await, StatusCode::OK, "made, anonymously");
-        let (other, body) = made(2);
-        let other_path = api::group_path(&other.get_group_identifier());
-        assert_eq!(send("PUT", other_path.clone(), body.clone(), ip, false).await, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(send("PUT", other_path, body, ip, true).await, StatusCode::OK, "signed: by the user, as before");
-        for _ in 0..3 {
+        for _ in 0..2 {
             assert_eq!(send("POST", path.clone(), fetch(), ip, false).await, StatusCode::OK);
         }
         assert_eq!(send("POST", path.clone(), fetch(), ip, false).await, StatusCode::TOO_MANY_REQUESTS, "by address");
+        let (other, body) = made(2);
+        let other_path = api::group_path(&other.get_group_identifier());
+        assert_eq!(send("PUT", other_path.clone(), body.clone(), ip, false).await, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(send("PUT", other_path, body, ip, true).await, StatusCode::OK, "signed: by the device");
         assert_eq!(send("POST", path.clone(), fetch(), [192, 0, 2, 2], false).await, StatusCode::OK, "another address");
         assert_eq!(send("POST", path.clone(), fetch(), ip, true).await, StatusCode::OK, "signed: not by address");
         // A signature there that does not hold: refused, not taken as anonymous.
@@ -712,7 +672,7 @@ mod tests {
             request: zkgroup::serialize(&context.get_request()).into(),
         });
         let ip = [192, 0, 2, 5];
-        for _ in 0..2 {
+        for _ in 0..3 {
             assert_eq!(send("POST", api::GROUP_CREDENTIAL.into(), asked.clone(), ip, false).await, StatusCode::OK);
         }
         let status = send("POST", api::GROUP_CREDENTIAL.into(), asked.clone(), ip, false).await;

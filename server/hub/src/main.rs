@@ -11,15 +11,15 @@
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE, YO_ASSET_LINKS_FILE
 //!   YO_RESERVED_FILE      deprecated: accepted but ignored; names and switch live in the database.
-//!   YO_BLOB_DIR           photos and videos (spec 6.8), one file each; default `blobs` beside YO_DB. Not for the
+//!   YO_BLOB_DIR           photos and videos (spec 4.3), one file each; default `blobs` beside YO_DB. Not for the
 //!                         database's backup: blobs are fleeting.
 //!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)
 //!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
 //!   YO_HUB_KEY_FILE       required: the hub's Curve25519 private key (32 bytes, `yo-hub hub-key new`), which signs
-//!                         answers handing out keys (spec 6.10, XEdDSA); its public half is pinned in the apps
-//!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 6.1), which sign the
+//!                         answers handing out keys (spec 4.1, XEdDSA); its public half is pinned in the apps
+//!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 4.1), which sign the
 //!                         devices' sender certificates; the trust root's public key is pinned in the apps
-//!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 4.9); their public half is
+//!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 3.4); their public half is
 //!                         pinned in the apps
 //!
 //! Sender-certificate keys (Signal's: a trust root kept offline, a server certificate on the hub):
@@ -28,12 +28,12 @@
 //!   yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE  a new server key with its certificate by that root: the hub's
 //!                                                       YO_SERVER_CERT_FILE (0600)
 //!
-//! The hub key (signed answers, spec 6.10):
+//! The hub key (signed answers, spec 4.1):
 //!   yo-hub hub-key new FILE                             a new hub key (its private key, 32 bytes, 0600): the hub's
 //!                                                       YO_HUB_KEY_FILE; prints its public key, base64url, for the apps
 //!   yo-hub hub-key public FILE                          prints it again
 //!
-//! Group keys (Signal's zkgroup server params, spec 4.9):
+//! Group keys (Signal's zkgroup server params, spec 3.4):
 //!   yo-hub zk new FILE                                  new ServerSecretParams (0600), the hub's YO_ZK_PARAMS_FILE;
 //!                                                       prints the public params, base64url, for the apps
 //!   yo-hub zk public FILE                               prints them again
@@ -95,6 +95,11 @@ fn config() -> Result<(Config, String), String> {
     if var("YO_RESERVED_FILE").is_some() {
         eprintln!("yo-hub: YO_RESERVED_FILE is deprecated and ignored; manage reserved names through admin");
     }
+    for old in ["YO_REGISTER_PER_IP_HOUR", "YO_BACKUP_PER_IP_HOUR"] {
+        if var(old).is_some() {
+            eprintln!("yo-hub: {old} is gone and ignored; YO_EXPENSIVE_PER_IP_HOUR limits both (spec 4.1)");
+        }
+    }
     let attest = var("YO_ATTEST").as_deref() == Some("1");
     let play_keys = match (var("YO_PLAY_INTEGRITY_DECRYPT_KEY"), var("YO_PLAY_INTEGRITY_VERIFY_KEY")) {
         (Some(decrypt), Some(verify)) if attest => {
@@ -137,14 +142,13 @@ fn config() -> Result<(Config, String), String> {
             .transpose()?,
         limits: Limits {
             // A test hub takes more sign-ups from one address (scripts making accounts); the default is production's.
-            register_per_ip_hour: parsed(
-                "YO_REGISTER_PER_IP_HOUR",
-                defaults.register_per_ip_hour,
+            expensive_per_ip_hour: parsed(
+                "YO_EXPENSIVE_PER_IP_HOUR",
+                defaults.expensive_per_ip_hour,
                 |_| true,
                 "a number",
             )?,
-            backup_per_ip_hour: parsed("YO_BACKUP_PER_IP_HOUR", defaults.backup_per_ip_hour, |_| true, "a number")?,
-            // Limits on a flood (spec 6.6, 6.7): the operator may set them without a new build.
+            // Limits on a flood (spec 4.1, 4.2): the operator may set them without a new build.
             recipient_bytes_burst: megabytes("YO_RECIPIENT_BYTES_BURST_MB", defaults.recipient_bytes_burst)?,
             recipient_bytes_per_hour: megabytes("YO_RECIPIENT_BYTES_PER_HOUR_MB", defaults.recipient_bytes_per_hour)?,
             push_window_contact_ms: parsed(

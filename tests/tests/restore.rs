@@ -1,6 +1,6 @@
 //! Restores to the extreme: accounts wiped and brought back again and again, by every way the app has (spec 2.4), the
 //! friends writing all along. After every cycle: the same user id, messages both ways exactly once, the block holding,
-//! the storage (6.9) intact and converged, nothing left behind at the hub.
+//! the storage (4.3) intact and converged, nothing left behind at the hub.
 
 use yo_core::backup::Door;
 use yo_core::{Client, Content, Error, Event, Push};

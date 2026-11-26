@@ -32,7 +32,7 @@ fn a_yo_goes_there_and_back() {
     a.send_yo(&pb).unwrap();
     let events = b.sync(0).unwrap();
     assert!(events.contains(&Event::NewChat { user: digits(&pa) }), "{events:?}");
-    assert!(events.contains(&Event::Profile { user: digits(&pa), name: "ALICE".into() }), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::Profile { .. })), "{events:?}");
     assert_eq!(yos_from(&events, &pa), 1);
     b.send_yo(&pa).unwrap();
     let events = a.sync(0).unwrap();
@@ -94,7 +94,7 @@ fn a_working_session_sends_without_inbox_freshness() {
     let (mut a, mut b, pa, pb) = pair(&hub);
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
-    // By user id, as the app sends: a name is asked of the hub first (spec 4.2).
+    // By user id, as the app sends: a name is asked of the hub first (spec 3.1).
     let b_id = b.user_id().to_owned();
     let now = Arc::new(AtomicU64::new(yo_hub::now_ms()));
     a.set_clock(Arc::new({
@@ -151,7 +151,7 @@ fn two_chats_started_at_once_both_work() {
 }
 
 /// A writes to B, then the hub tells A that B has another account key and device: those of B2, an account of its
-/// own (spec 3.4). A, its name, and B2.
+/// own (spec 2.3). A, its name, and B2.
 fn a_friend_with_another_key(hub: &TestHub) -> (Client, String, Client) {
     let n = random_u64() % 100_000_000;
     let (pa, pb, pb2) = (username(n), username(n + 1), username(n + 2));
@@ -204,6 +204,9 @@ fn a_verified_contact_with_a_new_key_waits_for_confirmation() {
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     let contact = &a.contacts()[0];
     assert!(contact.unconfirmed && !contact.verified);
+    a.set_verified(&pb, true).unwrap();
+    assert!(a.contacts()[0].unconfirmed);
+    assert!(a.deliver_begin().unwrap().is_empty());
     assert_eq!(a.waiting(), 1, "held");
     assert_eq!(unread_by(&mut b2), 0);
     a.confirm_identity(&pb).unwrap();
@@ -212,20 +215,18 @@ fn a_verified_contact_with_a_new_key_waits_for_confirmation() {
     assert_eq!(unread_by(&mut b2), 2, "the held Yo and the new one");
 }
 
-/// A name set while a verified contact's new key waits for confirmation is due to it and goes once it can take it,
-/// before the next message.
 #[test]
-fn a_name_set_while_a_new_key_waits_is_told_after_the_confirmation() {
+fn setting_a_name_sends_no_profile_after_confirmation() {
     let hub = TestHub::start();
     let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
     a.set_verified(&pb, true).unwrap();
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     a.set_name("ALICIA").unwrap();
-    assert_eq!(a.waiting(), 1, "the name waits too");
+    assert_eq!(a.waiting(), 1, "only the held Yo");
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
     assert_eq!(a.waiting(), 0);
-    assert_eq!(unread_by(&mut b2), 3, "the held Yo, the name, the new Yo");
+    assert_eq!(unread_by(&mut b2), 2, "the held Yo and the new Yo");
 }
 
 #[test]
@@ -272,7 +273,7 @@ fn the_state_survives_a_restart_of_the_app() {
     assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
 }
 
-/// A name keeps the spelling its owner chose (spec 3.3): "YoGPT" is found as "yogpt" or "Y0GPT", nobody else can
+/// A name keeps the spelling its owner chose (spec 2.2): "YoGPT" is found as "yogpt" or "Y0GPT", nobody else can
 /// have it in any spelling, and whoever meets the account sees "YoGPT", also when it wrote first.
 #[test]
 fn a_username_keeps_its_spelling_and_reaches_whoever_meets_it() {
@@ -352,33 +353,6 @@ fn a_new_phone_restores_a_username_with_its_account_key() {
     let again = by_name(&hub, &other, Some(old.account_secret())).unwrap();
     assert_eq!((again.user_id(), again.username()), (old.user_id(), Some(name.as_str())));
     assert!(Client::username_free(&*Http::new(hub.url()), &other).unwrap());
-}
-
-/// A backup has the name the account had when it was made. Renamed since, and the old name taken by someone else:
-/// the account key from the backup still brings back the same user, with the name it has now (spec 6.4, 7).
-#[test]
-fn a_restore_after_a_rename_brings_back_the_same_user_with_its_new_name() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let (first, renamed) = (format!("Old{n}"), format!("New{n}"));
-    let mut old = by_name(&hub, &first, None).unwrap();
-    let secret = old.account_secret();
-    old.set_username(Some(&renamed)).unwrap();
-    // The old name free again: the restore with it is the same user, renamed, and does not take the old name back.
-    let mut phone = by_name(&hub, &first, Some(secret)).unwrap();
-    assert_eq!((phone.user_id(), phone.username()), (old.user_id(), Some(renamed.as_str())));
-    assert!(Client::username_free(&*Http::new(hub.url()), &first).unwrap());
-    assert_eq!(old.sync(0), Err(Error::Replaced));
-    // Someone else takes the old name; the next restore from the same backup still finds the account.
-    let mut stranger = by_name(&hub, &first, None).unwrap();
-    assert_ne!(stranger.user_id(), old.user_id());
-    let mut again = by_name(&hub, &first, Some(secret)).unwrap();
-    assert_eq!((again.user_id(), again.username()), (old.user_id(), Some(renamed.as_str())));
-    assert_eq!(phone.sync(0), Err(Error::Replaced));
-    stranger.sync(0).unwrap();
-    // Friends reach it by its new name.
-    stranger.send_yo(&renamed).unwrap();
-    assert_eq!(yos_from_user(&again.sync(0).unwrap(), stranger.user_id()), 1);
 }
 
 #[test]
@@ -463,10 +437,8 @@ fn a_blocked_friend_is_not_heard_until_unblocked() {
 }
 
 #[test]
-fn a_report_reaches_the_operator_within_its_limit() {
-    let mut config = yo_hub::config::Config::for_tests();
-    config.limits.report_per_install_day = 3;
-    let hub = TestHub::start_with(config, "127.0.0.1:0");
+fn a_report_reaches_the_operator() {
+    let hub = TestHub::start();
     let (mut a, b, _, pb) = pair(&hub);
     // By the install id, not by the account: the hub cannot tell who reports.
     let phone = yo_core::help::new_install_id();
@@ -476,22 +448,20 @@ fn a_report_reaches_the_operator_within_its_limit() {
     let me = a.user_id().to_owned();
     assert!(a.report(&me, api::REPORT_SPAM, &phone).is_err(), "not oneself");
     assert!(a.report(&pb, api::REPORT_SPAM, "not an install id").is_err());
-    // Only the reasons there are; the third report today is the last.
+    // Only the reasons there are; no limit by install (only the address's anonymous rate, spec 4.1).
     let http = yo_tests::Http::new(hub.url());
     let user = yo_tests::user_id(b.user_id());
     assert_eq!(yo_core::help::report(&*http, &phone, user, 9), Err(Error::Refused(api::status::BAD_REQUEST)));
-    a.report(&pb, api::REPORT_OTHER, &phone).unwrap();
-    assert_eq!(a.report(&pb, api::REPORT_OTHER, &phone), Err(Error::Refused(api::status::RATE_LIMITED)));
-    // Per install: a new id (Send Crashes off and on) reports again.
+    for _ in 0..5 {
+        a.report(&pb, api::REPORT_OTHER, &phone).unwrap();
+    }
     a.report(&pb, api::REPORT_OTHER, &yo_core::help::new_install_id()).unwrap();
 }
 
 #[test]
-fn feedback_reaches_the_operator_within_its_limit() {
+fn feedback_reaches_the_operator() {
     use yo_core::help;
-    let mut config = yo_hub::config::Config::for_tests();
-    config.limits.support_per_install_day = 3;
-    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let hub = TestHub::start();
     let http = yo_tests::Http::new(hub.url());
     let (phone, other) = (help::new_install_id(), help::new_install_id());
     assert_ne!(phone, other);
@@ -515,39 +485,32 @@ fn feedback_reaches_the_operator_within_its_limit() {
         let answer = http.request("POST", api::HELP_MESSAGES, &headers, &body).unwrap();
         assert_eq!(answer.status, api::status::BAD_REQUEST);
     }
-    // The third today is the last.
     help::send_message(&*http, &phone, &"x".repeat(limit), "1.0 (1)").unwrap();
-    assert_eq!(
-        help::send_message(&*http, &phone, "one more", "1.0 (1)"),
-        Err(Error::Refused(api::status::RATE_LIMITED))
-    );
-    // Per install: another one's is still taken, in a thread of its own.
+    // Another install's is taken in a thread of its own.
     help::send_message(&*http, &other, "hi", "1.0 (1)").unwrap();
     assert_eq!(help::thread(&*http, &phone).unwrap().messages.len(), 3);
     assert_eq!(help::thread(&*http, &other).unwrap().messages.len(), 1);
 }
 
 #[test]
-fn registration_and_backups_are_limited_per_address() {
+fn registration_and_backups_share_the_expensive_limit_per_address() {
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.register_per_ip_hour = 2;
-    config.limits.backup_per_ip_hour = 2;
+    config.limits.expensive_per_ip_hour = 3;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let n = random_u64() % 100_000;
     by_name(&hub, &format!("ONE{n}"), None).unwrap();
     by_name(&hub, &format!("TWO{n}"), None).unwrap();
-    assert_eq!(by_name(&hub, &format!("THREE{n}"), None).err(), Some(Error::Refused(api::status::RATE_LIMITED)));
     let http = Http::new(hub.url());
-    for _ in 0..2 {
-        assert_eq!(fetch(&http, &[5; 16]), Ok(None));
-    }
+    assert_eq!(fetch(&http, &[5; 16]), Ok(None), "the third: a failed fetch");
+    assert_eq!(by_name(&hub, &format!("THREE{n}"), None).err(), Some(Error::Refused(api::status::RATE_LIMITED)));
     assert_eq!(fetch(&http, &[5; 16]), Err(Error::Refused(api::status::RATE_LIMITED)));
 }
 
 #[test]
 fn only_failed_backup_fetches_spend_the_address_limit() {
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.backup_per_ip_hour = 3;
+    // The registration takes one, three failed fetches the rest.
+    config.limits.expensive_per_ip_hour = 4;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let http = Http::new(hub.url());
     let mut account = by_name(&hub, &format!("SAFE{}", random_u64() % 100_000), None).unwrap();
@@ -641,11 +604,11 @@ fn usernames_are_bounded_in_bytes_and_lookalikes_are_one_name() {
         let raw = reqwest::blocking::Client::new().get(format!("{}{}", hub.url(), api::username_path(&name)));
         assert_eq!(raw.send().unwrap().status().as_u16(), api::status::BAD_REQUEST, "{name:?}");
     }
-    let mut leo = by_name(&hub, &format!("Leo{n}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), None).unwrap();
+    by_name(&hub, &format!("Leo{n}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), None).unwrap();
     let taken = Err(Error::Refused(api::status::CONFLICT));
     assert_eq!(by_name(&hub, &format!("LEO{n}\u{1F468}\u{1F469}\u{1F467}"), None).map(|_| ()), taken, "one skeleton");
     let http = Http::new(hub.url());
     assert_eq!(Client::username_free(&*http, &format!("leo{n}👨👩👧")), Ok(false), "taken in its look-alike");
-    assert!(leo.set_username(Some(&"🔥".repeat(17))).is_err(), "17 characters");
-    leo.set_username(Some(&format!("{}{}", "🔥".repeat(15), "a"))).unwrap();
+    assert!(by_name(&hub, &"🔥".repeat(17), None).is_err(), "17 characters");
+    by_name(&hub, &format!("{}{}", "🔥".repeat(15), "a"), None).unwrap();
 }

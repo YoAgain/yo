@@ -1,4 +1,4 @@
-//! Photos and videos at the hub (spec 6.8): blobs uploaded signed, fetched by id, gone after their last fetch or their
+//! Photos and videos at the hub (spec 4.3): blobs uploaded signed, fetched by id, gone after their last fetch or their
 //! time; quotas, the budget and the disk's free space; over HTTP against a real hub.
 
 use std::path::{Path, PathBuf};
@@ -281,16 +281,15 @@ fn a_deleted_account_takes_its_blobs_and_strays_are_swept() {
 }
 
 #[test]
-fn fetches_and_uploads_are_limited_per_address() {
-    let (hub, _) = hub_with(|config| {
-        config.limits.blob_get_per_ip_minute = 2;
-        config.limits.blob_put_per_ip_minute = 2;
-    });
+fn fetches_are_limited_per_address_and_uploads_by_device() {
+    let (hub, _) = hub_with(|config| config.limits.anonymous_per_ip_minute = 2);
     let (mut alice, _) = someone(&hub);
     let (media, _, sent) = upload(&mut alice, 100, 5);
     sent.unwrap();
-    upload(&mut alice, 100, 1).2.unwrap();
-    assert_eq!(upload(&mut alice, 100, 1).2, Err(Error::Refused(429)));
+    // Uploads are signed: the device's rate, not the address's.
+    for _ in 0..3 {
+        upload(&mut alice, 100, 1).2.unwrap();
+    }
     let http = Http::new(hub.url());
     media::fetch(http.as_ref(), &media).unwrap().unwrap();
     media::fetch(http.as_ref(), &media).unwrap().unwrap();

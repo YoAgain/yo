@@ -81,7 +81,7 @@ pub const USERNAME_MAX_BYTES: usize = 64;
 
 /// A username as it may be written (spec 2.2): 1 to 16 characters (grapheme clusters, NFC), at most 64 bytes, of Latin
 /// letters with their accents, 0–9, `_` and emoji (RGI sequences), starting with a letter, an emoji or a digit, with at
-/// least one letter or emoji ("1abc", not "1234"), in any case ("YoGPT"). What the hub refuses with `400` (spec 4.1).
+/// least one letter or emoji ("1abc", not "1234"), in any case ("YoGPT"). What the hub refuses with `400` (spec 2.2).
 /// Which names are reserved only the hub knows.
 pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();

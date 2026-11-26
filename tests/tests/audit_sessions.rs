@@ -99,7 +99,7 @@ fn a_strangers_forged_sender_claim_holds_back_nothing() {
     };
     // Garbage, and a well-formed session message between A's and B's identities that no device of A's made (it does
     // not decrypt): twenty of each, a minute apart. The well-formed ones may spend B's lookups on a decryption error's
-    // roster (4.6), never park anything.
+    // roster (3.2), never park anything.
     let identity = |key: [u8; 32]| {
         libsignal_protocol::IdentityKey::new(libsignal_protocol::PublicKey::from_djb_public_key_bytes(&key).unwrap())
     };

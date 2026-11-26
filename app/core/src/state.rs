@@ -1,4 +1,4 @@
-//! What a device keeps (spec 1.3): its keys, contacts, the outbox and the session store (written to `statedb`).
+//! What a device keeps (spec 3): its keys, contacts, the outbox and the session store (written to `statedb`).
 
 use crate::error::{Error, Result};
 use crate::identity::Key;
@@ -135,7 +135,7 @@ pub struct Contact {
     pub devices: Vec<Slot>,
     /// Something was sent to the user or came from them: a chat the app shows.
     pub chat: bool,
-    /// The own name is still to be told to the user.
+    /// Kept for older saves.
     pub profile_due: bool,
     /// The last plaintexts sent, resent when a `DecryptionErrorMessage` names their time (spec 3.2).
     pub sent: SentCache,
@@ -242,7 +242,7 @@ pub struct Group {
     pub members: Vec<String>,
     pub revision: u32,
     pub left: bool,
-    /// Joined; until then a group a stranger added this account to is a request (spec 3.3).
+    /// Joined; until then a group a stranger added this account to is a request (spec 3.4).
     pub accepted: bool,
     /// This account's entry at the hub has its profile key (else it is only invited).
     pub keyed: bool,
@@ -311,6 +311,9 @@ pub struct State {
     pub seen_due: BTreeMap<String, u64>,
     pub outbox: VecDeque<Outgoing>,
     pub next_seq: u64,
+    /// Request 429 deadlines in Unix milliseconds, and whether the leading key was refused too.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub request_wait: BTreeMap<String, (u64, bool)>,
     /// Events not yet handed to the app: saved, so a crash after the hub's ack loses nothing.
     pub events: Vec<crate::Event>,
     /// Handed out and not yet acknowledged: they come again after a crash.
@@ -336,7 +339,7 @@ pub struct State {
     pub storage_locked: bool,
     /// Each message sent is strictly later than this.
     pub last_sent_ms: u64,
-    /// Hashes of the last messages received (sender and plaintext): a copy sent again (4.6) is skipped.
+    /// Hashes of the last messages received (sender and plaintext): a copy sent again (3.2) is skipped.
     #[serde(with = "compact::hashes")]
     pub received: VecDeque<[u8; 32]>,
     /// This account's profile key (spec 3.3); none before the first sync.
@@ -346,6 +349,9 @@ pub struct State {
     pub requests_open: bool,
     /// The hub has the current access key check and `requests_open`.
     pub access_key_told: bool,
+    /// A block must revoke the old access check before the outbox goes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block_access_due: bool,
     /// The sender certificate and when it came by this clock (spec 4.1).
     pub sender_certificate: Option<(Vec<u8>, u64)>,
     /// The latest this clock showed: a clock set back fetches a new certificate instead of stretching the day.
@@ -372,6 +378,20 @@ pub struct State {
     /// This account declared itself one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bot: bool,
+}
+
+impl State {
+    pub(super) fn discard_profiles(&mut self) -> bool {
+        let before = self.outbox.len();
+        self.outbox.retain(|item| {
+            item.device.is_some()
+                || !yoip::decode::<yoip::protocol::envelope::Plain>(&item.plain)
+                    .ok()
+                    .and_then(|p| crate::Message::decode(p.content.as_slice()).ok())
+                    .is_some_and(|m| matches!(m.content, crate::Content::Profile { .. }))
+        });
+        before != self.outbox.len()
+    }
 }
 
 impl Drop for State {

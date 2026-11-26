@@ -48,7 +48,7 @@ ORDER BY max(d.last_seen_at) DESC, u.created_at DESC
 LIMIT ?
 """
 
-# Reports (spec 4.2): which install reported whom, why, when; newest first. No content: the hub has none. The
+# Reports (spec 4): which install reported whom, why, when; newest first. No content: the hub has none. The
 # reporter is a random install id (hub schema 9), never an account: no name to look up.
 REPORTS = """
 SELECT r.reporter, r.reported_id, (SELECT coalesce(spelling, value) FROM handles WHERE user_id = r.reported_id AND kind = 2),
@@ -414,7 +414,7 @@ def diagnostics(db):
     cursor = db.execute(f"SELECT d.*, {installs} AS installs FROM diagnostics d ORDER BY last_seen DESC")
     columns = [c[0] for c in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor]
-    # Its builds ([app, reports, last seen]) and its reports in the last 24 hours, per hour (newer hubs, spec 4.2).
+    # Its builds ([app, reports, last seen]) and its reports in the last 24 hours, per hour (newer hubs, spec 4).
     builds, hours = {}, {}
     if has_table(db, "diagnostic_builds"):
         for i, app, n, seen in db.execute("SELECT diagnostic_id, app, count, last_seen FROM diagnostic_builds ORDER BY app"):

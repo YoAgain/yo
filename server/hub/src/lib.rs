@@ -1,8 +1,8 @@
-//! The Yo hub (spec 6): it holds no content key, and the route that carries messages never learns a sender.
+//! The Yo hub (spec 4): it holds no content key, and the route that carries messages never learns a sender.
 //!
-//! `router` is the map of every route; each module serves one part of the spec: `account` (6.3, 6.4, 6.9, 7),
-//! `mail` (4.4, 6.7), `groups` (4.9), `blobs` (6.8), `support` and `admin` (the operator). `request` holds what all
-//! routes share: signatures (6.2) and limits (6.6).
+//! `router` is the map of every route; each module serves one part of the spec: `account` (4.1, 4.2, 4.3, 2.4),
+//! `mail` (3.2, 4.2), `groups` (3.4), `blobs` (4.3), `support` and `admin` (the operator). `request` holds what all
+//! routes share: signatures (4.1) and limits (4.1).
 
 mod account;
 mod admin;
@@ -53,7 +53,7 @@ use {
     std::time::Duration,
 };
 
-/// What the hub counts per minute, without any identifier (`events`, spec 6.6).
+/// What the hub counts per minute, without any identifier (`events`, spec 1).
 #[derive(Clone, Copy)]
 pub(crate) enum Event {
     /// A Yo accepted into an inbox.
@@ -164,15 +164,15 @@ pub struct Hub {
     db: Arc<Db>,
     blobs: Arc<blobs::Blobs>,
     pusher: push::Pusher,
-    /// Signs the devices' sender certificates (spec 6.1).
+    /// Signs the devices' sender certificates (spec 4.1).
     signer: certificate::Signer,
-    /// The zkgroup keys of its groups (spec 4.9).
+    /// The zkgroup keys of its groups (spec 3.4).
     zk: groups::Zk,
     /// To the writer, which stores deliveries in group commits (`mail::writer`).
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
     /// The bytes of the deliveries waiting for the writer (`mail::QUEUED_BYTES` at most).
     pub(crate) queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
-    /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in`, `yo-in-bot` also into
+    /// Events since the last flush, a count per kind only (1): into `events` (and `yo-in`, `yo-in-bot` also into
     /// `deliveries_hourly`) once a minute.
     events: [AtomicU64; Event::KINDS.len()],
     /// The blobs each bot account (`Config::bots`, in its order) uploaded since the last flush: `bot-media:LABEL`.
@@ -182,7 +182,7 @@ pub struct Hub {
     live: tokio::sync::broadcast::Sender<Event>,
     /// Set when the hub shuts down: the live streams end, so a graceful shutdown does not wait for them.
     closing: tokio::sync::watch::Sender<bool>,
-    /// Each device's last push and the one held for the end of its window (spec 6.7, `mail::Pushes`).
+    /// Each device's last push and the one held for the end of its window (spec 4.2, `mail::Pushes`).
     pushes: Mutex<mail::Pushes>,
     /// Long polls waiting for mail, by device.
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
@@ -190,7 +190,7 @@ pub struct Hub {
     fetching: Arc<Places>,
     challenges: Mutex<attest::Challenges>,
     limiter: Limiter,
-    /// Requests' buckets (spec 4.10), by the hub's clock as tests move it.
+    /// Requests' buckets (spec 4.1), by the hub's clock as tests move it.
     requests: Requests,
     replay: ReplayCache,
     /// The database disk's last answer (`db_room`): when (ms), and whether it was too full.
@@ -278,13 +278,12 @@ impl Hub {
         Ok(hub)
     }
 
-    /// Every route (spec 6.3). Those that only work the database run off the async workers (`off_workers`); those
+    /// Every route (spec 4.1). Those that only work the database run off the async workers (`off_workers`); those
     /// that wait (a long poll, the writer, a blob's bytes) run their database work through `Hub::blocking`.
     pub fn router(self: &Arc<Self>) -> Router {
         let synchronous = Router::new()
             .route(api::REGISTER, post(account::post_register))
             .route("/v1/username/{name}", get(account::get_username))
-            .route(api::USERNAME, put(account::put_username))
             .route(api::PREKEYS, put(account::put_prekeys))
             .route(api::ATTEST_CHALLENGE, get(attest::challenge))
             .route(api::ATTEST, post(attest::submit))
@@ -324,7 +323,7 @@ impl Hub {
             .merge(synchronous)
             .merge(admin::live_route(self));
         if !self.config.apple_app_ids.is_empty() {
-            // Which apps may make passkeys for this domain (spec 7).
+            // Which apps may make passkeys for this domain (spec 2.4).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
             let answer = move || async move { ([(CONTENT_TYPE, "application/json")], file.clone()) };
             router = router.route("/.well-known/apple-app-site-association", get(answer));
@@ -456,7 +455,7 @@ impl Hub {
         self.db.count_events(now, &counts)
     }
 
-    /// The hourly cleanup at `now`: envelopes past their time (6.6), blobs past theirs and files no blob owns (6.8).
+    /// The hourly cleanup at `now`: envelopes past their time (4.1), blobs past theirs and files no blob owns (4.3).
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY_MS)?;
@@ -521,17 +520,17 @@ impl Hub {
 
 // ---- the keys apps pin: for tools, apps ship their own copies ----
 
-/// `GET /.well-known/yo-hub-key` (spec 6.10).
+/// `GET /.well-known/yo-hub-key` (spec 4.1).
 async fn hub_key(State(hub): Hubs) -> Vec<u8> {
     config::hub_public_key(&hub.config.hub_key).to_vec()
 }
 
-/// `GET /.well-known/yo-trust-root` (spec 6.1).
+/// `GET /.well-known/yo-trust-root` (spec 4.1).
 async fn trust_root(State(hub): Hubs) -> Vec<u8> {
     hub.signer.root().to_vec()
 }
 
-/// `GET` the zkgroup public params (spec 4.9).
+/// `GET` the zkgroup public params (spec 3.4).
 async fn zk_params(State(hub): Hubs) -> Vec<u8> {
     hub.zk.public().to_vec()
 }
@@ -710,7 +709,6 @@ mod tests {
         use tower::ServiceExt;
         let path = std::env::temp_dir().join(format!("yo-todo-{}-{}.sqlite", std::process::id(), now_ms()));
         let mut config = Config { db_path: path.to_string_lossy().into(), ..Config::for_tests() };
-        config.limits.todo_per_ip_day = 5;
         for enabled in [false, true] {
             config.admin_token = enabled.then(|| "test-token".into());
             let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
@@ -722,7 +720,7 @@ mod tests {
                 ("test-token", vec![b'a'; 4001], StatusCode::BAD_REQUEST),
                 ("test-token", "fix 🎨".as_bytes().to_vec(), StatusCode::CREATED),
                 ("test-token", vec![b'a'; 4000], StatusCode::CREATED),
-                ("test-token", b"limit".to_vec(), StatusCode::TOO_MANY_REQUESTS),
+                ("test-token", b"no limit: admin only".to_vec(), StatusCode::CREATED),
             ] {
                 let mut request =
                     Request::post("/v1/admin/todos").header("yo-admin-token", token).body(Body::from(body)).unwrap();
@@ -1182,7 +1180,7 @@ mod tests {
         recorder.sent.lock().unwrap().iter().filter(|r| r.url.contains("/3/device/")).count()
     }
 
-    /// Spec 6.7: one push per device per window; a quiet device's at once, what comes within the window in one push
+    /// Spec 4.2: one push per device per window; a quiet device's at once, what comes within the window in one push
     /// at its end (urgent if any was); a contact's shorter window ends a request's sooner.
     #[tokio::test]
     async fn pushes_to_a_device_are_paced_per_window() {
@@ -1228,7 +1226,7 @@ mod tests {
         hub.forget_pushes(std::time::Instant::now());
     }
 
-    /// Spec 6.7: a device in backlog pacing gets one push per `push_backlog_interval_s`, also when its deliveries
+    /// Spec 4.2: a device in backlog pacing gets one push per `push_backlog_interval_s`, also when its deliveries
     /// come more than a minute apart: the hourly-minute cleanup forgets no push whose window is still open.
     #[tokio::test]
     async fn backlog_pacing_outlives_the_minutes_cleanup() {
@@ -1259,7 +1257,7 @@ mod tests {
         assert_eq!(hub.pushes.lock().unwrap().len(), 1, "only the one with a push held is kept");
     }
 
-    /// Spec 6.7: a device with more than `push_backlog` envelopes waiting gets one push per
+    /// Spec 4.2: a device with more than `push_backlog` envelopes waiting gets one push per
     /// `push_backlog_interval_s`; its backlog is counted by the delivery that stores each envelope.
     #[test]
     fn a_device_with_a_backlog_is_pushed_slowly() {
@@ -1283,7 +1281,7 @@ mod tests {
         }
     }
 
-    /// Spec 6.6: the envelope bytes sealed deliveries bring one inbox, from every address together (Signal's
+    /// Spec 4.1: the envelope bytes sealed deliveries bring one inbox, from every address together (Signal's
     /// inbound message bytes): a burst, then their rate an hour; beyond, `429` naming the recipient with
     /// `Retry-After` in whole minutes (the sender's outbox keeps them). What waits is not capped; fetching is never
     /// limited; a bot account's inbox is not limited.

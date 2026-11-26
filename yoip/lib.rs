@@ -66,9 +66,9 @@ pub const GROUP_ORDER: [u8; 32] = [
 ];
 
 /// Whether `signature` is the XEdDSA signature of the Curve25519 key `key` (its 32 bytes) over `message`, as libsignal
-/// makes and checks it: the account key's (spec 2.1, 4.2), an auth key's (6.2, 7), the hub's (6.10).
+/// makes and checks it: the account key's (spec 2.1, 4.2), an auth key's (4.1, 2.4), the hub's (4.1).
 /// Its scalar must be reduced (below `GROUP_ORDER`), as every signer makes it: libsignal takes it modulo the order,
-/// so without this one signature would have a second encoding, which a replay cache keyed by signatures (6.2) took
+/// so without this one signature would have a second encoding, which a replay cache keyed by signatures (4.1) took
 /// as another.
 pub fn xeddsa_verify(key: &[u8; KEY_LEN], message: &[u8], signature: &[u8]) -> bool {
     signature.len() == SIGNATURE_LEN

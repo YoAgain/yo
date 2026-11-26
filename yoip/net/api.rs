@@ -14,7 +14,7 @@ pub const INBOX_ACK: &str = "/v1/inbox/ack";
 pub const BACKUP: &str = "/v1/backup";
 /// `DELETE`: the signing device's account, with everything the hub holds about it.
 pub const ACCOUNT: &str = "/v1/account";
-/// Help (spec 4.2): everything a phone tells the operator about the app, by a random install id
+/// Help (spec 4): everything a phone tells the operator about the app, by a random install id
 /// (`HEADER_INSTALL`), never by the account, never signed. `GET`: the support thread; `POST`: a message to it.
 pub const HELP_MESSAGES: &str = "/v1/help/messages";
 /// `POST`, `SupportRead`: the operator's answers read, up to an id.
@@ -26,7 +26,7 @@ pub const HELP_CRASH: &str = "/v1/help/crash";
 /// `POST`, a JSON object of strings: an error report.
 pub const HELP_ERROR: &str = "/v1/help/error";
 /// The header of every help request: the install id, 32 lowercase hex digits (128 random bits) made on the phone
-/// and kept only there; sent on no other request, never with the account (spec 1, 4.2).
+/// and kept only there; sent on no other request, never with the account (spec 1, 4).
 pub const HEADER_INSTALL: &str = "yo-install";
 
 /// Whether a text is an install id: 32 lowercase hex digits.
@@ -98,7 +98,7 @@ pub fn backup_path(id: &[u8]) -> String {
     format!("{BACKUP}/{}", crate::b64(id))
 }
 
-/// `GET /v1/username/{name}`: whether a username is free (spec 4.1). The name's UTF-8 percent-encoded, every byte
+/// `GET /v1/username/{name}`: whether a username is free (spec 2.2). The name's UTF-8 percent-encoded, every byte
 /// but the unreserved ones of RFC 3986.
 pub fn username_path(name: &str) -> String {
     let mut path = format!("{USERNAME}/");
@@ -348,7 +348,7 @@ pub struct Backup {
     pub by_passkey: VLBytes,
     /// K under HKDF(the recovery key's backup key, "yo backup v3 code"); always there.
     pub by_code: VLBytes,
-    /// ChaCha20-Poly1305 under K: the account key, the recovery key.
+    /// ChaCha20-Poly1305 under K: the account key, the username, the user id, the recovery key.
     pub sealed: VLBytes,
     /// Where the recovery key alone finds the record: `LOCATOR_LEN` bytes, or empty (found by the user id only).
     pub locator: VLBytes,
@@ -416,7 +416,7 @@ impl Backup {
     }
 }
 
-/// Why a user is reported (spec 4.1).
+/// Why a user is reported (spec 4).
 pub const REPORT_SPAM: u8 = 1;
 pub const REPORT_ABUSE: u8 = 2;
 pub const REPORT_OTHER: u8 = 3;
@@ -430,7 +430,7 @@ pub struct Report {
 }
 
 /// `POST /v1/help/messages`: what a user writes to the operator about the app, and the app's version. Plain text: the
-/// hub reads it (spec 1).
+/// hub reads it (spec 4).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Feedback {
     /// UTF-8, 1 to `MAX_FEEDBACK_LEN` bytes.

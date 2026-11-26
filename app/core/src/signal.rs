@@ -126,7 +126,7 @@ pub fn address(user: &[u8; 16], slot: u8) -> Result<ProtocolAddress> {
     Ok(ProtocolAddress::new(Aci::from_uuid_bytes(*user).service_id_string(), device))
 }
 
-/// libsignal's store as entries the state seals (spec 1.3); the identity key pair is the account's, never stored.
+/// libsignal's store as entries the state seals (spec 3.1); the identity key pair is the account's, never stored.
 /// One part per store trait, as libsignal borrows several at once.
 pub struct Records {
     pub sessions: Sessions,

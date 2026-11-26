@@ -73,6 +73,8 @@ impl Device {
             legacy_storage_key: None,
             storage_locked: false,
             storage_saved_at: 0,
+            request_wait: Default::default(),
+            block_access_due: false,
             last_sent_ms: 0,
             received: VecDeque::new(),
             profile_key: None,

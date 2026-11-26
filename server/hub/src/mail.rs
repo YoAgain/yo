@@ -1,9 +1,9 @@
-//! Mail (spec 4.4, 6.3, 6.7): sealed deliveries stored by one writer in group commits, long polls, pushes.
+//! Mail (spec 3.2, 4.1, 4.2): sealed deliveries stored by one writer in group commits, long polls, pushes.
 
 use crate::db::{self, Copies, Db, Delivered, Incoming};
 use crate::error::{self, refuse, Refusal, Res};
 use crate::limiter::{self, Place};
-use crate::request::{b64_array, bad, header, held, path_id, query, Auth, Hubs, Peer, MINUTE};
+use crate::request::{b64_array, bad, header, held, path_id, query, Auth, Hubs, Peer};
 use crate::{now_ms, push, Hub};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -44,14 +44,14 @@ pub(crate) struct Delivery {
     pub urgent: bool,
     /// From the operator's bots (the server's own services, or a bot account's request): `bot-yo`, not `yo-in`.
     pub from_bot: bool,
-    /// A request (signed, 4.10): its pushes are paced by the requests' window, a contact's by the contacts'.
+    /// A request (signed, 3.3): its pushes are paced by the requests' window, a contact's by the contacts'.
     pub request: bool,
     pub stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
     /// Where its pushes are sent from.
     pub runtime: tokio::runtime::Handle,
 }
 
-/// A device's pushes (spec 6.7): when it was pushed last, and the one held for the end of its window: the device to
+/// A device's pushes (spec 4.2): when it was pushed last, and the one held for the end of its window: the device to
 /// push (its latest token), whether any delivery it stands for was urgent, and when it is due.
 pub(crate) struct Pushed {
     at: Instant,
@@ -149,7 +149,7 @@ impl Hub {
         Waiter { hub: self, device, notify }
     }
 
-    /// What follows a stored delivery: its devices' long polls answer, and each is pushed (spec 6.7), paced.
+    /// What follows a stored delivery: its devices' long polls answer, and each is pushed (spec 4.2), paced.
     fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, urgent: bool, request: bool, runtime: &tokio::runtime::Handle) {
         for wake in devices {
             let window = self.push_window(request, wake.waiting);
@@ -175,7 +175,7 @@ impl Hub {
         Duration::from_millis(if request { limits.push_window_request_ms } else { limits.push_window_contact_ms })
     }
 
-    /// One push per device per `window` at most (spec 6.7): a quiet device's goes at once; what comes within the
+    /// One push per device per `window` at most (spec 4.2): a quiet device's goes at once; what comes within the
     /// window after it goes as one push at its end. The push says only "there is mail": the device fetches all.
     pub(crate) fn push_paced(
         self: &Arc<Self>,
@@ -329,8 +329,8 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /v1/inbox/{user}`: an envelope for every device of a user, if the sender's view of them is the hub's (4.4).
-/// Sealed: no identity, but for a request (spec 4.10).
+/// `POST /v1/inbox/{user}`: an envelope for every device of a user, if the sender's view of them is the hub's (3.2).
+/// Sealed: no identity, but for a request (spec 3.3).
 pub(crate) async fn post_envelope(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
@@ -348,8 +348,8 @@ pub(crate) async fn post_envelope(
     };
     let devices_hash: [u8; 32] = header(&headers, HEADER_DEVICES).and_then(b64_array).ok_or_else(bad)?;
     let signed = headers.contains_key(HEADER_DEVICE);
-    // One envelope per device (spec 4.4), each a bucket's size; an app before multi-device sends one for all.
-    let copies = if headers.contains_key(api::HEADER_COPIES) {
+    // One envelope per device (spec 3.2), each a bucket's size; an app before multi-device sends one for all.
+    let copies: Option<Vec<(u8, Vec<u8>)>> = if headers.contains_key(api::HEADER_COPIES) {
         let copies: api::Copies = decode(&body).map_err(|_| bad())?;
         let mut numbers = std::collections::BTreeSet::new();
         if copies.copies.is_empty()
@@ -369,12 +369,10 @@ pub(crate) async fn post_envelope(
         yoip::protocol::envelope::check(&body, signed)?;
         None
     };
-    // Limited by its address only, and by the bytes it stores (6.6). An `Authorization` header is ignored.
-    hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)
-        .map_err(|_| error::limited("ip", None))?;
-    hub.limit_ip_bytes(peer, &headers, body.len())?;
+    // Limited by its address only (4.1), and by its recipient's inbox below. An `Authorization` header is ignored.
+    hub.limit_anonymous(peer, &headers)?;
 
-    // Whose it is (spec 4.10): a contact's (the profile key shown, or a group send token, 4.9), else a request,
+    // Whose it is (spec 3.3): a contact's (the profile key shown, or a group send token, 3.4), else a request,
     // which its sending device signs; unsigned it is `403`.
     let signer = if signed {
         let (uri, headers, body) = (uri.clone(), headers.clone(), body.clone());
@@ -385,6 +383,12 @@ pub(crate) async fn post_envelope(
     let sender = signer.as_ref().map(|s| s.user_id);
     // To its own user (Signal's sync): never a request, never back to the sending device.
     let from = signer.filter(|s| s.user_id == user).map(|s| s.device_id);
+    if from.is_some() {
+        let sealed = |bytes: &[u8]| bytes.first() == Some(&yoip::protocol::envelope::SEALED);
+        if copies.as_ref().map_or_else(|| sealed(&body), |copies| copies.iter().any(|(_, bytes)| sealed(bytes))) {
+            return Err(bad());
+        }
+    }
     let shown = header(&headers, api::HEADER_ACCESS).and_then(b64_array).map(|key| api::access_check(&key));
     let endorsed = header(&headers, api::HEADER_GROUP_SEND).is_some_and(|token| hub.endorsed(&user, token));
     let request = if endorsed || from.is_some() {
@@ -400,7 +404,7 @@ pub(crate) async fn post_envelope(
     // A request past its buckets waits, for this recipient only (`429` with `Retry-After`); a bot account's never.
     let request = request.filter(|sender| hub.bot(sender).is_none());
     let from_bot = hub.own_service(peer, &headers) || sender.is_some_and(|sender| hub.bot(&sender).is_some());
-    // A contact's delivery: the envelope bytes into the recipient's inbox from everyone (6.6, Signal's inbound
+    // A contact's delivery: the envelope bytes into the recipient's inbox from everyone (4.1, Signal's inbound
     // message bytes), not what waits; a bot's inbox and the server's own services pass. `429` naming the recipient,
     // `Retry-After` in whole minutes: the answer of every limit, telling nothing of the inbox.
     if request.is_none() && !from_bot && hub.bot(&user).is_none() {

@@ -1,4 +1,4 @@
-// Push (spec 4.1, /v1/push): the APNs device token to the hub. Yo Dev is signed for APNs' sandbox, TestFlight and the
+// Push (spec 4.2, /v1/push): the APNs device token to the hub. Yo Dev is signed for APNs' sandbox, TestFlight and the
 // App Store for production: the hub picks the APNs host by the platform the app names.
 import Intents
 import SwiftUI

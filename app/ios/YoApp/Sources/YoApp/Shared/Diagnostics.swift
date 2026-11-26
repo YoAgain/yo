@@ -318,7 +318,7 @@ enum Diagnostics {
   }
 }
 
-/// The random install id help goes by (support thread, reports, crash and error reports; spec 4.2): made on first use,
+/// The random install id help goes by (support thread, reports, crash and error reports; spec 4): made on first use,
 /// kept on this phone alone in the App Group (the app and its extensions), never sent with the account or put in its
 /// storage. Send Crashes off forgets it.
 enum InstallID {

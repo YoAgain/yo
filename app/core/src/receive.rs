@@ -277,7 +277,7 @@ impl Client {
             }
             return Ok(Some((user, None)));
         }
-        // Someone writing first, or a contact a rolled-back state forgot; a forger pays a delivery per lookup (6.6).
+        // Someone writing first, or a contact a rolled-back state forgot; a forger pays a delivery per lookup (4.1).
         match self.lookup(&Handle::account_key(&account_key), 0, Vec::new()) {
             Ok((found, username)) if found.account_key == account_key => {
                 let user = hex(&found.user_id);
@@ -411,7 +411,7 @@ impl Client {
             }
         }
         if copy.kind == KIND_PLAINTEXT {
-            // A contact's device at its number, as this device knows it: nothing else is answered (4.6).
+            // A contact's device at its number, as this device knows it: nothing else is answered (3.2).
             let known = unpinned.is_none() && self.knows_device(&user, &payload.device_key, payload.device_id);
             if !known {
                 self.drop_one("a decryption error from a device not known here".into());
@@ -476,7 +476,7 @@ impl Client {
             }
         };
         // It opened, so it is the account's. A device key unknown here is taken in only once the hub names it; else it
-        // is a replaced device's, and dropped (4.6).
+        // is a replaced device's, and dropped (3.2).
         *verified = true;
         self.remember(copy.message.as_slice());
         if let Some(Unpinned { account_key, username, roster }) = unpinned {
@@ -540,14 +540,14 @@ impl Client {
 
     /// The one way a contact's key is taken: kept, also in the storage (spec 4.3), and what waits for them goes now as
     /// a contact's. A type 10 tells no generation: the one held stays the bound until a content message tells it
-    /// (4.10).
+    /// (3.3).
     pub(crate) fn adopt_key(&mut self, user: &str, key: [u8; 32]) {
         let Some(contact) = self.state.contacts.get_mut(user) else { return };
         if contact.profile_key != Some(key) {
             contact.profile_key = Some(key);
             self.store_key(user, Some(key));
         }
-        self.request_wait.remove(user);
+        self.state.request_wait.remove(user);
         self.refused_until_read.remove(user);
     }
 
@@ -574,6 +574,10 @@ impl Client {
 
     /// A message from a contact.
     pub(super) fn received(&mut self, user: &str, device: &Key, plaintext: &[u8], message: Message) -> Result<()> {
+        if matches!(message.content, Content::Unknown(_)) {
+            self.drop_one(yoip::Error::Unsupported.to_string());
+            return Ok(());
+        }
         if let Content::Probe(token) | Content::ProbeReply(token) = message.content {
             if self.first_time(user, device, plaintext) && message.group.is_none() {
                 if matches!(message.content, Content::Probe(_)) {
@@ -612,14 +616,13 @@ impl Client {
         if let Some((key, generation)) = Message::profile_key_of(plaintext) {
             self.take_key_carried(user, key, generation);
         }
-        // A blocked user's messages are opened (sessions go on) and dropped unseen (4.8); group changes still count.
+        // A blocked user's messages are opened (sessions go on) and dropped unseen (3.3); group changes still count.
         if self.blocked(user) && !matches!(message.content, Content::Group(_) | Content::ProfileKey(_)) {
             return Ok(());
         }
-        // Requests off (spec 3.3): a stranger's content is dropped unseen and unanswered; so is what a stranger sends
-        // to a group not joined (a group a stranger made with this account in it is a request too), a Yo or a change.
+        // Requests off: drop strangers' direct messages and group changes, and anyone's Yos to an unjoined group.
         // A group known and not fetched yet holds its Yos until it is (`release_held` decides).
-        if !self.state.requests_open && self.stranger(user) {
+        if !self.state.requests_open && (message.group.is_some() || self.stranger(user)) {
             let tag = match &message.content {
                 Content::Group(tag) => Some(tag),
                 _ => message.group.as_ref(),
@@ -636,11 +639,11 @@ impl Client {
                 return Ok(());
             }
         }
-        // A copy resent for a decryption error and seen already (4.6): messages differ at least in their time.
+        // A copy resent for a decryption error and seen already (3.2): messages differ at least in their time.
         if !self.first_time(user, device, plaintext) {
             return Ok(());
         }
-        // Everything but a receipt gets a receipt so the ratchet moves on (spec 3.2); not a request yet (4.10).
+        // Everything but a receipt gets a receipt so the ratchet moves on (spec 3.2); not a request yet (3.3).
         if !matches!(message.content, Content::Receipt) {
             if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
                 contact.receipt_due = true;
@@ -661,6 +664,7 @@ impl Client {
                 self.group_yo(user, tag, message.sent_at_ms, content);
                 Ok(())
             }
+            // A name from an app before profiles went: kept, so old apps' names still show.
             Content::Profile { name } => {
                 if let Some(contact) = self.state.contacts.get_mut(user) {
                     contact.name = Some(name.clone());
@@ -673,8 +677,6 @@ impl Client {
                 let accepted = contact.accepted;
                 contact.receipt_due = accepted;
                 if !std::mem::replace(&mut contact.chat, true) {
-                    // A request (spec 3.3): no name goes to them until it is said yes to (`accept`).
-                    contact.profile_due = accepted && self.state.name.is_some();
                     self.push_event(Event::NewChat { user: user.to_owned() });
                 }
                 let content = self.forget_keys(content);
@@ -743,7 +745,7 @@ impl Client {
         Ok(())
     }
 
-    /// The receipts and decryption errors due (spec 3.2, 3.2).
+    /// The receipts and decryption errors due (spec 3.2).
     pub(super) fn answer_due(&mut self) -> Result<()> {
         let due: Vec<(String, bool, Vec<DecryptionError>)> = self
             .state
@@ -751,7 +753,7 @@ impl Client {
             .iter()
             .filter(|(_, c)| !c.blocked && !c.gone && !c.unconfirmed)
             .map(|(user, c)| {
-                // Not to a request not said yes to (4.10); one whose first message never opened gets one so its session
+                // Not to a request not said yes to (3.3); one whose first message never opened gets one so its session
                 // heals.
                 let answers = c.accepted || !c.chat || self.in_joined_group(user);
                 let errors = if answers { c.decryption_errors.clone() } else { Vec::new() };
@@ -777,7 +779,7 @@ impl Client {
     }
 }
 
-/// A copy's session message by its kind (spec 4.1).
+/// A copy's session message by its kind (spec 3.2).
 fn session_message(kind: u8, bytes: &[u8]) -> Result<CiphertextMessage> {
     match kind {
         KIND_PREKEY => PreKeySignalMessage::try_from(bytes).map(CiphertextMessage::PreKeySignalMessage),

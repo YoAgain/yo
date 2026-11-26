@@ -1,4 +1,4 @@
-//! Groups (spec 4.9): Signal's Groups v2 at the hub, zkgroup. The hub keeps each group encrypted with its revision;
+//! Groups (spec 3.4): Signal's Groups v2 at the hub, zkgroup. The hub keeps each group encrypted with its revision;
 //! members change it one revision on (the hub's compare and swap settles two at once), Yos go over the members'
 //! sessions, sealed with group send endorsements where the sender lacks a member's profile key.
 
@@ -38,7 +38,7 @@ fn ids(cs: &[&Client]) -> Vec<String> {
 
 /// Ann makes a group with Ben and Cleo, who do not know each other: everyone fetches the same group from the hub,
 /// each Yo reaches the other two, and nobody becomes a 1:1 chat of anyone through it. Both say yes (their keys into
-/// their entries, spec 4.9); Ben has no profile key of Cleo's yet: his Yo to her goes sealed on the group's send
+/// their entries, spec 3.4); Ben has no profile key of Cleo's yet: his Yo to her goes sealed on the group's send
 /// endorsement, which the hub issues for members with their key only.
 #[test]
 fn a_group_yo_reaches_every_member_also_without_their_profile_key() {
@@ -189,7 +189,7 @@ fn the_last_member_can_leave() {
     assert!(view(a, &id).left);
 }
 
-/// The same photo sent to a group again reaches each member once; a member added since gets it (spec 4.7, 5).
+/// The same photo sent to a group again reaches each member once; a member added since gets it (spec 3.2).
 #[test]
 fn the_same_group_photo_goes_to_each_member_once() {
     use yo_core::media;
@@ -237,7 +237,7 @@ fn a_blocked_member_is_not_heard_but_the_group_stays_one() {
 
 /// The groups' master keys are in the account's storage, as Signal keeps them (GroupV2Record): a new phone of the
 /// account fetches its groups from the hub with its first sync, named and with their members, before anyone writes to
-/// them. A request stays a request; a group left does not come back.
+/// them. Requests and groups left stay off the new phone.
 #[test]
 fn a_new_phone_gets_its_groups_back_before_any_yo() {
     let hub = TestHub::start();
@@ -265,12 +265,21 @@ fn a_new_phone_gets_its_groups_back_before_any_yo() {
     assert_eq!(g.members, ids(&[a, b, c]));
     assert_eq!(view(&ann, &gone).members, ids(&[a]));
 
-    // Ben's: FAMILY as he had it (a request, if it was one there), GONE not at all.
+    assert!(!view(b, &id).accepted);
+    assert!(!b.saved().state.storage.groups.contains_key(&id));
+    // An older phone could write a request into storage. The new phone skips it.
+    let mut legacy = b.saved().state.storage.clone();
+    let mut entry = a.saved().state.storage.groups[&id].clone();
+    entry.accepted.value = false;
+    legacy.groups.insert(id.clone(), entry);
+    let version = legacy.version;
+    legacy.version += 1;
+    let data = yo_core::storage::seal(&b.account_secret(), &yo_tests::user_id(b.user_id()), &legacy).unwrap();
+    let body = yoip::encode(&yoip::net::api::Storage { version, data: data.into() });
+    assert_eq!(b.signed_for_tests("PUT", yoip::net::api::STORAGE, &body).unwrap().status, 204);
     let mut ben = yo_tests::new_phone(Http::new(hub.url()), &names[1], b);
     ben.sync(0).unwrap();
-    let g = view(&ben, &id);
-    assert_eq!((g.name.as_str(), g.left, g.accepted), ("FAMILY", false, view(b, &id).accepted));
-    assert_eq!(g.members, ids(&[a, b, c]));
+    assert!(!ben.groups().iter().any(|g| g.id == id));
     assert!(!ben.groups().iter().any(|g| g.id == gone), "{:?}", ben.groups());
 
     // And it works: Ann's Yo from her new phone reaches the others.
@@ -278,7 +287,7 @@ fn a_new_phone_gets_its_groups_back_before_any_yo() {
     assert_eq!(group_yos(&take(c)), [(id.clone(), a.user_id().to_owned())]);
 }
 
-/// Deliveries `of` sent to `to` signed by its device: requests (spec 4.10), counted in the hub's buckets.
+/// Deliveries `of` sent to `to` signed by its device: requests (spec 3.3), counted in the hub's buckets.
 fn signed_to(of: &Http, to: &Client) -> usize {
     let path = yoip::net::api::deliver_path(&yo_tests::user_id(to.user_id()));
     let signed = |hs: &[(String, String)]| hs.iter().any(|(n, _)| n == yoip::net::request::HEADER_DEVICE);
@@ -306,7 +315,7 @@ fn contacts_and_a_bot(hub: &TestHub) -> ([Client; 3], [std::sync::Arc<Http>; 3],
     take(&mut b);
     take(&mut c);
     c.accept_group(&id).unwrap();
-    // Her yes is told to every member (type 8): they fetch the group, now endorsing her (spec 4.9), and get her key.
+    // Her yes is told to every member (type 8): they fetch the group, now endorsing her (spec 3.4), and get her key.
     take(&mut a);
     take(&mut b);
     ([a, b, c], https, id)
@@ -434,7 +443,7 @@ fn rounds(c: &mut Client, n: usize) {
     }
 }
 
-/// YoGPT's case: an account that told its access key before the hub kept commitments (spec 4.9) has none there,
+/// YoGPT's case: an account that told its access key before the hub kept commitments (spec 3.4) has none there,
 /// while its device holds it told. Its key going into a group it joined tells the access key with the commitment
 /// again, once, and then goes in; the device does not ask for its own credential after every read (it did, 404 each
 /// time, about 15 a second).
@@ -503,25 +512,7 @@ fn an_own_credential_refused_for_good_is_asked_for_after_a_pause_only() {
     assert_eq!(credential(&https[1]) - asked_before, 4, "the second pause is longer");
 }
 
-/// Groups made are limited a day (each is kept until its last member leaves): by the address they come from, as the
-/// hub does not know whose they are (spec 4.9, 6.6); past the limit `429`, which the maker sees as a refusal.
-#[test]
-fn the_groups_made_from_one_address_are_limited() {
-    let mut config = yo_hub::config::Config::for_tests();
-    config.limits.groups_per_ip_day = 2;
-    let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let mut p = people(&hub, 3);
-    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
-    let others = [b.user_id().to_owned()];
-    for name in ["ONE", "TWO"] {
-        a.create_group(name, &others).unwrap();
-    }
-    assert_eq!(a.create_group("THREE", &others).unwrap_err(), yo_core::Error::Refused(429), "past the day's groups");
-    assert!(c.create_group("OTHER", &others).is_err(), "the same address: not told apart by account");
-    assert_eq!(a.groups().len(), 2);
-}
-
-/// Audit M1 (spec 1, 4.9): the hub never learns who is in a group. Every group request but the day's auth credential
+/// Audit M1 (spec 1, 3.4): the hub never learns who is in a group. Every group request but the day's auth credential
 /// goes unsigned, on the connection that names no account (`api::anonymous`): making, fetching, changing, the yes,
 /// leaving, the profile key credentials; a Yo and a photo to the group go as ever.
 #[test]

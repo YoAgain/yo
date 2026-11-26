@@ -263,7 +263,7 @@ fn a_pinned_fetch_takes_only_the_hubs_answer_to_it() {
     let other: [u8; 32] = stranger.public_key.public_key_bytes().try_into().unwrap();
     between.replay.store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(Client::fetch_backup(&between, &user, &Door::Code(&new_code), &[other]).is_err(), "another hub's key");
-    // The hub's key among several pinned (the spare, 6.10): taken, the new record.
+    // The hub's key among several pinned (the spare, 4.1): taken, the new record.
     let fresh = Client::open_backup(&between, None, &Door::Code(&new_code), &[other, pinned[0]]).unwrap().unwrap();
     assert_eq!((*fresh.k, fresh.plain.as_slice()), ([3; 32], &b"{\"new\":1}"[..]));
     // Without a nonce the hub answers unsigned, as before (an app from before; the tools).

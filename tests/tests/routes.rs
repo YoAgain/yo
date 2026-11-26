@@ -1,5 +1,5 @@
-//! Every route of the hub as spec 6.3 lists it: what it answers to a good request, to a missing or bad signature, to
-//! a malformed or oversized body, to a repeat, past its limit; and the prekeys (4.1, 6.5) as the hub hands them out.
+//! Every route of the hub as spec 4.1 lists it: what it answers to a good request, to a missing or bad signature, to
+//! a malformed or oversized body, to a repeat, past its limit; and the prekeys (3.1, 4.2) as the hub hands them out.
 
 use std::sync::Arc;
 use yo_core::{help, Client, Error, Event};
@@ -85,7 +85,6 @@ fn signed_routes(me: &str) -> Vec<(&'static str, String, Vec<u8>)> {
     vec![
         ("PUT", api::PREKEYS.into(), encode(&one_time(1_000_000, 1))),
         ("POST", api::LOOKUP.into(), lookup_body(Handle::user(&user_id(me)), 0, Vec::new())),
-        ("PUT", api::USERNAME.into(), encode(&api::SetUsername { username: None })),
         ("PUT", api::PUSH.into(), encode(&api::Push::none())),
         ("PUT", api::BOT.into(), vec![1]),
         ("GET", api::inbox_path(0), Vec::new()),
@@ -97,7 +96,7 @@ fn signed_routes(me: &str) -> Vec<(&'static str, String, Vec<u8>)> {
     ]
 }
 
-/// Spec 6.2: a signed route answers `401` to a request without a signature, with another request's, from a device
+/// Spec 4.1: a signed route answers `401` to a request without a signature, with another request's, from a device
 /// the hub does not know and to a replay; `410` to a device replaced by a new phone and to one whose account is gone.
 #[test]
 fn every_signed_route_wants_its_devices_signature() {
@@ -145,7 +144,7 @@ fn every_signed_route_wants_its_devices_signature() {
     assert_ne!(name, b_name);
 }
 
-/// Spec 6.2: a time outside the window is `401` telling the hub's time, so the device can correct its clock; any
+/// Spec 4.1: a time outside the window is `401` telling the hub's time, so the device can correct its clock; any
 /// other `401` (a replay, a bad signature) tells nothing.
 #[test]
 fn a_time_outside_the_window_is_told_the_hubs_time() {
@@ -168,7 +167,7 @@ fn a_time_outside_the_window_is_told_the_hubs_time() {
     assert_eq!((code, body.len()), (status::UNAUTHORIZED, 0));
 }
 
-/// Spec 2 (strict decoding), 6.3: a body that is not the route's type, empty, or with a byte after it is `400`.
+/// Spec 1.3 (strict decoding), 4.1: a body that is not the route's type, empty, or with a byte after it is `400`.
 #[test]
 fn a_malformed_body_is_400_on_every_route() {
     let hub = TestHub::start();
@@ -185,7 +184,7 @@ fn a_malformed_body_is_400_on_every_route() {
             assert_eq!(code, status::BAD_REQUEST, "{method} {path} {} bytes", bad.len());
         }
     }
-    // Unsigned routes alike: registration, delivery (6.1: size and version only).
+    // Unsigned routes alike: registration, delivery (4.1: size and version only).
     for bad in [Vec::new(), vec![0xFF; 3]] {
         assert_eq!(raw(&hub, "POST", api::REGISTER, &[], bad).0, status::BAD_REQUEST);
     }
@@ -219,7 +218,7 @@ fn a_malformed_body_is_400_on_every_route() {
     }
 }
 
-/// Spec 6.6: a request body beyond 65 KiB is `413` on every route, and each route's own limits hold.
+/// Spec 4.1: a request body beyond 65 KiB is `413` on every route, and each route's own limits hold.
 #[test]
 fn bodies_are_held_to_their_limits() {
     let hub = TestHub::start();
@@ -230,7 +229,7 @@ fn bodies_are_held_to_their_limits() {
         if method == "GET" || method == "DELETE" {
             continue;
         }
-        // Refused before the body is read (spec 6.6): `413`, or the connection closed under a client still sending it.
+        // Refused before the body is read (spec 4.1): `413`, or the connection closed under a client still sending it.
         match a.signed_for_tests(method, &path, &vec![0; most + 1]) {
             Ok(response) => assert_eq!(response.status, status::TOO_LARGE, "{method} {path}"),
             Err(error) => assert!(matches!(error, Error::Network(_)), "{method} {path}: {error:?}"),
@@ -248,7 +247,7 @@ fn bodies_are_held_to_their_limits() {
     let path = api::deliver_path(&user_id(&me));
     assert_eq!(too_large(&path, vec![(api::HEADER_DEVICES, yoip::b64(&hash))]), status::TOO_LARGE);
 
-    // Prekeys (6.6): 32 one-time of each kind per upload, 2 KiB each, signatures of 64 bytes.
+    // Prekeys (4.1): 32 one-time of each kind per upload, 2 KiB each, signatures of 64 bytes.
     let mut put = |prekeys: &api::Prekeys| signed(&mut a, "PUT", api::PREKEYS, &encode(prekeys)).0;
     let mut many = one_time(1_000, 32);
     assert_eq!(put(&many), status::NO_CONTENT);
@@ -303,7 +302,7 @@ fn bodies_are_held_to_their_limits() {
     ] {
         assert_eq!(signed(&mut a, "POST", api::LOOKUP, &lookup_body(handle, 0, Vec::new())).0, status::BAD_REQUEST);
     }
-    // Help (6.4): an install id of 32 lowercase hex digits, never a signature; a report's reason there is.
+    // Help (4): an install id of 32 lowercase hex digits, never a signature; a report's reason there is.
     let phone = install(1);
     let report = |user: [u8; 16], reason| encode(&api::Report { user_id: user, reason });
     for reason in [0, 4, 255] {
@@ -325,7 +324,7 @@ fn bodies_are_held_to_their_limits() {
     for path in ["/v1/crash", "/v1/errors", "/v1/diagnostics/crash", "/v1/support", "/v1/feedback", "/v1/report"] {
         assert_eq!(raw(&hub, "POST", path, &phone, feedback(b"x".to_vec(), 1)).0, status::NOT_FOUND, "{path}");
     }
-    // Backup (7): wraps 256 bytes, sealed 60 KiB, a locator of 16 bytes or none, auth keys that are keys.
+    // Backup (2.4): wraps 256 bytes, sealed 60 KiB, a locator of 16 bytes or none, auth keys that are keys.
     let mut record = backup_record(Vec::new());
     record.sealed = vec![1; 60 * 1024].into();
     assert_eq!(signed(&mut a, "PUT", api::BACKUP, &encode(&record)).0, status::NO_CONTENT);
@@ -343,7 +342,7 @@ fn bodies_are_held_to_their_limits() {
     }
 }
 
-/// Spec 6.3, 6.4: registration answers `Registered`; the same request again (a device registered already) and a name
+/// Spec 4.1, 4.2: registration answers `Registered`; the same request again (a device registered already) and a name
 /// someone has are `409`; the account key again is its user (its old device `410`); a registration without its
 /// signed or last-resort prekey, with a proof that does not hold or a push token too long is `400`.
 #[test]
@@ -386,7 +385,7 @@ fn registration_answers_as_the_spec_says() {
     assert_eq!(old.sync(0), Err(Error::Replaced));
 }
 
-/// Spec 3.3: how short a name may be is the hub's switch (`YO_NAME_MIN`): "Mia" with the default of 3, "Or" not;
+/// Spec 2.2: how short a name may be is the hub's switch (`YO_NAME_MIN`): "Mia" with the default of 3, "Or" not;
 /// one letter only once it is lowered to 1.
 #[test]
 fn the_least_name_length_is_the_hubs_switch() {
@@ -407,8 +406,7 @@ fn the_least_name_length_is_the_hubs_switch() {
     assert_eq!(new.err(), Some(Error::Refused(status::BAD_REQUEST)), "a new two-letter name");
 }
 
-/// Spec 3.3: a name from before a higher least stays its owner's: found (`409`), sent to, restored and respelled;
-/// only new names, at registration and on a rename, are measured.
+/// Spec 2.2: a name from before a higher least stays its owner's: found (`409`), sent to, restored.
 #[test]
 fn a_short_name_from_before_stays() {
     let dir = std::env::temp_dir().join(format!("yo-short-{}", random_u64()));
@@ -433,21 +431,15 @@ fn a_short_name_from_before_stays() {
     let events = ya.sync(0).unwrap();
     assert!(events.iter().any(|e| matches!(e, Event::Message { user, .. } if *user == bob.user_id())), "{events:?}");
 
-    let set = |a: &mut Client, name: &str| {
-        let body = encode(&api::SetUsername { username: Some(name.as_bytes().to_vec().into()) });
-        signed(a, "PUT", api::USERNAME, &body).0
-    };
-    assert_eq!(set(&mut ya, "YA"), status::NO_CONTENT, "its own name respelled");
-    assert_eq!(set(&mut bob, "Bo"), status::BAD_REQUEST, "a new short name");
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Spec 6.3: `204` free, `409` taken (in any spelling) or reserved, `400` no username; the rate per address.
+/// Spec 2.2: `204` free, `409` taken (in any spelling) or reserved, `400` no username; the anonymous rate per address.
 #[test]
 fn whether_a_username_is_free() {
     let mut config = Config::for_tests();
     config.reserved = yo_hub::config::parse_reserved("Admin\n");
-    config.limits.name_check_per_ip_minute = 8;
+    config.limits.anonymous_per_ip_minute = 8;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (_, _, name) = account(&hub);
     let check = |name: &str| raw(&hub, "GET", &api::username_path(name), &[], Vec::new()).0;
@@ -464,51 +456,59 @@ fn whether_a_username_is_free() {
     assert_eq!(check("Free_one"), status::RATE_LIMITED, "the ninth this minute");
 }
 
-/// Spec 3.3, 6.3: `PUT /v1/username` claims, renames and gives up; a name someone has or reserved is `409`; the same
-/// request twice is the same; the old name is free at once.
 #[test]
-fn a_username_is_set_and_given_up() {
-    let mut config = Config::for_tests();
-    config.reserved = yo_hub::config::parse_reserved("Admin\n");
-    let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let (mut a, _, name) = account(&hub);
-    let (_, _, other) = account(&hub);
-    let set = |a: &mut Client, name: Option<&str>| {
-        let body = encode(&api::SetUsername { username: name.map(|n| n.as_bytes().to_vec().into()) });
-        signed(a, "PUT", api::USERNAME, &body).0
-    };
-    let free = |name: &str| raw(&hub, "GET", &api::username_path(name), &[], Vec::new()).0 == status::NO_CONTENT;
-    assert_eq!(set(&mut a, Some(&other)), status::CONFLICT);
-    assert_eq!(set(&mut a, Some("admin")), status::CONFLICT);
-    assert_eq!(set(&mut a, Some("x")), status::BAD_REQUEST);
-    assert_eq!(set(&mut a, Some(&name.to_lowercase())), status::NO_CONTENT, "its own in another spelling");
-    let renamed = format!("Re{}", &name[1..]);
-    for _ in 0..2 {
-        assert_eq!(set(&mut a, Some(&renamed)), status::NO_CONTENT);
+fn a_registered_username_cannot_be_changed_or_released() {
+    let hub = TestHub::start();
+    let (mut a, http, name) = account(&hub);
+    for other in [Some("Another"), None] {
+        let before = http.sent.lock().unwrap().len();
+        assert_eq!(a.set_username(other), Err(Error::Protocol("username is fixed")));
+        assert_eq!(http.sent.lock().unwrap().len(), before);
+        let body = encode(&api::SetUsername { username: other.map(|n| n.as_bytes().to_vec().into()) });
+        assert_eq!(signed(&mut a, "PUT", api::USERNAME, &body).0, status::NOT_FOUND);
     }
-    assert!(free(&name) && !free(&renamed));
-    for _ in 0..2 {
-        assert_eq!(set(&mut a, None), status::NO_CONTENT);
-    }
-    assert!(free(&renamed));
-    let me = a.user_id().to_owned();
-    let (code, body) = signed(&mut a, "POST", api::LOOKUP, &lookup_body(Handle::user(&user_id(&me)), 2, Vec::new()));
-    assert_eq!(code, status::OK);
-    assert_eq!(decode::<api::LookupNamed>(&body).unwrap().username, None);
-    assert_eq!(
-        signed(&mut a, "POST", api::LOOKUP, &lookup_body(Handle::username(&renamed), 0, Vec::new())).0,
-        status::NOT_FOUND
-    );
+    assert_eq!(a.username(), Some(name.as_str()));
+    assert!(!Client::username_free(&*http, &name).unwrap());
+    assert!(Client::username_free(&*http, "Another").unwrap());
 }
 
-/// Spec 6.3: a lookup by user id, account key and username answers who it is (`LookupResult`, or `LookupNamed` with
-/// flag 2); with flag 1 a bundle per device; `404` for nobody. Each kind has its rate per device and day.
+#[test]
+fn signed_self_delivery_rejects_sealed_envelopes() {
+    use yoip::net::request::{to_be_signed, HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
+    let hub = TestHub::start();
+    let (a, _, _) = account(&hub);
+    let state = a.saved().state;
+    let path = api::deliver_path(&user_id(a.user_id()));
+    let mut identified = junk(1);
+    identified[0] = yoip::VERSION;
+    let copies = api::Copies {
+        copies: vec![
+            api::CopyFor { device: 2, envelope: identified.into() },
+            api::CopyFor { device: 3, envelope: junk(2).into() },
+        ],
+    };
+    for (i, body) in [junk(1), encode(&copies)].into_iter().enumerate() {
+        let time = yo_hub::now_ms().max(state.signed_until + 1) + i as u64;
+        let signature = yo_core::identity::sign_with(&state.auth_secret, &to_be_signed("POST", &path, time, &body));
+        let mut headers = vec![
+            (HEADER_DEVICE, yoip::b64(&state.device_id)),
+            (HEADER_TIME, time.to_string()),
+            (HEADER_SIGNATURE, yoip::b64(&signature)),
+            (api::HEADER_DEVICES, yoip::b64(&[0; 32])),
+        ];
+        if i == 1 {
+            headers.push((api::HEADER_COPIES, "1".into()));
+        }
+        assert_eq!(raw(&hub, "POST", &path, &headers, body).0, status::BAD_REQUEST);
+    }
+}
+
+/// Spec 4.1: a lookup by user id, account key and username answers who it is (`LookupResult`, or `LookupNamed` with
+/// flag 2); with flag 1 a bundle per device; `404` for nobody. Only those with prekeys have their own rate per device
+/// and day; the rest count as any signed request.
 #[test]
 fn lookups_answer_who_and_are_limited() {
-    let hub = hub_with(|l| {
-        l.lookup_per_device_day = 3;
-        l.identity_lookup_per_device_day = 5;
-    });
+    let hub = hub_with(|l| l.lookup_per_device_day = 3);
     let (mut a, _, _) = account(&hub);
     let (b, _, b_name) = account(&hub);
     let b_user = user_id(b.user_id());
@@ -527,8 +527,10 @@ fn lookups_answer_who_and_are_limited() {
     let (code, body) = ask(Handle::username(&b_name.to_lowercase()), 2);
     assert_eq!((code, decode::<api::LookupNamed>(&body).unwrap().found.user_id), (status::OK, b_user));
     assert_eq!(ask(Handle::user(&[0; 16]), 0).0, status::NOT_FOUND);
-    assert_eq!(ask(Handle::account_key(&[1; 32]), 0).0, status::NOT_FOUND, "the identity rate's fifth");
-    assert_eq!(ask(Handle::user(&b_user), 0).0, status::RATE_LIMITED);
+    assert_eq!(ask(Handle::account_key(&[1; 32]), 0).0, status::NOT_FOUND);
+    for _ in 0..10 {
+        assert_eq!(ask(Handle::user(&b_user), 0).0, status::OK, "without prekeys: no rate of its own");
+    }
     // With prekeys: its own rate.
     let (code, body) = ask(Handle::user(&b_user), 1);
     assert_eq!(code, status::OK);
@@ -540,7 +542,7 @@ fn lookups_answer_who_and_are_limited() {
     assert_eq!(ask(Handle::user(&b_user), 1).0, status::RATE_LIMITED);
 }
 
-/// Spec 4.1, 6.5: one-time prekeys go once each, the last resort when none is left, a refill brings new ones, a
+/// Spec 3.1, 4.2: one-time prekeys go once each, the last resort when none is left, a refill brings new ones, a
 /// repeated upload none back; at most 64 of each kind, none with an id not above the highest so far; an upload with a
 /// signed prekey or last resort replaces it.
 #[test]
@@ -595,7 +597,7 @@ fn prekeys_are_handed_out_as_the_spec_says() {
     }
     assert!(bundles(&mut looker, &who, Vec::new()).bundles[0].one_time.is_none());
 
-    // Hub-side bounds, with prekeys made up for a device of its own (the hub checks no signature, 6.5).
+    // Hub-side bounds, with prekeys made up for a device of its own (the hub checks no signature, 4.2).
     let (mut s, _, _) = account(&hub);
     let mine = s.user_id().to_owned();
     for from in [1_000_000, 2_000_000, 3_000_000] {
@@ -628,7 +630,7 @@ fn prekeys_are_handed_out_as_the_spec_says() {
     );
 }
 
-/// Spec 4.4: a delivery whose `Yo-Devices` is not the hub's roster stores nothing and is `409` with the roster; with
+/// Spec 3.2: a delivery whose `Yo-Devices` is not the hub's roster stores nothing and is `409` with the roster; with
 /// it, `202` to every device. A new phone changes the roster; a deleted account is `404`.
 #[test]
 fn a_delivery_names_the_devices_or_gets_them() {
@@ -665,11 +667,11 @@ fn a_delivery_names_the_devices_or_gets_them() {
     );
 }
 
-/// Spec 6.6: deliveries 200 per address and minute (here 3); a full inbox `507` for that recipient only.
+/// Spec 4.1: deliveries count in the anonymous rate per address (here 4); a full inbox `507` for that recipient only.
 #[test]
 fn deliveries_are_limited_per_address_and_per_inbox() {
     let hub = hub_with(|l| {
-        l.deliver_per_ip_minute = 4;
+        l.anonymous_per_ip_minute = 4;
         l.max_pending_per_device = 2;
     });
     let (a, _, _) = account(&hub);
@@ -697,7 +699,7 @@ fn deliveries_are_limited_per_address_and_per_inbox() {
     );
 }
 
-/// Spec 6.3, 6.6: the inbox answers oldest first, 100 at most, with the prekeys left; an ack deletes what it names
+/// Spec 4.1, 3.2: the inbox answers oldest first, 100 at most, with the prekeys left; an ack deletes what it names
 /// (again: nothing more); a long poll waits for its seconds; four requests of one device at once, not five.
 #[test]
 fn the_inbox_answers_and_takes_acks() {
@@ -752,11 +754,12 @@ fn the_inbox_answers_and_takes_acks() {
     assert_eq!(signed(&mut fifth, "GET", &api::inbox_path(0), &[]).0, status::OK, "places given back");
 }
 
-/// Spec 6.3, 6.9: the storage is `404` until written; a `PUT` names the version it replaces, else `409` with the
-/// current one; the same write twice is the second's `409`; both directions count against 120 an hour.
+/// Spec 4.1, 4.3: the storage is `404` until written; a `PUT` names the version it replaces, else `409` with the
+/// current one; the same write twice is the second's `409`; both directions count as signed requests.
 #[test]
 fn storage_is_versioned_and_limited() {
-    let hub = hub_with(|l| l.storage_per_user_hour = 6);
+    // The registration's sender certificate takes one of the 7.
+    let hub = hub_with(|l| l.signed_per_device_minute = 7);
     let (mut a, _, _) = account(&hub);
     assert_eq!(signed(&mut a, "GET", api::STORAGE, &[]).0, status::NOT_FOUND);
     let put = |version: u64, fill: u8| encode(&api::Storage { version, data: vec![fill; 1024].into() });
@@ -772,11 +775,11 @@ fn storage_is_versioned_and_limited() {
     assert!(stored.version > current.version);
     assert_eq!(stored.data.as_slice(), vec![2; 1024]);
     assert_eq!(signed(&mut a, "GET", api::STORAGE, &[]).0, status::OK);
-    assert_eq!(signed(&mut a, "GET", api::STORAGE, &[]).0, status::RATE_LIMITED, "the seventh this hour");
+    assert_eq!(signed(&mut a, "GET", api::STORAGE, &[]).0, status::RATE_LIMITED, "the eighth signed this minute");
     assert_eq!(signed(&mut a, "PUT", api::STORAGE, &put(stored.version, 3)).0, status::RATE_LIMITED);
 }
 
-/// Spec 6.3, 7: a backup is stored (`204`, again `204`), found only by a request signed with its door's key; a
+/// Spec 4.1, 2.4: a backup is stored (`204`, again `204`), found only by a request signed with its door's key; a
 /// locator another account has is `409`, a user id as locator too; an auth key that is no key `400`.
 #[test]
 fn backups_are_stored_once_per_locator() {
@@ -822,12 +825,12 @@ fn backups_are_stored_once_per_locator() {
     assert_eq!(fetch(&sign([9; 32], old), old).0, status::NOT_FOUND, "out of the window");
 }
 
-/// Spec 6.6: an old client's delivery token (`Authorization: PrivateToken`) is ignored, no `401`: the delivery counts
+/// Spec 4.1: an old client's delivery token (`Authorization: PrivateToken`) is ignored, no `401`: the delivery counts
 /// against its address like any other; there is no issuance any more.
 #[test]
 fn an_old_delivery_token_is_ignored() {
     // The roster's fetch is a delivery too: two this minute.
-    let hub = hub_with(|l| l.deliver_per_ip_minute = 2);
+    let hub = hub_with(|l| l.anonymous_per_ip_minute = 2);
     let (a, _, _) = account(&hub);
     let hash = yo_tests::devices_hash(&hub.url(), a.user_id()).unwrap();
     let path = api::deliver_path(&user_id(a.user_id()));
@@ -839,7 +842,7 @@ fn an_old_delivery_token_is_ignored() {
     assert_eq!(raw(&hub, "POST", "/v1/tokens", &[], Vec::new()).0, status::NOT_FOUND);
 }
 
-/// Spec 6.6: 1200 signed requests per device and minute (here 5), counted only once the signature holds.
+/// Spec 4.1: 1200 signed requests per device and minute (here 5), counted only once the signature holds.
 #[test]
 fn signed_requests_are_limited_per_device() {
     let hub = hub_with(|l| l.signed_per_device_minute = 5);
@@ -853,14 +856,14 @@ fn signed_requests_are_limited_per_device() {
         ];
         assert_eq!(raw(&hub, "GET", &api::inbox_path(0), &headers, Vec::new()).0, status::UNAUTHORIZED);
     }
-    // The registration's sender certificate (spec 6.1) took one of the 5.
+    // The registration's sender certificate (spec 4.1) took one of the 5.
     for _ in 0..4 {
         assert_eq!(signed(&mut a, "PUT", api::PUSH, &encode(&api::Push::none())).0, status::NO_CONTENT);
     }
     assert_eq!(signed(&mut a, "PUT", api::PUSH, &encode(&api::Push::none())).0, status::RATE_LIMITED);
 }
 
-/// Spec 4.2 step 4, 6.4 (schema 1 → 2): a device without prekeys at the hub (an app from before sessions) has no
+/// Spec 3.1, 4.2 (schema 1 → 2): a device without prekeys at the hub (an app from before sessions) has no
 /// bundle; a Yo to it waits in the outbox and `send` is `Outdated`; the hub is asked again only after an hour, and
 /// once the account has registered again with prekeys, the Yo goes.
 #[test]
@@ -906,7 +909,7 @@ fn a_yo_to_an_account_without_prekeys_is_outdated_and_waits() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Spec 6.5: lookups at once from many devices never hand out one one-time prekey twice.
+/// Spec 4.2: lookups at once from many devices never hand out one one-time prekey twice.
 #[test]
 fn one_time_prekeys_go_once_also_to_lookups_at_once() {
     let hub = TestHub::start();
@@ -929,7 +932,7 @@ fn one_time_prekeys_go_once_also_to_lookups_at_once() {
     assert_eq!(distinct.len(), ids.len(), "none twice");
 }
 
-/// Spec 6.3, 6.4: a replaced device is answered `410` for good, never `401` as a device the hub never knew.
+/// Spec 4.1, 4.2: a replaced device is answered `410` for good, never `401` as a device the hub never knew.
 #[test]
 fn a_replaced_device_is_gone_for_good() {
     const DAY: u64 = 24 * 3600 * 1000;
@@ -946,7 +949,7 @@ fn a_replaced_device_is_gone_for_good() {
     assert_eq!(signed(&mut phone, "GET", &api::inbox_path(0), &[]).0, status::OK, "secured: kept");
 }
 
-/// A body that says it is larger than any request may be is refused before it is read (spec 6.6): `413` at once,
+/// A body that says it is larger than any request may be is refused before it is read (spec 4.1): `413` at once,
 /// with not a byte of it sent, on a route with a small body and on a delivery.
 #[test]
 fn a_body_too_large_is_refused_before_it_is_read() {
@@ -1085,20 +1088,17 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
     assert_eq!(raw(&hub, "GET", "/v1/admin/messages/invalid", &headers, vec![]).0, 400);
 }
 
+/// Spec 4.1: help (messages, the thread, reports) counts in the anonymous rate by address, whatever install it names.
 #[test]
-fn help_is_limited_by_install_and_by_address() {
-    let hub = hub_with(|limits| {
-        limits.support_per_install_day = 2;
-        limits.help_per_ip_day = 4;
-    });
+fn help_is_limited_by_address() {
+    let hub = hub_with(|limits| limits.anonymous_per_ip_minute = 4);
     let http = Http::new(hub.url());
     let (a, b, c) = ("0a".repeat(16), "0b".repeat(16), "0c".repeat(16));
     help::send_message(&*http, &a, "one", "1").unwrap();
     help::send_message(&*http, &a, "two", "1").unwrap();
-    assert_eq!(help::send_message(&*http, &a, "limited", "1"), Err(Error::Refused(status::RATE_LIMITED)));
     help::send_message(&*http, &b, "another install", "1").unwrap();
     assert_eq!(help::thread(&*http, &a).unwrap().messages.len(), 2);
-    // A new id does not pass the address limit (4 a day here, the refused message counted).
+    // A new id does not pass the address limit (4 a minute here).
     assert_eq!(help::send_message(&*http, &c, "one too many", "1"), Err(Error::Refused(status::RATE_LIMITED)));
     let through = encode(&api::SupportRead { through: u64::MAX });
     assert_eq!(raw(&hub, "POST", api::HELP_READ, &install(10), through).0, status::BAD_REQUEST);
@@ -1108,7 +1108,6 @@ fn help_is_limited_by_install_and_by_address() {
 fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     let mut config = Config::for_tests();
     config.admin_token = Some("test-token".into());
-    config.limits.diagnostics_per_install_hour = 23;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let error = serde_json::json!({"domain":"network", "code":"timeout", "place":"sync", "app":"ios/1", "os":"26", "model":"iPhone"}).to_string().into_bytes();
     for _ in 0..12 {
@@ -1161,9 +1160,8 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     assert_eq!(status, 200);
     let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(rows.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap()["done"], true);
-    // 23 an hour by one install here; another install goes on.
-    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), error.clone()).0, status::RATE_LIMITED);
-    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(2), error).0, status::NO_CONTENT);
+    // No limit by install: one install goes on (the address's rate is the only one).
+    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), error).0, status::NO_CONTENT);
 }
 
 #[test]

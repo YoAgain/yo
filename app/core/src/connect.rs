@@ -120,7 +120,7 @@ impl Client {
         }
         self.atomic(|c| {
             if let Some(contact) = c.state.contacts.get_mut(&user).filter(|_| !accepted) {
-                (contact.accepted, contact.key_due, contact.profile_due) = (false, false, false);
+                (contact.accepted, contact.key_due) = (false, false);
             }
             c.send_message(&user, Content::Connect { kind: CONNECT_DECLINED, code })?;
             c.encrypt_waiting(&user);

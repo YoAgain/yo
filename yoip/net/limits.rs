@@ -21,7 +21,7 @@ pub const MAX_WAIT_S: u64 = 60;
 pub const MAX_BLOB_LEN: usize = 10 * 1024 * 1024;
 /// The most fetches one blob is stored for: every device it goes to, 16 devices of a 20-member group (spec 4.3).
 pub const MAX_BLOB_FETCHES: u32 = 320;
-/// The most while every account has one device (the hub replaces, spec 3.2): a 20-member group and room.
+/// The most while every account has one device (the hub replaces, spec 4.2): a 20-member group and room.
 pub const MAX_BLOB_FETCHES_ONE_DEVICE: u32 = 64;
 /// The largest request body: the largest envelope bucket and some room.
 pub const MAX_BODY: usize = 64 * 1024 + 1024;
@@ -40,7 +40,7 @@ pub const MAX_BACKUP_SEALED_LEN: usize = 60 * 1024;
 /// The sizes a sealed storage blob and a backup's sealed part can have (spec 4.3, 2.4): padded like an envelope, then
 /// sealed, so the hub sees a size class. The largest is both limits.
 pub const SEALED_SIZES: [usize; 4] = [1024, 4096, 16 * 1024, 60 * 1024];
-/// The longest feedback text, in bytes of UTF-8 (spec 4.1).
+/// The longest feedback text, in bytes of UTF-8 (spec 4).
 pub const MAX_FEEDBACK_LEN: usize = 2000;
 /// The account's sealed storage (spec 4.3).
 pub const MAX_STORAGE_LEN: usize = 60 * 1024;

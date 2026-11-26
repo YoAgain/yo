@@ -3,10 +3,10 @@
 //! behind Cloudflare (`YO_TRUST_CLOUDFLARE`) so does every request but the server's own (`Hub::own_service`).
 
 use crate::error::{refuse, Res};
-use crate::request::{bad, Hubs, Peer, DAY};
+use crate::request::{bad, Hubs};
 use crate::{blobs, db, now_ms, Event, Hub};
 use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -63,7 +63,7 @@ fn user_id(text: &str) -> Res<UserId> {
     blobs::unhex(text).ok_or_else(bad)
 }
 
-/// An install id in a path (spec 6.4): 32 hex digits.
+/// An install id in a path (spec 4): 32 hex digits.
 fn install(text: &str) -> Res<db::Install> {
     blobs::unhex(text).ok_or_else(bad)
 }
@@ -103,7 +103,6 @@ async fn post_reply(State(hub): Hubs, Path(id): Path<String>, body: Bytes) -> Re
     if text.trim().is_empty() || body.len() > limits::MAX_FEEDBACK_LEN {
         return Err(bad());
     }
-    hub.limit_by("support-reply", &id, 100, DAY)?;
     if !hub.db.support_reply(&id, text, now_ms())? {
         return Err(refuse(StatusCode::CONFLICT));
     }
@@ -156,13 +155,7 @@ async fn delete_todo(State(hub): Hubs, Path(id): Path<i64>) -> Res<StatusCode> {
 }
 
 /// A to-do, plain UTF-8 text: `201 {"id"}`.
-async fn post_todo(
-    State(hub): Hubs,
-    ConnectInfo(peer): Peer,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Res<(StatusCode, Json<Value>)> {
-    hub.limit_ip("admin-todo", peer, &headers, hub.config.limits.todo_per_ip_day, DAY)?;
+async fn post_todo(State(hub): Hubs, body: Bytes) -> Res<(StatusCode, Json<Value>)> {
     if body.is_empty() || body.len() > 4000 {
         return Err(bad());
     }
@@ -223,7 +216,7 @@ async fn put_diagnostics(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {
     get_diagnostics(State(hub)).await
 }
 
-// ---- reserved names (spec 3.3) ----
+// ---- reserved names (spec 2.2) ----
 
 /// The names, the switch, and the rules they are compared by.
 async fn get_reserved(State(hub): Hubs) -> Res<Json<Value>> {

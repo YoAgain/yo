@@ -29,7 +29,7 @@ pub struct GroupView {
     pub revision: u32,
     /// This account is not in it (any more).
     pub left: bool,
-    /// Joined: else someone not yet a contact added this account to it, a request (spec 3.3).
+    /// Joined: else someone not yet a contact added this account to it, a request (spec 3.4).
     pub accepted: bool,
 }
 
@@ -254,7 +254,6 @@ impl Client {
         }
         let tag = GroupTag { key: key_of(&group).ok()?, revision: group.revision };
         self.atomic(|c| {
-            c.send_profiles();
             c.queue(&others, Some(tag), content)?;
             for user in &others {
                 c.encrypt_waiting(user); // its envelope in the same save
@@ -323,7 +322,6 @@ impl Client {
         }
         self.not_empty(&group)?;
         let others = self.reach_all(&group.members)?;
-        self.send_profiles();
         let tag = GroupTag { key: key_of(&group)?, revision: group.revision };
         self.atomic(|c| {
             c.queue(&others, Some(tag), content)?;
@@ -510,7 +508,7 @@ impl Client {
         }
         members.sort();
         let left = !members.contains(&me);
-        // Joined (spec 3.3): once said yes to, until this account is out (leaving says no; added back by a stranger it
+        // Joined (spec 3.4): once said yes to, until this account is out (leaving says no; added back by a stranger it
         // is a request again), or with its key in its entry, or added by itself or an accepted contact.
         let accepted = (old.accepted && !old.left && !left)
             || keyed
@@ -549,7 +547,7 @@ impl Client {
     }
 
     /// Yos held for this group: shown if the fetched group has their sender in it, else dropped; never a blocked one's,
-    /// nor with requests off a stranger's in a group not joined (spec 3.3).
+    /// nor with requests off anyone's in a group not joined (spec 3.3).
     fn release_held(&mut self, id: &str) {
         let (theirs, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| g == id);
@@ -561,7 +559,7 @@ impl Client {
                     Event::GroupMessage { user, .. } => {
                         group.members.contains(user)
                             && !self.blocked(user)
-                            && (group.accepted || self.state.requests_open || !self.stranger(user))
+                            && (group.accepted || self.state.requests_open)
                     }
                     _ => false,
                 };
@@ -841,9 +839,6 @@ impl Client {
         let group = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
         let tag = GroupTag { key: key_of(&group)?, revision: group.revision };
         let reached = self.reach_all(users)?;
-        if !group.left {
-            self.send_profiles();
-        }
         self.atomic(|c| {
             c.queue(&reached, None, Content::Group(tag))?;
             c.persist()
@@ -910,7 +905,7 @@ impl Client {
 
     /// Queues the same content for each recipient.
     pub(crate) fn queue(&mut self, users: &[String], group: Option<GroupTag>, content: Content) -> Result<()> {
-        // Media already sent to some members (a lost answer, sent again) goes only to the rest (spec 3.2, 3.2).
+        // Media already sent to some members (a lost answer, sent again) goes only to the rest (spec 3.2).
         let users: Vec<String> = match &content {
             Content::Photo(media) | Content::Video { media, .. } => {
                 let in_group = group.as_ref().map(|g| &g.key);

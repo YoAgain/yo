@@ -1,7 +1,7 @@
 use super::*;
 
 impl Client {
-    /// Sends the outbox now, the message just queued and saved. What cannot go now waits: the send succeeded (4.7), so
+    /// Sends the outbox now, the message just queued and saved. What cannot go now waits: the send succeeded (3.2), so
     /// the app never sends it a second time.
     pub(crate) fn deliver_now(&mut self) -> Result<()> {
         match self.deliver() {
@@ -96,7 +96,7 @@ impl Client {
 
     // ---- delivery ----
 
-    /// Sends the outbox in order per user, taking in any device the hub names (4.4), until the outbox moves.
+    /// Sends the outbox in order per user, taking in any device the hub names (3.2), until the outbox moves.
     pub(super) fn deliver(&mut self) -> Result<()> {
         let mut identified = false;
         let mut result = Ok(());
@@ -185,7 +185,7 @@ impl Client {
         Ok(())
     }
 
-    /// What of the outbox can go now, in order per user, encrypted for the user's device with its device check (4.4);
+    /// What of the outbox can go now, in order per user, encrypted for the user's device with its device check (3.2);
     /// its users are marked as on their way. Local work: `Deliveries::send` posts, `delivered` takes the answers.
     pub(super) fn deliveries(&mut self) -> Result<Deliveries> {
         if self.replaced.get() {
@@ -194,19 +194,23 @@ impl Client {
         if self.prune_outbox() {
             self.persist()?;
         }
+        if self.state.block_access_due {
+            return Ok(self.no_deliveries());
+        }
         // Users whose envelopes another flush is sending, or that cannot be written to now: theirs wait, in order.
         let mut waiting = self.delivering.clone();
         let now = self.monotonic();
         // A request's hold ends at its time or with their key, however it came (an extension may have taken it in).
         let contacts = &self.state.contacts;
-        self.request_wait
+        self.state
+            .request_wait
             .retain(|user, (until, _)| *until > now && contacts.get(user).is_none_or(|c| c.profile_key.is_none()));
         self.contact_wait.retain(|_, until| *until > now);
         let mut encrypted = false;
         let mut i = 0;
         while i < self.state.outbox.len() {
             let user = self.state.outbox[i].user.clone();
-            // Nothing goes to a blocked user (4.8), nor to one whose new key waits for confirmation (3.4).
+            // Nothing goes to a blocked user (3.3), nor to one whose new key waits for confirmation (2.3).
             let held = self.blocked(&user) || self.state.contacts.get(&user).is_some_and(|c| c.unconfirmed);
             if waiting.contains(&user) || held {
                 waiting.insert(user);
@@ -266,7 +270,7 @@ impl Client {
         let certificate = self.certificate();
         let own = identity::account_pair(&self.state.account_secret)?;
         let mut first = BTreeSet::new();
-        // Users one of whose envelopes a `429` holds (6.6): their next ones wait behind it, in order.
+        // Users one of whose envelopes a `429` holds (4.1): their next ones wait behind it, in order.
         let mut limited = BTreeSet::new();
         for item in &self.state.outbox {
             if item.payloads.is_empty() {
@@ -275,10 +279,10 @@ impl Client {
             if waiting.contains(&item.user) || self.refused_until_read.contains(&item.user) {
                 continue;
             }
-            // A request held back by the hub's limit (`429`) waits, all but the key ahead of it: keys first (4.10).
+            // A request held back by the hub's limit (`429`) waits, all but the key ahead of it: keys first (3.3).
             let leading = first.insert(item.user.clone());
             let key_may = leading && is_key(item);
-            if self.request_wait.get(&item.user).is_some_and(|(_, key_refused)| *key_refused || !key_may) {
+            if self.state.request_wait.get(&item.user).is_some_and(|(_, key_refused)| *key_refused || !key_may) {
                 continue;
             }
             // To this account's other devices: identified and signed, so the hub leaves out this one (Signal's sync).
@@ -316,7 +320,7 @@ impl Client {
             // Identified for want of a certificate, or as a request (spec 3.3); an envelope per device.
             let identity = signal::identity_of(&account_key)?;
             let sealed = certificate.as_ref().filter(|_| access.is_some() || endorsed);
-            // Held by a `429` for the time it named: not posted again before (6.6), so a limit is never hammered.
+            // Held by a `429` for the time it named: not posted again before (4.1), so a limit is never hammered.
             if limited.contains(&item.user)
                 || self.held_until.deliveries > now
                 || (sealed.is_none() && self.held_until.signed > now)
@@ -379,6 +383,7 @@ impl Client {
     pub(super) fn delivered(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Result<bool> {
         let mut done = BTreeSet::new();
         let mut gone = BTreeSet::new();
+        let mut save_wait = false;
         let mut recover = BTreeSet::new();
         let mut changed = false;
         let mut result = Ok(());
@@ -427,7 +432,7 @@ impl Client {
                     gone.insert(item.user.clone());
                 }
                 // The key shown is not the recipient's any more, or they take no requests and this account is no
-                // contact (4.10).
+                // contact (3.3).
                 Some(Ok(response))
                     if response.status == status::FORBIDDEN
                         || (response.status == status::UNAUTHORIZED && item.access.is_some()) =>
@@ -469,10 +474,11 @@ impl Client {
                         Some(Limit::Recipient(wait)) if item.access.is_some() || item.endorsed => {
                             self.contact_wait.insert(item.user.clone(), now + wait);
                         }
-                        // A request past its bucket (4.10): until then, or until their key comes.
+                        // A request past its bucket (3.3): until then, or until their key comes.
                         Some(Limit::Recipient(wait)) => {
-                            let key_refused = self.request_wait.contains_key(&item.user);
-                            self.request_wait.insert(item.user.clone(), (now + wait, key_refused));
+                            let key_refused = self.state.request_wait.contains_key(&item.user);
+                            self.state.request_wait.insert(item.user.clone(), (now + wait, key_refused));
+                            save_wait = true;
                         }
                         Some(Limit::Address(wait) | Limit::All(wait)) => {
                             self.held_until.deliveries = self.held_until.deliveries.max(now + wait);
@@ -493,6 +499,9 @@ impl Client {
         self.state.outbox.retain(|item| !done.contains(&item.seq));
         for user in gone {
             self.user_gone(&user);
+        }
+        if save_wait {
+            self.persist()?;
         }
         for user in recover {
             // The hub never has the plaintext profile key: its encrypted update is read first, then the device

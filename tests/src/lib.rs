@@ -400,7 +400,7 @@ pub fn access_shown(http: &Http, to: &str) -> Option<String> {
     })
 }
 
-/// A hub that lies to one client (spec 2.3), once told to: asked for `user`, it answers with the keys and devices of
+/// A hub that lies to one client (spec 1.2), once told to: asked for `user`, it answers with the keys and devices of
 /// another account, the stand-in, under the user's id and name, and hands what is sent to the user to the stand-in.
 /// What a hub that gives out a key not the user's would do; the client must notice.
 pub struct Lying {

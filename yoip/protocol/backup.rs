@@ -9,8 +9,9 @@ use zeroize::Zeroizing;
 
 /// The recovery key in what was pasted, typed or scanned (case, spaces, dashes and line breaks ignored).
 pub fn parse_recovery_key(typed: &str) -> Option<AccountEntropyPool> {
-    let plain: String =
-        typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_lowercase()).collect();
+    let plain: Zeroizing<String> = Zeroizing::new(
+        typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_lowercase()).collect(),
+    );
     plain.parse().ok()
 }
 

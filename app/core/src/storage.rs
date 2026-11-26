@@ -74,14 +74,12 @@ impl Client {
         }
         self.promote_contact(user);
         let now = crate::wall_ms();
-        // Added (again): a contact as a yes makes one (spec 3.3), told this account's key and name.
+        // Added (again): a contact as a yes makes one (spec 3.3), told this account's key.
         let adding = self.state.storage.friends.get(user).is_none_or(|f| f.removed.value);
-        let named = self.state.name.is_some();
         if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| adding && !c.accepted && !c.probe_service) {
             contact.accepted = true;
             contact.chat = true;
             contact.key_due = !contact.blocked && !contact.gone;
-            contact.profile_due = named;
         }
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
         if friend.name.value != name {
@@ -118,7 +116,6 @@ impl Client {
             contact.accepted = false;
             contact.chat = false;
             contact.key_due = false;
-            contact.profile_due = false;
             contact.receipt_due = false;
         }
         if let Some(friend) = self.state.storage.friends.get_mut(user) {
@@ -241,7 +238,9 @@ impl Client {
                 self.state.access_key_told = false;
                 // A key made elsewhere while this device had its own: every contact gets it; a new phone's first key
                 // not.
-                if new {
+                if self.state.block_access_due {
+                    self.rotate_profile_key();
+                } else if new {
                     self.key_due_to_all();
                 }
             }
@@ -270,7 +269,9 @@ impl Client {
     /// A fetched group into the storage: its key while in it, and when it left. A group never kept and left stays out
     /// (a stranger's made-up key never goes up).
     pub(crate) fn store_group(&mut self, id: &str) {
-        let Some(group) = self.state.groups.get(id).filter(|g| g.revision > 0) else { return };
+        let Some(group) = self.state.groups.get(id).filter(|g| g.revision > 0 && (g.accepted || g.left)) else {
+            return;
+        };
         let Some(key) = crate::state::unhex(&group.key) else { return };
         let (left, accepted) = (group.left, group.accepted);
         let storage = &mut self.state.storage;
@@ -311,7 +312,7 @@ impl Client {
             .storage
             .groups
             .iter()
-            .filter(|(id, g)| !g.removed.value && !self.state.groups.contains_key(*id))
+            .filter(|(id, g)| g.accepted.value && !g.removed.value && !self.state.groups.contains_key(*id))
             .filter_map(|(id, g)| {
                 let key: yoip::protocol::content::GroupKey = yoip::unb64(&g.key).ok()?.try_into().ok()?;
                 // Its id is the key's: a damaged entry is passed over.
@@ -334,7 +335,7 @@ impl Client {
     }
 
     /// The storage applied to the contacts: its blocks hold, and friends this device does not know (a restored
-    /// phone) become accepted contacts due the profile key (4.10); a known one keeps its own say.
+    /// phone) become accepted contacts due the profile key (3.3); a known one keeps its own say.
     fn apply_storage(&mut self) {
         let me = self.state.user_id.clone();
         let friends: Vec<(String, Field<bool>, bool)> = self
@@ -356,7 +357,7 @@ impl Client {
         }
         self.apply_keys();
         self.apply_groups();
-        // "Requests from Strangers" as another device of this account set it: the hub is told again (4.10).
+        // "Requests from Strangers" as another device of this account set it: the hub is told again (3.3).
         if let Some(open) = self.state.storage.requests_open.value {
             if open != self.state.requests_open {
                 self.state.requests_open = open;
@@ -460,6 +461,7 @@ impl Client {
                 return Ok(());
             }
             let mut next = self.state.storage.clone();
+            next.groups.retain(|_, group| group.accepted.value || group.removed.value);
             next.version = self.state.storage_version + 1;
             let data = self.sealed_within_limit(&mut next)?;
             let body = encode(&api::Storage { version: self.state.storage_version, data: data.into() });

@@ -1,4 +1,4 @@
-//! yo-register: registration by username and backups under load, with the real core (spec 6.4, 7).
+//! yo-register: registration by username and backups under load, with the real core (spec 4.2, 2.4).
 //!
 //!   yo-register [--accounts 200] [--threads 16] [--races 20] [--url http://…]
 //!
@@ -190,7 +190,7 @@ fn main() {
         TestHub::start_with(config, "127.0.0.1:0")
     });
     let limited_url = limited_hub.as_ref().map(|h| h.url()).unwrap_or_else(|| url.clone());
-    let allowed = Limits::default().register_per_ip_hour as usize;
+    let allowed = Limits::default().expensive_per_ip_hour as usize;
     let mut first_429 = None;
     for i in 0..allowed + 10 {
         match by_name(&limited_url, &format!("L{run:05}Y{i:04}"), None) {

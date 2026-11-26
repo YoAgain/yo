@@ -323,7 +323,7 @@ struct Acct {
     friends: Vec<usize>,
     bot: bool,
     feedback: u32,
-    /// Its install id for help (spec 6.4), never sent with the account.
+    /// Its install id for help (spec 4), never sent with the account.
     install: String,
     /// Whether the hub has a backup record of the account: `None` when that is not known (a lost answer).
     backed_up: Option<bool>,
@@ -335,7 +335,7 @@ const STATE_KEY: [u8; 32] = [7; 32];
 
 // ---- names ----
 
-/// A username for account `i` in one of several spellings (spec 3.3): accents, emoji, mixed case; unique by skeleton
+/// A username for account `i` in one of several spellings (spec 2.2): accents, emoji, mixed case; unique by skeleton
 /// within the run (`run` is a few letters that differ between runs on a persistent hub).
 fn name_for(run: &str, i: usize, style: u64) -> String {
     match style % 6 {
@@ -837,7 +837,7 @@ fn op_block(w: &World, a: &mut Acct, rng: &mut Rng) {
         let mut ledger = w.ledger();
         ledger.blocks.insert((a.user.clone(), who.clone()));
         let me = a.user.clone();
-        // And what waits for them in the outbox stays there until an unblock (spec 4.8).
+        // And what waits for them in the outbox stays there until an unblock (spec 3.3).
         ledger.relax(|m| (m.to == me && m.from == who) || (m.from == me && m.to == who));
     }
     match client.set_blocked(&who, block) {
@@ -984,7 +984,7 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     {
         let me = a.user.clone();
         // What the old device sent and was not received yet may be lost too, also what the hub took: a receiver that
-        // reads it after the device is out of the account's roster drops it as a replaced device's (spec 4.6), which
+        // reads it after the device is out of the account's roster drops it as a replaced device's (spec 3.2), which
         // it cannot tell from a message the device sent after.
         w.ledger().relax(|m| m.to == me || m.from == me);
     }
@@ -1106,7 +1106,7 @@ fn step(w: &World, a: &mut Acct, rng: &mut Rng) {
     }
 }
 
-/// The blocks as the device has them: a new phone gets them back from the storage (spec 6.9), now or at its first
+/// The blocks as the device has them: a new phone gets them back from the storage (spec 4.3), now or at its first
 /// receive. What comes from someone newly blocked may be dropped from then on.
 fn sync_blocks(w: &World, a: &mut Acct) {
     let Some(client) = a.client.as_ref() else { return };
@@ -1134,9 +1134,7 @@ fn hub_config(args: &Args, db: &str) -> Config {
     let mut config = Config::for_tests();
     config.db_path = db.to_owned();
     if args.limits {
-        config.limits = Limits { register_per_ip_hour: u32::MAX, backup_per_ip_hour: u32::MAX, ..Limits::default() };
-    } else {
-        config.limits.support_per_install_day = 10;
+        config.limits = Limits { expensive_per_ip_hour: u32::MAX, ..Limits::default() };
     }
     config.reserved = yo_hub::config::parse_reserved(&RESERVED.join("\n"));
     config

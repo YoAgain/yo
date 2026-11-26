@@ -39,7 +39,7 @@ impl Signer {
         self.root
     }
 
-    /// A sender certificate for a user's device (spec 3.1), good until a day from `now_ms`.
+    /// A sender certificate for a user's device (spec 4.1), good until a day from `now_ms`.
     pub fn issue(
         &self,
         user: &UserId,

@@ -844,13 +844,10 @@ fn hub_config(args: &Args) -> Config {
     config.trust_cloudflare = true;
     config.limits = Limits {
         lookup_per_device_day: 1000,
-        identity_lookup_per_device_day: 10_000,
-        register_per_ip_hour: 1000,
-        name_check_per_ip_minute: u32::MAX,
-        backup_per_ip_hour: u32::MAX,
+        expensive_per_ip_hour: 1000,
         max_pending_per_device: args.inbox,
         blob_bytes_stored_per_user: args.blob_quota_mb * MIB,
-        // The request limits as they are (spec 4.10), their hour 10 s: the run is days of use in minutes (accounts
+        // The request limits as they are (spec 4.1), their hour 10 s: the run is days of use in minutes (accounts
         // away for long stretches), and a stranger's requests held past the burst go on within it, as they would.
         request_hour_ms: 10_000,
         ..Limits::default()
@@ -1358,7 +1355,7 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
     }
 }
 
-/// The user says yes to every request, a person's or a group's, once it is shown (spec 4.10): they are all people
+/// The user says yes to every request, a person's or a group's, once it is shown (spec 3.3): they are all people
 /// it knows. Until then what it got from them is shown, nothing goes back, and past the hub's limits what they send
 /// waits with them; after it they are contacts and hold its profile key.
 fn say_yes(w: &World, a: &mut Acct, (people, groups): (BTreeSet<String>, BTreeSet<String>), rng: &mut Rng) {
@@ -1772,7 +1769,7 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
             }
         }
         2 => {
-            // A wrong clock for a while: hours off, corrected by the hub's time (spec 6.2) until it is set right.
+            // A wrong clock for a while: hours off, corrected by the hub's time (spec 4.1) until it is set right.
             a.wrong_clock = 3 + rng.below(10) as u32;
             let off = (360_000 + rng.below(3 * 3600 * 1000)) as i64;
             let off = if rng.below(2) == 0 { off } else { -off };
@@ -1809,7 +1806,7 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     let old_proc = a.proc_.clone();
     {
         // What the old phone had not received is gone with it, and so is what it sent that was not received yet: a
-        // message from a replaced device is not opened (spec 4.6), though the hub took it.
+        // message from a replaced device is not opened (spec 3.2), though the hub took it.
         let mut ledger = w.ledger();
         ledger.relax_to(a.uid, REPLACED_PHONE);
         ledger.relax_from(a.uid, REPLACED_PHONE);
@@ -2126,7 +2123,7 @@ fn quiesce(w: &Arc<World>, all: Vec<Vec<Acct>>, what: &str) -> Vec<Vec<Acct>> {
         );
         if moved == 0 && waiting == 0 && deferred == 0 && round >= 1 {
             // A payload from a device under another's number whose roster was asked a moment ago is received again
-            // a minute later (spec 4.6): once more after that, then done.
+            // a minute later (spec 3.2): once more after that, then done.
             if waited {
                 break;
             }
@@ -2192,11 +2189,11 @@ fn probe(w: &Arc<World>, all: Vec<Vec<Acct>>) -> Vec<Vec<Acct>> {
 }
 
 /// What an account's outbox still owes: all but what waits for someone who blocks it (it does not know: those go as
-/// requests, one an hour past the burst, spec 4.10, and are dropped unseen there), and those apart.
+/// requests, one an hour past the burst, spec 4.1, and are dropped unseen there), and those apart.
 fn owed(w: &World, me: u32, client: &Client) -> (usize, usize) {
     let ledger = w.ledger();
     let (mut owed, mut to_blockers) = (0, 0);
-    // What it holds for someone it blocks goes only after an unblock (spec 4.8): owed to nobody.
+    // What it holds for someone it blocks goes only after an unblock (spec 3.3): owed to nobody.
     for entry in client.outbox_view().into_iter().filter(|e| e.reason != OutboxReason::Blocked) {
         let blocker = w.idx_of(&entry.user).is_some() && ledger.blocks.contains(&(w.uid(&entry.user), me));
         match blocker {

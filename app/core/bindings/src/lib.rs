@@ -335,7 +335,7 @@ pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia
     Ok(SealedMedia { media: media.into(), ciphertext })
 }
 
-/// Whether an error means "later", not "never" (spec 4.1, `yo_core::retry_later`).
+/// Whether an error means "later", not "never" (spec 3.2, `yo_core::retry_later`).
 #[uniffi::export]
 pub fn retry_later(error: &YoError) -> bool {
     match error {
@@ -393,7 +393,7 @@ impl From<Content> for MessageKind {
             Content::Photo(media) => MessageKind::Photo { media: media.into() },
             Content::Video { media, duration_ms } => MessageKind::Video { media: media.into(), duration_ms },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
-            // Never an event (spec 3.2, 3.2).
+            // Never an event (spec 3.2).
             Content::Receipt
             | Content::Group(_)
             | Content::ProfileKey(_)
@@ -684,7 +684,7 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
 }
 
 /// A new install id (128 random bits, 32 hex digits) for help: the support thread, reports, crash and error reports
-/// (spec 4.2). The app keeps it on the phone alone and sends it with nothing else; Send Crashes off deletes it.
+/// (spec 4). The app keeps it on the phone alone and sends it with nothing else; Send Crashes off deletes it.
 #[uniffi::export]
 pub fn new_install_id() -> String {
     yo_core::help::new_install_id()

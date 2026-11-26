@@ -85,7 +85,7 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     let alone = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed }, vec![]).unwrap().unwrap();
     assert!(alone.record.by_passkey.is_empty() && alone.k != found.k);
     assert!(yo::open_backup(app(), Some(user.clone()), yo::YoDoor::Passkey { prf }, vec![]).unwrap().is_none());
-    // Pinned to the test hub's key, the fetch takes the hub's signed answer (spec 6.10); another key's: refused.
+    // Pinned to the test hub's key, the fetch takes the hub's signed answer (spec 4.1); another key's: refused.
     let pinned = vec![yo_tests::hub_key().to_vec()];
     assert!(yo::open_backup(app(), None, by_words(), pinned.clone()).unwrap().is_none(), "the old words: none");
     let renewed = yo_tests::backup::recovery_key([5; 16]);
@@ -225,7 +225,7 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
     assert_eq!(b.fetch_media(media).unwrap(), None, "fetched by its one device: gone");
     assert!(yo::retry_later(&yo::YoError::Refused { status: 507 }));
     assert!(!yo::retry_later(&yo::YoError::NotOnYo));
-    // One rule for every path (spec 6.6): the core's, a too old app (426) and a full disk included.
+    // One rule for every path (spec 4.1): the core's, a too old app (426) and a full disk included.
     for status in [426, 429, 500, 503, 507] {
         assert!(yo::retry_later(&yo::YoError::Refused { status }), "{status}");
         assert!(yo_core::retryable(&yo_core::Error::Refused(status)), "{status}");
@@ -360,7 +360,7 @@ fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
     assert_eq!(yos(&drain(&b), &a.user_id()), 3);
 }
 
-/// A name that changed hands: the app's Yo to it goes to whoever has it now (asked of the hub, spec 4.2), not to the
+/// A name that changed hands: the app's Yo to it goes to whoever has it now (asked of the hub, spec 3.1), not to the
 /// contact that had it.
 #[test]
 fn the_app_layer_sends_a_name_to_whoever_has_it_now() {
@@ -371,11 +371,10 @@ fn the_app_layer_sends_a_name_to_whoever_has_it_now() {
     let b = client(&hub, &pb, "BOB", Disk::new());
     b.send_yo(pa.clone()).unwrap();
     assert_eq!(yos(&drain(&a), &b.user_id()), 1);
-    a.core_for_tests(|c| c.set_username(Some(&username(n + 2)))).unwrap();
+    a.delete_account().unwrap();
     let c = client(&hub, &pa, "CAROL", Disk::new());
     b.send_yo(pa.clone()).unwrap();
     assert_eq!(yos(&drain(&c), &b.user_id()), 1);
-    assert_eq!(yos(&drain(&a), &b.user_id()), 0);
     assert!(b.contacts().iter().all(|k| k.user == c.user_id() || k.handles.is_empty()));
 }
 
@@ -508,14 +507,14 @@ fn the_app_layer_asks_who_a_typed_name_is_before_the_first_yo() {
     assert_eq!(yos(&drain(&bot), &me.user_id()), 1);
 }
 
-/// The hub takes so many deliveries a minute from one sender (spec 6.6); a burst over it waits in the outbox and goes
+/// The hub takes so many deliveries a minute from one sender (spec 4.1); a burst over it waits in the outbox and goes
 /// out, in order, as the app sends it again. Nothing is lost.
 #[test]
 fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     use std::time::{Duration, Instant};
     // Yos until the hub refuses one (at any machine's pace), then a few more: they wait, and go at a Yo a second.
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.deliver_per_ip_minute = 60;
+    config.limits.anonymous_per_ip_minute = 60;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
@@ -1066,7 +1065,7 @@ fn a_closed_client_saves_nothing_and_does_nothing() {
     assert_eq!(file.word(), saved, "and nothing is written over the state");
 }
 
-/// Groups through the app's layer (spec 4.9): made, a Yo to it arriving as a group Yo, the group the same everywhere.
+/// Groups through the app's layer (spec 3.4): made, a Yo to it arriving as a group Yo, the group the same everywhere.
 #[test]
 fn the_app_layer_makes_a_group_and_yos_it() {
     let hub = TestHub::start();
@@ -1239,7 +1238,7 @@ fn the_app_layer_reads_and_marks_support_replies() {
     let config =
         yo_hub::config::Config { admin_token: Some("test-token".into()), ..yo_hub::config::Config::for_tests() };
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    // Help goes by the install id, without an account (spec 6.4).
+    // Help goes by the install id, without an account (spec 4).
     let app = Arc::new(App(Http::new(hub.url())));
     let install = yo::new_install_id();
     assert!(yo::help_thread(app.clone(), install.clone()).unwrap().messages.is_empty());
@@ -1358,9 +1357,9 @@ fn a_registration_tried_again_after_a_lost_answer_keeps_its_device() {
     assert_eq!(yos(&drain(&new), &b.user_id()), 1, "the Yo for the device the hub took arrives");
 }
 
-/// More Yos to a stranger than a request's bucket holds (spec 4.10, 10 at once a pair): each send is fine, the rest
+/// More Yos to a stranger than a request's bucket holds (spec 4.1, 10 at once a pair): each send is fine, the rest
 /// waits quietly. The stranger says yes: their key comes, and all that waited goes at once as a contact's, also when
-/// the notification service took the key in while the app slept (the app's hold of the `429` is in its memory only).
+/// the notification service took the key in while the app slept.
 #[test]
 fn the_app_layer_holds_yos_past_a_requests_bucket_until_the_yes() {
     let mut config = yo_hub::config::Config::for_tests();

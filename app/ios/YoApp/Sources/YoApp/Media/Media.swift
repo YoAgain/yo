@@ -48,7 +48,7 @@ enum MediaStorage {
   }
 }
 
-/// The manifests hold media keys, so they are sealed (spec 1.2): ChaCha20-Poly1305 under HKDF-SHA256("yo media
+/// The manifests hold media keys, so they are sealed (spec 3): ChaCha20-Poly1305 under HKDF-SHA256("yo media
 /// manifest v1") of the state key. On disk: "YOM1" || nonce || ciphertext || tag. Older plain JSON is read once and
 /// written again sealed.
 enum ManifestSeal {

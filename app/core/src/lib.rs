@@ -67,13 +67,13 @@ const OUTBOX_PER_RECIPIENT: usize = 1_000;
 const ROTATE_EVERY_MS: u64 = 7 * 24 * 3600 * 1000;
 /// ... and the ones replaced kept this long (wall clock): a session started with one may still wait at the hub.
 const RETIRED_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
-/// One-time prekeys of each kind kept: lookups that never lead to a message use them up at the hub (spec 3.2).
+/// One-time prekeys of each kind kept: lookups that never lead to a message use them up at the hub (spec 3.1).
 const ONE_TIME_KEPT: usize = 4 * PREKEY_TARGET as usize;
 /// A saved signing time at most this far ahead of the clock is kept as the floor of the next (spec 4.1).
 const SIGN_AHEAD_MS: u64 = 60 * 1000;
 /// Session message hashes remembered against redelivery.
 const SEEN: usize = 2000;
-/// Messages kept per contact to resend when a decryption error names one, and decryption errors due at most (4.6).
+/// Messages kept per contact to resend when a decryption error names one, and decryption errors due at most (3.2).
 const KEPT_FOR_RESEND: usize = 64;
 /// Saves from before multi-device (sent messages without their devices, received ids without the sending device)
 /// are read until 1 March 2027 (UTC); a device not opened since starts those afresh. Remove the fallbacks then.
@@ -105,7 +105,7 @@ fn test_trust_roots() -> Vec<Key> {
 }
 /// How often a payload may make this device ask the hub for a user's device (spec 3.2).
 const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
-/// Lookups a day that unopened payloads may cause, by default: the rest of the hub's allowance (6.6) stays for the
+/// Lookups a day that unopened payloads may cause, by default: the rest of the hub's allowance (4.1) stays for the
 /// app. A bot the hub does not limit raises it (`set_recovery_lookups_per_day`).
 pub const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
 /// Payloads parked for a roster that could not be asked yet (`State::deferred`); past it the oldest is dropped.
@@ -122,7 +122,7 @@ const DEVICE_ROUNDS: usize = 3;
 /// A contact whose app is too old for sessions is asked about again at most this often (spec 3.1).
 const OUTDATED_RETRY_MS: u64 = 3600 * 1000;
 
-/// Errors that say "not now", not "never" (spec 4.1): no network, `429`, `426`, `507`, `5xx`.
+/// Errors that say "not now", not "never" (spec 3.2): no network, `429`, `426`, `507`, `5xx`.
 pub fn retryable(error: &Error) -> bool {
     match error {
         Error::Network(_) | Error::Clock => true,
@@ -230,11 +230,11 @@ pub struct SessionInfo {
     pub device: String,
     /// A message can go to it now: a session made with PQXDH whose sending chain is good.
     pub usable: bool,
-    /// Its message did not open here last: a decryption error is on its way (4.6).
+    /// Its message did not open here last: a decryption error is on its way (3.2).
     pub retrying: bool,
 }
 
-/// Where the state goes after every operation. A failed save stops the operation before anything leaves (4.7).
+/// Where the state goes after every operation. A failed save stops the operation before anything leaves (3.2).
 pub trait Store: Send + Sync {
     fn save_state(&self, state: &State, records: signal::Entries) -> std::result::Result<(), String>;
 }
@@ -350,7 +350,7 @@ pub enum Sent {
 /// An answer from the hub, or why there was none.
 pub type Answer = std::result::Result<Response, String>;
 
-/// A delivery the hub refused for good (4.4): the envelope is dropped, the user's next ones go on.
+/// A delivery the hub refused for good (3.2): the envelope is dropped, the user's next ones go on.
 fn gone_for_good(status: u16) -> bool {
     matches!(status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE)
 }
@@ -358,7 +358,7 @@ fn gone_for_good(status: u16) -> bool {
 /// How long a `429` that names no time holds the deliveries sharing its limit (spec 4.1; the hub's bucket refills
 /// evenly): not tried again with the next send or sync.
 const LIMIT_WAIT_MS: u64 = 5_000;
-/// How long a `429` to one of the outbox's session lookups holds them (a day's allowance, 6.6).
+/// How long a `429` to one of the outbox's session lookups holds them (a day's allowance, 4.1).
 const LOOKUP_LIMIT_WAIT_MS: u64 = 60_000;
 
 /// A delivery's answer that ends it: taken, refused for good, or a request the recipient refuses (spec 3.3).
@@ -422,7 +422,7 @@ fn urgent(plain: &[u8], control_or_own: bool) -> bool {
 /// What a `429` holds back (spec 4.1), by the limit the hub names in its body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Limit {
-    /// A request's bucket (4.10), or a recipient's inbound bytes (6.6): this recipient only, for the ms named.
+    /// A request's bucket (4.1), or a recipient's inbound bytes (4.1): this recipient only, for the ms named.
     Recipient(u64),
     /// The sender's address (or bytes): every delivery, for the ms named (else `LIMIT_WAIT_MS`).
     Address(u64),
@@ -486,7 +486,7 @@ impl Limits {
 
 impl Deliveries {
     /// Posts each user's envelopes in order, users in parallel. After one the hub did not take, that user's next are
-    /// held (`None`) to keep their order; after a `429`, what shares its limit is held (6.6).
+    /// held (`None`) to keep their order; after a `429`, what shares its limit is held (4.1).
     pub fn send(&self) -> Vec<Option<Answer>> {
         let mut users: Vec<&str> = Vec::new();
         for item in &self.items {
@@ -547,13 +547,11 @@ pub struct Client {
     drop_reasons: Vec<String>,
     /// Users whose envelopes are on their way to the hub (`deliveries`): nothing else to them goes meanwhile.
     delivering: BTreeSet<String>,
-    /// Users refused as a request though their key was shown (4.10): held until the inbox, where a new key may wait.
+    /// Users refused as a request though their key was shown (3.3): held until the inbox, where a new key may wait.
     refused_until_read: BTreeSet<String>,
     /// The hub's last answer to a delivery to each user (0: none came, no network): why theirs wait (`outbox_view`).
     last_answer: BTreeMap<String, u16>,
-    /// Users whose requests the hub limits (`429`, 4.10), until when, and whether their key was refused too. Not saved.
-    request_wait: BTreeMap<String, (u64, bool)>,
-    /// A contact's deliveries the hub limits (`429 recipient`, their inbound bytes, 6.6), until when. Not saved.
+    /// A contact's deliveries the hub limits (`429 recipient`, their inbound bytes, 4.1), until when. Not saved.
     contact_wait: BTreeMap<String, u64>,
     /// Users whose session the hub had no answer for that will do, until when they are not looked up again: a lookup
     /// with every send and sync would spend the day's. Not saved.
@@ -595,7 +593,7 @@ pub struct Client {
     /// it.
     skew_ms: i64,
     /// How far the hub's clock is from this device's, as its last `401` for a time outside its window told (spec
-    /// 6.2): signing times and the times of messages sent are corrected by it. In memory: each process learns it.
+    /// 4.1): signing times and the times of messages sent are corrected by it. In memory: each process learns it.
     hub_offset_ms: std::cell::Cell<i64>,
     /// Time passed in tests beyond the monotonic clock's (`pass_time_for_tests`).
     passed_ms: u64,
@@ -861,7 +859,7 @@ impl Client {
         expect(response, status::NO_CONTENT).map(drop)
     }
 
-    /// Whether a username (NFC) is free, also in other spellings and look-alikes (spec 4.1). `Refused(400)`: no
+    /// Whether a username (NFC) is free, also in other spellings and look-alikes (spec 2.2). `Refused(400)`: no
     /// username; `Refused(429)`: asked too often.
     pub fn username_free(transport: &dyn Transport, username: &str) -> Result<bool> {
         let response = transport.request("GET", &api::username_path(username), &[], &[]).map_err(Error::Network)?;
@@ -930,15 +928,16 @@ impl Client {
         entries: signal::Entries,
         guest: bool,
     ) -> Result<(Client, bool)> {
+        let discarded = state.discard_profiles();
         if guest {
             let records = Records::new(&entries, &state.account_secret, state.registration_id)?;
             let mut client = Client::with(transport, records, state);
             client.guest_events = Some(client.state.events.len());
-            return Ok((client, false));
+            return Ok((client, discarded));
         }
         // What the last call handed out may not have reached the app before the restart: it comes again.
         let handed = std::mem::take(&mut state.handed);
-        let changed = !handed.is_empty();
+        let changed = discarded || !handed.is_empty();
         state.events.splice(0..0, handed);
         let records = Records::new(&entries, &state.account_secret, state.registration_id)?;
         Ok((Client::with(transport, records, state), changed))
@@ -958,7 +957,6 @@ impl Client {
             delivering: BTreeSet::new(),
             refused_until_read: BTreeSet::new(),
             last_answer: BTreeMap::new(),
-            request_wait: BTreeMap::new(),
             contact_wait: BTreeMap::new(),
             lookup_wait: BTreeMap::new(),
             held_until: Held::default(),
@@ -1083,6 +1081,7 @@ impl Client {
         }
         self.records = Records::new(&entries, &state.account_secret, state.registration_id)?;
         self.state = state;
+        self.state.discard_profiles();
         // Left to the hub's repeat: the state taken in says whether they are seen.
         self.unacked.clear();
         self.received_ids.clear();
@@ -1182,7 +1181,7 @@ impl Client {
     /// Why what waits for `user` waits now (`outbox_view`), and until when if the hub said.
     fn waits_for(&self, user: &str, now: u64) -> (OutboxReason, Option<u64>) {
         let mono = self.monotonic();
-        let wait = (self.request_wait.get(user).map(|(until, _)| *until))
+        let wait = (self.state.request_wait.get(user).map(|(until, _)| *until))
             .filter(|_| self.request_holds(user, mono))
             .or_else(|| self.contact_wait.get(user).copied().filter(|until| *until > mono))
             .or_else(|| Some(self.held_until.deliveries).filter(|until| *until > mono))
@@ -1253,7 +1252,7 @@ impl Client {
 
     /// A request's `429` holds `user` now (`monotonic`): until its time, and only while their key is not here.
     fn request_holds(&self, user: &str, now: u64) -> bool {
-        self.request_wait.get(user).is_some_and(|(until, _)| *until > now)
+        self.state.request_wait.get(user).is_some_and(|(until, _)| *until > now)
             && self.state.contacts.get(user).is_none_or(|c| c.profile_key.is_none())
     }
 
@@ -1271,12 +1270,11 @@ impl Client {
         self.device_wall().saturating_add_signed(self.hub_offset_ms.get())
     }
 
-    /// A monotonic clock (ms, from this process's start) for what waits in memory: a clock set back or ahead does not
-    /// move it.
+    /// Unix milliseconds at process start, advanced monotonically so clock changes do not move an active wait.
     pub(crate) fn monotonic(&self) -> u64 {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        let start = START.get_or_init(std::time::Instant::now);
-        1 + start.elapsed().as_millis() as u64 + self.passed_ms
+        static START: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
+        let (start, epoch) = START.get_or_init(|| (std::time::Instant::now(), wall_ms()));
+        epoch + start.elapsed().as_millis() as u64 + self.passed_ms
     }
 
     /// A `401` that tells the hub's time (its window missed): the offset to this device's clock kept; whether it was
@@ -1549,7 +1547,6 @@ impl Client {
                 }
                 if !contact.devices.is_empty() && !added.is_empty() {
                     contact.key_due |= contact.accepted && !contact.blocked;
-                    contact.profile_due |= contact.accepted && contact.chat && self.state.name.is_some();
                 }
                 let grew = !contact.devices.is_empty() && devices.len() > contact.devices.len();
                 contact.devices = devices;
@@ -1733,7 +1730,7 @@ impl Client {
         } else {
             self.state.contacts.get(user).ok_or(Error::Protocol("user"))?.account_key
         };
-        // The content's time, as Signal's envelope shows it: what a decryption error names (4.6).
+        // The content's time, as Signal's envelope shows it: what a decryption error names (3.2).
         let sent_at = match plaintext {
             true => self.wall(),
             false => decode::<Plain>(plain)
@@ -1827,7 +1824,6 @@ impl Client {
                 contact.probe_service = true;
                 contact.chat |= added;
                 if !contact.chat {
-                    contact.profile_due = false;
                     contact.key_due = false;
                 }
             }
@@ -1894,7 +1890,6 @@ impl Client {
             c.note_outdated(&peer);
             let contact = c.state.contacts.get_mut(&peer).ok_or(Error::Internal("contact"))?;
             contact.chat |= !contact.probe_service;
-            contact.profile_due = contact.chat && c.state.name.is_some();
             // Added from here: accepted, and told this account's profile key (spec 3.3).
             if !contact.accepted {
                 contact.accepted = true;
@@ -1930,14 +1925,12 @@ impl Client {
         Ok(())
     }
 
-    /// Writing to someone accepts them (spec 3.3): they get this account's profile key and its name.
+    /// Writing to someone accepts them (spec 3.3): they get this account's profile key.
     fn accept_writing(&mut self, user: &str) {
-        let name = self.state.name.is_some();
         if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted && (!c.probe_service || c.chat))
         {
             contact.accepted = true;
             contact.key_due = true;
-            contact.profile_due = name;
         }
     }
 
@@ -1953,7 +1946,6 @@ impl Client {
             contact.chat = true;
             contact.accepted = true;
             contact.key_due = true;
-            contact.profile_due = self.state.name.is_some();
             let key = contact.profile_key;
             if key.is_some() {
                 self.store_key(user, key);
@@ -1967,7 +1959,7 @@ impl Client {
         self.finish_sent(result)
     }
 
-    /// `finish` for a send: queued and saved before it went (4.7), so a later failed save does not make it unsent
+    /// `finish` for a send: queued and saved before it went (3.2), so a later failed save does not make it unsent
     /// (`Save` would make the app send a second message).
     pub(crate) fn finish_sent(&mut self, result: Result<()>) -> Result<Vec<Event>> {
         let queued = result.is_ok();
@@ -2003,10 +1995,9 @@ impl Client {
             Some(user) => user,
             None => self.start_chat(&handle)?,
         };
-        // Writing back accepts a request: its name goes first, as one not yet told does.
+        // Writing back accepts a request.
         self.promote_contact(&peer);
         self.accept_writing(&peer);
-        self.send_profiles();
         // Saved with the message and the due profile key ahead of it, or not made at all (spec 3.2); its envelope is
         // made in the same step, so one save precedes its leaving.
         self.atomic(|c| {
@@ -2025,7 +2016,7 @@ impl Client {
     }
 
     /// The user a send goes to: a username is asked of the hub now (without spending a prekey), since a name may have
-    /// changed hands (3.3). `None`: no contacts yet, the first lookup asks.
+    /// changed hands (3.1). `None`: no contacts yet, the first lookup asks.
     pub(crate) fn send_target(&mut self, handle: &Handle) -> Result<Option<String>> {
         if handle.kind == KIND_USER {
             return Ok(Some(hex(handle.value.as_slice())));
@@ -2076,11 +2067,9 @@ impl Client {
         {
             return None;
         }
-        // As in `send`: the name first, saved with the message or not made at all.
         self.atomic(|c| {
             c.promote_contact(&user);
             c.accept_writing(&user);
-            c.send_profiles();
             c.queue_key(&user)?;
             c.send_message(&user, content)?;
             c.encrypt_waiting(&user); // its envelope in the same save
@@ -2358,7 +2347,6 @@ impl Client {
             self.refresh_groups_quietly();
             self.refresh_certificate()?;
             self.refill()?;
-            self.send_profiles();
             self.profile_keys_with(deliver)?;
             if deliver {
                 self.deliver()?;
@@ -2402,9 +2390,10 @@ impl Client {
         for user in &due {
             self.queue_key(user)?;
         }
-        if !self.state.access_key_told {
-            // The new key reaches contacts before the hub takes it, so their next refused delivery finds it waiting.
-            if !due.is_empty() {
+        let revoking = self.state.block_access_due;
+        if revoking || !self.state.access_key_told {
+            // Except on a block, contacts receive the key before the hub takes its check.
+            if !revoking && !due.is_empty() {
                 if !deliver {
                     return Ok(());
                 }
@@ -2424,12 +2413,16 @@ impl Client {
             match self.signed("PUT", api::ACCESS_KEY, &body) {
                 Ok(response) if response.status == status::NO_CONTENT => {
                     self.state.access_key_told = true;
+                    self.state.block_access_due = false;
                     self.persist()?;
                 }
                 Ok(response) => self.note(format!("profile key: {}", response.status)),
                 Err(error) if retryable(&error) => {}
                 Err(error) => return Err(error),
             }
+        }
+        if revoking && !self.state.block_access_due && deliver && !self.state.outbox.is_empty() {
+            self.deliver()?;
         }
         Ok(())
     }
@@ -2631,11 +2624,42 @@ mod handle_tests {
     }
 
     #[test]
+    fn opening_an_old_outbox_discards_only_profiles() {
+        let mut state = State::default();
+        for content in [Content::Profile { name: "OLD".into() }, Content::Yo] {
+            let bytes = Message { sent_at_ms: 1, group: None, content }.encode().unwrap();
+            let plain = encode(&yoip::protocol::envelope::Plain { to: None, content: bytes.into() });
+            state.outbox.push_back(Outgoing { seq: state.outbox.len() as u64, plain, ..Default::default() });
+        }
+        assert!(state.discard_profiles());
+        assert_eq!(state.outbox.len(), 1);
+        assert_eq!(state.outbox[0].seq, 1);
+    }
+
+    #[test]
+    fn unknown_content_is_dropped_and_legacy_profiles_still_name() {
+        let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
+        let mut client = Client::registering(transport, "SILENT", None, None, None, Push::none()).unwrap();
+        let user = hex(&[7; 16]);
+        client.state.contacts.insert(user.clone(), Contact::default());
+        let message = Message { sent_at_ms: 1, group: None, content: Content::Unknown(999) };
+        client.received(&user, &[8; 32], b"message", message).unwrap();
+        assert!(!client.state.contacts[&user].chat);
+        assert!(client.state.events.is_empty());
+        assert_eq!(client.dropped(), 1);
+        // An app from before sends its name as a Profile: still taken, no chat opened.
+        let message = Message { sent_at_ms: 1, group: None, content: Content::Profile { name: "OLD".into() } };
+        client.received(&user, &[8; 32], b"message", message).unwrap();
+        assert!(!client.state.contacts[&user].chat);
+        assert_eq!(client.state.contacts[&user].name.as_deref(), Some("OLD"));
+    }
+
+    #[test]
     fn what_waits_in_memory_is_timed_by_the_monotonic_clock() {
         let transport = Arc::new(ClockHub(std::sync::Mutex::new(Vec::new()), 0));
         let mut client = Client::registering(transport, "MONO", None, None, None, Push::none()).unwrap();
         let user = hex(&[9; 16]);
-        client.request_wait.insert(user.clone(), (client.monotonic() + 60_000, false));
+        client.state.request_wait.insert(user.clone(), (client.monotonic() + 60_000, false));
         // The phone's clock set back an hour during the wait: it ends after the wait all the same.
         client.set_clock(Arc::new(|| wall_ms() - 3_600_000));
         client.set_clock_skew(-3_600_000);
@@ -2869,7 +2893,7 @@ mod handle_tests {
         assert_eq!(client.waiting_unheld(), 1, "what the hub should have taken still shows");
     }
 
-    /// A `429` holds what shares its limit for the time it names (6.6), or 5 s: never posted again at once (the
+    /// A `429` holds what shares its limit for the time it names (4.1), or 5 s: never posted again at once (the
     /// storm of `429`s a client hammering a limit makes), then it goes by itself.
     #[test]
     fn a_rate_limit_holds_for_its_time_and_never_at_once() {

@@ -258,7 +258,7 @@ fn a_signed_put_saves_its_signing_time() {
 }
 
 /// The first Yo to a new friend while the hub cannot answer who they are (its lookups limited, 429): an error the app
-/// keeps and tries again ("not now", one rule for all, spec 4.1), and the Yo goes once it can.
+/// keeps and tries again ("not now", one rule for all, spec 3.2), and the Yo goes once it can.
 #[test]
 fn a_first_yo_the_hub_cannot_look_up_now_goes_when_tried_again() {
     let hub = TestHub::start();
@@ -334,7 +334,7 @@ fn a_contacts_rate_limit_waits_its_time_and_holds_no_one_else() {
     a.send_yo(&pc).unwrap();
     c.sync(0).unwrap();
     let path = api::deliver_path(&yo_tests::user_id(b.user_id()));
-    // Contacts with each other's key, so what goes is no request (4.10); nothing left to send.
+    // Contacts with each other's key, so what goes is no request (3.3); nothing left to send.
     for _ in 0..3 {
         b.maintenance().unwrap();
         a.maintenance().unwrap();
