@@ -177,7 +177,7 @@ sequenceDiagram
 ```
 - The hub assigns the lowest free device number (1–127). A user has at most 16 devices with distinct keys and numbers. Both ends MUST bind both addresses into the MAC.
 - Clients MUST choose a random nonzero 14-bit registration id and MUST increase `🔐 prekey` ids monotonically. They SHOULD rotate signed and last-resort keys weekly, refill below 16 one-time keys, keep replaced keys 31 days and keep the newest 128 private `🔐 one-time keys` per kind. Clients MUST reject a repeated base key on a last-resort Kyber prekey (≤ 20,000 markers).
-- Without a bundle, senders SHOULD queue, report `Outdated` and retry at most hourly until the device opens a session. Clients MUST look up typed usernames and SHOULD refresh pinned contacts on failure.
+- Without a bundle, senders SHOULD queue, report `Outdated` and retry at most hourly until the device opens a session. Clients MUST look up a typed username that is not a pinned contact; a typed name of a pinned contact resolves locally to its account, like picking it from the list. Clients SHOULD refresh pinned contacts on failure.
 - Receivers MUST match content by the pinned `🔐 account key`, else look it up, and MUST drop unknown keys. First content raises `NewChat`.
 ### 3.2 Messages
 The sender posts all device copies together. The hub accepts only a current roster. Acceptance is final. Clients keep a persistent outbox and an ordered inbox, so crashes lose nothing.
