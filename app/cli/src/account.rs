@@ -250,6 +250,12 @@ impl Transport for Line {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         self.send(false, method, path, headers, body)
     }
+
+    /// The connection, and one request naming nobody (the hub's key, as the apps' checks): the front answers the
+    /// first request on a connection slower, so the first Yo pays neither that nor the handshake.
+    fn warm(&self) {
+        let _ = self.send(false, "GET", yoip::net::hubsig::KEY_PATH, &[], &[]);
+    }
 }
 
 impl Transport for Http {
@@ -259,6 +265,10 @@ impl Transport for Http {
         let anonymous = !signed && yoip::net::api::anonymous(method, path);
         let line = if anonymous { &self.anonymous } else { &self.signed };
         line.send(signed, method, path, headers, body)
+    }
+
+    fn warm(&self) {
+        self.anonymous.warm();
     }
 }
 
@@ -370,6 +380,10 @@ struct Named(yo_core::ohttp::Ohttp);
 impl Transport for Named {
     fn authenticated(&self) -> bool {
         self.0.authenticated()
+    }
+
+    fn warm(&self) {
+        self.0.warm();
     }
 
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {

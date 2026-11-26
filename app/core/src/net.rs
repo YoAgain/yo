@@ -31,6 +31,10 @@ pub trait Transport: Send + Sync {
     fn authenticated(&self) -> bool {
         false
     }
+
+    /// Readies the anonymous line ahead of its first Yo (a listener's start): its connection open, where the transport
+    /// keeps one, with at most a request naming nobody. Its own failure is the next request's.
+    fn warm(&self) {}
 }
 
 /// How a transport's failure starts when TLS refused the hub's certificate for its dates (`Transport`).

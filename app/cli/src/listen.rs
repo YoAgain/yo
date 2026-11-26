@@ -208,6 +208,9 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
         begun: AtomicUsize::new(0),
     };
     std::thread::scope(|scope| -> i32 {
+        // The first Yo out then needs no handshake: until it, only the signed line has traffic.
+        let warming = transport.clone();
+        scope.spawn(move || warming.warm());
         if drain_media {
             scope.spawn(move || drainer(transport.as_ref(), &to_drain));
         }

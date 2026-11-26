@@ -138,6 +138,10 @@ impl Transport for Ohttp {
         true
     }
 
+    fn warm(&self) {
+        self.anonymous.warm();
+    }
+
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         self.request_headers(method, path, headers, body).map(|(response, _)| response)
     }

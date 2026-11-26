@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
 
 /// A QUIC handshake the hub's front answers in a round trip; past this, UDP is taken as blocked.
 const HANDSHAKE: Duration = Duration::from_millis(1500);
@@ -35,7 +36,8 @@ pub struct Quic {
     port: u16,
     tls: Arc<rustls::ClientConfig>,
     state: OnceLock<Result<Runtime, String>>,
-    connection: Mutex<Option<(quinn::Connection, Sender)>>,
+    /// Held through a handshake: a request meanwhile (a Yo while the line warms) waits for it instead of making another.
+    connection: AsyncMutex<Option<(quinn::Connection, Sender)>>,
 }
 
 struct Runtime {
@@ -61,7 +63,7 @@ impl Quic {
             port: uri.port_u16().unwrap_or(443),
             tls: Arc::new(tls),
             state: OnceLock::new(),
-            connection: Mutex::new(None),
+            connection: AsyncMutex::new(None),
         })
     }
 
@@ -79,19 +81,7 @@ impl Quic {
         if OFF.load(Ordering::Relaxed) {
             return Err(Failed::Unreachable("off".into()));
         }
-        let state = self
-            .state
-            .get_or_init(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .thread_name("yo-quic")
-                    .enable_all()
-                    .build()
-                    .map(|runtime| Runtime { runtime, endpoint: Mutex::new(None) })
-                    .map_err(|e| format!("quic: {e}"))
-            })
-            .as_ref()
-            .map_err(|e| Failed::Unreachable(e.clone()))?;
+        let state = self.runtime().map_err(Failed::Unreachable)?;
         let request = http::Request::builder()
             .method(method)
             .uri(format!("https://{}:{}{path}", self.host, self.port))
@@ -108,8 +98,8 @@ impl Quic {
         }
         let request = http::Request::from_parts(parts, ());
         let result = state.runtime.block_on(async {
-            let mut sender = match self.sender(state).await {
-                Ok(sender) => sender,
+            let (connection, mut sender) = match self.sender(state).await {
+                Ok(held) => held,
                 Err(error) => {
                     OFF.store(true, Ordering::Relaxed);
                     return Err(Failed::Unreachable(error));
@@ -122,6 +112,11 @@ impl Quic {
                 }
                 stream.finish().await.map_err(|e| e.to_string())?;
                 let response = stream.recv_response().await.map_err(|e| e.to_string())?;
+                if yo_core::timing::on() {
+                    // The front's site only (the ray id's suffix), and the path's round trip as QUIC measures it.
+                    let colo = response.headers().get("cf-ray").and_then(|v| v.to_str().ok()?.rsplit('-').next());
+                    yo_core::timing::note(&format!("quic: colo {} rtt {:?}", colo.unwrap_or("-"), connection.rtt()));
+                }
                 let mut answer = Vec::new();
                 while let Some(mut chunk) = stream.recv_data().await.map_err(|e| e.to_string())? {
                     if answer.len() as u64 + chunk.remaining() as u64 > limit {
@@ -144,21 +139,34 @@ impl Quic {
         });
         if let Err(Failed::Broken(_)) = &result {
             // The next request on a new connection, not on one that may be gone.
-            if let Some((connection, _)) = self.connection.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Some((connection, _)) = self.connection.blocking_lock().take() {
                 connection.close(0u32.into(), b"");
             }
         }
         result
     }
 
+    fn runtime(&self) -> Result<&Runtime, String> {
+        self.state
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .thread_name("yo-quic")
+                    .enable_all()
+                    .build()
+                    .map(|runtime| Runtime { runtime, endpoint: Mutex::new(None) })
+                    .map_err(|e| format!("quic: {e}"))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
     /// The line's connection, made anew when there is none or it closed.
-    async fn sender(&self, state: &Runtime) -> Result<Sender, String> {
-        {
-            let held = self.connection.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((connection, sender)) = held.as_ref() {
-                if connection.close_reason().is_none() {
-                    return Ok(sender.clone());
-                }
+    async fn sender(&self, state: &Runtime) -> Result<(quinn::Connection, Sender), String> {
+        let mut held = self.connection.lock().await;
+        if let Some((connection, sender)) = held.as_ref() {
+            if connection.close_reason().is_none() {
+                return Ok((connection.clone(), sender.clone()));
             }
         }
         let address = tokio::net::lookup_host((self.host.as_str(), self.port))
@@ -185,8 +193,8 @@ impl Quic {
             let _ = driver.wait_idle().await;
         });
         yo_core::timing::note(&format!("quic: connected {:?}", started.elapsed()));
-        *self.connection.lock().unwrap_or_else(|e| e.into_inner()) = Some((connection, sender.clone()));
-        Ok(sender)
+        *held = Some((connection.clone(), sender.clone()));
+        Ok((connection, sender))
     }
 
     /// One UDP socket per line, bound once for its family.
