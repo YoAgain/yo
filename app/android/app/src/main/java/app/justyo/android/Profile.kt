@@ -105,6 +105,7 @@ internal data class Setting(
     /** A second action on the same line, before the switch: its icon and its label. */
     val action: Pair<ImageVector, String>? = null,
     val onAction: (() -> Unit)? = null,
+    val trailing: (@Composable () -> Unit)? = null,
     val onChecked: ((Boolean) -> Unit)? = null,
     val onClick: (() -> Unit)? = null,
 )
@@ -135,7 +136,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         Box(Modifier.size(LeadingSide), contentAlignment = Alignment.Center) { Icon(icon, null) }
     } }
     val hasTrailing = row.checked != null || row.value != null || row.badge || row.dot || row.good != null || row.action != null
-    val trailing: (@Composable () -> Unit)? = if (!hasTrailing) null else { {
+    val trailing: (@Composable () -> Unit)? = row.trailing ?: if (!hasTrailing) null else { {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             row.value?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium, maxLines = 1) }
@@ -219,33 +220,51 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
 /** Settings (iOS SettingsView): a height chosen per page: half for the pages that fit there (the first page, Account,
  *  Blocked, Account Security and App Icon; all but the first grow on a screen too short for them), full for every
  *  other; its pages pushed in with a back arrow. */
-@Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
+@Composable fun ProfileSheet(model: YoViewModel, onClose: () -> Unit, devices: Boolean = false, onAddFriends: () -> Unit = {}) = YoSystemTheme {
     // The whole state (counters and the last sync included): the list underneath takes it without them.
     val s by model.repository.state.collectAsStateWithLifecycle()
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     fun hideThen(then: () -> Unit) { scope.launch { sheet.hide() }.invokeOnCompletion { then() } }
     // The way here: a contact's page is reached from Contacts.
-    val trail = rememberSaveable { mutableStateOf(listOf("Profile")) }
+    val trail = rememberSaveable { mutableStateOf(if (devices) DeviceTrail else listOf("Profile")) }
     FittedSheet(onDismissRequest = onClose, state = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer,
         // On a short screen a half page may not fit (Account's "Delete Your Account" fell below): it grows to what it
         // needs. The first page alone stays at half, its card filling the room the rows leave.
-        height = if (trail.value.last() in HalfPages) 0.5f else 1f, grows = trail.value.last() != "Profile") {
+        height = if (trail.value.last() in HalfPages) 0.5f else 1f, grows = trail.value.last() !in setOf("Profile", "Scan", "Linked")) {
         Settings(model, s, trail, onClose = { hideThen(onClose) }, onAddFriends = { hideThen(onAddFriends) })
     }
 }
 
 /** The settings pages that fit at half height without scrolling. */
-private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security", "Appearance")
+private val DeviceTrail = listOf("Profile", "Devices")
+/** As iOS: Devices, the scanner and "linked" are pushed in the half sheet too. */
+private val HalfPages = setOf("Profile", "Account", "Blocked", "Security", "Appearance", "Devices", "Scan", "Linked")
 
-@Composable private fun Settings(model: YoViewModel, s: AppState, trailState: MutableState<List<String>>, onClose: () -> Unit,
-    onAddFriends: () -> Unit) {
+@Composable private fun Settings(model: YoViewModel, s: AppState, trailState: MutableState<List<String>>, onClose: () -> Unit, onAddFriends: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     val repo = model.repository
     var trail by trailState
     val page = trail.last()
     fun open(next: String) { trail = trail + next }
+    val capable by produceState(false, page) { value = repo.addsDevices() }
+    var ownNumber by remember { mutableStateOf<UByte?>(null) }
+    var devices by remember { mutableStateOf<List<YoDevice>?>(null) }
+    var revision by remember { mutableIntStateOf(0) }
+    var devicesError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(page, capable, revision, s.deviceAdded) {
+        if (capable && page in setOf("Profile", "Devices")) {
+            devicesError = null
+            try {
+                val (number, list) = withContext(Dispatchers.IO) { repo.deviceNumber() to repo.ownDevices() }
+                ownNumber = number
+                devices = list
+            }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { devicesError = friendlyError(context, e); if (e is YoException.Replaced) repo.command { throw e } }
+        }
+    }
     val back = { if (trail.size > 1) trail = trail.dropLast(1) else onClose() }
     // A pushed page goes back one; on the first page the sheet's own back closes it.
     androidx.activity.compose.BackHandler(enabled = trail.size > 1) { trail = trail.dropLast(1) }
@@ -295,7 +314,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     /** The recovery key's screen; a secured account's key only after the screen lock. */
     fun openKey() { if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true } }
     val passkeyConfigured by produceState(false, s.secured, passkeyPage, passkeyRevision, page) {
-        if (!passkeyPage && s.secured && page in setOf("Account Security", "Delete Account")) {
+        if (!passkeyPage && s.secured && page in setOf("Security", "Delete Account")) {
             value = withContext(Dispatchers.IO) { runCatching { repo.hasRecoveryPasskey() }.getOrDefault(false) }
         }
     }
@@ -315,15 +334,18 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         page.startsWith("contact:") -> s.friends.firstOrNull { it.key == page.removePrefix("contact:") }?.name.orEmpty()
         else -> stringResource(when (page) {
             "Contacts" -> R.string.ui_contacts
-            "Account Security" -> R.string.account_security
-            "Appearance" -> R.string.ui_app_icon
+            "Security" -> R.string.md_security
+            "Appearance" -> R.string.md_look
+            "Scan" -> R.string.md_scan
+            "Devices" -> R.string.md_devices
+            "Linked" -> R.string.md_linked
             "Blocked" -> R.string.ui_blocked
             "Block Contact" -> R.string.block_contact
             "Contact Us" -> R.string.ui_yo_team
             "Crash Reports" -> R.string.ui_crash_reports
             "Delete Account" -> R.string.ui_delete_account
             "Encryption" -> R.string.ui_encryption
-            "Help" -> R.string.help_and_about
+            "Help" -> R.string.md_about
             "Licenses" -> R.string.about_and_licenses
             "Profile" -> R.string.ui_settings
             else -> R.string.ui_status
@@ -382,31 +404,31 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         }
                     }
                 }
+                shown == "Scan" -> DeviceScanner(repo, capable, code,
+                    onLinked = { trail = trail.dropLast(1) + "Linked" }, onFriendAdded = onClose)
                 shown == "Licenses" -> LicensesPage()
                 // At half height the first page never scrolls: the profile card takes the room the rows leave, so the
                 // gap under the last section is the one at the top. Accessibility font sizes keep the compact card and scroll.
                 shown == "Profile" && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f -> CardOverRows(
                     card = { ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true }, Modifier.fillMaxHeight(), grow = true) },
-                    rows = { Column { ProfileRows(s, repo, ::open, onAddFriends) } },
+                    rows = { Column { ProfileRows(s, ::open, if (capable) devices?.size ?: 0 else null, onAddFriends) } },
                 )
                 else -> Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(top = 8.dp)) { when {
                     shown == "Profile" -> {
                         ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true })
-                        ProfileRows(s, repo, ::open, onAddFriends)
+                        ProfileRows(s, ::open, if (capable) devices?.size ?: 0 else null, onAddFriends)
                     }
                     // iOS AccountPage: who, then Account Security and leaving; deleting is a link under them (App Review 5.1.1(v)).
                     shown == "Account" -> {
                         Section(null, null,
+                            Setting(stringResource(R.string.md_security), Icons.Default.Shield,
+                                badge = s.recoveryNeedsAttention, good = if (s.recoveryNeedsAttention) null else true,
+                                onClick = { open("Security") }),
+                        )
+                        Section(null, null,
                             Setting(stringResource(R.string.ui_contacts), Icons.Default.People,
                                 encrypted?.let { res.getString(R.string.part_of_total, it.first, it.second) }, onClick = { open("Contacts") }),
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, onClick = { open("Blocked") }),
-                        )
-                        // Backup and the ways back on a new phone on a page of their own; the row says whether they are in place.
-                        Section(null, null,
-                            Setting(stringResource(R.string.account_security), Icons.Default.Shield,
-                                badge = s.recoveryNeedsAttention, good = if (s.recoveryNeedsAttention) null else true,
-                                // The red badge goes straight to the recovery key's screen, as before.
-                                onClick = { if (s.recoveryNeedsAttention) openKey() else open("Account Security") }),
                         )
                         Section(null, null,
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
@@ -423,13 +445,13 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         }
                     }
                     // iOS AccountSecurityPage: Yo's own backup, then the three ways back on a new phone.
-                    shown == "Account Security" -> {
+                    shown == "Security" -> {
                         // Yo's own end-to-end encrypted copy of the contacts, groups and settings, on its own.
                         Section(null, null, accountBackupRow(repo))
                         // iOS AccountSecurityPage: the three ways back on a new phone, each with its switch; the (i) above
                         // explains them. A passkey here rides on a saved recovery key, so without one its switch opens the key's screen.
                         val keyOn = s.secured && s.recoverySaved
-                        Section(copy(ProductText.ACCOUNT_RECOVERY), null,
+                        Section(copy(ProductText.ACCOUNT_RECOVERY), stringResource(R.string.md_security_footer),
                             // On opens the key's screen, saved there; off makes the saved key stop working.
                             // While on, the eye left of the switch opens the key's screen again, to show or save it.
                             Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key, badge = s.recoveryNeedsAttention, checked = keyOn,
@@ -486,7 +508,19 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         else contacts.map { friend ->
                             Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, onClick = { blockingNew = friend })
                         }).toTypedArray())
-                    shown == "Appearance" -> IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
+                    shown == "Appearance" -> {
+                        IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
+                        Section(null, stringResource(R.string.md_left_footer),
+                            Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
+                                onChecked = { on -> repo.command { settings(left = on) } }))
+                    }
+                    shown == "Devices" -> DevicesPage(repo, ownNumber, devices, devicesError, { revision++ }, { open("Scan") })
+                    shown == "Linked" -> {
+                        Text(stringResource(R.string.md_linked_title), style = MaterialTheme.typography.headlineSmall)
+                        Note(stringResource(R.string.md_linked_footer))
+                        Section(null, null, Setting(stringResource(R.string.md_show_devices), Icons.Default.Devices,
+                            onClick = { trail = DeviceTrail }))
+                    }
                     // iOS HelpPage: the tutorial, then Status and About & Licenses with the version.
                     shown == "Help" -> {
                         HelpHero(Modifier.padding(bottom = 20.dp))
@@ -495,6 +529,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                                 stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected, onClick = { open("Status") }),
                             Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info, rowVersion(), onClick = { open("Licenses") }),
                         )
+                        Section(null, null,
+                            Setting(stringResource(R.string.md_feedback), Icons.Default.Forum, dot = s.supportUnread, onClick = { open("Contact Us") }))
                     }
                     shown == "Status" -> StatusPage(model, s, connected) { open(it) }
                     shown == "Crash Reports" -> {
@@ -533,7 +569,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
 
     // Done there (the key kept) lands inside Account Security, where it now shows on; the ✕ stays where it was.
     if (secure) RecoverySheet(model, s, onClose = { secure = false },
-        onDone = { secure = false; if (page != "Account Security") open("Account Security") })
+        onDone = { secure = false; if (page != "Security") open("Security") })
     if (passkeyPage) PasskeySheet(model, passkeyConfigured) { passkeyPage = false; passkeyRevision++ }
     // Off: the backup moves to a new key at once, so the saved one stops working now; the new one is not saved yet.
     if (turningOffKey) AlertDialog(
@@ -643,8 +679,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         }
     }
     FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White,
-        // The tall card, like iOS's large detent: people screenshot it, so no friend names show behind it.
-        height = 1f) {
+        // Half height, as iOS's own-code card from the profile row's QR button.
+        height = 0.5f) {
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
             val width = maxWidth.value
             val height = maxHeight.value
@@ -681,7 +717,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                     autoSize = TextAutoSize.StepBased(minFontSize = 9f.fixedSp(), maxFontSize = 18f.fixedSp()))
                 Spacer(Modifier.weight(1f))
                 val colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)
-                Row(Modifier.width(cardWidth.dp).padding(top = (gap * 0.7f).dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // At half height the code is small: the buttons keep the room their words need.
+                Row(Modifier.width(maxOf(cardWidth, minOf(width - 32f, 300f)).dp).padding(top = (gap * 0.7f).dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         // Android (13+, the app's least is 14) shows its own toast for the copy.
                         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(copyLabel, link))
@@ -935,20 +972,16 @@ private fun inviteCard(context: Context, name: String, code: InviteCode): Bitmap
     }
 }
 
-/** The first page's rows under the profile card. */
-@Composable private fun ProfileRows(s: AppState, repo: Repository, open: (String) -> Unit, onAddFriends: () -> Unit) {
+/** The first page's rows under the profile card, as iOS: Look and Devices (on a hub that adds them), then Add Friends
+ *  and About. */
+@Composable private fun ProfileRows(s: AppState, open: (String) -> Unit, devices: Int?, addFriends: () -> Unit) {
     Section(null, null,
-        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.ui_app_icon), leading = { AppIconPreview(s.appIcon, 32, 8) }, onClick = { open("Appearance") }),
-        Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
-            onChecked = { on -> repo.command { settings(left = on) } })),
-    )
+        Setting(stringResource(R.string.md_look), Icons.Default.Palette, onClick = { open("Appearance") }),
+        if (devices != null) Setting(stringResource(R.string.md_devices), Icons.Default.Devices,
+            value = devices.takeIf { it > 0 }?.toString(), onClick = { open("Devices") }) else null)
     Section(null, null,
-        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
-        Setting(stringResource(R.string.ui_send_feedback), Icons.Default.Forum, dot = s.supportUnread, onClick = { open("Contact Us") })),
-    )
-    Section(null, null,
-        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends)),
-    )
+        Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAddAlt, onClick = addFriends),
+        Setting(stringResource(R.string.md_about), Icons.AutoMirrored.Filled.Help, dot = s.supportUnread, onClick = { open("Help") }))
 }
 
 /** The first page at half height: the rows at their own height, the card in the room they leave, but never less than
@@ -994,7 +1027,7 @@ private val CompactCard = 48.dp + 32.dp + 12.dp
                 )
                 if (s.recoveryNeedsAttention) AttentionBadge()
             }
-            FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
+            FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.md_my_code)) }
         }
     }
     Card(onClick = onOpen, modifier = modifier.fillMaxWidth().padding(bottom = 12.dp), shape = MaterialTheme.shapes.extraLarge,
@@ -1349,8 +1382,17 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     val context = LocalContext.current
     val chunks = rememberLicenseChunks(true)
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-        // iOS LicensesPage: who makes Yo, its version, who operates it, the website, the privacy policy and the terms.
+        // iOS LicensesPage ("About & Legal"): the terms and the privacy policy first, then who makes Yo, its version, who
+        // operates it and the website.
         item {
+            Section(null, null,
+                Setting(stringResource(R.string.terms_of_use), onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/terms".toUri()))
+                }),
+                Setting(stringResource(R.string.privacy_policy), onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/privacy".toUri()))
+                }),
+            )
             Section(null, null,
                 Setting(stringResource(R.string.about_yo_by), onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/imprint".toUri()))
@@ -1359,12 +1401,6 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
                 Setting(stringResource(R.string.about_operated_by)),
                 Setting(stringResource(R.string.about_website), value = "justyo.co", onClick = {
                     context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co".toUri()))
-                }),
-                Setting(stringResource(R.string.privacy_policy), onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/privacy".toUri()))
-                }),
-                Setting(stringResource(R.string.terms_of_use), onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/terms".toUri()))
                 }),
             )
         }

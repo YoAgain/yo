@@ -1235,3 +1235,15 @@ fn a_stopping_hub_ends_its_long_polls() {
     assert_eq!(poll.join().unwrap(), status::OK);
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "answered in {:?}", started.elapsed());
 }
+
+/// Spec 2.5: `/.well-known/yo-hub` says whether the hub adds devices, so the apps show linking only where it works.
+#[test]
+fn features_say_whether_devices_link() {
+    for on in [false, true] {
+        let hub = TestHub::start_with(Config { add_devices: on, ..Config::for_tests() }, "127.0.0.1:0");
+        let (code, body) = raw(&hub, "GET", api::FEATURES_PATH, &[], Vec::new());
+        assert_eq!(code, 200);
+        let features: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(features["link"], on);
+    }
+}

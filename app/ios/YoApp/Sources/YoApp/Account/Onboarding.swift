@@ -586,6 +586,9 @@ private struct SignInCard: View {
   @State private var keyProblem: String?
   @State private var scanning = false
   @State private var picked: _PhotosUI_SwiftUI.PhotosPickerItem?
+  /// The hub adds devices (`DeviceLinking`): "Link from Another Device" first.
+  @State private var linkingOn = DeviceLinking.on == true
+  @State private var linkingDevice = false
 
   private var open: Bool { opened ?? synced.isEmpty }
   private var motion: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
@@ -623,6 +626,10 @@ private struct SignInCard: View {
       } else if typed.filter({ $0.isASCII && ($0.isLetter || $0.isNumber) }).count >= 64 {
         keyProblem = Self.mismatch
       }
+    }
+    .task { linkingOn = await DeviceLinking.check() }
+    .fullScreenCover(isPresented: $linkingDevice) {
+      LinkThisDevicePage(close: { linkingDevice = false }).appObjects()
     }
     .sheet(isPresented: $scanning) {
       QRScanner { text in
@@ -685,12 +692,23 @@ private struct SignInCard: View {
       } else {
         ForEach(synced) { account($0) }
       }
+      if linkingOn {
+        Button { linkingDevice = true } label: {
+          Label("Link from Another Device", systemImage: "qrcode")
+            .font(.system(.title3, weight: .semibold))
+            .frame(maxWidth: .infinity, minHeight: 40)
+        }
+        .buttonStyle(.glassProminent)
+        .tint(.white)
+        .foregroundStyle(.black)
+        .accessibilityIdentifier("signIn.link")
+      }
       Button {
         withAnimation(motion) { opened = !open }
       } label: {
         // As the welcome's "Got Yo? Sign In": the quiet question, then the action.
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-          Text(ProductText.notListed.english).font(.system(size: 15, weight: .semibold))
+          Text(linkingOn ? "No other device?" : ProductText.notListed.english).font(.system(size: 15, weight: .semibold))
             .foregroundStyle(.white.opacity(0.85))
           Text(ProductText.useAKey.english).font(.yo(18))
         }

@@ -25,6 +25,23 @@ struct AccountPage: View {
   var body: some View {
     Form {
       Section {
+        // Backup and the ways back on a new phone, on a page of their own; the row says whether they are in place.
+        // With the red badge it opens the recovery key's screen itself.
+        // Always the Security page (Recovery Key, Passkey); the badge says the account isn't secured yet.
+        NavigationLink(value: SettingsView.Page.security) {
+          LabeledContent {
+            if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
+              RecoveryBadge()
+            } else {
+              Image(systemName: Check.ok.symbol).foregroundStyle(Check.ok.color).accessibilityLabel("Set Up")
+            }
+          } label: {
+            Label("Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
+          }
+        }
+        .accessibilityIdentifier("account.security")
+      }
+      Section {
         // A full page: only its own sheet, no push into the half sheet.
         Button {
           openSheet(.contacts)
@@ -46,33 +63,6 @@ struct AccountPage: View {
           Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
         }
         .accessibilityIdentifier("account.blocked")
-      }
-      Section {
-        // Backup and the ways back on a new phone, on a page of their own; the row says whether they are in place.
-        // With the red badge it opens the recovery key's screen itself.
-        if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
-          Button { showingRecoveryKey = true } label: {
-            ChevronRow {
-              HStack(spacing: 8) {
-                RecoveryBadge()
-                DisclosureChevron()
-              }
-            } label: {
-              Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
-            }
-          }
-          .tint(Color(.label))
-          .accessibilityIdentifier("account.security")
-        } else {
-          NavigationLink(value: SettingsView.Page.security) {
-            LabeledContent {
-              Image(systemName: Check.ok.symbol).foregroundStyle(Check.ok.color).accessibilityLabel("Set Up")
-            } label: {
-              Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
-            }
-          }
-          .accessibilityIdentifier("account.security")
-        }
       }
       Section {
         // App Review 5.1.1(v): deleting is easy to find, no page between.
@@ -314,6 +304,8 @@ struct AccountSecurityPage: View {
             .contentShape(.rect.inset(by: -13))  // 18 pt drawn, 44 pt to touch, without a taller header
             .accessibilityIdentifier("security.howRecoveryWorks")
         }
+      } footer: {
+        Text("The recovery key or a passkey brings your account back on a new phone.")
       }
       .disabled(busy)
     }
@@ -322,7 +314,7 @@ struct AccountSecurityPage: View {
     .contentMargins(.top, 8, for: .scrollContent)
     .scrollBounceBehavior(.basedOnSize)
     .accessibilityIdentifier("security.page")
-    .navigationTitle("Account Security")
+    .navigationTitle("Security")
     .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet().systemAppearance().appObjects() }
     .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }).systemAppearance().appObjects() }
     .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }).systemAppearance().appObjects() }

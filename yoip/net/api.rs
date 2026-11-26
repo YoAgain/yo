@@ -85,6 +85,9 @@ pub fn blob_put_path(id: &crate::protocol::content::BlobId, fetches: u32) -> Str
 
 /// `POST`: a request wrapped to the hub's OHTTP key (spec 4.1, RFC 9458), answered wrapped.
 pub const OHTTP: &str = "/v1/ohttp";
+/// What this hub offers, as JSON: `{"link": true}` when it adds devices (`YO_ADD_DEVICES`, spec 2.5).
+pub const FEATURES_PATH: &str = "/.well-known/yo-hub";
+
 /// `GET`: the hub's OHTTP key configs (`application/ohttp-keys`), current and spare: for tools; apps pin their own.
 pub const OHTTP_KEYS_PATH: &str = "/.well-known/yo-ohttp";
 pub const OHTTP_REQUEST_TYPE: &str = "message/ohttp-req";

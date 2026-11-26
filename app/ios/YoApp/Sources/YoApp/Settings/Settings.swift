@@ -85,19 +85,20 @@ struct SettingsView: View {
   @State private var hasRecoveryKey = true
   @State private var currentIconName = UIApplication.shared.alternateIconName
   enum Page: Hashable, Identifiable {
-    case account, security, help, status, contacts, code, licenses, appIcon
+    case account, security, help, status, contacts, code, licenses, appIcon, look, devices, scan
 
     var id: Self { self }
 
     /// The pages that fit at half height (Account, its Account Security and App Icon's five icons) are pushed inside
     /// the half sheet; every other opens as a sheet of its own at full height, so the half sheet never changes height.
-    var opensOwnSheet: Bool { !(self == .account || self == .security || self == .appIcon) }
+    var opensOwnSheet: Bool { !(self == .account || self == .security || self == .appIcon || self == .look || self == .devices) }
   }
   @State private var path: [Page] = []
-  /// The full-height page open as its own sheet on top, with its own stack (About & Licenses and Status push in it).
+  /// The full-height page open as its own sheet on top, with its own stack (About & Legal and Status push in it).
   @State private var sheet: Page?
   @State private var showingDeleteAccount = false
-  @State private var showingFeedback = false
+  @State private var linking = DeviceLinking.on == true
+  @State private var deviceCount: Int?
 
   /// Every push goes through here: a half page joins the path, a full page opens its own sheet instead.
   private func navigate(to new: [Page]) {
@@ -120,74 +121,39 @@ struct SettingsView: View {
             NavigationLink(value: Page.account) {
               let name = Text(account.username).font(.yo(26, relativeTo: .title2)).lineLimit(1)
               let badge = accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey)
+              // This account's own code, for a friend to scan (scanning is in Add Friends and Devices › Add Device).
               let code = YourCodeButton {
                 YourCodePage.prepare(name: account.username)
                 sheet = .code
               }
-              // The whole name beside the picture; at large text sizes where it does not fit there, on a line of
-              // its own under it (it was cut to "IosH…").
-              ViewThatFits(in: .horizontal) {
-                HStack(spacing: 14) {
-                  Avatar(name: account.username, size: 56)
-                  name.fixedSize()
-                  if badge { RecoveryBadge() }
-                  Spacer(minLength: 0)
-                  code
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                  HStack(spacing: 14) {
-                    Avatar(name: account.username, size: 56)
-                    if badge { RecoveryBadge() }
-                    Spacer(minLength: 0)
-                    code
-                  }
-                  name.minimumScaleFactor(0.5)
-                }
+              // As iOS Settings' Apple Account row: the picture, the name beside it, the code button at the end. A
+              // long name shrinks to fit the one line.
+              HStack(spacing: 14) {
+                Avatar(name: account.username, size: 56)
+                name.minimumScaleFactor(0.5)
+                if badge { RecoveryBadge() }
+                Spacer(minLength: 0)
+                code
               }
               .padding(.vertical, 2)
             }
           }
+          // Look, and Devices (only on a hub that adds them, `DeviceLinking`; pushed in the sheet).
           Section {
-            NavigationLink(value: Page.appIcon) {
-              Label {
-                Text("App Icon")
-              } icon: {
-                AppIconPicture(asset: currentIconAsset)
-              }
-              .labelStyle(Tile(.amethyst))
+            NavigationLink(value: Page.look) {
+              Label("Look", systemImage: "paintbrush.fill").labelStyle(Tile(.amethyst))
             }
-            Toggle(isOn: Binding(get: { leftHanded }, set: { leftHanded = $0; accounts.storeLeftHanded($0) })) {
-              Label("Left-Handed", systemImage: "hand.point.up.left.fill").labelStyle(Tile(.blue))
-            }
-          }
-          Section {
-            // A full page: only its own sheet, no push (a link would also push it into the half sheet).
-            Button {
-              sheet = .help
-            } label: {
-              ChevronRow {
-                DisclosureChevron()
-              } label: {
-                HStack {
-                  Label("Help & About", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
+            .accessibilityIdentifier("settings.look")
+            if linking {
+              NavigationLink(value: Page.devices) {
+                LabeledContent {
+                  if let deviceCount { Text("\(deviceCount)") }
+                } label: {
+                  Label("Devices", systemImage: "iphone").labelStyle(Tile(.blue))
                 }
               }
+              .accessibilityIdentifier("settings.devices")
             }
-            .tint(Color(.label))
-            // The support chat opens as its own sheet.
-            Button {
-              showingFeedback = true
-            } label: {
-              ChevronRow {
-                DisclosureChevron()
-              } label: {
-                HStack {
-                  Label("Send Feedback", systemImage: "envelope.fill").labelStyle(Tile(.blue))
-                  SupportBadge()
-                }
-              }
-            }
-            .tint(Color(.label))
           }
           Section {
             // Opens the list's own "+" field, so one learns where friends are added.
@@ -198,6 +164,17 @@ struct SettingsView: View {
                 DisclosureChevron()
               } label: {
                 Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(Tile(.green))
+              }
+            }
+            .tint(Color(.label))
+            // A full page: only its own sheet, no push (a link would also push it into the half sheet).
+            Button {
+              sheet = .help
+            } label: {
+              ChevronRow {
+                DisclosureChevron()
+              } label: {
+                Label("About", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
               }
             }
             .tint(Color(.label))
@@ -220,6 +197,11 @@ struct SettingsView: View {
       .toolbarBackground(.hidden, for: .navigationBar)
       .scrollEdgeEffectHidden(!typeSize.isAccessibilitySize, for: .top)
       .task { await accounts.refreshSupport() }
+      .task(id: path) {
+        guard path.isEmpty else { return }
+        linking = await DeviceLinking.check()
+        if linking { deviceCount = try? await accounts.ownDevices().count }
+      }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { destination($0) }
     }
@@ -234,11 +216,11 @@ struct SettingsView: View {
           .navigationDestination(for: Page.self) { destination($0) }
       }
       .scrollBounceBehavior(.basedOnSize)
-      .presentationDetents([.large])
+      // The scanner and the own code are half-height cards; every other full page at full height.
+      .presentationDetents(page == .scan || page == .code ? [.medium] : [.large])
       .presentationBackground(Color(.systemGroupedBackground))
       .systemAppearance().appObjects()
     }
-    .sheet(isPresented: $showingFeedback) { MessagePage().systemAppearance().appObjects() }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
@@ -263,6 +245,28 @@ struct SettingsView: View {
     }
   }
 
+  /// Look: the app icon and the bars' sides.
+  private var lookPage: some View {
+    Form {
+      Section {
+        NavigationLink(value: Page.appIcon) {
+          Label {
+            Text("App Icon")
+          } icon: {
+            AppIconPicture(asset: currentIconAsset)
+          }
+          .labelStyle(Tile(.amethyst))
+        }
+        Toggle(isOn: Binding(get: { leftHanded }, set: { leftHanded = $0; accounts.storeLeftHanded($0) })) {
+          Label("Left-Handed", systemImage: "hand.point.up.left.fill").labelStyle(Tile(.blue))
+        }
+      } footer: {
+        Text("Left-Handed swaps the bars’ sides and moves Settings to the bottom right.")
+      }
+    }
+    .navigationTitle("Look")
+  }
+
   private func destination(_ page: Page) -> some View {
     Group {
       switch page {
@@ -275,6 +279,9 @@ struct SettingsView: View {
       case .security:
         if let account = accounts.account { AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey) }
       case .appIcon: AppIconPage()
+      case .look: lookPage
+      case .devices: DevicesPage()
+      case .scan: ScanPage(close: nil, done: { sheet = nil; dismiss() })
       case .help: HelpPage()
       case .status: StatusPage()
       case .contacts: ContactSecurityPage()

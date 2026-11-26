@@ -1,6 +1,7 @@
 package app.justyo.android
 
 import android.content.Context
+import androidx.core.content.edit
 import android.media.AudioAttributes
 import android.util.Base64
 import androidx.glance.appwidget.updateAll
@@ -73,6 +74,40 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         private set
     private val changes = Mutex()
     internal val pendingShares=PendingShares(context,vault,changes) { sessionId }
+    private val capabilityLock = Mutex()
+    private var deviceCapability: Boolean? = null
+
+    /**
+     * Whether the hub adds devices (`YO_ADD_DEVICES`): `/.well-known/yo-hub` says `"link": true` (a hub from before the
+     * flag answers 404: off). Asked once per run; no answer (no connection) keeps the last one and asks again next time.
+     */
+    suspend fun addsDevices(): Boolean = withContext(Dispatchers.IO) {
+        capabilityLock.withLock {
+            val kept = context.getSharedPreferences("devices", Context.MODE_PRIVATE)
+            deviceCapability ?: try {
+                val connection = java.net.URL(Hub.url.trimEnd('/') + "/.well-known/yo-hub").openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = 8000; connection.readTimeout = 8000; connection.useCaches = false
+                try {
+                    when (connection.responseCode) {
+                        200 -> JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optBoolean("link", false)
+                        404 -> false
+                        else -> null
+                    }
+                } finally { connection.disconnect() }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { null }.also { answer ->
+                if (answer != null) kept.edit { putBoolean("linking", answer) }
+                deviceCapability = answer
+            } ?: kept.getBoolean("linking", false)
+        }
+    }
+
+    fun disableDeviceLinks() { deviceCapability = false }
+    fun ownDevices() = checkNotNull(client).ownDevices()
+    fun deviceNumber() = checkNotNull(client).deviceNumber()
+    fun removeDevice(number: UByte) = checkNotNull(client).removeDevice(number)
+    fun approveDevice(offer: YoLinkOffer) = checkNotNull(client).linkApprove(offer)
+    fun dismissDeviceBanner() = mutable.update { it.copy(deviceAdded = false) }
+
     private val accountTurn = Mutex()
     private val sending = mutableMapOf<String, Mutex>()
     /** Yos that did not go, by target (`unsent-yos`): the bar says "Not Sent · Tap to Retry" until a tap sent them. */
@@ -239,7 +274,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 key ?: error(context.getString(R.string.ui_state_key_missing_use_your_recovery_key))
                 val db = file.database(key)
                 // A kept sign-in of `migrate` saved before the hub answered is finished by `finishMigration`.
-                if (db.hasState() && (vault.read("migration") == null || db.registered())) YoClient.openDb(transport, db, key, false, null) else null
+                if (db.hasState() && (vault.read("migration") == null || db.registered())) {
+                    try { YoClient.openDb(transport, db, key, false, null) }
+                    catch (_: YoException.DeviceLimit) { null } // Pending registration. Sign In can resume it with a choice.
+                } else null
             } else null
             if (restored != null) {
                 vault.delete("migration"); vault.delete("migration-storage")
@@ -300,6 +338,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             mutable.update { it.copy(updating = true) }
             if (kept.accountKey.isEmpty()) restore(checkNotNull(kept.recoveryKey))
             else signIn(checkNotNull(syncedItemUpgraded(kept)), vault.read("migration-storage"))
+        } catch (_: ReplacementCancelled) {
+            mutable.update { it.copy(updating = false) }
+            return true
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
             // Not signed in: offline or the hub busy for now (`retryLater`, as iOS), kept for later; refused for good
             // (account gone, name another's), signed out as an old install without a key. Signed in and a later
@@ -440,9 +481,29 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     /** The hub's keys this build pins (spec 4.1): a backup's fetch takes only the hub's signed answer. */
     private fun hubKeys(): List<ByteArray> = Hub.hubKeys.map(::decodeUrl)
 
-    private fun registerCore(name: String, account: ByteArray, attest: YoAttest? = null): YoClient {
+    private class ReplacementCancelled : CancellationException()
+    internal class Replacement(val devices: List<YoDevice>, internal val choice: CompletableDeferred<UByte?>)
+    private val pendingReplacement = MutableStateFlow<Replacement?>(null)
+    internal val replacement = pendingReplacement.asStateFlow()
+
+    private suspend fun registerCore(name: String, account: ByteArray, attest: YoAttest? = null,
+        replace: UByte? = null, seed: ByteArray? = null, storageKey: ByteArray? = null): YoClient {
         val key = vault.secret("state-key")
-        return YoClient.registerUsernameDb(transport, file.database(key), key, null, name, account, null, null, null, 0u, "", attest)
+        var number = replace
+        while (true) {
+            try {
+                val db = file.database(key)
+                // After DeviceLimit: the saved registration finishes in place of the device the owner picked.
+                return number?.let { YoClient.registerReplacingDb(transport, db, key, null, account, it) }
+                    ?: YoClient.registerUsernameDb(transport, db, key, null, name, account,
+                        seed, storageKey, null, 0u, "", attest)
+            } catch (limit: YoException.DeviceLimit) {
+                val request = Replacement(limit.devices, CompletableDeferred())
+                pendingReplacement.value = request
+                try { number = request.choice.await() ?: throw ReplacementCancelled() }
+                finally { pendingReplacement.value = null }
+            }
+        }
     }
 
     private suspend fun restoreBackup(opened: YoOpenedBackup, typedCode: String?) {
@@ -458,16 +519,21 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         syncItem()
     }
 
+    suspend fun link(linked: YoLinked, replace: UByte?) {
+        val item = SyncedItem(linked.username, byteArrayOf(), linked.accountSecret, false, false, false, false,
+            null, null, syncedItemVersion(), null)
+        signIn(item, linked.legacyStorageKey, replace)
+        vault.delete("left")
+    }
+
     /**
      * Signs in with the synced item's account key, as iOS does with its iCloud Keychain item (`storageKey`: an old
      * install's, its storage still sealed under it). The item's backup counts only for the account it was made for: a
      * name registered anew after a deletion is another account (a kept sign-in of `migrate` names none).
      */
-    private suspend fun signIn(item: SyncedItem, storageKey: ByteArray? = null) = accountTurn.withLock {
+    private suspend fun signIn(item: SyncedItem, storageKey: ByteArray? = null, replace: UByte? = null) = accountTurn.withLock {
         check(client == null)
-        val key = vault.secret("state-key")
-        val c = YoClient.registerUsernameDb(transport, file.database(key), key, null, item.username, item.accountKey,
-            item.legacySeed, storageKey, null, 0u, "", null)
+        val c = registerCore(item.username, item.accountKey, replace = replace, seed = item.legacySeed, storageKey = storageKey)
         pin(c); client = c; sessionId++
         val same = item.userId.isEmpty() || c.userId().hexBytes().contentEquals(item.userId)
         val code = item.recoveryKey.takeIf { same }
@@ -929,11 +995,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         listFriends()
         present { time -> if (failure == null) sendFinished(time, friend.key, kind) else sendFailed(time, friend.key, failure) }
     }
-    private fun recordStat(friend: Friend,sent: Boolean) {
-        val time=System.currentTimeMillis()
+    private fun recordStat(friend: Friend, sent: Boolean, time: Long = System.currentTimeMillis()) {
         mutable.update { s -> s.copy(sent=s.sent+if(sent) 1 else 0,received=s.received+if(sent) 0 else 1,
             byFriend=s.byFriend+(friend.key to ((s.byFriend[friend.key] ?: 0)+1)),
-            lastSent=if(sent) s.lastSent+(friend.key to time) else s.lastSent,
+            lastSent=if(sent) s.lastSent+(friend.key to maxOf(time, s.lastSent[friend.key] ?: 0L)) else s.lastSent,
             lastReceived=if(sent) s.lastReceived else s.lastReceived+(friend.key to time)) }
     }
     private val notifications = YoNotifications(context)
@@ -988,6 +1053,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             for (event in events) when (event) {
                 is YoEvent.Message -> removedUsers.remove(event.user)
                 is YoEvent.NewChat -> removedUsers.remove(event.user)
+                is YoEvent.Sent -> removedUsers.remove(event.user)
                 else -> Unit
             }
             // A Yo from someone already on the list shows at once; the list's refresh (core lists, the encrypted
@@ -1007,7 +1073,19 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             for (event in events) {
                 if(event is YoEvent.Profile) present { senderNamed(it,event.user,event.name) }
                 // The hub lists a device more (this account's own: one of its devices, as Signal tells of a linked one).
-                if (event is YoEvent.DeviceAdded) android.util.Log.i("Yo", "device added")
+                if (event is YoEvent.DeviceAdded) mutable.update { it.copy(deviceAdded = true) }
+                if (event is YoEvent.Sent) {
+                    // refresh() above mirrors the core’s accepted contact before presenting its sent bar.
+                    state.value.friends.firstOrNull { it.user == event.user }?.let { friend ->
+                        if (!firstPresentation("sent/${friend.target}/${event.sentAtMs}")) return@let
+                        showSent(friend, kind = when (event.kind) {
+                            is MessageKind.Photo -> ListKind.PHOTO
+                            is MessageKind.Video -> ListKind.VIDEO
+                            else -> ListKind.YO
+                        })
+                        recordStat(friend, true, event.sentAtMs.toLong())
+                    }
+                }
                 if (event is YoEvent.IdentityChanged) {
                     val friend = state.value.friends.firstOrNull { it.user == event.user }
                     if (friend != null) mutable.update { s -> s.copy(friends = s.friends.map { if (it.key == friend.key) it.copy(keyChanged = true) else it },
@@ -1036,6 +1114,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         }
     }
 
+    private fun firstPresentation(id: String): Boolean {
+        if (!seen.add(id)) return false
+        if (seen.size > 2000) seen.remove(seen.first())
+        return true
+    }
+
     /** A message event's Yo on its bar (once: `seen`), its media expected, a notification in the background. */
     private suspend fun arrive(event: YoEvent, profiles: Map<String, String>, contacts: Map<String, YoContact>) {
         val user = when (event) { is YoEvent.Message -> event.user; is YoEvent.GroupMessage -> event.user; else -> return }
@@ -1048,8 +1132,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val id = "${friend.target}/$user/$at"
         // First save the media descriptor; an unsuccessful save leaves the event in the Rust journal.
         media.expect(id, friend.target, user, kind, at.toLong())
-        if (!seen.add(id)) return
-        if (seen.size > 2000) seen.remove(seen.first())
+        if (!firstPresentation(id)) return
         arrival(friend, user, kind, id)
         val contact = contacts[user]
         val sender = friends.firstOrNull { it.user == user }

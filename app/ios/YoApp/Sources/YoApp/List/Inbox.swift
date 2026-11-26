@@ -46,6 +46,16 @@ final class Inbox {
   /// Counts each time Yos are ready for the list (`takeArrivals`): at most every `batchSeconds`, so a burst redraws
   /// the list a few times, not once per Yo.
   private(set) var arrived = 0
+  /// Another device of this account sent these users a Yo (`YoEvent.sent`): their bars show "Sent Yo" as after a tap
+  /// here. Counted, so the list takes them (`takeSentElsewhere`).
+  private(set) var sentElsewhere = 0
+  @ObservationIgnored private var sentUsers: [String] = []
+  func takeSentElsewhere() -> [String] {
+    defer { sentUsers = [] }
+    return sentUsers
+  }
+  /// A device was linked to this account (`YoEvent.deviceAdded`): the list's "New device linked" banner.
+  var deviceLinked = false
   /// Sustained floods alone suppress list motion: more than twelve arrivals in one second.
   private(set) var busy = false
   @ObservationIgnored private var recentArrivals: [ContinuousClock.Instant] = []
@@ -633,6 +643,9 @@ final class Inbox {
       case .deviceAdded(let user):
         // The hub lists a device more (this account's own: one of its devices, as Signal tells of a linked one).
         Logger(subsystem: "app.justyo", category: "devices").notice("device added for \(user, privacy: .private)")
+        deviceLinked = true  // only this account's own devices are told
+      case .sent(let user, _, _):
+        if seenUsers.insert(user).inserted { users.append(user) }
       default: break
       }
     }
@@ -715,7 +728,10 @@ final class Inbox {
           _ = friend(user)
         case .identityChanged:
           break  // reconciled with the batch before publication
-        case .profile, .deviceAdded, .connectionChanged, .sent:
+        case .sent(let user, _, _):
+          sentUsers.append(user)
+          sentElsewhere += 1
+        case .profile, .deviceAdded, .connectionChanged:
           break
         }
         kept.append(event)

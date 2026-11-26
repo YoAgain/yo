@@ -45,6 +45,12 @@ extension FriendList {
       .onChange(of: inbox.mediaChanges) { syncListMedia() }
       .onChange(of: outbox.unsentTo, initial: true) { syncUnsent() }
       .onChange(of: inbox.unsentBars) { syncUnsent() }
+      .onChange(of: inbox.sentElsewhere) {
+        // Sent from another device of this account: the bar shows it as a Yo sent here.
+        for user in inbox.takeSentElsewhere() {
+          if let bar = friends.all.first(where: { $0.user == user }) { showSent(to: bar, BarSendText.sentYo, thenOnTop: true) }
+        }
+      }
       .onAppear {
         // A photo or video that did not go at first and went now: its bar tells it.
         outbox.wentLater = { to, kind in

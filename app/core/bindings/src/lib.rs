@@ -1500,6 +1500,11 @@ impl YoClient {
         self.read(|c| c.user_id().to_owned())
     }
 
+    /// This device's number in its account: the one `own_devices` lists as this device.
+    pub fn device_number(&self) -> u8 {
+        self.read(|c| c.device_number())
+    }
+
     /// The username as its owner writes it ("José").
     pub fn username(&self) -> Option<String> {
         self.read(|c| c.username().map(str::to_owned))

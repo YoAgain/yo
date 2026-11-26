@@ -23,6 +23,7 @@ import java.io.File
 
 class YoViewModel(application: Application) : AndroidViewModel(application) {
     val repository = application.repository
+    internal val deviceLink = DeviceLink(viewModelScope, repository, application)
     val shares = MutableStateFlow<List<Uri>>(emptyList())
     private val shareSending = kotlinx.coroutines.sync.Mutex()
     val importingShares=MutableStateFlow(false)

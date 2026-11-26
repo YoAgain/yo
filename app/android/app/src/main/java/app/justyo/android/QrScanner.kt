@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -47,6 +48,20 @@ internal fun readQr(image: ImageProxy): com.google.zxing.Result {
 }
 
 @Composable internal fun QrScanner(onClose: ()->Unit,onCode: (ScannedQr)->Unit) {
+    Dialog(onDismissRequest=onClose,properties=DialogProperties(usePlatformDefaultWidth=false)) {
+        Surface(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+                Row(Modifier.fillMaxWidth().padding(16.dp),horizontalArrangement=Arrangement.SpaceBetween) {
+                    Text(stringResource(R.string.scan_qr),style=MaterialTheme.typography.titleLarge)
+                    TextButton(onClick=onClose){Text(stringResource(R.string.ui_cancel))}
+                }
+                QrCamera(Modifier.fillMaxWidth().weight(1f), onCode = onCode)
+            }
+        }
+    }
+}
+
+@Composable internal fun QrCamera(modifier: Modifier, continuous: Boolean = false, onCode: (ScannedQr) -> Unit) {
     val context=LocalContext.current
     val owner=LocalLifecycleOwner.current
     var granted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED) }
@@ -54,8 +69,9 @@ internal fun readQr(image: ImageProxy): com.google.zxing.Result {
     val request=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted=it }
     LaunchedEffect(Unit) { if(!granted) request.launch(Manifest.permission.CAMERA) }
     val deliver by rememberUpdatedState(onCode)
-    val preview=remember { PreviewView(context) }
-    DisposableEffect(granted,owner) {
+    // A texture, not a surface: in a half sheet the preview stays inside its card (a surface drew over the sheet's top).
+    val preview=remember { PreviewView(context).apply { implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
+    DisposableEffect(granted, owner, continuous) {
         val executor=Executors.newSingleThreadExecutor()
         val disposed=AtomicBoolean(false)
         val completed=AtomicBoolean(false)
@@ -65,6 +81,7 @@ internal fun readQr(image: ImageProxy): com.google.zxing.Result {
         val future=ProcessCameraProvider.getInstance(context)
         var provider: ProcessCameraProvider?=null
         if(granted) {
+            val sightings = CodeSightings()
             var lastScan=0L
             analysis.setAnalyzer(executor) { image ->
                 try {
@@ -73,7 +90,9 @@ internal fun readQr(image: ImageProxy): com.google.zxing.Result {
                     if(now-lastScan<100) return@setAnalyzer
                     lastScan=now
                     val code=scanned(readQr(image))
-                    if(completed.compareAndSet(false,true)) main.execute { if(!disposed.get()) deliver(code) }
+                    val fresh = if (continuous) sightings.sighted(listOf(code.text), now, true) != null
+                        else completed.compareAndSet(false, true)
+                    if (fresh) main.execute { if (!disposed.get()) deliver(code) }
 
                 } catch(_: NotFoundException) { /* Next frame. */ }
                 catch(_: Exception) { /* A malformed QR never stops camera analysis. */ }
@@ -86,16 +105,6 @@ internal fun readQr(image: ImageProxy): com.google.zxing.Result {
         }
         onDispose { disposed.set(true);analysis.clearAnalyzer();provider?.unbind(display,analysis);executor.shutdown() }
     }
-    Dialog(onDismissRequest=onClose,properties=DialogProperties(usePlatformDefaultWidth=false)) {
-        Surface(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-                Row(Modifier.fillMaxWidth().padding(16.dp),horizontalArrangement=Arrangement.SpaceBetween) {
-                    Text(stringResource(R.string.scan_qr),style=MaterialTheme.typography.titleLarge)
-                    TextButton(onClick=onClose){Text(stringResource(R.string.ui_cancel))}
-                }
-                if(granted && !failed) AndroidView(factory={preview},modifier=Modifier.fillMaxWidth().weight(1f))
-                else Text(stringResource(if(failed) R.string.camera_unavailable else R.string.camera_permission_needed),modifier=Modifier.padding(24.dp))
-            }
-        }
-    }
+    if (granted && !failed) AndroidView(factory = { preview }, modifier = modifier.clipToBounds())
+    else Text(stringResource(if (failed) R.string.camera_unavailable else R.string.camera_permission_needed), Modifier.padding(24.dp))
 }

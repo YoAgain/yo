@@ -322,6 +322,7 @@ impl Hub {
             .route(hubsig::KEY_PATH, get(hub_key))
             .route(api::TRUST_ROOT_PATH, get(trust_root))
             .route(api::ZK_PARAMS_PATH, get(zk_params))
+            .route(api::FEATURES_PATH, get(features))
             .merge(admin::routes(self))
             .route_layer(from_fn_with_state(self.clone(), off_workers))
             .route_layer(from_fn_with_state(self.clone(), admit));
@@ -588,6 +589,11 @@ async fn hub_key(State(hub): Hubs) -> Vec<u8> {
 /// `GET /.well-known/yo-trust-root` (spec 4.1).
 async fn trust_root(State(hub): Hubs) -> Vec<u8> {
     hub.signer.root().to_vec()
+}
+
+/// `GET /.well-known/yo-hub`: what this hub offers, so the apps show linking only where it works (spec 2.5).
+async fn features(State(hub): Hubs) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "link": hub.config.add_devices }))
 }
 
 /// `GET` the zkgroup public params (spec 3.4).

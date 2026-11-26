@@ -22,6 +22,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -184,6 +185,8 @@ import uniffi.yo.usernameValid
             },
             dismissButton=if (change.confirm) {{ TextButton(onClick=repo::keyChangeSeen){Text(stringResource(android.R.string.ok))} }} else null) } }
     }
+    val replacement by repo.replacement.collectAsStateWithLifecycle()
+    replacement?.let { YoSystemTheme { ReplaceDevice(it) } }
 }
 @Composable fun BrandText(text: String, size: Int, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
     Text(text, modifier, maxLines = maxLines, softWrap = maxLines > 1,
@@ -203,6 +206,10 @@ import uniffi.yo.usernameValid
     var name by rememberSaveable { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
     val repo = model.repository
+    model.deviceLink.screen?.let { page ->
+        LinkDevicePage(model.deviceLink, page)
+        return
+    }
     val field = remember(repo) { YoNameField(repo.transport) }
     var sequence by remember(field) { mutableStateOf(name.takeIf { it.isNotEmpty() }?.let { field.typed(it, repo.ownsPendingRegistration(it)) }) }
     var state by remember(field) { mutableStateOf(field.state()) }
@@ -403,7 +410,8 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
     var looked by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { saved = repo.savedAccount(); looked = true }
     var opened by rememberSaveable { mutableStateOf<Boolean?>(null) }
-    val open = opened ?: (looked && saved == null)
+    val capable by produceState<Boolean?>(null, repo) { value = repo.addsDevices() }
+    val open = opened ?: (capable == false && looked && saved == null)
     var by by remember { mutableStateOf<SignInWay?>(null) }
     var tried by remember { mutableStateOf<String?>(null) }
     var keyProblem by remember { mutableStateOf<String?>(null) }
@@ -451,6 +459,12 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         BrandText(copy(ProductText.SIGN_IN), 28)
+        if (capable == true) {
+            Button(onClick = model.deviceLink::start, enabled = !busy, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black)) {
+                Text(stringResource(R.string.md_link_from))
+            }
+        }
         val item = saved
         if (item != null) {
             val label = stringResource(R.string.signin_as, item.username)
@@ -467,7 +481,7 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                     if (by == SignInWay.SAVED) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Black, strokeWidth = 2.5.dp)
                 }
             }
-        } else if (looked) {
+        } else if (looked && capable == false) {
             Box(Modifier.fillMaxWidth().heightIn(min = 44.dp).background(Color.White.copy(alpha = 0.16f), CircleShape)
                 .padding(horizontal = 16.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
                 Text(copy(ProductText.NO_SAVED_ACCOUNT), color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp,
@@ -475,7 +489,7 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
             }
         }
         // As the welcome's "Got Yo? Sign In": the quiet question, then the action.
-        val keyLabel = stringResource(R.string.signin_use_a_key)
+        val keyLabel = stringResource(if (capable == true) R.string.md_use_key else R.string.signin_use_a_key)
         TextButton(
             onClick = { opened = !open },
             modifier = Modifier.clearAndSetSemantics {
@@ -485,12 +499,14 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
             },
             contentPadding = PaddingValues(0.dp),
         ) {
-            val question = copy(ProductText.NOT_LISTED)
-            val questionStyle = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = 0.85f))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(question, Modifier.alignByBaseline(), style = questionStyle, maxLines = 1)
-                Text(copy(ProductText.USE_A_KEY), Modifier.alignByBaseline(),
-                    style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White), maxLines = 1)
+            if (capable == true) Text(keyLabel, color = Color.White) else {
+                val question = copy(ProductText.NOT_LISTED)
+                val questionStyle = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = 0.85f))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(question, Modifier.alignByBaseline(), style = questionStyle, maxLines = 1)
+                    Text(copy(ProductText.USE_A_KEY), Modifier.alignByBaseline(),
+                        style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White), maxLines = 1)
+                }
             }
         }
         AnimatedVisibility(
@@ -516,14 +532,14 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                     // As the key field below it: the passkey and the recovery key are two equal options.
                     enabled = !busy, shape = CircleShape,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-                    color = Color.White.copy(alpha = 0.16f), contentColor = Color.White,
+                    color = Color.White, contentColor = Color.Black,
                 ) {
                     Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         SignInOptionIcon(Icons.Default.Key)
                         Spacer(Modifier.width(12.dp))
                         Text(copy(ProductText.PASSKEY), Modifier.weight(1f), maxLines = 1,
-                            style = TextStyle(fontFamily = YoFont, fontSize = 22.sp, color = Color.White))
-                        if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
+                            style = TextStyle(fontFamily = YoFont, fontSize = 22.sp, color = Color.Black))
+                        if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Black, strokeWidth = 2.5.dp)
                     }
                 }
                 Row(Modifier.clearAndSetSemantics {}, verticalAlignment = Alignment.CenterVertically) {
@@ -580,7 +596,7 @@ private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (S
                 )
             }
         }
-        OnboardingNote(keyProblem ?: s.error)
+        OnboardingNote(keyProblem ?: s.error ?: model.deviceLink.error)
     }
 }
 
@@ -628,6 +644,32 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         // room, wrapped, and the bar said only "Turn On".
         BasicText(label, style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White), maxLines = 1,
             softWrap = false, autoSize = TextAutoSize.StepBased(minFontSize = with(LocalDensity.current) { 12.dp.toSp() }, maxFontSize = 36.sp))
+    }
+}
+
+/** "New Device Linked": a bar in the list's own colours; × or a swipe sideways lets it go. */
+@Composable
+private fun DeviceLinkedRow(onClick: () -> Unit, onDismiss: () -> Unit) {
+    var drag by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    val swipe = with(LocalDensity.current) { 80.dp.toPx() }
+    Box(
+        Modifier.fillMaxWidth().height(BarHeight).offset { androidx.compose.ui.unit.IntOffset(drag.toInt(), 0) }
+            .background(Color(0xFF2980B9)).clickable(onClick = onClick)
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragEnd = { if (kotlin.math.abs(drag) > swipe) onDismiss() else drag = 0f },
+                    onDragCancel = { drag = 0f },
+                ) { _, amount -> drag += amount }
+            }
+            .padding(horizontal = 56.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        BasicText(stringResource(R.string.md_device_added), style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White),
+            maxLines = 1, softWrap = false,
+            autoSize = TextAutoSize.StepBased(minFontSize = with(LocalDensity.current) { 12.dp.toSp() }, maxFontSize = 36.sp))
+        IconButton(onClick = onDismiss, Modifier.align(Alignment.CenterEnd).offset(x = 48.dp)) {
+            Icon(Icons.Default.Close, stringResource(R.string.ui_close), tint = Color.White)
+        }
     }
 }
 
@@ -680,6 +722,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     val view=LocalView.current
     val scope=rememberCoroutineScope()
     // Saveable: a rotation or a process restored by Android keeps Settings, Add Friend and New Group open.
+    var openDevices by rememberSaveable { mutableStateOf(false) }
     var profile by rememberSaveable { mutableStateOf(false) }
     var add by rememberSaveable { mutableStateOf(false) }
     var group by rememberSaveable { mutableStateOf(false) }
@@ -1040,6 +1083,11 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             if (showNotificationBar && !cameraOn) item(key = "notification-settings") {
                 NotificationSettingsRow { openNotificationSettings(context) }
             }
+            // Another device joined the account: a bar on top, the Yo way (as iOS); a tap opens Settings › Devices.
+            if (s.deviceAdded && !cameraOn) item(key = "device-linked") {
+                DeviceLinkedRow(onClick = { repo.dismissDeviceBanner(); openDevices = true; profile = true },
+                    onDismiss = repo::dismissDeviceBanner)
+            }
             items(visible.size,key={visible[it].key}) { index ->
                 val friend = visible[index]
                 FriendRow(repo, friend, bars.getValue(friend.key), rowShade(visible,index), cameraOn, recording, s.leftHanded,
@@ -1237,11 +1285,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
     }
     }
-    if (profile) ProfileSheet(model, onClose = { profile = false }, onAddFriends = {
-        profile = false
-        add = true
-        scope.launch { listState.animateScrollToItem(visible.size + if (showNotificationBar) 1 else 0) }
-    })
+    if (profile) ProfileSheet(model, onClose = { profile = false; openDevices = false }, devices = openDevices,
+        onAddFriends = { profile = false; openDevices = false; cameraOn = false; add = true })
     if(group) GroupSheet(model,s,onClose={group=false})
     menu?.let { friend -> FriendMenu(model,friend,onClose={menu=null}) }
     leaving?.let { friend -> FriendMenu(model,friend,leaving=true,onClose={leaving=null}) }

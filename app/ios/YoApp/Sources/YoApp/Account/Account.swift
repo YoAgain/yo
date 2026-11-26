@@ -465,7 +465,7 @@ final class AccountStore {
   /// time: a second registration would replace the first. `replacing`: the account shown during migration.
   private func register(
     _ username: String, secret: Data?, legacySeed: Data? = nil, legacyStorageKey: Data? = nil,
-    replacing: Account? = nil, attest: YoAttest? = nil
+    replacing: Account? = nil, attest: YoAttest? = nil, replace: UInt8? = nil
   ) async throws -> (client: YoClient, secret: Data) {
     // A second tap while signing in: the person is told to wait.
     guard !registering, account == replacing else { throw Diagnostics.expected(AccountError.busy) }
@@ -477,7 +477,11 @@ final class AccountStore {
     do {
       return try await Hub.run {
         let make = { (db: StateDb, key: Data, lock: StateLock?) in
-          let client = try YoClient.registerUsernameDb(
+          // After DeviceLimit: the saved registration finishes in place of the device the owner picked.
+          let client = try replace.map {
+            try YoClient.registerReplacingDb(
+              transport: transport, db: db, stateKey: key, lock: lock, accountSecret: secret ?? Data(), replace: $0)
+          } ?? YoClient.registerUsernameDb(
             transport: transport, db: db, stateKey: key, lock: lock, username: username, accountSecret: secret,
             legacySeed: legacySeed, legacyStorageKey: legacyStorageKey, name: nil, pushPlatform: push.platform,
             pushToken: push.token, attest: attest)
@@ -758,6 +762,17 @@ final class AccountStore {
   }
 
   // MARK: A new phone
+
+  /// Linked from another device of the account (spec 2.5): registers as an added device with what it handed over.
+  /// `replace`: after `DeviceLimit`, the device the owner chose to go for this one.
+  func link(_ linked: YoLinked, replace: UInt8? = nil) async throws {
+    let (client, secret) = try await register(
+      linked.username, secret: linked.accountSecret, legacyStorageKey: linked.legacyStorageKey, replace: replace)
+    use(client, secret: secret)
+    let id = Hub.bytes(client.userId()) ?? Data()
+    SyncedAccount.left = nil
+    adopt(Account(username: client.username() ?? linked.username, userID: id, byPasskey: false), restored: true)
+  }
 
   func restoreWithPasskey() async throws {
     let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)

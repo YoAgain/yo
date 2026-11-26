@@ -4,6 +4,7 @@ import YoCore
 
 @MainActor
 struct HelpPage: View {
+  @State private var showingFeedback = false
   static var marketingVersion: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
   }
@@ -23,7 +24,7 @@ struct HelpPage: View {
   }
 
   /// The Help row's short form, one line beside the title: "1.0.0 RC19", else "1.0.0 dev" (the build number is on the
-  /// About & Licenses page).
+  /// About & Legal page).
   static var rowVersion: String {
     if let rc = Bundle.main.infoDictionary?["YoReleaseName"] as? String { return "\(marketingVersion) \(rc)" }
     return (Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1") == "1" ? marketingVersion : "\(marketingVersion) dev"
@@ -41,15 +42,33 @@ struct HelpPage: View {
           LabeledContent {
             Text(Self.rowVersion)
           } label: {
-            Label("About & Licenses", systemImage: "info.circle.fill").labelStyle(Tile(.gray))
+            Label("About & Legal", systemImage: "info.circle.fill").labelStyle(Tile(.gray))
           }
         }
       }
+      Section {
+        // The support chat opens as its own sheet.
+        Button {
+          showingFeedback = true
+        } label: {
+          ChevronRow {
+            DisclosureChevron()
+          } label: {
+            HStack {
+              Label("Feedback", systemImage: "envelope.fill").labelStyle(Tile(.blue))
+              SupportBadge()
+            }
+          }
+        }
+        .tint(Color(.label))
+        .accessibilityIdentifier("about.feedback")
+      }
     }
+    .sheet(isPresented: $showingFeedback) { MessagePage().systemAppearance().appObjects() }
     .hitchScene("Help & About")
-    // About & Licenses opens whole, its text already read.
+    // About & Legal opens whole, its text already read.
     .task { await LicenseContent.prepare() }
-    .navigationTitle("Help & About")
+    .navigationTitle("About")
     .navigationBarTitleDisplayMode(.inline)
   }
 }
