@@ -728,7 +728,6 @@ pub fn register_on(
         platform,
         token,
         None,
-        None,
     )
 }
 

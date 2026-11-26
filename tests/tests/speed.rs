@@ -34,6 +34,8 @@ impl App {
 }
 
 impl HttpTransport for App {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         let route: String = path.split('/').take(3).collect::<Vec<_>>().join("/");
         self.routes.lock().unwrap().push(format!("{method} {}", route.split('?').next().unwrap_or("")));
@@ -101,7 +103,6 @@ fn client(app: Arc<App>, file: Arc<File>, name: &str, token: &str) -> Arc<YoClie
         platform,
         token.into(),
         None,
-        None,
     )
     .unwrap()
 }
@@ -121,7 +122,6 @@ fn db_client(app: Arc<App>, disk: &Disk, name: &str, token: &str) -> Arc<YoClien
         None,
         platform,
         token.into(),
-        None,
         None,
     )
     .unwrap()

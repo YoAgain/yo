@@ -1348,10 +1348,43 @@ impl YoClient {
         Ok(Self::on(client, shared))
     }
 
+    /// After `DeviceLimit` (multi-device): finishes the account's registration saved in `db` in place of its device
+    /// `replace`, the owner's choice. `State` when no registration of `account_secret` waits there. Its own
+    /// constructor: one more argument on `register_username_db` breaks the call on Android (JNA, past 13).
+    #[uniffi::constructor]
+    pub fn register_replacing_db(
+        transport: Arc<dyn HttpTransport>,
+        db: Arc<StateDb>,
+        state_key: Vec<u8>,
+        lock: Option<Arc<dyn StateLock>>,
+        account_secret: Vec<u8>,
+        replace: u8,
+    ) -> Result<Arc<Self>, YoError> {
+        let key = key_of(state_key)?;
+        let secret = key_of(account_secret)?;
+        let mut turn = first_turn(&lock)?;
+        let Ok(Loaded::Newer { word, state, records }) = db.0.load(None, &key) else {
+            return Err(YoError::State);
+        };
+        let (mut client, _) = Client::from_snapshot(wire(transport), *state, records, false)?;
+        if !client.is_registering() || client.account_secret() != secret {
+            return Err(YoError::State);
+        }
+        let shared = Shared::new(&db, Some(word), lock.clone());
+        if let Some(turn) = &mut turn {
+            turn.store = Some(shared.store.clone());
+        }
+        client.persist_to(shared.store.clone(), key)?;
+        client.replace_on_register(replace)?;
+        client.finish_registration()?;
+        drop(turn);
+        Ok(Self::on(client, shared))
+    }
+
     /// Registers a username into `db` under the turn, replacing what is there; saved before the request leaves. The
-    /// same account's registration still unanswered there is finished instead, with the device it made; `replace`
-    /// (after `DeviceLimit`, the owner's choice) names the account's device that goes for it.
-    #[uniffi::constructor(default(attest = None, replace = None))]
+    /// same account's registration still unanswered there is finished instead, with the device it made
+    /// (`DeviceLimit`: `register_replacing_db`). No more arguments: past 13 the call breaks on Android (JNA).
+    #[uniffi::constructor(default(attest = None))]
     #[allow(clippy::too_many_arguments)]
     pub fn register_username_db(
         transport: Arc<dyn HttpTransport>,
@@ -1366,7 +1399,6 @@ impl YoClient {
         push_platform: u8,
         push_token: String,
         attest: Option<YoAttest>,
-        replace: Option<u8>,
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
         let attest =
@@ -1387,9 +1419,6 @@ impl YoClient {
                     turn.store = Some(shared.store.clone());
                 }
                 client.persist_to(shared.store.clone(), key)?;
-                if let Some(number) = replace {
-                    client.replace_on_register(number)?;
-                }
                 client.finish_registration()?;
                 drop(turn);
                 return Ok(Self::on(client, shared));

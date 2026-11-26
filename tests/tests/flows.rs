@@ -21,6 +21,8 @@ impl App {
 }
 
 impl HttpTransport for App {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         let headers: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
         let result = yo_core::Transport::request(self.0.as_ref(), &method, &path, &headers, &body);
@@ -74,7 +76,6 @@ impl Phone {
             shown.map(str::to_owned),
             0,
             String::new(),
-            None,
             None,
         )
         .unwrap();
@@ -874,7 +875,6 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
         Some("ALICE".into()),
         0,
         String::new(),
-        None,
         None,
     )
     .unwrap();

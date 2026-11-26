@@ -7,6 +7,8 @@ use yo_tests::{random_u64, register_on, reopen, username, AppClient, Disk, Http,
 struct App(Arc<Http>);
 
 impl HttpTransport for App {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         let headers: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
         match yo_core::Transport::request(self.0.as_ref(), &method, &path, &headers, &body) {
@@ -106,6 +108,8 @@ struct Held {
 }
 
 impl HttpTransport for Held {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if path.contains("wait=") && !path.ends_with("wait=0") {
             self.waiting.lock().unwrap().send(()).unwrap();
@@ -164,6 +168,8 @@ struct HeldUpload {
 }
 
 impl HttpTransport for HeldUpload {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if method == "PUT" && path.starts_with("/v1/blobs/") {
             self.waiting.lock().unwrap().send(()).unwrap();
@@ -284,6 +290,8 @@ struct Gate {
 }
 
 impl HttpTransport for Gate {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if method == "POST" && path == self.path && self.closed.load(std::sync::atomic::Ordering::Relaxed) {
             self.held.lock().unwrap().send(()).unwrap();
@@ -382,6 +390,8 @@ fn the_app_layer_sends_a_name_to_whoever_has_it_now() {
 struct Slow(App);
 
 impl HttpTransport for Slow {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         std::thread::sleep(std::time::Duration::from_millis(40));
         self.0.request(method, path, headers, body)
@@ -566,7 +576,6 @@ fn shared_client(transport: Arc<App>, disk: &Arc<Disk>, username: &str, name: Op
         0,
         String::new(),
         None,
-        None,
     )
     .unwrap()
 }
@@ -642,6 +651,8 @@ struct Watch {
 }
 
 impl HttpTransport for Watch {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if method == "POST" && path.starts_with("/v1/inbox/") && path != yoip::net::api::INBOX_ACK {
             if self.offline.load(std::sync::atomic::Ordering::Relaxed) {
@@ -680,7 +691,6 @@ fn the_app_layer_syncs_its_outbox_without_holding_the_turn() {
         Some("ALICE".into()),
         0,
         String::new(),
-        None,
         None,
     )
     .unwrap();
@@ -729,7 +739,6 @@ fn the_app_layer_maintains_without_holding_the_turn_for_its_outbox() {
         Some("ALICE".into()),
         0,
         String::new(),
-        None,
         None,
     )
     .unwrap();
@@ -816,7 +825,6 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
         Some("ALICE".into()),
         0,
         String::new(),
-        None,
         None,
     )
     .unwrap();
@@ -1022,6 +1030,8 @@ fn a_photo_whose_state_did_not_save_is_tried_again_later() {
 struct NoBlobs(App);
 
 impl HttpTransport for NoBlobs {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         if method == "PUT" && path.starts_with("/v1/blobs/") {
             return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()), headers: Vec::new() };
@@ -1147,7 +1157,6 @@ fn a_refused_shared_turn_can_be_retried() {
         0,
         String::new(),
         None,
-        None,
     )
     .unwrap();
     lock.refused.store(true, Ordering::Relaxed);
@@ -1202,7 +1211,6 @@ fn a_turn_taken_back_writes_nothing_and_the_next_step_starts_from_the_database()
         None,
         0,
         String::new(),
-        None,
         None,
     )
     .unwrap();
@@ -1320,6 +1328,8 @@ struct LostAnswer {
 }
 
 impl HttpTransport for LostAnswer {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         let lost = || HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()), headers: Vec::new() };
         if !self.down.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1427,6 +1437,8 @@ fn the_app_layer_holds_yos_past_a_requests_bucket_until_the_yes() {
 struct Headed(String);
 
 impl HttpTransport for Headed {
+    fn opened(&self, _: String, _: String, _: u16) {}
+
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
         let mut request =
             reqwest::blocking::Client::new().request(method.parse().unwrap(), format!("{}{path}", self.0)).body(body);
@@ -1478,7 +1490,7 @@ fn the_name_field_takes_the_hubs_minimum_by_attestation() {
 }
 
 /// Multi-device (a hub that adds devices): past 16 the registration is `DeviceLimit` with the account's devices; the
-/// same registration again with `replace` takes the chosen one's place, which gets `Replaced`.
+/// same registration again by `register_replacing_db` takes the chosen one's place, which gets `Replaced`.
 #[test]
 fn the_app_layer_registers_past_the_device_limit_in_place_of_a_chosen_device() {
     let hub = TestHub::start_with(
@@ -1494,7 +1506,7 @@ fn the_app_layer_registers_past_the_device_limit_in_place_of_a_chosen_device() {
             .unwrap();
     }
     let disk = Disk::new();
-    let register = |replace: Option<u8>| {
+    let register = || {
         YoClient::register_username_db(
             app(),
             disk.db(),
@@ -1508,15 +1520,16 @@ fn the_app_layer_registers_past_the_device_limit_in_place_of_a_chosen_device() {
             0,
             String::new(),
             None,
-            replace,
         )
     };
-    let devices = match register(None) {
+    let devices = match register() {
         Err(yo::YoError::DeviceLimit { devices }) => devices,
         other => panic!("{:?}", other.map(|_| ())),
     };
     assert_eq!(devices.len(), 16);
-    let last = register(Some(1)).unwrap();
+    let last =
+        YoClient::register_replacing_db(app(), disk.db(), vec![7; 32], Some(Process::new(&disk)), secret.clone(), 1)
+            .unwrap();
     assert_eq!(last.user_id(), first.user_id());
     assert!(matches!(first.sync(0), Err(yo::YoError::Replaced)));
     assert_eq!(last.own_devices().unwrap().len(), 16);
