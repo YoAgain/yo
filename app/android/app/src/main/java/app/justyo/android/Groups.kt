@@ -112,7 +112,7 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE }
     if (members) { GroupMembersSheet(model, friend, onClose = { members = false; onClose() }); return@YoSystemTheme }
     if (!leaving) FittedSheet(onDismissRequest = onClose) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-            Text(if (friend.group == null) friend.name else "#" + friend.name.removePrefix("#"), Modifier.padding(start = 8.dp, bottom = 16.dp),
+            Text(friend.title, Modifier.padding(start = 8.dp, bottom = 16.dp),
                 style = MaterialTheme.typography.headlineSmall)
             val activity = remember(s.lastSent[friend.key], s.lastReceived[friend.key]) {
                 uniffi.yo.productLastActivity(s.lastSent[friend.key], s.lastReceived[friend.key], System.currentTimeMillis(), Words)

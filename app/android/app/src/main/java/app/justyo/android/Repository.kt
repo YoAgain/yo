@@ -961,7 +961,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         for (contact in contacts.filter { it.user !in removedUsers }) {
             val old = friends.firstOrNull { it.user == contact.user } ?: friends.firstOrNull { it.group == null && it.user == null && contact.handles.any { h -> usernameSkeleton(h) == usernameSkeleton(it.name) } }
             val row = (old ?: Friend(name = contact.handles.firstOrNull() ?: contact.name ?: yoUser, color = nextColor(friends), user = contact.user))
-                .copy(user = contact.user, blocked = contact.blocked, gone = contact.gone, request = !contact.accepted)
+                .copy(user = contact.user, blocked = contact.blocked, gone = contact.gone, request = !contact.accepted, bot = contact.bot)
             friends = if (old == null) friends + row else friends.map { if (it.key == old.key) row else it }
         }
         val groups = c.groups()

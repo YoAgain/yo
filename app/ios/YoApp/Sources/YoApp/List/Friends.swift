@@ -20,6 +20,8 @@ struct Friend: Codable, Hashable, Identifiable {
   var keyChanged = false
   /// A request (spec 3.3): nothing goes to them until it is said yes to.
   var request = false
+  /// They declare themselves a bot (spec 2.1, the core's `ContactInfo.bot`): "/" before their name.
+  var bot = false
   /// "Undo Before Sending" (Per Contact): a Yo to them waits `undoSeconds` under the undo ring, as a photo does.
   var undoFirst = false
   var undoSeconds: Double = Double(listTimings().undoMs) / 1000
@@ -39,7 +41,7 @@ struct Friend: Codable, Hashable, Identifiable {
     key == other.key && name == other.name && color == other.color
       && user == other.user && group == other.group && blocked == other.blocked
       && gone == other.gone && keyChanged == other.keyChanged && request == other.request
-      && undoFirst == other.undoFirst && undoSeconds == other.undoSeconds
+      && bot == other.bot && undoFirst == other.undoFirst && undoSeconds == other.undoSeconds
   }
 
   init(name: String, color: Int, user: String? = nil) {
@@ -58,6 +60,7 @@ struct Friend: Codable, Hashable, Identifiable {
     gone = try c.decodeIfPresent(Bool.self, forKey: .gone) ?? false
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
     request = try c.decodeIfPresent(Bool.self, forKey: .request) ?? false
+    bot = try c.decodeIfPresent(Bool.self, forKey: .bot) ?? false
     undoFirst = try c.decodeIfPresent(Bool.self, forKey: .undoFirst) ?? false
     undoSeconds = try c.decodeIfPresent(Double.self, forKey: .undoSeconds) ?? Double(listTimings().undoMs) / 1000
     group = try c.decodeIfPresent(String.self, forKey: .group)
@@ -277,6 +280,7 @@ final class Friends {
           colors[color] += 1
           var friend = Friend(name: spelled ?? handles.first ?? "?", color: color, user: user)
           friend.request = contacts[user].map { !$0.accepted && !$0.blocked } ?? false
+          friend.bot = contacts[user]?.bot ?? false
           indexes[user] = list.count
           list.append(friend)
           added.append(friend)
@@ -290,6 +294,7 @@ final class Friends {
           let request = !contact.accepted && !contact.blocked
           if list[index].request != request { list[index].request = request; changed = true }
           if contact.gone && !list[index].gone { list[index].gone = true; changed = true }
+          if list[index].bot != contact.bot { list[index].bot = contact.bot; changed = true }
         }
         if changedKeys.contains(user) {
           if !list[index].keyChanged { list[index].keyChanged = true; changed = true }

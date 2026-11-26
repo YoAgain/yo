@@ -155,5 +155,5 @@ extension AccountStore {
 }
 
 extension Friend {
-  var shared: ShareBridge.Friend { ShareBridge.Friend(name: name, color: color, to: target) }
+  var shared: ShareBridge.Friend { ShareBridge.Friend(name: name, color: color, to: target, bot: bot) }
 }

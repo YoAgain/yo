@@ -13,9 +13,7 @@ internal const val ACTION_SEND_YO = "app.justyo.android.SEND_YO"
 internal const val SHORTCUT_ACTIVITY = "app.justyo.android.ShortcutActivity"
 
 internal val Friend.shortcutEligible get() = !blocked && !gone && !request
-internal val Friend.shortcutLabel get() = name.ifBlank { copy(ProductText.YO) }.let {
-    if (group == null) it else "#${it.removePrefix("#")}"
-}
+internal val Friend.shortcutLabel get() = name.ifBlank { copy(ProductText.YO) }.let { uniffi.yo.listBarTitle(it, group != null, bot) }
 
 private fun shortcut(context: Context, friend: Friend, rank: Int): ShortcutInfoCompat {
     val label = friend.shortcutLabel

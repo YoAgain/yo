@@ -27,9 +27,11 @@ struct FriendEntity: AppEntity {
 
 extension ShareBridge.Friend {
   /// A group's with one "#", as its bar shows it, whether the name brings its own or not (usernames can't hold one).
-  var title: String { Self.title(name, to: to) }
+  var title: String { Self.title(name, to: to, bot: bot == true) }
 
-  static func title(_ name: String, to: String) -> String { listBarTitle(name: name, group: to.hasPrefix("group:")) }
+  static func title(_ name: String, to: String, bot: Bool = false) -> String {
+    listBarTitle(name: name, group: to.hasPrefix("group:"), bot: bot)
+  }
 }
 
 extension ShareBridge.Friend {

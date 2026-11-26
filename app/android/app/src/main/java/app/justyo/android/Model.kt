@@ -60,16 +60,18 @@ data class Friend(
     val key: String = UUID.randomUUID().toString(), val name: String, val color: Int,
     val user: String? = null, val group: String? = null, val blocked: Boolean = false,
     val gone: Boolean = false, val request: Boolean = false, val keyChanged: Boolean = false,
-    val undo: Boolean = false, val undoSeconds: Int = 2,
+    val undo: Boolean = false, val undoSeconds: Int = 2, val bot: Boolean = false,
 ) {
+    /** The name as shown: a group's with its "#", a bot's with its "/" (the core's rule). */
+    val title get() = uniffi.yo.listBarTitle(name, group != null, bot)
     val target get() = group?.let { "group:$it" } ?: user ?: name
     fun json() = JSONObject().put("key", key).put("name", name).put("color", color)
         .put("user", user).put("group", group).put("blocked", blocked).put("gone", gone)
-        .put("request", request).put("keyChanged", keyChanged).put("undo", undo).put("undoSeconds", undoSeconds)
+        .put("request", request).put("keyChanged", keyChanged).put("undo", undo).put("undoSeconds", undoSeconds).put("bot", bot)
     companion object {
         fun from(j: JSONObject) = Friend(j.getString("key"), j.getString("name"), j.getInt("color"),
             j.stringOrNull("user"), j.stringOrNull("group"), j.optBoolean("blocked"), j.optBoolean("gone"),
-            j.optBoolean("request"), j.optBoolean("keyChanged"), j.optBoolean("undo"), j.optInt("undoSeconds", 2))
+            j.optBoolean("request"), j.optBoolean("keyChanged"), j.optBoolean("undo"), j.optInt("undoSeconds", 2), j.optBoolean("bot"))
     }
 }
 fun JSONObject.stringOrNull(key: String) = if (isNull(key)) null else optString(key).takeIf { it.isNotEmpty() }

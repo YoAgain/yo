@@ -145,7 +145,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
                     if (sent && queued.isNotEmpty()) {
                         reportShortcutUsed(context, friend)
                         val sign = if (sharedVideo) "🎥" else "📷"
-                        val name = if (friend.group == null) friend.name else "#${friend.name.removePrefix("#")}"
+                        val name = friend.title
                         kotlinx.coroutines.withContext(Dispatchers.Main) {
                             android.widget.Toast.makeText(context, context.getString(R.string.share_confirmation, sign, name),
                                 android.widget.Toast.LENGTH_SHORT).show()

@@ -12,6 +12,8 @@ enum ShareBridge {
     var color: Int
     /// The user id at the hub, else the name (before the first Yo).
     var to: String
+    /// A bot ("/" before its name); nil in lists saved before it was kept.
+    var bot: Bool?
   }
 
   struct List: Codable, Equatable, Sendable {
@@ -133,7 +135,7 @@ enum ShareBridge {
     var bar: String? = nil
     var request = false
 
-    var title: String { bar.map { listBarTitle(name: $0, group: true) } ?? senderName }
+    var title: String { bar.map { listBarTitle(name: $0, group: true, bot: false) } ?? senderName }
 
     var body: String {
       productNotificationBody(sender: bar != nil || request ? senderName : nil,

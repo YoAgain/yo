@@ -101,10 +101,13 @@ pub fn flow_two_lines(flow: &Flow, widths: &FlowWidths, room: f32) -> [String; 2
     [first, second]
 }
 
-/// A bar's name as shown: a group's with one "#" ("#WG"), whether the name brings its own or not.
-pub fn bar_title(name: &str, group: bool) -> String {
+/// A bar's name as shown: a group's with one "#" ("#WG"), a bot's with one "/" ("/PING"), whether the name
+/// brings its own or not.
+pub fn bar_title(name: &str, group: bool, bot: bool) -> String {
     if group {
         format!("#{}", name.strip_prefix('#').unwrap_or(name))
+    } else if bot {
+        format!("/{}", name.strip_prefix('/').unwrap_or(name))
     } else {
         name.to_string()
     }
@@ -237,9 +240,11 @@ mod tests {
 
     #[test]
     fn a_group_title_has_one_hash() {
-        assert_eq!(bar_title("WG", true), "#WG");
-        assert_eq!(bar_title("#BOTS", true), "#BOTS");
-        assert_eq!(bar_title("MIA", false), "MIA");
+        assert_eq!(bar_title("WG", true, false), "#WG");
+        assert_eq!(bar_title("#BOTS", true, false), "#BOTS");
+        assert_eq!(bar_title("MIA", false, false), "MIA");
+        assert_eq!(bar_title("PING", false, true), "/PING");
+        assert_eq!(bar_title("/PING", false, true), "/PING");
     }
 
     #[test]

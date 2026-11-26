@@ -18,5 +18,5 @@ internal fun copy(text: ProductText): String = texts.getOrPut(text) { productTex
 internal fun rowTitle(row: ListRow?, friend: Friend): String {
     if (friend.request) return productRequestRow(friend.name, friend.group != null, Words)
     val title = row?.title ?: friend.name
-    return if (title == friend.name) listBarTitle(title, friend.group != null) else title
+    return if (title == friend.name) listBarTitle(title, friend.group != null, friend.bot) else title
 }

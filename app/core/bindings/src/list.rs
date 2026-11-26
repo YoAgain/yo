@@ -89,10 +89,10 @@ pub fn list_sender_flow(senders: Vec<Sender>, lang: Language) -> Flow {
     flow::sender_flow(&senders, lang)
 }
 
-/// A bar's name as shown: a group's with one "#".
+/// A bar's name as shown: a group's with one "#", a bot's with one "/" ("/PING").
 #[uniffi::export]
-pub fn list_bar_title(name: String, group: bool) -> String {
-    flow::bar_title(&name, group)
+pub fn list_bar_title(name: String, group: bool, bot: bool) -> String {
+    flow::bar_title(&name, group, bot)
 }
 
 /// A bar title's words, to measure at the small size when it does not fit in one line.
