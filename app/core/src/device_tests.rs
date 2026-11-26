@@ -410,3 +410,18 @@ fn an_envelope_too_large_is_dropped() {
     assert!(sender.state.outbox.is_empty());
     assert_eq!(sender.dropped(), 1);
 }
+
+#[test]
+fn a_contacts_pinned_name_is_sent_to_without_asking_the_hub() {
+    let mut a = phone(1, 1);
+    let mut b = phone(2, 1);
+    let user = b.user_id().to_owned();
+    let key = b.my_account_key();
+    a.take_devices(&user, key, &[rostered(&b)], Some("Bee".into())).unwrap();
+    a.take_bundles(&user, key, &[bundle(&mut b)]).unwrap();
+    // Offline: an answer at all means the hub was not asked.
+    for typed in ["Bee", "bee", "B\u{65}e"] {
+        assert_eq!(a.send_target(&Handle::parse(typed).unwrap()).unwrap(), Some(user.clone()), "{typed}");
+    }
+    assert!(matches!(a.send_target(&Handle::parse("Stranger").unwrap()), Err(Error::Network(_))), "looked up");
+}

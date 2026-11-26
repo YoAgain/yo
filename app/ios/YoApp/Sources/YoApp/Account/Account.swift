@@ -360,7 +360,7 @@ final class AccountStore {
   static func hubAnswers() async -> Bool {
     var request = URLRequest(url: Hub.url.appending(path: ".well-known/yo-hub-key"), timeoutInterval: 8)
     request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-    guard let (_, response) = await Diagnostics.attempt({ try await URLSession(configuration: .ephemeral).data(for: request) }) else { return false }
+    guard let (_, response) = await Diagnostics.attempt({ try await HubTransport.publicData(for: request) }) else { return false }
     return (response as? HTTPURLResponse)?.statusCode == 200
   }
 

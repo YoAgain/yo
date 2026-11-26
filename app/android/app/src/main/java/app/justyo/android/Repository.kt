@@ -85,15 +85,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         capabilityLock.withLock {
             val kept = context.getSharedPreferences("devices", Context.MODE_PRIVATE)
             deviceCapability ?: try {
-                val connection = java.net.URL(Hub.url.trimEnd('/') + "/.well-known/yo-hub").openConnection() as java.net.HttpURLConnection
-                connection.connectTimeout = 8000; connection.readTimeout = 8000; connection.useCaches = false
-                try {
-                    when (connection.responseCode) {
-                        200 -> JSONObject(connection.inputStream.bufferedReader().use { it.readText() }).optBoolean("link", false)
-                        404 -> false
-                        else -> null
-                    }
-                } finally { connection.disconnect() }
+                val (status, text) = transport.publicGet("/.well-known/yo-hub", 8)
+                when (status) {
+                    200 -> JSONObject(text).optBoolean("link", false)
+                    404 -> false
+                    else -> null
+                }
             } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (_: Exception) { null }.also { answer ->
                 if (answer != null) kept.edit { putBoolean("linking", answer) }
                 deviceCapability = answer

@@ -17,7 +17,7 @@ import YoCore
     if asked, let on { return on }
     var request = URLRequest(url: Hub.url.appending(path: ".well-known/yo-hub"), timeoutInterval: 8)
     request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-    if let (data, response) = try? await URLSession(configuration: .ephemeral).data(for: request),
+    if let (data, response) = try? await HubTransport.publicData(for: request),
        let status = (response as? HTTPURLResponse)?.statusCode {
       if status == 200, let features = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         remember(features["link"] as? Bool == true)

@@ -34,10 +34,14 @@ pub trait Locked {
     fn forget(&self, _deliveries: &crate::Deliveries) {}
 }
 
-/// The user a name is now, asked without the client (no prekey spent); a user id as it is.
+/// The user a name is: a user id as it is, a pinned contact's name locally (spec 3.1), any other name asked without
+/// the client (no prekey spent).
 pub fn user_for<L: Locked>(locked: &L, to: &str) -> Result<String, L::Error> {
     if Client::is_user_id(to) {
         return Ok(to.to_owned());
+    }
+    if let Some(user) = locked.step(|c| c.pinned_contact(to))? {
+        return Ok(user);
     }
     let whois = locked.step(|c| c.whois_begin(to))??;
     let (user, username, bot) = whois.send()?;

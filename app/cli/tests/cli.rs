@@ -299,3 +299,26 @@ fn signup_friends_remove_and_yo_name() {
     assert_eq!(yo.run(&["friends", "remove", &alice_name]).0, 1, "no such friend");
     assert_eq!(yo.ok(&["requests", "list"])["requests"], serde_json::json!([]));
 }
+
+/// Spec 3.1: `yo send NAME` to a pinned contact resolves the name locally, no lookup; a name no contact has is
+/// looked up.
+#[test]
+fn a_friends_name_is_sent_to_without_a_lookup() {
+    let hub = TestHub::start();
+    let yo = Yo::new(&hub);
+    yo.ok(&["register", &format!("Cli{}", random_u64() % 1_000_000)]);
+    let mut alice = someone(&hub);
+    let bob = someone(&hub);
+    let alice_name = alice.username().unwrap().to_owned();
+    yo.ok(&["add", &alice_name]);
+    yo.ok(&["send", &alice_name]);
+    let lookups = |to: &str| {
+        let out = yo.command().env("YO_TIMING", "1").args(["send", to]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr).lines().filter(|l| l.contains("/v1/lookup")).count()
+    };
+    assert_eq!(lookups(&alice_name), 0, "a friend: resolved locally");
+    assert_eq!(lookups(&alice_name.to_lowercase()), 0, "in any spelling");
+    assert_eq!(yos_until_quiet(&mut alice, Duration::from_millis(500)).len(), 3);
+    assert!(lookups(bob.username().unwrap()) > 0, "a stranger: looked up");
+}

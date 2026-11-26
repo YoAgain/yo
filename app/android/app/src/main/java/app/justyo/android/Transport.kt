@@ -92,6 +92,14 @@ class HubTransport(
         val evict = { listOf(signed, anonymous).forEach { it.connectionPool.evictAll() } }
         if (now) runCatching(evict) else offMain(evict)
     }
+    /** An account-free GET of the app's own (the hub's `.well-known` files) on the anonymous line's warm connection:
+     *  its status and text, never a connection of its own. Blocking: off the main thread. */
+    fun publicGet(path: String, seconds: Long): Pair<Int, String> {
+        require(path.startsWith("/") && !path.startsWith("//"))
+        val client = anonymous.newBuilder().callTimeout(seconds, TimeUnit.SECONDS).build()
+        val request = Request.Builder().url(Hub.url.trimEnd('/') + path).header("Yo-App", YO_APP_WIRE).build()
+        return client.newCall(request).execute().use { it.code to it.body.string() }
+    }
     fun close() = offMain { listOf(signed, anonymous).forEach { it.dispatcher.cancelAll(); it.connectionPool.evictAll() } }
     private fun offMain(work: () -> Unit) { thread(name = "yo-connections") { runCatching(work) } }
     companion object {

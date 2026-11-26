@@ -235,3 +235,50 @@ fn transcripts_reach_every_own_device() {
         assert_eq!(sent_to(&events, &to), 1, "{events:?}");
     }
 }
+
+/// Spec 3.1, 3.2: a Yo to a contact by its pinned name asks the hub nothing; a device the contact added since comes
+/// back as `409 Devices`, is looked up and gets the Yo; a name no contact has is looked up.
+#[test]
+fn a_known_contact_gets_a_yo_without_a_lookup() {
+    let hub = TestHub::start_with(config(), "127.0.0.1:0");
+    let n = yo_tests::random_u64() % 1_000_000_000;
+    let (an, bn, cn) = (yo_tests::username(n), yo_tests::username(n + 1), yo_tests::username(n + 2));
+    let ha = Http::new(hub.url());
+    let mut a = yo_tests::register(ha.clone(), &an, None);
+    let mut b = yo_tests::register(Http::new(hub.url()), &bn, None);
+    yo_tests::register(Http::new(hub.url()), &cn, None);
+    let lookups = || {
+        let mut sent = ha.sent.lock().unwrap();
+        let n = sent.iter().filter(|(m, p, _)| m == "POST" && p == yoip::net::api::LOOKUP).count();
+        sent.clear();
+        n
+    };
+    let yos =
+        |events: &[Event]| events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count();
+    a.send_yo(&bn).unwrap();
+    assert!(lookups() > 0, "first contact: looked up");
+    assert_eq!(yos(&b.sync(0).unwrap()), 1);
+    b.accept(a.user_id()).unwrap();
+    b.send_yo(&an).unwrap();
+    a.sync(0).unwrap();
+    lookups();
+    for typed in [bn.clone(), bn.to_lowercase()] {
+        a.send_yo(&typed).unwrap();
+        assert_eq!(lookups(), 0, "known contact {typed}: no lookup");
+    }
+    assert_eq!(yos(&b.sync(0).unwrap()), 2);
+
+    // B's new device: the delivery's 409 Devices, one lookup for its bundle, and the Yo reaches both.
+    let mut b2 = yo_tests::new_phone(Http::new(hub.url()), &bn, &b);
+    b2.sync(0).unwrap();
+    a.send_yo(&bn).unwrap();
+    assert_eq!(lookups(), 1, "409 Devices: the bundle of the new device");
+    assert_eq!(yos(&b2.sync(0).unwrap()), 1);
+    assert_eq!(yos(&b.sync(0).unwrap()), 1);
+    a.send_yo(&bn).unwrap();
+    assert_eq!(lookups(), 0, "the new device known now");
+
+    // A name no contact has: asked of the hub.
+    a.send_yo(&cn).unwrap();
+    assert!(lookups() > 0, "unknown name: looked up");
+}

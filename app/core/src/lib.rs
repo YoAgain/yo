@@ -2108,11 +2108,28 @@ impl Client {
         }
     }
 
-    /// The user a send goes to: a username is asked of the hub now (without spending a prekey), since a name may have
-    /// changed hands (3.1). `None`: no contacts yet, the first lookup asks.
+    /// The pinned contact a typed name names, with a chat to it: resolved locally, like picking it from the list
+    /// (spec 3.1); a changed device list comes back as `409 Devices` on delivery (3.2).
+    fn pinned_user(&self, handle: &Handle) -> Option<String> {
+        if handle.kind == KIND_USER || self.is_me(handle) {
+            return None;
+        }
+        self.known_user(handle).filter(|u| self.has_chat(u))
+    }
+
+    /// `pinned_user` of a typed name: `None` for a user id, a name no pinned contact has, or no name.
+    pub fn pinned_contact(&self, to: &str) -> Option<String> {
+        Handle::parse(to).ok().and_then(|handle| self.pinned_user(&handle))
+    }
+
+    /// The user a send goes to: a pinned contact's name locally (`pinned_user`), any other username asked of the hub
+    /// now (without spending a prekey). `None`: no contacts yet, the first lookup asks.
     pub(crate) fn send_target(&mut self, handle: &Handle) -> Result<Option<String>> {
         if handle.kind == KIND_USER {
             return Ok(Some(hex(handle.value.as_slice())));
+        }
+        if let Some(user) = self.pinned_user(handle) {
+            return Ok(Some(user));
         }
         if self.state.contacts.is_empty() {
             return Ok(None);

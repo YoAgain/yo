@@ -228,9 +228,20 @@ final class HubTransport: HttpTransport {
     _ = try? await anonymousSession.data(for: request)
   }
 
+  /// An account-free request of the app's own (the hub's `.well-known` files) on the anonymous line's warm
+  /// connection, never a session of its own.
+  static func publicData(for request: URLRequest) async throws -> (Data, URLResponse) {
+    try await anonymousSession.data(for: request)
+  }
+
+  /// One session per line for the process: its HTTP/2 connection stays open between requests (no new TCP+TLS for the
+  /// next Yo); `reconnect` drops it after a suspension or a network change.
   private static func plain() -> URLSessionConfiguration {
     let config = URLSessionConfiguration.ephemeral
     config.httpAdditionalHeaders = ["Connection": "keep-alive"]
+    // Each request has its own timeout (the inbox's wait 70 s); a blob on a slow line may take longer, never 7 days.
+    config.timeoutIntervalForResource = 300
+    config.waitsForConnectivity = false
     config.httpCookieStorage = nil
     config.httpShouldSetCookies = false
     config.urlCache = nil
