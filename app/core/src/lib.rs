@@ -155,8 +155,8 @@ pub enum Event {
     GroupMessage { group: String, user: String, sent_at_ms: u64, content: Content },
     /// A group came, changed (name, members) or was left: `groups()` has it as it is now.
     GroupChanged { group: String },
-    /// The hub lists a device more for `user` (this account's own id: a device of this account, as Signal tells of a
-    /// newly linked one), not one in place of another. For the app's log.
+    /// The hub lists a device more for this account (`user`: its own id), as Signal tells of a newly linked one; not
+    /// one in place of another, and never for a contact. For the app to show ("A new device was added").
     DeviceAdded { user: String },
     /// A service (user id) answered: `connections()` has it.
     ConnectionChanged { user: String },
@@ -1607,11 +1607,8 @@ impl Client {
                 if !contact.devices.is_empty() && !added.is_empty() {
                     contact.key_due |= contact.accepted && !contact.blocked;
                 }
-                let grew = !contact.devices.is_empty() && devices.len() > contact.devices.len();
+                // A contact's added device is no event (Signal tells of none): only this account's own are.
                 contact.devices = devices;
-                if grew {
-                    self.push_event(Event::DeviceAdded { user: user.to_owned() });
-                }
             }
         }
         // What waits for the user is encrypted for its devices and sessions as they are now.

@@ -238,7 +238,7 @@ fn a_later_sibling_is_announced_and_held_until_it_writes() {
     a.queue_sync(SyncMessage::StorageChanged).unwrap();
     assert_eq!(a.state.outbox.len(), 1);
 
-    // A contact's roster that grows is told too; one device in place of another is not.
+    // A contact's roster that grows, or one device in place of another, is no event: only this account's own.
     let peer = hex(&[2; 16]);
     a.state.events.clear();
     let one = api::Device { key: [2; 32], id: 1 };
@@ -246,7 +246,7 @@ fn a_later_sibling_is_announced_and_held_until_it_writes() {
     a.take_devices(&peer, [3; 32], &[api::Device { key: [5; 32], id: 2 }], None).unwrap();
     assert!(a.state.events.is_empty());
     a.take_devices(&peer, [3; 32], &[one, api::Device { key: [5; 32], id: 2 }], None).unwrap();
-    assert_eq!(a.state.events, [Event::DeviceAdded { user: peer }]);
+    assert!(a.state.events.is_empty());
 }
 
 #[test]

@@ -473,7 +473,7 @@ pub enum YoEvent {
     GroupChanged {
         group: String,
     },
-    /// The hub lists a device more for `user` (this account's own id: one of its devices): for the app's log.
+    /// The hub lists a device more for this account (`user`: its own id), never for a contact: for the app to show.
     DeviceAdded {
         user: String,
     },
