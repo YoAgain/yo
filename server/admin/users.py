@@ -52,11 +52,13 @@ LIMIT ?
 """
 
 # Reports (spec 4): which install reported whom, why, when; newest first. No content: the hub has none. The
-# reporter is a random install id (hub schema 9), never an account: no name to look up.
+# reporter is a random install id (hub schema 9), never an account: no name to look up. Reports against bots
+# (account.bot, spec 2.1) are left out: people report a bot that answered them, which is the bot working.
 REPORTS = """
 SELECT r.reporter, r.reported_id, (SELECT coalesce(spelling, value) FROM account_name WHERE user_id = r.reported_id AND kind = 2),
        r.reason, r.created_at
-FROM support_report r ORDER BY r.created_at DESC LIMIT ?
+FROM support_report r WHERE NOT EXISTS (SELECT 1 FROM account WHERE id = r.reported_id AND bot = 1)
+ORDER BY r.created_at DESC LIMIT ?
 """
 REASONS = {1: "spam", 2: "abuse", 3: "other"}
 PUSH = {0: None, 1: "APNs", 2: "APNs (sandbox)", 3: "FCM"}
