@@ -398,7 +398,7 @@ envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
 | 🔑 Play Integrity keys | Google-issued | no | attestation (§4.2) |
 | 🔐 OHTTP key (+ spare) | X25519 HPKE | yes, current and spare | Oblivious HTTP (§4.1) |
 | 🔑 Admin token | random | no | admin routes (not part of YoIP) |
-| 🔑 Cloudflare tunnel token | provider credential | no | the tunnel in front of the hub |
+| 🔑 Origin key and certificate | TLS, certificate signed by the proxy's origin CA | no | TLS from the proxy to the hub; the proxy proves itself with a client certificate |
 
 **Signed requests.**
 ```
@@ -471,7 +471,7 @@ struct { uint8 platform; opaque token<V>; } Push;        // 0 none, 1 APNs, 2 AP
 
 Status: `404` unknown · `409` devices changed or name/locator/blob id taken · `410` device replaced or account gone · `429` limit named in the body · `507` no room.
 
-**Limits.** The hub keeps in-memory rates that refill evenly; fetching is never capped. IPv6 counts per /64; behind Cloudflare the IP is `CF-Connecting-IP`. Loopback, operator bots and own services are exempt.
+**Limits.** The hub keeps in-memory rates that refill evenly; fetching is never capped. IPv6 counts per /64; behind Cloudflare the IP is `CF-Connecting-IP`. The hub MUST be reachable only through the TLS proxy (firewall to the proxy's addresses, client certificate of the proxy required), else that header is forgeable. Loopback, operator bots and own services are exempt.
 
 | Limit | Default | Over it |
 |---|---|---|
