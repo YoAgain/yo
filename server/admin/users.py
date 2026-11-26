@@ -141,6 +141,40 @@ def min_app(name: str):
     return None
 
 
+def env_value(name: str, key: str):
+    """A value of the hub's env file, None when not set."""
+    try:
+        with open(ENVS[name]) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k == key and v:
+                    return v.strip().strip('"')
+    except OSError:
+        pass
+    return None
+
+
+def multi_device(db, now, threshold):
+    """Issue #4's gate: per platform, the phones seen within 30 days and of them those on a build at or above
+    `threshold` (YO_MULTI_DEVICE_APP, YO_MIN_APP's form "ios/202612010000,android/120"); counts only."""
+    mins = {}
+    for part in (threshold or "").split(","):
+        platform, _, build = part.strip().partition("/")
+        if platform and build.isdigit():
+            mins[platform] = int(build)
+    out = {}
+    for platform in ("ios", "android"):
+        seen = ready = 0
+        for (app,) in db.execute("SELECT app FROM account_device WHERE last_seen_at > ? AND app LIKE ?",
+                                 (now - 30 * DAY_MS, platform + "/%")):
+            seen += 1
+            build = app.partition("/")[2]
+            if platform in mins and build.isdigit() and int(build) >= mins[platform]:
+                ready += 1
+        out[platform] = {"seen": seen, "ready": ready, "min": mins.get(platform)}
+    return out
+
+
 def yogpt_min():
     """YoGPT's build as deployed: the deploy minute (UTC) of YOGPT_VERSION_FILE, less 2 minutes of slack."""
     import datetime
@@ -718,6 +752,9 @@ def hub(name: str, path: str) -> dict:
                 "SELECT count(*), coalesce(sum(size), 0) FROM message_blob").fetchone() if has_table(db, "message_blob") else None),
             "deliveries": part("deliveries", lambda: deliveries(db, hour)),
             "min_app": min_app(name),
+            # Multi-device's 80 % gate (#4): devices seen in 30 days on a build with it, per platform.
+            "multi_device": part("multi_device", lambda: multi_device(
+                db, now, env_value(name, "YO_MULTI_DEVICE_APP")) if has_app else None),
             "yogpt_min": yogpt_min(),
             "yogpt_contacts": yogpt_contacts(name),
             "apps": part("apps", lambda: db.execute(

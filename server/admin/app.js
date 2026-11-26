@@ -1026,6 +1026,18 @@ if (document.body.classList.contains("login")) {
         return [platform(p), ...details].join(" · ");
       }).concat("Unknown counts phone accounts seen within 48 hours.").join("\n");
     }
+    // Multi-device's gate (#4): the share of phones seen in 30 days on a build with it (YO_MULTI_DEVICE_APP).
+    const md = $("multidevice");
+    md.hidden = !hubNow?.multi_device;
+    if (!md.hidden) {
+      const rows = Object.entries(h.multi_device);
+      const platform = p => p === "ios" ? "iOS" : "Android";
+      md.textContent = "Multi-device ready (30 d) · " + rows.map(([p, r]) =>
+        `${platform(p)} ${r.min == null ? "–" : pctText(r.seen ? r.ready * 100 / r.seen : 0)}`).join(" · ");
+      md.title = rows.map(([p, r]) => `${platform(p)}: ${num(r.ready)} of ${num(r.seen)} devices seen in 30 days`
+        + (r.min == null ? " · no YO_MULTI_DEVICE_APP build set" : ` on build ${r.min} or newer`))
+        .concat("Gate: 80 % per platform before YO_MIN_APP is raised.").join("\n");
+    }
     if (!hubNow) {
       set("problem-n", "–");
       state("problem-dial", null);

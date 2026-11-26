@@ -263,6 +263,13 @@ async fn unwrapped(
     if let Some(ip) = outer_headers.get("cf-connecting-ip") {
         headers.insert("cf-connecting-ip", ip.clone());
     }
+    // The app's `Yo-App` (spec 4.1): the apps' transports name it on the outer request; inside, unless the wrapped
+    // request names its own, it is the same, so `426` and a device's app and version are as direct (#4's gate).
+    if !headers.contains_key(api::HEADER_APP) {
+        if let Some(app) = outer_headers.get(api::HEADER_APP) {
+            headers.insert(api::HEADER_APP, app.clone());
+        }
+    }
     // A ticket for a blob transfer outside OHTTP (spec 4.1): one blob, one direction, once, 5 minutes.
     if headers.remove(api::HEADER_TICKET).is_some() {
         let blob = path.starts_with(&format!("{}/", api::BLOBS));
@@ -375,8 +382,15 @@ mod tests {
     }
 
     async fn post(hub: &Arc<Hub>, body: Vec<u8>, ip: [u8; 4]) -> Response {
-        let mut request =
-            Request::post(api::OHTTP).header(CONTENT_TYPE, api::OHTTP_REQUEST_TYPE).body(Body::from(body)).unwrap();
+        post_as(hub, body, ip, None).await
+    }
+
+    async fn post_as(hub: &Arc<Hub>, body: Vec<u8>, ip: [u8; 4], app: Option<&str>) -> Response {
+        let mut request = Request::post(api::OHTTP).header(CONTENT_TYPE, api::OHTTP_REQUEST_TYPE);
+        if let Some(app) = app {
+            request = request.header(api::HEADER_APP, app);
+        }
+        let mut request = request.body(Body::from(body)).unwrap();
         request.extensions_mut().insert(ConnectInfo(SocketAddr::from((ip, 1))));
         hub.router().oneshot(request).await.unwrap()
     }
@@ -485,6 +499,20 @@ mod tests {
         assert_eq!(keys.status(), StatusCode::OK);
         let (wrapped, opener) = wrap("GET", "/v1/username/Somebody", &[], std::time::SystemTime::now());
         assert_ne!(open(post(&hub, wrapped, [192, 0, 2, 1]).await, opener).await.0, 426);
+    }
+
+    #[tokio::test]
+    async fn the_outer_yo_app_counts_inside_unless_the_inner_names_one() {
+        let mut config = Config::for_tests();
+        config.min_app = vec![("ios".into(), 10)];
+        let hub = hub(config);
+        let now = std::time::SystemTime::now();
+        let (wrapped, opener) = wrap("GET", "/v1/username/Somebody", &[], now);
+        let answer = post_as(&hub, wrapped, [192, 0, 2, 1], Some("ios/5 1.0.0")).await;
+        assert_eq!(open(answer, opener).await.0, 426, "too old by the outer Yo-App");
+        let (wrapped, opener) = wrap("GET", "/v1/username/Somebody", &[(api::HEADER_APP, "ios/11")], now);
+        let answer = post_as(&hub, wrapped, [192, 0, 2, 1], Some("ios/5")).await;
+        assert_ne!(open(answer, opener).await.0, 426, "the inner one wins");
     }
 
     #[test]
