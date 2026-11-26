@@ -21,7 +21,6 @@
     <string name="connect_service_text">%1$s can Yo you, and sees the Yos you send it.</string>
     <string name="connect_allow">Allow</string>
     <string name="ui_invite">Invite</string>
-    <string name="ui_invite_friends">Invite Friends</string>
     <string name="ui_members">Members</string>
     <string name="group_member_limit">Members · %1$d of 20</string>
     <string name="find_group_friends">Find Friends</string>

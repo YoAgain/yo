@@ -192,7 +192,7 @@ extension FriendList {
   var selecting: Bool { !libraryItems.isEmpty || !picked.isEmpty }
 
   /// A sheet over the list (Settings and what opens from it, New Group, members): the camera does not open under it.
-  var sheetUp: Bool { settings || newGroup || membersOf != nil }
+  var sheetUp: Bool { settings || newGroup || invite || membersOf != nil }
 
   var flipButton: some View {
     Button {

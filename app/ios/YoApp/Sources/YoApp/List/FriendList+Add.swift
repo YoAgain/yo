@@ -60,7 +60,13 @@ extension FriendList {
             addAction("Group", icon: "person.2.badge.plus", color: Color(hex: 0x3498DB), metrics: rowMetrics)
           }
           if let account = accounts.account {
-            InviteShareLink(name: account.username) {
+            // The own code with the share sheet on top: shared away, or scanned once the share sheet is gone.
+            Button {
+              typing = false
+              adding = false
+              YourCodePage.prepare(name: account.username)
+              invite = true
+            } label: {
               addAction("Invite", icon: "square.and.arrow.up", color: .amethyst, metrics: rowMetrics)
             }
           }

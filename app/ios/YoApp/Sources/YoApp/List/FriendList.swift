@@ -60,6 +60,7 @@ struct FriendList: View {
   @State private var notificationsDenied = false
   @State var adding = false
   @State var newGroup = false
+  @State var invite = false
   @State var newName = ""
   /// Shown in the empty field for a moment instead of "Name": the lookup, "No Such User", "That’s You".
   @State var hint: String?
@@ -323,6 +324,11 @@ struct FriendList: View {
           .appObjects()
         }
         .sheet(isPresented: $newGroup) { NewGroupSheet().systemAppearance().appObjects() }
+        .sheet(isPresented: $invite) {
+          if let account = accounts.account {
+            YourCodeSheet(name: account.username, shareOnAppear: true).systemAppearance().appObjects()
+          }
+        }
         .videoTrimming($videoTrim)
         .confirmDestructive(
           $blocking,

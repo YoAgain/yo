@@ -360,7 +360,12 @@ private struct KeyCard: View {
       popover.sourceRect = .null  // UIKit tracks the source view as its window resizes.
       popover.permittedArrowDirections = []
     }
-    top.present(controller, animated: true)
+    // A sheet still sliding up (the list's Invite opens the code with the share sheet on top) takes it once it is up.
+    if let transition = top.transitionCoordinator {
+      transition.animate(alongsideTransition: nil) { _ in top.present(controller, animated: true) }
+    } else {
+      top.present(controller, animated: true)
+    }
   }
 
   static func recoveryKey(name: String, key: String, completion: @escaping @MainActor (Bool) -> Void) {

@@ -657,8 +657,9 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Security", "Appe
 }
 
 /** Your code (iOS YourCodePage), as justyo.co/NAME: the name as a coloured row, "wants to Yo", the QR code on a white
- * card (a tap shares it), and Link and Share as wide as the code under it. All on one screen, a small phone's too. */
-@Composable private fun YourCodeSheet(name: String, onClose: () -> Unit) {
+ * card (a tap shares it), and Link and Share as wide as the code under it. All on one screen, a small phone's too.
+ * From the list's Invite with the chooser on top. */
+@Composable internal fun YourCodeSheet(name: String, shareOnOpen: Boolean = false, onClose: () -> Unit) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val link = inviteLink(name)
@@ -678,6 +679,9 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Security", "Appe
             finally { sharing = false }
         }
     }
+    // The list's Invite: the chooser once on top of the sheet, the code left under it for scanning.
+    var shared by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) { if (shareOnOpen && !shared) { shared = true; share() } }
     FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White,
         // Half height, as iOS's own-code card from the profile row's QR button.
         height = 0.5f) {

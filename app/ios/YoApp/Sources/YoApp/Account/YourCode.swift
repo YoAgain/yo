@@ -4,55 +4,9 @@ import UIKit
 import UniformTypeIdentifiers
 import YoCore
 
-/// Share the invite as a URL so the system offers Copy Link. Through UIActivityViewController with the URL itself:
-/// SwiftUI's ShareLink hands a URL over as its archived property list too, which some apps (X) posted as text
-/// ("bplist00…https://justyo.co/NAME…").
-@MainActor
-struct InviteShareLink<Label: View>: View {
-  let name: String
-  @ViewBuilder var label: () -> Label
-
-  var body: some View {
-    Button {
-      Share.present([InviteItem(name: name)]) { _ in }
-    } label: {
-      label()
-    }
-  }
-}
-
-/// The invite link for the share sheet: the URL, the mail subject, and the preview's title ("NAME wants to Yo").
-private final class InviteItem: NSObject, UIActivityItemSource {
-  let name: String
-  let url: URL
-
-  init(name: String) {
-    self.name = name
-    url = Invite.link(for: name)
-  }
-
-  func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any { url }
-
-  func activityViewController(_ controller: UIActivityViewController, itemForActivityType type: UIActivity.ActivityType?)
-    -> Any?
-  { url }
-
-  func activityViewController(_ controller: UIActivityViewController, subjectForActivityType type: UIActivity.ActivityType?)
-    -> String
-  { "\(name) wants to Yo" }
-
-  func activityViewControllerLinkMetadata(_ controller: UIActivityViewController) -> LPLinkMetadata? {
-    let metadata = LPLinkMetadata()
-    metadata.originalURL = url
-    metadata.url = url
-    metadata.title = "\(name) wants to Yo"
-    return metadata
-  }
-}
-
 /// The invite as a picture and a text, from the code page's Share and a tap on its code: the card in the page's own
-/// look and "Yo me on Yo: https://justyo.co/NAME". The link goes inside the string, not as a URL item (see
-/// `InviteShareLink`: some apps posted a URL's archived property list).
+/// look and "Yo me on Yo: https://justyo.co/NAME". The link goes inside the string, not as a URL item: some apps
+/// posted a URL's archived property list ("bplist00…https://justyo.co/NAME…").
 @MainActor
 enum InviteShare {
   static func text(name: String) -> String { "Yo me on Yo: \(Invite.link(for: name).absoluteString)" }
@@ -277,14 +231,18 @@ private struct InvitePicture: View {
 @MainActor
 struct YourCodePage: View {
   let name: String
+  /// The list's Invite: the share sheet once on top of the page, the code left behind it for scanning.
+  var shareOnAppear = false
+  @State private var autoShared = false
   @State private var code: InviteCode?
   @State private var loaded = false
   @State private var sharing = false
   @State private var copyCount = 0
   @State private var copied = false
 
-  init(name: String) {
+  init(name: String, shareOnAppear: Bool = false) {
     self.name = name
+    self.shareOnAppear = shareOnAppear
     _code = State(initialValue: ContactCodeExport.cachedCode(name: name))
   }
 
@@ -385,6 +343,31 @@ struct YourCodePage: View {
       code = await ContactCodeExport.render(name: name)?.code
       loaded = true
     }
+    .onAppear {
+      guard shareOnAppear, !autoShared else { return }
+      autoShared = true
+      share()
+    }
+  }
+}
+
+/// The own code as its own half-height card with a close button, as Settings opens it.
+struct YourCodeSheet: View {
+  let name: String
+  var shareOnAppear = false
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    NavigationStack {
+      YourCodePage(name: name, shareOnAppear: shareOnAppear)
+        .toolbar {
+          ToolbarItem(placement: .topBarLeading) {
+            Button(role: .close) { dismiss() }
+          }
+        }
+    }
+    .presentationDetents([.medium])
+    .presentationBackground(Color(.systemGroupedBackground))
   }
 }
 

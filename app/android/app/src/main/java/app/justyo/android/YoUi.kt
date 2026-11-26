@@ -726,6 +726,7 @@ private fun DeviceLinkedRow(onClick: () -> Unit, onDismiss: () -> Unit) {
     var profile by rememberSaveable { mutableStateOf(false) }
     var add by rememberSaveable { mutableStateOf(false) }
     var group by rememberSaveable { mutableStateOf(false) }
+    var invite by rememberSaveable { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf("") }
     var addingFriend by remember { mutableStateOf(false) }
     // While the hub is asked: "NAME…" in the empty field, as iOS; the field takes the next name meanwhile.
@@ -1152,7 +1153,12 @@ private fun DeviceLinkedRow(onClick: () -> Unit, onDismiss: () -> Unit) {
                             ListActionRow(
                                 stringResource(R.string.ui_invite), Icons.Default.Share, Amethyst,
                                 Modifier.weight(1f),
-                            ) { shareInvite(context, s.username.orEmpty()) }
+                            ) {
+                                // The own code with the share sheet on top: shared away, or scanned once it is gone.
+                                focusManager.clearFocus()
+                                add = false
+                                invite = true
+                            }
                         }
                     }
                 }
@@ -1288,6 +1294,7 @@ private fun DeviceLinkedRow(onClick: () -> Unit, onDismiss: () -> Unit) {
     if (profile) ProfileSheet(model, onClose = { profile = false; openDevices = false }, devices = openDevices,
         onAddFriends = { profile = false; openDevices = false; cameraOn = false; add = true })
     if(group) GroupSheet(model,s,onClose={group=false})
+    if(invite) YourCodeSheet(s.username.orEmpty(), shareOnOpen = true) { invite = false }
     menu?.let { friend -> FriendMenu(model,friend,onClose={menu=null}) }
     leaving?.let { friend -> FriendMenu(model,friend,leaving=true,onClose={leaving=null}) }
     viewing?.let { queue -> MediaViewer(repo,queue,heldFinger,onClose={viewing=null}) }
@@ -1295,14 +1302,6 @@ private fun DeviceLinkedRow(onClick: () -> Unit, onDismiss: () -> Unit) {
 
 internal fun inviteLink(name: String) = "https://justyo.co/${Uri.encode(name)}"
 
-fun shareInvite(context: Context, name: String) {
-    val title = context.getString(R.string.code_wants_to_yo, name)
-    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-        .putExtra(Intent.EXTRA_TEXT, inviteLink(name))
-        .putExtra(Intent.EXTRA_SUBJECT, title)
-        .putExtra(Intent.EXTRA_TITLE, title)
-    context.startActivity(Intent.createChooser(send, context.getString(R.string.ui_invite_friends)))
-}
 @Composable fun PhotoUri(uri: Uri,modifier: Modifier=Modifier) {
     val context=LocalContext.current
     var bitmap by remember(uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
