@@ -51,6 +51,7 @@ class Vault(private val context: Context) {
         atomicWrite(File(directory, name), cipher.iv + cipher.doFinal(value))
     }
     @Synchronized fun secret(name: String): ByteArray = read(name) ?: randomBytes(32).also { write(name, it) }
+    @Synchronized fun has(name: String) = File(directory, name).exists()
     @Synchronized fun delete(name: String) = AtomicFile(File(directory, name)).delete()
     /** Signed out: everything but what outlives an account on this phone (`KEPT`). */
     @Synchronized fun clear() { directory.listFiles().orEmpty().filterNot { keeps(it.name) }.forEach { it.delete() } }

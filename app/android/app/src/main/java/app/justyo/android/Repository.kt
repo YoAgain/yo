@@ -387,12 +387,15 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             Problems.report(e) { command { client?.writeStorage() } }
         }
     }
+    private fun registrationKey(name: String) = "registration-" + usernameSkeleton(name).toByteArray().sha256Hex()
+    /** This phone keeps the key of its own interrupted sign-up for [name]: the hub's "taken" is this phone's. */
+    fun ownsPendingRegistration(name: String): Boolean = runCatching { vault.has(registrationKey(name)) }.getOrDefault(false)
     suspend fun register(name: String, attest: YoAttest? = null) = accountTurn.withLock {
         check(client == null)
         mutable.update { it.copy(busy = true) }
         try {
             require(usernameValid(name)) { context.getString(R.string.valid_name) }
-            val pendingName = "registration-" + usernameSkeleton(name).toByteArray().sha256Hex()
+            val pendingName = registrationKey(name)
             val secret = vault.secret(pendingName)
             val c = registerCore(name, secret, attest)
             pin(c); client = c; sessionId++; vault.delete("left")

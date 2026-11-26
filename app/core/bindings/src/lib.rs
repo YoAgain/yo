@@ -822,10 +822,11 @@ impl YoNameField {
     }
 
     /// The text changed: the check number to run with `check` (after the app's typing pause), or `None` when
-    /// the state is already known (empty, forbidden characters).
-    pub fn typed(&self, text: String) -> Option<u64> {
+    /// the state is already known (empty, forbidden characters). `own_key`: this device keeps a new-account key for
+    /// the text (its own interrupted sign-up), so taken counts as free.
+    pub fn typed(&self, text: String, own_key: bool) -> Option<u64> {
         let mut field = self.lock();
-        field.typed(&text);
+        field.typed_own(&text, own_key);
         let seq = (field.view().phase == yo_core::name_field::Phase::Checking).then(|| field.seq());
         self.changed.notify_all();
         seq

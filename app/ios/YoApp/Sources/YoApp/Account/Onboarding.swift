@@ -210,7 +210,7 @@ struct Onboarding: View {
     name = value
     registrationRefusal = nil
     problem = nil
-    sequence = nameField.typed(text: value)
+    sequence = nameField.typed(text: value, ownKey: NewAccountKey.has(value))
     nameState = nameField.state()
   }
 

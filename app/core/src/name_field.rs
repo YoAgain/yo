@@ -85,6 +85,8 @@ pub struct NameField {
     result: Option<(Phase, Option<u32>)>,
     bad: Vec<String>,
     pending: bool,
+    /// This device keeps a new-account key for `text` (its own earlier, interrupted sign-up): taken counts as free.
+    own: bool,
     /// How long the device check took (ms), once done.
     pub device_ms: Option<u64>,
 }
@@ -99,6 +101,7 @@ impl NameField {
             result: None,
             bad: Vec::new(),
             pending: false,
+            own: false,
             device_ms: None,
         }
     }
@@ -138,6 +141,13 @@ impl NameField {
 
     /// The text changed: the name check to run, if one is due now (it waits for the device check otherwise).
     pub fn typed(&mut self, text: &str) -> Option<Query> {
+        self.typed_own(text, false)
+    }
+
+    /// As `typed`; `own`: this device keeps a new-account key for the text (its own earlier sign-up, interrupted
+    /// before the hub's answer arrived). The hub then says taken, but the name is this device's: free, sign-up resumes.
+    pub fn typed_own(&mut self, text: &str, own: bool) -> Option<Query> {
+        self.own = own;
         if text == self.text && (self.result.is_some() || self.seq > 0) {
             return None;
         }
@@ -189,6 +199,7 @@ impl NameField {
         };
         let phase = match answer {
             Ok((status::NO_CONTENT, _)) => Phase::Ok,
+            Ok((status::CONFLICT, _)) if self.own => Phase::Ok,
             Ok((status::CONFLICT, _)) => Phase::Taken,
             Ok((status::BAD_REQUEST, _)) => match handle::check_username_form(&self.text) {
                 Ok(()) => Phase::TooShort,
@@ -335,5 +346,18 @@ mod tests {
         assert_eq!((f.view().phase, f.view().min), (Phase::Offline, Some(FALLBACK_MIN)));
         assert_eq!(f.typed(""), None);
         assert_eq!(f.view().phase, Phase::Empty);
+    }
+
+    #[test]
+    fn taken_by_this_devices_own_interrupted_sign_up_is_free() {
+        let mut f = NameField::new(0);
+        f.device_done(None, 0);
+        let q = f.typed_own("Annabelle1234", true).unwrap();
+        assert_eq!(f.sign_up(), SignUp::Wait);
+        assert_eq!(f.answered(q.seq, Ok((409, Some(12)))), Some(SignUp::Go), "its own pending key: sign-up resumes");
+        assert_eq!(f.view().phase, Phase::Ok);
+        let q = f.typed("Annabelle12345").unwrap();
+        f.answered(q.seq, Ok((409, Some(12))));
+        assert_eq!(f.view().phase, Phase::Taken, "no key of this device: taken");
     }
 }

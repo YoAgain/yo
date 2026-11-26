@@ -204,7 +204,7 @@ import uniffi.yo.usernameValid
     var code by rememberSaveable { mutableStateOf("") }
     val repo = model.repository
     val field = remember(repo) { YoNameField(repo.transport) }
-    var sequence by remember(field) { mutableStateOf(name.takeIf { it.isNotEmpty() }?.let { field.typed(it) }) }
+    var sequence by remember(field) { mutableStateOf(name.takeIf { it.isNotEmpty() }?.let { field.typed(it, repo.ownsPendingRegistration(it)) }) }
     var state by remember(field) { mutableStateOf(field.state()) }
     var registrationRefusal by remember { mutableStateOf<YoNamePhase?>(null) }
     var submitting by remember { mutableStateOf(false) }
@@ -297,7 +297,7 @@ import uniffi.yo.usernameValid
                 name = value
                 registrationRefusal = null
                 repo.clearError()
-                sequence = field.typed(value)
+                sequence = field.typed(value, repo.ownsPendingRegistration(value))
                 state = field.state()
             }
             NameEntry(nameValue, onName, phase, !busy,
