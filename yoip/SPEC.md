@@ -350,7 +350,16 @@ Bridge    other service ──► api.justyo.app/NAME/… ──► entrance ─
 - Each service declares its names, triggers and allowed calls in its manifest (`yo-services`); anything else is refused.
 ## 4. Net
 ### 4.1 Transport
-The hub is reached only over HTTPS (plain HTTP redirects, HSTS 6 months). Contact deliveries use unsigned, padded, sealed envelopes. The hub sees inbox and size. Without a valid 24 h `🎟️ sender certificate`, send once identified and fetch one.
+The hub is reached only over HTTPS (plain HTTP redirects, HSTS 6 months).
+
+**Oblivious HTTP.** Clients SHOULD wrap every request to the hub's `🔐 OHTTP key` (RFC 9458, Binary HTTP RFC 9292) and `POST` it to `/v1/ohttp`; the hub unwraps it, serves it as if sent directly and wraps the answer. The TLS proxy in front of the hub then sees only IP, time and size.
+- Both directions MUST be padded to fixed buckets; a Yo MUST fit the smallest, ≤ 1 KiB. Bucket sizes: `net/limits.rs`.
+- Media does not go through OHTTP. Over OHTTP the client gets a one-time ticket and streams the blob with `PUT` or `GET /v1/blobs/t/{ticket}`; a ticket works once, for one blob, in one direction.
+- The separate connections of §1.1 hold inside OHTTP too: anonymous and signed requests MUST NOT share a connection, so the hub cannot link a sealed delivery to the account that fetched an inbox on the same line.
+- The hub MUST limit `/v1/ohttp` per IP before unwrapping. It keeps the direct endpoints until most active devices use OHTTP (§5.2).
+- The key config is served at `/.well-known/yo-ohttp`; apps pin current and spare.
+
+Contact deliveries use unsigned, padded, sealed envelopes. The hub sees inbox and size. Without a valid 24 h `🎟️ sender certificate`, send once identified and fetch one.
 ```
 Padded { uint8 version = 1; uint32 length; opaque payload[length]; opaque zeros[...]; }
 envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
@@ -359,7 +368,7 @@ envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
 - Envelope: padded to 1, 4, 16 or 64 KiB; first byte sealed `0x11`, identified `1`; the hub MUST reject others with `400`. Identified fallback: signed `Padded`, `Yo-Access` if known.
 - Certificates bind ACI, device number and `🔐 account key` under an offline Curve25519 root; apps pin current and spare roots. Clients SHOULD fetch one at registration and when < 2 h of 23 h remain, ≤ 1/min. Receivers MUST verify root, key, number and user at inbox `received_ms` and MUST drop on failure.
 
-**Hub keys.** The hub holds these secrets; apps pin the public halves marked as pinned. Losing a pinned key without its spare strands every app, so each lives offline in the operator's vault as well.
+**Hub keys.** The hub holds these secrets, each for live and dev; apps pin the public halves marked as pinned. Losing a pinned key without its spare strands every app, so each lives offline in the operator's vault as well.
 
 | Key | Kind | Pinned by apps | Used for |
 |---|---|---|---|
@@ -369,6 +378,9 @@ envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
 | 🔐 zkgroup `ServerSecretParams` | zkgroup | public params | group credentials and endorsements (§3.4) |
 | 🔑 APNs key, FCM service account | provider credentials | no | push (§4.2) |
 | 🔑 Play Integrity keys | Google-issued | no | attestation (§4.2) |
+| 🔐 OHTTP key (+ spare) | X25519 HPKE | yes, current and spare | Oblivious HTTP (§4.1) |
+| 🔑 Admin token | random | no | admin routes (not part of YoIP) |
+| 🔑 Cloudflare tunnel token | provider credential | no | the tunnel in front of the hub |
 
 **Signed requests.**
 ```
@@ -555,7 +567,7 @@ JSON = { "version": n,
 ### 5.2 Planned
 - Accounts and groups: additional devices (phase 2), username changes or releases, group admins and invite links.
 - Backup v4: bind version, door and user id as AAD, and commit to `K`.
-- Oblivious HTTP (RFC 9458): every request and answer wrapped to the hub's OHTTP key at `POST /v1/ohttp`, media streamed with one-time tickets, so the TLS proxy sees only IP, time and size; old endpoints end at 80 % adoption (#8).
+- Oblivious HTTP (§4.1) for every client; the direct endpoints end at 80 % adoption (#8).
 - Privacy: cover traffic, key transparency and private contact discovery.
 - Abuse: attestation at registration if accounts are made in bulk.
 ### 5.3 References
