@@ -257,6 +257,14 @@ impl Hub {
         }
     }
 
+    /// A wrapped request by address, before it is unwrapped (spec 4.1): `429` `ip`.
+    pub(crate) fn limit_ohttp(&self, peer: SocketAddr, headers: &HeaderMap) -> Res<()> {
+        match self.limit_ip("ohttp", peer, headers, self.config.limits.ohttp_per_ip_minute, MINUTE) {
+            true => Ok(()),
+            false => Err(error::limited("ip", None)),
+        }
+    }
+
     /// An expensive request by address (a registration, a failed backup fetch): `429`.
     pub(crate) fn limit_expensive(&self, peer: SocketAddr, headers: &HeaderMap) -> Res<()> {
         match self.limit_ip("expensive", peer, headers, self.config.limits.expensive_per_ip_hour, HOUR) {

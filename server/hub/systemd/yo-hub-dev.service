@@ -50,6 +50,9 @@ LoadCredential=server-cert:/etc/yo/server-cert-dev
 Environment=YO_SERVER_CERT_FILE=/run/credentials/yo-hub-dev.service/server-cert
 LoadCredential=zk-params:/etc/yo/zk-params-dev
 Environment=YO_ZK_PARAMS_FILE=/run/credentials/yo-hub-dev.service/zk-params
+# The OHTTP key in use (spec 4.1), key id 1; its spare (id 2) stays offline in 1Password until a rotation.
+LoadCredential=ohttp-key:/etc/yo/ohttp-key-dev
+Environment=YO_OHTTP_KEY_FILE=/run/credentials/yo-hub-dev.service/ohttp-key
 
 [Install]
 WantedBy=multi-user.target

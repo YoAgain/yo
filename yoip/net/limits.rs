@@ -46,3 +46,29 @@ pub const MAX_FEEDBACK_LEN: usize = 2000;
 pub const MAX_STORAGE_LEN: usize = 60 * 1024;
 /// The longest app version sent with feedback.
 pub const MAX_APP_VERSION_LEN: usize = 64;
+
+/// Oblivious HTTP (spec 4.1): the sizes a whole wrapped body can have, both directions; the TLS proxy sees only the
+/// bucket. One table, so it is easy to change. Measured before (#8, 26.11.): a one-device Yo is about 1.2 KB
+/// directly (its envelope 1 KiB, headers 150), with `envelope::SMALL` it fits the smallest; lookups, certificates,
+/// inbox fetches of a few Yos and group calls fit 4 KiB; registrations and prekey uploads (about 55 KB) 64 KiB;
+/// the largest delivery (`MAX_DELIVERY_BODY`) 1 MiB; a full inbox fetch (100 envelopes of 64 KiB) 16 MiB.
+pub const OHTTP_BUCKETS: [usize; 8] =
+    [1024, 4096, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
+/// The largest wrapped request the hub reads: the bucket that holds the largest delivery.
+pub const MAX_OHTTP_REQUEST: usize = 1024 * 1024;
+/// The largest wrapped answer: the largest bucket.
+pub const MAX_OHTTP_RESPONSE: usize = OHTTP_BUCKETS[OHTTP_BUCKETS.len() - 1];
+/// What wrapping adds to a request (RFC 9458, X25519, AES-128-GCM): key id and suite (7), `enc` (32), tag (16).
+pub const OHTTP_REQUEST_OVERHEAD: usize = 7 + 32 + 16;
+/// What wrapping adds to an answer: its nonce (16) and tag (16).
+pub const OHTTP_RESPONSE_OVERHEAD: usize = 16 + 16;
+
+/// The length to pad a Binary HTTP message of `len` bytes to, so that wrapped (`overhead`) it fills a bucket.
+pub fn ohttp_padded(len: usize, overhead: usize) -> Option<usize> {
+    OHTTP_BUCKETS.iter().find(|b| **b >= len + overhead).map(|b| b - overhead)
+}
+
+/// A blob ticket's lifetime (spec 4.1): 5 minutes.
+pub const TICKET_MS: u64 = 5 * 60 * 1000;
+/// A wrapped request's inner `Date` may differ from the hub's clock by this much (spec 4.1).
+pub const OHTTP_SKEW_MS: u64 = 5 * 60 * 1000;

@@ -16,12 +16,15 @@ pub mod groups;
 mod help;
 pub mod limiter;
 mod mail;
+pub mod ohttp;
 pub mod push;
 mod request;
 
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::header::CONTENT_TYPE;
+use axum::http::HeaderMap;
 use axum::middleware::from_fn_with_state;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use config::Config;
@@ -44,7 +47,6 @@ pub use request::READING_AT_ONCE;
 // The in-file tests use these through `super::*`.
 #[cfg(test)]
 use {
-    axum::extract::ConnectInfo,
     axum::http::StatusCode,
     bytes::Bytes,
     db::Delivered,
@@ -160,6 +162,8 @@ impl Event {
 
 pub struct Hub {
     config: Config,
+    /// Oblivious HTTP (spec 4.1), with its keys configured.
+    ohttp: Option<ohttp::Gateway>,
     db: Arc<Db>,
     blobs: Arc<blobs::Blobs>,
     pusher: push::Pusher,
@@ -239,7 +243,9 @@ impl Hub {
             limits.requests_per_recipient,
             limits.request_hour_ms,
         );
+        let gateway = ohttp::Gateway::new(&config.ohttp_keys)?;
         let hub = Arc::new(Hub {
+            ohttp: gateway,
             db,
             blobs: Arc::new(blobs),
             pusher,
@@ -329,11 +335,38 @@ impl Hub {
         if let Some(statements) = self.config.asset_links.clone() {
             router = router.route("/.well-known/assetlinks.json", get(move || async move { axum::Json(statements) }));
         }
-        router
+        let inner = router
             .layer(from_fn_with_state(self.clone(), too_old))
+            .layer(from_fn_with_state(self.clone(), ohttp::direct_gone))
             .layer(from_fn_with_state(self.clone(), request::counted))
             .layer(DefaultBodyLimit::max(limits::MAX_BODY))
-            .with_state(self.clone())
+            .with_state(self.clone());
+        // Oblivious HTTP (spec 4.1): wrapped requests served by the routes above, their keys, and ticket transfers.
+        let (hub, served) = (self.clone(), inner.clone());
+        let wrapped = move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: bytes::Bytes| {
+            ohttp::post(hub.clone(), served.clone(), peer, headers, body)
+        };
+        let (hub, served) = (self.clone(), inner.clone());
+        let transfer = move |Path(ticket): Path<String>, request: axum::extract::Request| {
+            ohttp::transfer(hub.clone(), served.clone(), ticket, request)
+        };
+        let hub = self.clone();
+        let keys = move || {
+            let configs = hub.ohttp.as_ref().map(|g| g.configs().to_vec());
+            async move {
+                match configs {
+                    Some(configs) => ([(CONTENT_TYPE, api::OHTTP_KEYS_TYPE)], configs).into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        };
+        inner
+            .route(api::OHTTP, post(wrapped).layer(DefaultBodyLimit::max(limits::MAX_OHTTP_REQUEST)))
+            .route(api::OHTTP_KEYS_PATH, get(keys))
+            .route(
+                &format!("{}/{{ticket}}", api::TICKETS),
+                put(transfer.clone()).get(transfer).layer(DefaultBodyLimit::disable()),
+            )
     }
 
     /// Serves until `shutdown` resolves; cleans up meanwhile.
@@ -361,6 +394,9 @@ impl Hub {
         loop {
             every.tick().await;
             self.replay.forget_expired(now_ms());
+            if let Some(gateway) = &self.ohttp {
+                gateway.forget_expired(self.clock_ms());
+            }
             self.forget_pushes(std::time::Instant::now());
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
             let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;

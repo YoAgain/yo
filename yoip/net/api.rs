@@ -56,6 +56,25 @@ pub fn blob_put_path(id: &crate::protocol::content::BlobId, fetches: u32) -> Str
     format!("{BLOBS}/{}?fetches={fetches}", crate::b64(id))
 }
 
+/// `POST`: a request wrapped to the hub's OHTTP key (spec 4.1, RFC 9458), answered wrapped.
+pub const OHTTP: &str = "/v1/ohttp";
+/// `GET`: the hub's OHTTP key configs (`application/ohttp-keys`), current and spare: for tools; apps pin their own.
+pub const OHTTP_KEYS_PATH: &str = "/.well-known/yo-ohttp";
+pub const OHTTP_REQUEST_TYPE: &str = "message/ohttp-req";
+pub const OHTTP_RESPONSE_TYPE: &str = "message/ohttp-res";
+pub const OHTTP_KEYS_TYPE: &str = "application/ohttp-keys";
+/// Ticket transfers (spec 4.1): `PUT` or `GET /v1/blobs/t/{ticket}`, direct.
+pub const TICKETS: &str = "/v1/blobs/t";
+/// On a blob `PUT` or `GET` inside OHTTP: answer a ticket for it (base64url, 16 bytes), not the transfer.
+pub const HEADER_TICKET: &str = "yo-ticket";
+/// On a ticket `PUT` inside OHTTP: the blob's length, which the transfer must have.
+pub const HEADER_BLOB_LENGTH: &str = "yo-blob-length";
+
+/// `PUT` or `GET /v1/blobs/t/{ticket}`.
+pub fn ticket_path(ticket: &str) -> String {
+    format!("{TICKETS}/{ticket}")
+}
+
 /// The header of a blob upload naming the SHA-256 of its body (base64url): what the signature covers, so the hub
 /// checks the request before it takes the body (spec 4.3).
 pub const HEADER_BODY_HASH: &str = "yo-body-sha256";

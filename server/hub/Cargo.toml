@@ -33,6 +33,11 @@ rand = { workspace = true }
 libsignal-protocol = { workspace = true }
 zkgroup = { workspace = true }
 
+ohttp = { version = "=0.8.0", default-features = false, features = ["server", "rust-hpke"] }
+bhttp = "=0.8.0"
+httpdate = "=1.0.3"
+# The inner routes served in-process (Oblivious HTTP, spec 4.1).
+tower = { version = "=0.5.3", features = ["util"] }
 aws-lc-rs = "=1.19.0"
 rustls-webpki = { version = "=0.103.17", features = ["aws-lc-rs"] }
 rustls-pki-types = "=1.16.0"
@@ -42,5 +47,5 @@ base64.workspace = true
 subtle = "=2.6.1"
 
 [dev-dependencies]
+ohttp = { version = "=0.8.0", default-features = false, features = ["client", "server", "rust-hpke"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs"] }
-tower = { version = "=0.5.3", features = ["util"] }

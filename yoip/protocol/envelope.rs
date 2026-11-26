@@ -6,6 +6,12 @@ use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 
 /// The sizes an envelope can have.
 pub const BUCKETS: [usize; 4] = [1024, 4096, 16 * 1024, 64 * 1024];
+/// A smaller first bucket for senders over OHTTP (spec 4.1): a one-device Yo then fits the smallest OHTTP bucket.
+/// Accepted by the hub and by receivers from now on; sent only where the client asks for it (`Client::set_small_envelopes`),
+/// since receivers before it refuse it.
+pub const SMALL: usize = 736;
+/// The buckets an OHTTP sender seals to.
+pub const SMALL_BUCKETS: [usize; 5] = [SMALL, 1024, 4096, 16 * 1024, 64 * 1024];
 /// What `pad` puts before the message: its version and length.
 pub const HEADER: usize = 1 + 4;
 /// The first byte of a sealed envelope: libsignal's sealed sender v1 (`SEALED_SENDER_V1_FULL_VERSION`).
@@ -52,7 +58,7 @@ pub struct Plain {
 /// What the hub checks of a delivery: a bucket, sealed; or, `signed` by its sending device (the hub knows who sends),
 /// identified: the padded payload as it is (`pad`, version 1), for a sender without a certificate (spec 4.1).
 pub fn check(envelope: &[u8], signed: bool) -> Result<(), Error> {
-    if !BUCKETS.contains(&envelope.len()) {
+    if !SMALL_BUCKETS.contains(&envelope.len()) {
         return Err(Error::Size);
     }
     match envelope[0] {

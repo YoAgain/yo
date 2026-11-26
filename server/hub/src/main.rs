@@ -20,6 +20,10 @@
 //!                         answers handing out keys (spec 4.1, XEdDSA); its public half is pinned in the apps
 //!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 4.1), which sign the
 //!                         devices' sender certificates; the trust root's public key is pinned in the apps
+//!   YO_OHTTP_KEY_FILE     optional: 32 bytes of key material for the OHTTP key (spec 4.1), key id
+//!                         YO_OHTTP_KEY_ID (default 1); YO_OHTTP_SPARE_FILE and YO_OHTTP_SPARE_KEY_ID (default 2)
+//!                         the spare. Without, /v1/ohttp is off. Its key config is pinned in the apps.
+//!   YO_DIRECT_GONE        1: after the OHTTP cutoff the direct YoIP routes answer 426 (apps before it update)
 //!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 3.4); their public half is
 //!                         pinned in the apps
 //!
@@ -38,6 +42,11 @@
 //!   yo-hub zk new FILE                                  new ServerSecretParams (0600), the hub's YO_ZK_PARAMS_FILE;
 //!                                                       prints the public params, base64url, for the apps
 //!   yo-hub zk public FILE                               prints them again
+//!
+//! OHTTP keys (spec 4.1):
+//!   yo-hub ohttp new FILE KEY_ID                        new key material (32 bytes, 0600), YO_OHTTP_KEY_FILE or
+//!                                                       YO_OHTTP_SPARE_FILE; prints its key config, base64url, to pin
+//!   yo-hub ohttp public FILE KEY_ID                     prints it again
 
 use std::sync::Arc;
 use yo_hub::config::{
@@ -182,9 +191,31 @@ fn config() -> Result<(Config, String), String> {
         hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
         server_certificate: bytes("YO_SERVER_CERT_FILE")?,
         zk_params: bytes("YO_ZK_PARAMS_FILE")?,
+        ohttp_keys: ohttp_keys()?,
+        direct_gone: var("YO_DIRECT_GONE").is_some_and(|v| v.trim() == "1"),
         bots: var("YO_BOT_ACCOUNTS").map(|text| yo_hub::config::parse_bots(&text)).transpose()?.unwrap_or_default(),
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
+}
+
+/// The OHTTP keys (`Config::ohttp_keys`): current, then spare; each optional.
+fn ohttp_keys() -> Result<Vec<(u8, [u8; 32])>, String> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let mut keys = Vec::new();
+    for (file, id, default) in
+        [("YO_OHTTP_KEY_FILE", "YO_OHTTP_KEY_ID", 1u8), ("YO_OHTTP_SPARE_FILE", "YO_OHTTP_SPARE_KEY_ID", 2)]
+    {
+        let Some(path) = var(file) else { continue };
+        let id = match var(id) {
+            Some(text) => text.trim().parse().map_err(|_| format!("{id}: 0 to 255"))?,
+            None => default,
+        };
+        keys.push((id, read_hub_key(&path)?));
+    }
+    if keys.len() == 2 && keys[0].0 == keys[1].0 {
+        return Err("YO_OHTTP_KEY_ID and YO_OHTTP_SPARE_KEY_ID must differ".into());
+    }
+    Ok(keys)
 }
 
 /// Writes a new file readable by its owner alone, never over one that is there; prints the public half, base64url.
@@ -232,6 +263,19 @@ fn tool(args: &[String]) -> Result<(), String> {
             println!("{}", b64(yo_hub::groups::Zk::from_bytes(&read(file)?)?.public()));
             Ok(())
         }
+        ["ohttp", "new", file, id] => {
+            let id = id.parse().map_err(|_| "KEY_ID: 0 to 255")?;
+            let mut ikm = [0u8; 32];
+            getrandom::fill(&mut ikm).map_err(|e| e.to_string())?;
+            let public = yo_hub::ohttp::key_config(id, &ikm)?;
+            write_new(file, &ikm, Some(&public))
+        }
+        ["ohttp", "public", file, id] => {
+            let id = id.parse().map_err(|_| "KEY_ID: 0 to 255")?;
+            println!("{}", b64(&yo_hub::ohttp::key_config(id, &read_hub_key(file)?)?));
+            Ok(())
+        }
+        ["ohttp", ..] => Err("usage: yo-hub ohttp new FILE KEY_ID | yo-hub ohttp public FILE KEY_ID".into()),
         ["trust-root", ..] => {
             Err("usage: yo-hub trust-root new ROOT_FILE | yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE".into())
         }
@@ -250,7 +294,7 @@ fn or_exit<T>(result: Result<T, String>) -> T {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().is_some_and(|command| ["hub-key", "zk", "trust-root"].contains(&command.as_str())) {
+    if args.first().is_some_and(|command| ["hub-key", "zk", "trust-root", "ohttp"].contains(&command.as_str())) {
         return or_exit(tool(&args));
     }
     let (config, listen) = or_exit(config());

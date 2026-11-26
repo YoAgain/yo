@@ -55,6 +55,9 @@ pub struct Limits {
     /// Requests with a body read and handled at once from one address (`admit`, of `READING_AT_ONCE`): beyond,
     /// `503` for that address only. The server's own services pass.
     pub reading_per_ip: u32,
+    /// Wrapped requests (`/v1/ohttp`) by address, a minute, counted before unwrapping (spec 4.1); inside, every
+    /// request meets its own limits as well.
+    pub ohttp_per_ip_minute: u32,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -95,6 +98,7 @@ impl Default for Limits {
             blob_bytes_per_user_day: 2 * GIB,
             blob_bytes_stored_per_user: GIB,
             reading_per_ip: 64,
+            ohttp_per_ip_minute: 3000,
         }
     }
 }
@@ -117,6 +121,7 @@ impl Limits {
             request_recipients_per_sender: u64::MAX,
             requests_per_recipient: u64::MAX,
             reading_per_ip: u32::MAX,
+            ohttp_per_ip_minute: u32::MAX,
             ..Limits::default()
         }
     }
@@ -225,6 +230,13 @@ pub struct Config {
     pub server_certificate: Vec<u8>,
     /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, spec 3.4).
     pub zk_params: Vec<u8>,
+    /// The OHTTP keys (spec 4.1), current first, then the spare: key id and 32 bytes of key material
+    /// (`YO_OHTTP_KEY_FILE` with `YO_OHTTP_KEY_ID`, default 1; `YO_OHTTP_SPARE_FILE` with `YO_OHTTP_SPARE_KEY_ID`,
+    /// default 2). None: `/v1/ohttp` and `/.well-known/yo-ohttp` answer `404`.
+    pub ohttp_keys: Vec<(u8, [u8; 32])>,
+    /// `YO_DIRECT_GONE=1`, after the cutoff (spec 4.1, migration): the direct YoIP routes answer `426`, so apps
+    /// before OHTTP learn they are outdated; discovery, `/v1/ohttp`, tickets, admin and support stay. Off by default.
+    pub direct_gone: bool,
     /// The operator's bot accounts (`YO_BOT_ACCOUNTS` "YoGPT:USERHEX,PING:USERHEX"), a stopgap: no rate limits per
     /// device or user, and what they send counted apart (`bot-yo`, `bot-media`, `bot-media:LABEL`), out of the Yo counts.
     pub bots: Vec<(String, yoip::UserId)>,
@@ -325,6 +337,10 @@ pub fn app_header(text: &str) -> Option<(&str, Option<&str>)> {
     Some((named, version))
 }
 
+/// The OHTTP key material of `Config::for_tests` and its key id: tests pin its config (`ohttp::key_config`).
+pub const TEST_OHTTP_KEY: [u8; 32] = [0x4f; 32];
+pub const TEST_OHTTP_KEY_ID: u8 = 1;
+
 /// The hub key of `Config::for_tests`: tests pin its public half.
 pub const TEST_HUB_KEY: [u8; 32] = [0x48; 32];
 
@@ -371,6 +387,8 @@ impl Config {
             name_attest: false,
             hub_key: TEST_HUB_KEY,
             server_certificate: crate::certificate::test_file(),
+            ohttp_keys: vec![(TEST_OHTTP_KEY_ID, TEST_OHTTP_KEY)],
+            direct_gone: false,
             zk_params: {
                 static PARAMS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
                 PARAMS.get_or_init(crate::groups::test_params).clone()
