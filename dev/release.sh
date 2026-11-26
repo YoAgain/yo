@@ -7,7 +7,7 @@
 # origin/main, pushes it to main, publishes the GitHub release v<version> on it (pre-release for -RC), which runs the
 # release workflows, and sends the release card from the sibling yo-hub checkout (release-yo) when it is there.
 # YO_GH_USER picks the gh account that pushes and releases (default: gh's active one); YO_HUB_DIR the yo-hub checkout.
-# The same commit adds the notes as F-Droid's changelog (fastlane/metadata/android/en-US/changelogs/<versionCode>.txt,
+# The same commit adds the notes as F-Droid's changelog (app/android/app/fastlane/metadata/android/en-US/changelogs/<versionCode>.txt,
 # plain text, at most 500 characters). Only these two files are committed; other changes in the checkout stay as they are.
 set -euo pipefail
 version=${1:?usage: dev/release.sh x.y.z[-RCn] NOTES.md}
@@ -32,7 +32,7 @@ git fetch -q origin main --tags
 code=$(sed -n 's/^versionCode=//p' "$file")
 code=$((code + 1))
 sed -i -e "s/^versionCode=.*/versionCode=$code/" -e "s/^versionName=.*/versionName=$version/" "$file"
-changelog=fastlane/metadata/android/en-US/changelogs/$code.txt
+changelog=app/android/app/fastlane/metadata/android/en-US/changelogs/$code.txt
 mkdir -p "$(dirname "$changelog")"
 # Markdown to plain text: no emphasis or links, "- " bullets as "• ", GitHub's changelog line left out; cut at 500.
 sed -e '/Full Changelog/d' -e 's/\*\*//g' -e 's/`//g' -e 's/\[\([^]]*\)\]([^)]*)/\1/g' -e 's/^- /• /' "$notes" \
