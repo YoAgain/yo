@@ -140,6 +140,16 @@ final class HubTransport: HttpTransport {
   nonisolated(unsafe) static var answered: (@Sendable () -> Void)?
 
   static var unsupported: Bool { tooOld.load(ordering: .relaxed) }
+  /// How the last request to a YoIP route went (Status's Privacy Relay): 0 none yet, 1 inside OHTTP, 2 direct.
+  private static let relay = Atomic<UInt8>(0)
+  /// The last YoIP request went inside OHTTP (spec 4.1); nil before any.
+  static var viaOhttp: Bool? {
+    switch relay.load(ordering: .relaxed) {
+    case 1: true
+    case 2: false
+    default: nil
+    }
+  }
   /// TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`, "Check Your
   /// Phone's Date & Time").
   /// The TLS failure carries the hub's certificate and it fails its trust evaluation (another certificate in the way:
@@ -236,6 +246,14 @@ final class HubTransport: HttpTransport {
     let (outerMethod, outerPath) = (method, path)
     let (method, path) = inner?.count == 2 ? (String(inner![0]), String(inner![1])) : (method, path)
     let headers = headers.filter { $0.name != "yo-ohttp-line" && $0.name != "yo-ohttp-inner" }
+    // Discovery, help, admin and ticket transfers go direct either way: only the routes OHTTP serves count.
+    if inner != nil {
+      Self.relay.store(1, ordering: .relaxed)
+    } else if outerPath.hasPrefix("/v1/"), !outerPath.hasPrefix("/v1/ohttp"), !outerPath.hasPrefix("/v1/blobs/t/"),
+      !outerPath.hasPrefix("/v1/help/"), !outerPath.hasPrefix("/v1/admin")
+    {
+      Self.relay.store(2, ordering: .relaxed)
+    }
     guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil, headers: []) }
     guard let url = URL(string: outerPath, relativeTo: base) else {
       Diagnostics.record(NSError(domain: "HubTransport", code: -1000))

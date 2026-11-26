@@ -1059,6 +1059,7 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     var yosView by rememberSaveable { mutableIntStateOf(0) }
     val notifications by model.notificationsEnabled.collectAsStateWithLifecycle()
     val pushSession by repo.pushSession.collectAsStateWithLifecycle()
+    val relay by HubTransport.viaOhttp.collectAsStateWithLifecycle()
     val ready = if (BuildConfig.FLOSS) s.keepConnection else pushSession == repo.sessionId
     val top = s.byFriend.maxByOrNull { it.value }
     val mostYos = top?.let { most -> s.friends.firstOrNull { it.key == most.key }?.name } ?: "—"
@@ -1108,7 +1109,13 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
                     try { trip = roundTrip()?.let { "$it ms" } ?: res.getString(R.string.ui_no_reply) } finally { probing = false }
                 }
             }),
-        Setting(stringResource(R.string.ui_encryption), Icons.Default.EnhancedEncryption, onClick = { open("Encryption") }),
+        // Oblivious HTTP (spec 4.1): the hub's proxy sees only IP, time and size; direct only in a measuring build.
+        Setting(stringResource(R.string.ui_privacy_relay), Icons.Default.Shield,
+            when (relay) { true -> "OHTTP"; false -> stringResource(R.string.ui_direct); null -> stringResource(R.string.ui_checking) },
+            good = relay),
+    )
+    Section(stringResource(R.string.ui_encryption), null,
+        Setting(stringResource(R.string.ui_identity), Icons.Default.EnhancedEncryption, onClick = { open("Encryption") }),
     )
 }
 

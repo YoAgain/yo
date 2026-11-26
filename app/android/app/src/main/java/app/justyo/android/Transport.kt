@@ -32,6 +32,11 @@ class HubTransport(
         val line = headers.firstOrNull { it.name == "yo-ohttp-line" }?.value
         val inner = headers.firstOrNull { it.name == "yo-ohttp-inner" }?.value
         val attestation = path == "/v1/attest" || path == "/v1/attest/challenge"
+        // Status's Privacy Relay: discovery, help, admin and ticket transfers go direct either way, so only the routes
+        // OHTTP serves count.
+        if (inner != null) viaOhttp.value = true
+        else if (path.startsWith("/v1/") && !path.startsWith("/v1/ohttp") && !path.startsWith("/v1/blobs/t/") &&
+            !path.startsWith("/v1/help/") && !path.startsWith("/v1/admin")) viaOhttp.value = false
         if (stopped.get()) return HttpResult(426u, byteArrayOf(), null, emptyList())
         return try {
             require(path.startsWith("/") && !path.startsWith("//"))
@@ -91,6 +96,8 @@ class HubTransport(
     private fun offMain(work: () -> Unit) { thread(name = "yo-connections") { runCatching(work) } }
     companion object {
         const val MAX_ANSWER = 11 * 1024 * 1024
+        /** The last YoIP request went inside Oblivious HTTP (spec 4.1); null before any. */
+        val viaOhttp = kotlinx.coroutines.flow.MutableStateFlow<Boolean?>(null)
     }
 }
 

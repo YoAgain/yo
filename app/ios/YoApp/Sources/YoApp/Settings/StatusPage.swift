@@ -202,6 +202,13 @@ struct StatusPage: View {
         }
         .tint(Color(.label))
         .disabled(accounts.client == nil)
+        // Oblivious HTTP (spec 4.1): the hub's proxy sees only IP, time and size; direct only in a measuring build.
+        let relay = HubTransport.viaOhttp
+        StatusRow(
+          title: "Privacy Relay", value: relay.map { $0 ? "OHTTP" : "Direct" } ?? "Checking…",
+          check: relay.map { $0 ? .ok : .problem } ?? .open)
+      }
+      Section("Encryption") {
         Button {
           showingKeys = true
         } label: {
