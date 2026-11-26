@@ -1013,42 +1013,6 @@ if (document.body.classList.contains("login")) {
   const overview = (h) => {
     const ok = h && !h.error;
     hubNow = ok ? h : null;
-    const attest = $("attestation");
-    attest.hidden = !hubNow?.attestation;
-    if (!attest.hidden) {
-      const rows = Object.entries(h.attestation);
-      const platform = p => p === "ios" ? "iOS" : "Android";
-      attest.textContent = "Attested / failed / unknown · " + rows.map(([p, r]) =>
-        `${platform(p)} ${num(r.attested)} / ${num(r.failed)} / ${num(r.unknown)}`).join(" · ");
-      attest.title = rows.map(([p, r]) => {
-        const details = [...Object.entries(r.reasons), ...Object.entries(r.levels)].map(([k, n]) => `${k} ${num(n)}`);
-        details.push(r.last ? "Last " + new Date(r.last).toLocaleString() : "No attestation yet");
-        return [platform(p), ...details].join(" · ");
-      }).concat("Unknown counts phone accounts seen within 48 hours.").join("\n");
-    }
-    // Multi-device's gate (#4): the share of phones seen in 30 days on a build with it (YO_MULTI_DEVICE_APP).
-    const md = $("multidevice");
-    md.hidden = !hubNow?.multi_device;
-    if (!md.hidden) {
-      const rows = Object.entries(h.multi_device);
-      const platform = p => p === "ios" ? "iOS" : "Android";
-      md.textContent = "Multi-device ready (30 d) · " + rows.map(([p, r]) =>
-        `${platform(p)} ${r.min == null ? "–" : pctText(r.seen ? r.ready * 100 / r.seen : 0)}`).join(" · ");
-      md.title = rows.map(([p, r]) => `${platform(p)}: ${num(r.ready)} of ${num(r.seen)} devices seen in 30 days`
-        + (r.min == null ? " · no YO_MULTI_DEVICE_APP build set" : ` on build ${r.min} or newer`))
-        .concat("Gate: 80 % per platform before YO_MIN_APP is raised.").join("\n");
-    }
-    // OHTTP's share (#8): devices seen in 30 days that came inside OHTTP in that time, per platform.
-    const oh = $("ohttpshare");
-    oh.hidden = !hubNow?.ohttp;
-    if (!oh.hidden) {
-      const rows = Object.entries(h.ohttp);
-      const platform = p => p === "ios" ? "iOS" : "Android";
-      oh.textContent = "On OHTTP (30 d) · " + rows.map(([p, r]) =>
-        `${platform(p)} ${r.seen ? pctText(r.ohttp * 100 / r.seen) : "–"}`).join(" · ");
-      oh.title = rows.map(([p, r]) => `${platform(p)}: ${num(r.ohttp)} of ${num(r.seen)} devices seen in 30 days came via /v1/ohttp`)
-        .concat("Recorded by the hub at most once a day per device.").join("\n");
-    }
     if (!hubNow) {
       set("problem-n", "–");
       state("problem-dial", null);
@@ -2432,9 +2396,56 @@ if (document.body.classList.contains("login")) {
   const saved = (k, fallback, allowed) => { try { const v = localStorage.getItem(k); return allowed.includes(v) ? v : fallback; } catch { return fallback; } };
   const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
   let relPlat = saved("relPlat", "all", ["all", "ios", "android"]);
+  // Goals under the App widget, one chip each, coloured by progress toward 80 % (the gate); the details in the hover.
+  const PLATFORM = { ios: "iOS", android: "Android" };
+  const goalChips = (h) => {
+    const share = (a, b) => (b ? (100 * a) / b : null);
+    const tone = (p) => (p == null ? "" : p >= 80 ? "ok" : p >= 40 ? "mid" : "bad");
+    const chip = (label, progress, tip) => {
+      const c = el("button", `chip goal ${tone(progress)}`);
+      c.type = "button";
+      c.append(el("span", "dot"), label);
+      return hint(c, tip);
+    };
+    const chips = [];
+    if (h.multi_device) {
+      // Multi-device's gate (#4): phones seen in 30 days on a build with it (YO_MULTI_DEVICE_APP).
+      const rows = Object.entries(h.multi_device), shares = rows.map(([, r]) => (r.min == null ? null : share(r.ready, r.seen) ?? 0));
+      chips.push(chip("Multi-device " + shares.map((p) => (p == null ? "–" : pctText(p))).join(" / "),
+        shares.includes(null) ? null : Math.min(...shares), { head: "Multi-device ready (30 days)", rows: rows.flatMap(([p, r]) => [
+          { section: PLATFORM[p] }, { label: "Ready", value: `${num(r.ready)} of ${num(r.seen)} · ${r.min == null ? "–" : pctText(share(r.ready, r.seen) ?? 0)}` },
+          { label: "Build", value: r.min == null ? "not set" : `${r.min} or newer` }]),
+          note: "Gate: 80 % per platform (iOS / Android) before YO_MIN_APP is raised." }));
+    }
+    if (h.ohttp) {
+      // OHTTP's share (#8): phones seen in 30 days that came via /v1/ohttp in that time.
+      const rows = Object.entries(h.ohttp), all = rows.reduce((a, [, r]) => [a[0] + r.ohttp, a[1] + r.seen], [0, 0]);
+      const total = share(...all);
+      chips.push(chip("OHTTP " + (total == null ? "–" : pctText(total)), total, { head: "On OHTTP (30 days)", rows: [
+        ...rows.map(([p, r]) => ({ label: PLATFORM[p], value: `${num(r.ohttp)} of ${num(r.seen)} · ${r.seen ? pctText(share(r.ohttp, r.seen)) : "–"}` })),
+        { label: "All", value: `${num(all[0])} of ${num(all[1])}` }],
+        note: "Devices seen in 30 days whose requests came via /v1/ohttp, recorded by the hub at most once a day." }));
+    }
+    if (h.attestation) {
+      // Attestation (spec 4.2), measured only: accounts attested, of those with a verdict or seen without one.
+      const rows = Object.entries(h.attestation), sum = (k) => rows.reduce((a, [, r]) => a + r[k], 0);
+      const attested = sum("attested"), all = attested + sum("failed") + sum("unknown");
+      chips.push(chip("Attested " + num(attested), share(attested, all), { head: "Attested / failed / unknown", rows: rows.flatMap(([p, r]) => [
+        { section: PLATFORM[p] }, { label: "Attested / failed / unknown", value: `${num(r.attested)} / ${num(r.failed)} / ${num(r.unknown)}` },
+        ...[...Object.entries(r.reasons), ...Object.entries(r.levels)].map(([k, n]) => ({ label: k, value: num(n) })),
+        { label: "Last", value: r.last ? new Date(r.last).toLocaleString() : "none yet" }]),
+        note: "Unknown counts phone accounts seen within 48 hours without a verdict." }));
+    }
+    if (!chips.length) return null;
+    const row = el("div", "goals");
+    row.append(...chips);
+    return row;
+  };
   const relCard = (h) => {
     const card = relChart(h, relPlat, "App");
     card.querySelector("h3")?.children[0]?.after(pillOf([["all", "All"], ["ios", "iOS"], ["android", "Android"]], relPlat, (v) => { relPlat = v; save("relPlat", v); drawDetail(); }));
+    const goals = goalChips(h);
+    if (goals) card.append(goals);
     return [card];
   };
   const deviceRow = () => {

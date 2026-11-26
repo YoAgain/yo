@@ -1477,4 +1477,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .diag-still-note { color: #e67e22; }
 .diag-recent { color: #e67e22; font-weight: 700; }
 
-#attestation, #multidevice, #ohttpshare { font-size: .8rem; font-variant-numeric: tabular-nums; padding: .35rem 0; }
+/* Goals under the App widget: a chip each, its dot by progress toward 80 %. */
+.goals { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 2px; }
+.chip.goal { font-variant-numeric: tabular-nums; cursor: default; }
+.chip.goal.mid .dot { background: var(--warn); }

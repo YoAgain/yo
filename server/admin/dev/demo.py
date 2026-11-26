@@ -42,7 +42,7 @@ CREATE TABLE name_reserved (skeleton TEXT PRIMARY KEY, spelling TEXT NOT NULL, n
 CREATE TABLE account_device (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, device_key BLOB NOT NULL UNIQUE, auth_key BLOB NOT NULL,
     push_platform INTEGER NOT NULL, push_token BLOB NOT NULL, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
     app TEXT, registration_id INTEGER NOT NULL DEFAULT 0, number INTEGER NOT NULL DEFAULT 1,
-    prekey_max INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+    prekey_max INTEGER NOT NULL DEFAULT 0, ohttp_at INTEGER) WITHOUT ROWID;
 CREATE TABLE account_device_gone (id BLOB PRIMARY KEY, gone_at INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE account_prekey (device_id BLOB NOT NULL, kind INTEGER NOT NULL, id INTEGER NOT NULL, key BLOB NOT NULL,
     signature BLOB NOT NULL, PRIMARY KEY (device_id, kind, id)) WITHOUT ROWID;
@@ -219,6 +219,8 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             db.execute("INSERT INTO account_backup VALUES (?,?,?,?,?,?)", (uid, rid(rng), rid(rng, 120),
                        created + rng.randint(60_000, max(120_000, now - created)), rid(rng, 32), None))
         users.append(uid)
+    # OHTTP (#8): about a third of the devices came via /v1/ohttp lately (the hub's ohttp_at).
+    db.execute("UPDATE account_device SET ohttp_at = last_seen_at WHERE abs(random()) % 3 = 0")
     # Attestation verdicts (spec 4.2), measured since three days ago, from a generator of their own so the rest of
     # the made-up world stays as it was.
     at_rng, since = random.Random(611), now - 3 * DAY
