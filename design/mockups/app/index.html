@@ -154,12 +154,14 @@
       <button id="incoming">Stranger wants to Yo</button>
       <button id="friendyo">Anna Yos you</button>
       <button id="approve">Old device confirms link</button>
+      <button id="feedFriend">Scanner reads a friend code</button>
+      <button id="feedDevice">Scanner reads a device code</button>
       <button id="remoteRemove">Other device removes this one</button>
     </div>
     <p><button id="reset">Reset everything</button></p>
     <p><b>Sign-up:</b> taken <code>anna</code> <code>peter</code> <code>chris</code>; reserved <code>apple</code> <code>admin</code>. After Sign Up the app lands on the list.</p>
-    <p><b>Linking (§2.5):</b> turn on “Second device”. Right: Got Yo? Sign In › Link from Another Device shows a QR. Left: Settings › Account › Devices › Link a Device › scan. One confirming tap. At 16 devices the new one picks one to replace.</p>
-    <p><b>Settings (proposal):</b> Devices moved into Account; App Icon and Left-Handed grouped under Look; Sign Out in Account.</p>
+    <p><b>Linking (§2.5):</b> turn on “Second device”. Right: Got Yo? Sign In › Link from Another Device shows a QR. Left: Settings › Account › Security › Devices › Add Device › scan. One confirming tap. At 16 devices the new one picks one to replace.</p>
+    <p><b>Settings (proposal):</b> Devices, Recovery Key and Passkey live in Account › Security; one scanner (QR at the profile card, or Add Device) reads friend and device codes; App Icon and Left-Handed grouped under Look; Sign Out in Account.</p>
   </div>
 </div>
 
@@ -244,7 +246,7 @@ const KIND = {
   replace:['intro','pfull'], removed:['intro','pfull'],
   list:['list'], settings:['list','half'], account:['list','half'], appearance:['list','half'], blocked:['list','half'],
   devices:['list','full'], scan:['list','full'], linked:['list','full'], contacts:['list','full'], help:['list','full'],
-  rkey:['list','pfull'], code:['list','pfull'],
+  security:['list','half'], rkey:['list','pfull'], code:['list','pfull'],
 };
 
 function go(p, screen) { p.stack.push(p.screen); p.screen = screen; p.err = ''; render(p); }
@@ -352,7 +354,7 @@ S.list = p => {
 const chev = '<span class="ch"></span>';
 S.settings = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">Yodentity</div><div class="sbody">
   <div class="card"><div class="r" data-a="go" data-s="account" style="min-height:124px;align-items:flex-start;flex-direction:column;justify-content:center;gap:8px">
-    <div style="display:flex;align-items:center;gap:14px;width:100%"><span class="avatar" style="background:${avatarColor(a.name)}">${esc(a.name[0].toUpperCase())}</span>${a.passkey ? '' : '<span class="badge">1</span>'}<span style="flex:1"></span><span class="qrbtn" data-a="go" data-s="code">${svg('qr', 20, '#9b59b6')}</span>${chev}</div>
+    <div style="display:flex;align-items:center;gap:14px;width:100%"><span class="avatar" style="background:${avatarColor(a.name)}">${esc(a.name[0].toUpperCase())}</span>${a.passkey ? '' : '<span class="badge">1</span>'}<span style="flex:1"></span><span class="qrbtn" data-a="toScanTop">${svg('qr', 20, '#9b59b6')}</span>${chev}</div>
     <div class="yo" style="font-size:26px;color:#000">${esc(a.name)}</div></div></div>
   <div class="card"><div class="r" data-a="go" data-s="appearance">${tile('paint', '#9b59b6')}<span class="t">Look</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">About</span>${chev}</div>
@@ -365,12 +367,17 @@ S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Look
   <div class="foot">Left-Handed swaps the bars’ sides and moves Settings to the bottom right.</div></div>`;
 
 S.account = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">${backbtn()}<span class="yo" style="font:600 17px var(--sys)">${esc(a.name)}</span>&nbsp;<span style="width:8px;height:8px;border-radius:4px;background:var(--green)"></span></div><div class="sbody">
-  <div class="card"><div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Devices</span><span class="v">${a.devices.length}</span>${chev}</div>
-    <div class="r" data-a="go" data-s="rkey">${tile('shield', '#9b59b6')}<span class="t">Account Security</span>${a.passkey ? '<span style="color:var(--green)">✓</span>' : '<span class="badge">1</span>'}${chev}</div></div>
+  <div class="card"><div class="r" data-a="go" data-s="security">${tile('shield', '#9b59b6')}<span class="t">Security</span>${a.passkey ? '<span style="color:var(--green)">✓</span>' : '<span class="badge">1</span>'}${chev}</div></div>
   <div class="card"><div class="r" data-a="go" data-s="contacts">${tile('people', '#34c759')}<span class="t">Contacts</span>${chev}</div>
     <div class="r" data-a="go" data-s="blocked">${tile('hand', '#ff3b30')}<span class="t">Blocked</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="askSignOut">${tile('out', '#8e8e93')}<span class="t">Sign Out</span></div></div>
   <div class="foot">Leaving Yo for good? <a data-a="askDelete">Delete Your Account</a></div></div>`; };
+
+S.security = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">${backbtn()}Security</div><div class="sbody">
+  <div class="card"><div class="r" data-a="go" data-s="rkey">${tile('shield', '#9b59b6')}<span class="t">Recovery Key</span>${chev}</div>
+    <div class="r" data-a="passkey">${tile('person', '#34c759')}<span class="t">Passkey</span><span class="v">${p.busy === 'pk' ? '<span class="spin dark"></span>' : a.passkey ? 'On' : 'Set Up'}</span>${a.passkey ? '' : '<span class="badge">1</span>'}${chev}</div>
+    <div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Devices</span><span class="v">${a.devices.length}</span>${chev}</div></div>
+  <div class="foot">The recovery key or a passkey brings your account back on a new phone.</div></div>`; };
 
 S.blocked = p => `<div class="grab"></div><div class="shead">${backbtn()}Blocked</div><div class="sbody">
   <div class="card"><div class="r plain" data-a="toggleReq"><span class="t">Allow Yo Requests</span><span class="sw ${p.noReq ? '' : 'on'}"></span></div>
@@ -396,29 +403,30 @@ S.rkey = p => `<div class="shead">${xbtn()}</div><div class="sbody" style="displ
   <div class="ptext">Keep it safe. It brings your account back.</div>
   ${p.showKey ? `<div class="mono">${hub.account.key.match(/.{4}/g).join(' ')}</div>` : ''}
   <div style="flex:1"></div>
-  <button class="pill" data-a="saveKey" style="font-size:17px">${p.busy === 'key' ? '<span class="spin dark"></span>' : 'Save Recovery Key'}</button>
-  <div class="notlisted" data-a="showKey"><b style="font-size:13px">${p.showKey ? 'Hide Key' : 'Show Key'}</b></div>
-  <div class="notlisted" data-a="passkey" style="margin-top:0">${p.busy === 'pk' ? '<span class="spin"></span>' : hub.account.passkey ? 'Passkey: on' : '<b style="font-size:13px">Set Up a Passkey</b>'}</div></div>`;
+  <button class="pill" data-a="saveKey" style="font-size:17px">${p.busy === 'key' ? '<span class="spin dark"></span>' : (p.keySaved ? 'Saved ✓' : 'Save Recovery Key')}</button>
+  <div class="notlisted" data-a="showKey"><b style="font-size:13px">${p.showKey ? 'Hide Key' : 'Show Key'}</b></div></div>`;
 
 const devTile = d => tile(/Android|iOS|iPadOS/.test(d.platform) ? 'phone' : /Linux/.test(d.platform) ? 'term' : 'laptop', /Android/.test(d.platform) ? '#34c759' : /Linux/.test(d.platform) ? '#34495e' : '#007aff');
-S.devices = p => { const a = hub.account; return `<div class="shead">${xbtn()}Devices</div><div class="sbody">
+S.devices = p => { const a = hub.account; return `<div class="shead">${backbtn()}Devices</div><div class="sbody">
+  <div class="card"><div class="r" data-a="toScan">${tile('qr', '#9b59b6')}<span class="t">Add Device</span>${chev}</div></div>
   <div class="cap">${a.devices.length} of 16 Devices</div>
   <div class="card">${a.devices.map(d => `<div class="r ${d.id === p.deviceId ? 'static' : ''}" ${d.id === p.deviceId ? '' : `data-a="askRemove" data-id="${d.id}"`}>
      ${devTile(d)}<span class="t">${esc(d.name)}<small>${d.id === p.deviceId ? 'This Device' : `${esc(d.platform)} · last seen ${esc(d.last)}`}</small></span>
      ${d.id === p.deviceId ? '' : '<span style="color:var(--red);font-size:15px">Remove</span>'}</div>`).join('')}</div>
-  <div class="card"><div class="r" data-a="toScan">${tile('qr', '#9b59b6')}<span class="t">Link a Device</span>${chev}</div></div>
   <div class="foot">A new phone or computer shows a code under Got Yo? Sign In; scan it here.${a.devices.length >= 16 ? ' At 16 devices the new one picks which to replace.' : ''}</div></div>`; };
 
-S.scan = p => `<div class="shead">${backbtn()}Link a Device</div>
-  <div class="cam"><div class="finder">${p.busy === 'scan' ? '<span class="spin"></span>' : 'Point the camera at the code on your new device'}</div>
+S.scan = p => `<div class="shead">${backbtn()}Scan</div>
+  <div class="cam"><div class="finder">${p.busy === 'scan' ? '<span class="spin"></span>' : 'Point the camera at a friend’s code or a new device’s code'}</div>
   <div style="font-size:14px;opacity:.8">${esc(p.err)}</div>
-  <button class="pill" data-a="doScan" style="font-size:17px">Scan Code (simulated)</button>
+  <button class="pill" data-a="doScan" style="font-size:17px">Scan Device Code (simulated)</button>
+  <button class="pill ghost" data-a="scanFriend" style="font-size:17px">Scan Friend Code (simulated)</button>
+  <button class="pill ghost" data-a="go" data-s="code" style="font-size:17px">My Code</button>
   <button class="pill ghost" data-a="pasteOpen" style="font-size:17px">Paste Code Instead</button>
   ${p.pasting ? `<textarea class="kfield" data-in="paste" placeholder="yo-link:…">${esc(p.paste || '')}</textarea><button class="pill" data-a="pasteGo" style="font-size:17px">Link</button>` : ''}</div>`;
 
 S.linked = p => `<div class="shead">${xbtn('toList')}</div><div class="sbody" style="text-align:center;padding-top:120px">
   <div style="font-size:64px;color:var(--green)">✓</div><h2 style="font-size:22px">${esc(p.linkedName)} is linked</h2>
-  <p style="color:var(--sub)">It now has your friends and Yos. You can remove it any time in Account › Devices.</p>
+  <p style="color:var(--sub)">It now has your friends and Yos. You can remove it any time in Account › Security › Devices.</p>
   <div class="card"><div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Show Devices</span>${chev}</div></div></div>`;
 
 /* ---------- render ---------- */
@@ -443,8 +451,8 @@ function overlay(p) {
   const o = p.overlay; if (!o) return '';
   if (o.type === 'alert') return `<div class="alert"><div><h4>${o.title}</h4><p>${o.text}</p><div class="ab"><button data-a="closeOverlay">Cancel</button><button class="${o.red ? 'red' : ''}" data-a="${o.act}">${o.ok}</button></div></div></div>`;
   if (o.type === 'confirmLink') return `<div class="alert"><div style="text-align:center">
-    <div style="margin:4px 0 6px">${svg('phone', 40, '#9b59b6')}</div><h4>Link This Device?</h4>
-    <p><b>It gets access to your account</b>: your name, friends and Yos. Only continue if the code is on a device in front of you.</p>
+    <div style="margin:4px 0 6px">${svg('phone', 40, '#9b59b6')}</div><h4>Link this device?</h4>
+    <p><b>This device gets access to your account</b>: your name, friends and Yos. Only continue if the code is on a device in front of you.</p>
     ${p.err ? `<p style="color:var(--red)">${esc(p.err)}</p>` : ''}
     <div class="ab"><button data-a="closeOverlay">Cancel</button><button data-a="confirmLink" style="background:var(--amethyst);color:#fff">${p.busy === 'confirm' ? '<span class="spin"></span>' : 'Link'}</button></div></div></div>`;
   return '';
@@ -620,7 +628,7 @@ const A = {
   toIntro: p => home(p, 'intro'),
   toList: p => home(p, 'list'),
   toSettings: p => go(p, 'settings'),
-  toDevices: p => { p.banner = null; if (p.screen !== 'devices') { p.stack = ['list', 'settings', 'account']; p.screen = 'devices'; render(p); } },
+  toDevices: p => { p.banner = null; if (p.screen !== 'devices') { p.stack = ['list', 'settings', 'account', 'security']; p.screen = 'devices'; render(p); } },
   closeBanner: p => { p.banner = null; render(p); },
   go: (p, e) => { event?.stopPropagation?.(); go(p, e.dataset.s); },
   toast: (p, e) => toast(p, e.dataset.t),
@@ -628,7 +636,10 @@ const A = {
   toggleReq: p => { p.noReq = !p.noReq; render(p); },
   icon: (p, e) => { p.icon = e.dataset.n; render(p); },
   showKey: p => { p.showKey = !p.showKey; render(p); },
-  saveKey: p => toast(p, 'Saved to iCloud Keychain'),
+  saveKey: p => { p.keySaved = true; toast(p, 'Saved to iCloud Keychain'); },
+  toScanTop: p => { event?.stopPropagation?.(); A.toScan(p); },
+  scanFriend: p => { p.overlay = { type:'alert', title:'Add ANNA?', text:'anna can Yo you and you can Yo anna.', ok:'Add', act:'addScanned' }; render(p); },
+  addScanned: p => { p.overlay = null; home(p, 'list'); toast(p, 'anna added'); },
   askSignOut: p => { p.overlay = { type:'alert', title:'Sign Out?', text:hub.account.passkey ? 'Your other devices stay signed in.' : 'Your account isn’t secured. Set up recovery methods to access your account.', ok:'Sign Out', act:'signOut', red:true }; render(p); },
   signOut: p => { hub.account.devices = hub.account.devices.filter(d => d.id !== p.deviceId); syncSlider(); p.deviceId = null; p.overlay = null; resetSignup(p); home(p, 'intro'); },
   askDelete: p => { p.overlay = { type:'alert', title:'Delete Your Account?', text:'Can’t be undone. Friends can’t reach you anymore and all your devices are signed out.', ok:'Delete', act:'doDelete', red:true }; render(p); },
@@ -728,10 +739,12 @@ $('approve').addEventListener('click', () => { const w = waitingPhone(); const p
   if (!w) return toast(p, 'No device is showing a link code');
   if (!hub.account) { newAccount('chris'); for (let i = 0; i < +$('ndev').value; i++) addDevice(null, ...PLATFORMS[i % PLATFORMS.length]); }
   hub.links[w.link.id].bundle = { by:'simulated' }; newDeviceReceives(w); });
+const feed = k => { const p = phones.A; if (p.screen !== 'scan') return toast(p, 'Open the scanner first'); k === 'f' ? A.scanFriend(p) : A.doScan(p); };
+$('feedFriend').addEventListener('click', () => feed('f')); $('feedDevice').addEventListener('click', () => feed('d'));
 $('remoteRemove').addEventListener('click', () => { const p = Object.values(phones).find(q => q.deviceId); if (!p) return toast(phones.A, 'No signed-in device'); hub.account.devices = hub.account.devices.filter(d => d.id !== p.deviceId); syncSlider(); signedOut(p); });
 function resetAll() {
   Object.values(phones).forEach(p => clearInterval(p.timer));
-  freshHub(); for (const k in phones) delete phones[k]; $('A').innerHTML = ''; $('B').innerHTML = ''; delete $('A').dataset.screen; delete $('B').dataset.screen; delete $('A').dataset.wired; delete $('B').dataset.wired;
+  freshHub(); for (const k in phones) delete phones[k]; $('A').innerHTML = ''; $('B').innerHTML = ''; delete $('A').dataset.screen; delete $('B').dataset.screen;
   $('off').checked = false; $('ndev').value = 1; $('nd').textContent = 1; setSecond(false);
   wire(Phone('A')); render(phones.A);
 }
@@ -741,12 +754,13 @@ $('reset').addEventListener('click', () => { history.replaceState(null, '', loca
 const JUMPS = [
   ['Start', [['signup','Sign-up'],['signin','Sign In'],['recover','Sign In with a key',1]]],
   ['List', [['list','List'],['list-new','List, just signed up',1],['adding','Add a friend',1],['requests','Request (Yo / No)',1],['yos','Yos waiting (! Yo 3)',1],['banner','“New device linked”',1]]],
-  ['Settings', [['settings','Settings'],['account','Account',1],['contacts','Contacts',2],['blocked','Blocked',2],['devices','Devices',2],['rkey','Account Security',2],['code','Your Code',1],['appearance','Look',1],['lefthanded','Left-Handed on',2],['help','Help & About',1],['signout','Sign Out?',1],['delete','Delete Your Account?',1]]],
-  ['Devices & Linking (§2.5)', [['scan','Old device: scan',1],['confirm','Old device: confirm',1],['linked','Old device: linked',1],['linkqr','New device: QR',1],['link2','Both phones linking',1],['replace','16-device limit',1],['removed','Removed elsewhere',1]]],
+  ['Settings', [['settings','Settings'],['account','Account',1],['security','Security',2],['rkey','Recovery Key',3],['showkey','Show Key',3],['savedkey','Save Recovery Key (done)',3],['passkey','Set Up a Passkey',3],['devices','Devices',3],['scan','Add Device (scanner)',3],['contacts','Contacts',2],['blocked','Blocked',2],['signout','Sign Out?',2],['delete','Delete Your Account?',2],['appearance','Look',1],['lefthanded','Left-Handed on',2],['help','About',1],['feedback','Feedback',1]]],
+  ['Scanner', [['scanqr','Scan (QR at profile)',1],['addfriend','Friend code: Add ANNA?',1],['code','My Code',1]]],
+  ['Devices & Linking (§2.5)', [['confirm','Device code: Link this device?',1],['linked','Old device: linked',1],['linkqr','New device: QR',1],['link2','Both phones linking',1],['replace','16-device limit',1],['removed','Removed elsewhere',1]]],
 ];
 function side() {
   $('side').innerHTML = JUMPS.map(([h, items]) => `<h2>${h}</h2>` + items.map(([k, t, sub]) =>
-    `<a href="#${k}" data-j="${k}" class="${sub ? 'sub' : ''}" style="${sub === 2 ? 'padding-left:36px' : ''}">${t}</a>`).join('')).join('');
+    `<a href="#${k}" data-j="${k}" class="${sub ? 'sub' : ''}" style="${sub > 1 ? `padding-left:${18 * sub}px` : ''}">${t}</a>`).join('')).join('');
 }
 let current = '';
 function markSide() { document.querySelectorAll('.side a').forEach(a => a.classList.toggle('on', a.dataset.j === current)); }
@@ -766,7 +780,7 @@ function jump(h) {
     case 'replace': signedIn(phones.A, { ndev:16 }); a.deviceId = null; a.pick = null; return at('replace', []);
     case 'removed': return at('removed', []);
     case 'link2': { signedIn(a); $('delay').value = 50; setSecond(true); const b = phones.B; b.stack = ['intro']; b.screen = 'signin';
-      return startLink(b).then(() => { a.stack = ['list','settings','account','devices']; a.screen = 'scan'; render(a); }); }
+      return startLink(b).then(() => { a.stack = ['list','settings','account','security','devices']; a.screen = 'scan'; render(a); }); }
   }
   signedIn(a, { friends: h === 'list-new' ? 'fresh' : 'demo', ndev: h === 'list-new' ? 1 : 4 });
   switch (h) {
@@ -776,14 +790,24 @@ function jump(h) {
     case 'yos': a.friends[0].count = 3; a.friends[0].bang = true; return at('list', []);
     case 'banner': a.banner = 'New device linked: iPhone 13'; return at('list', []);
     case 'settings': return at('settings', ['list']);
-    case 'account': case 'appearance': case 'help': case 'code': return at(h, ['list', 'settings']);
+    case 'account': case 'appearance': case 'help': return at(h, ['list', 'settings']);
+    case 'code': return at('code', ['list', 'settings', 'scan']);
+    case 'feedback': at('settings', ['list']); return toast(a, 'Send Feedback opens the support chat');
+    case 'security': return at('security', ['list', 'settings', 'account']);
+    case 'rkey': return at('rkey', ['list', 'settings', 'account', 'security']);
+    case 'showkey': a.showKey = true; return at('rkey', ['list', 'settings', 'account', 'security']);
+    case 'savedkey': a.keySaved = true; return at('rkey', ['list', 'settings', 'account', 'security']);
+    case 'passkey': $('delay').value = 3000; at('security', ['list', 'settings', 'account']); return A.passkey(a);
+    case 'devices': return at('devices', ['list', 'settings', 'account', 'security']);
+    case 'scanqr': return at('scan', ['list', 'settings']);
+    case 'addfriend': at('scan', ['list', 'settings']); return A.scanFriend(a);
     case 'lefthanded': a.left = true; return at('appearance', ['list', 'settings']);
-    case 'contacts': case 'blocked': case 'devices': case 'rkey': return at(h, ['list', 'settings', 'account']);
+    case 'contacts': case 'blocked': return at(h, ['list', 'settings', 'account']);
     case 'signout': at('account', ['list', 'settings']); return A.askSignOut(a);
     case 'delete': at('account', ['list', 'settings']); return A.askDelete(a);
-    case 'scan': return at('scan', ['list', 'settings', 'account', 'devices']);
-    case 'confirm': { $('delay').value = 50; at('scan', ['list', 'settings', 'account', 'devices']); const id = rnd(26); hub.links[id] = { from:null, created:Date.now() }; return oldDeviceScanned(a, `yo-link:${id}.${rnd(43)}`); }
-    case 'linked': a.linkedName = 'iPhone 13'; return at('linked', ['list', 'settings', 'account', 'devices']);
+    case 'scan': return at('scan', ['list', 'settings', 'account', 'security', 'devices']);
+    case 'confirm': { $('delay').value = 50; at('scan', ['list', 'settings', 'account', 'security', 'devices']); const id = rnd(26); hub.links[id] = { from:null, created:Date.now() }; return oldDeviceScanned(a, `yo-link:${id}.${rnd(43)}`); }
+    case 'linked': a.linkedName = 'iPhone 13'; return at('linked', ['list', 'settings', 'account', 'security', 'devices']);
   }
 }
 side();
