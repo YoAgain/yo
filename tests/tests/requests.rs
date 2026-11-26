@@ -1,4 +1,4 @@
-//! Contact requests (spec 4.10): what comes from someone not yet a contact waits as a request, signed by its sender;
+//! Contact requests (spec 3.3): what comes from someone not yet a contact waits as a request, signed by its sender;
 //! a contact shows the account's profile key to the hub instead (sealed sender). The hub takes requests only as the
 //! account allows and only so many per sender, in buckets that refill evenly.
 
@@ -6,7 +6,7 @@ use std::sync::Arc;
 use yo_core::{Client, Content, Event};
 use yo_hub::config::Config;
 use yo_tests::{random_u64, register, user_id, username, Fault, Http, TestHub};
-use yo_wire::api;
+use yoip::net::api;
 
 /// An account: its client, its transport, its username.
 type Account = (Client, Arc<Http>, String);
@@ -172,8 +172,12 @@ fn kinds(of: &Http, to: &Client) -> (usize, usize) {
     let to_them = || recorded.iter().filter(|(_, p, _, _)| *p == path);
     let has = |h: &[(String, String)], name: &str| h.iter().any(|(n, _)| n == name);
     (
-        to_them().filter(|(_, _, h, _)| has(h, yo_wire::request::HEADER_DEVICE) && !has(h, api::HEADER_ACCESS)).count(),
-        to_them().filter(|(_, _, h, _)| has(h, api::HEADER_ACCESS) && !has(h, yo_wire::request::HEADER_DEVICE)).count(),
+        to_them()
+            .filter(|(_, _, h, _)| has(h, yoip::net::request::HEADER_DEVICE) && !has(h, api::HEADER_ACCESS))
+            .count(),
+        to_them()
+            .filter(|(_, _, h, _)| has(h, api::HEADER_ACCESS) && !has(h, yoip::net::request::HEADER_DEVICE))
+            .count(),
     )
 }
 
@@ -231,7 +235,7 @@ fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
     assert_eq!(yos(&d.sync(0).unwrap(), &s), 0);
 }
 
-/// The request limits are buckets that refill evenly (spec 4.10): past them `429` with `Retry-After`, for that
+/// The request limits are buckets that refill evenly (spec 3.3): past them `429` with `Retry-After`, for that
 /// recipient only; after the wait the rest goes, and a key that comes lets it all go at once, as a contact's.
 #[test]
 fn a_request_past_its_bucket_waits_its_retry_after_and_holds_no_one_else() {
@@ -382,7 +386,7 @@ fn an_invite_to_a_group_from_a_stranger_is_a_request() {
     assert_eq!((c.waiting(), c.dropped()), (0, 0), "{:?}", c.drop_reasons());
 }
 
-/// Spec 4.10: what a contact shows the hub is Signal's access key (16 bytes), derived from the recipient's profile key;
+/// Spec 3.3: what a contact shows the hub is Signal's access key (16 bytes), derived from the recipient's profile key;
 /// a block makes a new profile key, so a new access key, and the old one makes a delivery no contact's any more.
 #[test]
 fn the_access_key_comes_from_the_profile_key_and_a_block_replaces_it() {
@@ -392,7 +396,7 @@ fn the_access_key_comes_from_the_profile_key_and_a_block_replaces_it() {
     friends(&mut a, &mut b, &b_name);
     let shown = yo_tests::access_shown(&ha, b.user_id()).expect("a contact's delivery");
     assert_eq!(Some(shown.clone()), b.access_key_for_tests());
-    assert_eq!(yo_wire::unb64(&shown).unwrap().len(), api::ACCESS_KEY_LEN);
+    assert_eq!(yoip::unb64(&shown).unwrap().len(), api::ACCESS_KEY_LEN);
     // B blocks someone else: a new profile key, a new access key; unsigned with the old one, nothing is taken.
     let (c, _, _) = account(&hub, "Cleo");
     b.set_blocked(c.user_id(), true).unwrap();
@@ -403,7 +407,7 @@ fn the_access_key_comes_from_the_profile_key_and_a_block_replaces_it() {
     assert_eq!(yo_tests::deliver_raw_with(&hub.url(), b.user_id(), Some(&new), envelope), 202);
 }
 
-/// A contact that missed a new key heals with its first identified Yo (spec 4.10): A blocks C, its new key never
+/// A contact that missed a new key heals with its first identified Yo (spec 3.3): A blocks C, its new key never
 /// reaches B, B sends A 15 Yos with a request bucket of 3: the first goes identified (a request), A sends its key
 /// back at once, the rest go sealed. All arrive.
 #[test]
@@ -444,7 +448,7 @@ fn a_contact_that_missed_the_new_key_heals_with_its_first_identified_yo() {
     assert!(sealed_now - sealed >= 12, "the rest sealed: {}", sealed_now - sealed);
 }
 
-/// A key missed comes with the next Yo too (spec 4.10, as Signal's every message carries it).
+/// A key missed comes with the next Yo too (spec 3.3, as Signal's every message carries it).
 #[test]
 fn a_yo_carries_the_profile_key() {
     let hub = TestHub::start();
@@ -462,7 +466,7 @@ fn a_yo_carries_the_profile_key() {
     assert_eq!(yos(&a.sync(0).unwrap(), &b), 1);
 }
 
-/// An unblock gives the key made at the block (spec 4.10): what the unblocked one sends is a contact's again.
+/// An unblock gives the key made at the block (spec 3.3): what the unblocked one sends is a contact's again.
 #[test]
 fn an_unblocked_contact_gets_the_current_key() {
     let hub = TestHub::start();
@@ -582,7 +586,7 @@ fn a_recoverable_access_refusal_keeps_the_outbox_in_order() {
     assert_eq!(received, ["first", "second"]);
 }
 
-/// Spec 4.9, 6.9: a group accepted before the hub has this account's commitment is joined in the account's storage
+/// Spec 3.4, 4.3: a group accepted before the hub has this account's commitment is joined in the account's storage
 /// at once, and its own entry gets the profile key once the commitment is there: on this phone, and on the next one
 /// (the group from the storage) when this one never got to it.
 #[test]
@@ -601,7 +605,7 @@ fn a_group_accepted_before_the_commitment_is_stored_and_keyed_later() {
     assert!(!group(&b).keyed);
     b.write_storage().unwrap();
     let response = b.signed_for_tests("GET", api::STORAGE, &[]).unwrap();
-    let stored: api::Storage = yo_wire::decode(&response.body).unwrap();
+    let stored: api::Storage = yoip::decode(&response.body).unwrap();
     let user = yo_core::state::unhex(b.user_id()).unwrap();
     let storage = yo_core::storage::open(&b.account_secret(), &user, stored.data.as_slice()).unwrap();
     assert!(storage.groups[&id].accepted.value, "joined in the storage");

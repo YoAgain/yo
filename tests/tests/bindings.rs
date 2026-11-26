@@ -325,7 +325,7 @@ fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
     let gate = Arc::new(Gate {
         app: App(Http::new(hub.url())),
         closed: gate_closed.clone(),
-        path: yo_wire::api::deliver_path(&b_user),
+        path: yoip::net::api::deliver_path(&b_user),
         held: Mutex::new(held),
         release: Mutex::new(released),
     });
@@ -642,7 +642,7 @@ struct Watch {
 
 impl HttpTransport for Watch {
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
-        if method == "POST" && path.starts_with("/v1/inbox/") && path != yo_wire::api::INBOX_ACK {
+        if method == "POST" && path.starts_with("/v1/inbox/") && path != yoip::net::api::INBOX_ACK {
             if self.offline.load(std::sync::atomic::Ordering::Relaxed) {
                 return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()) };
             }
@@ -1298,7 +1298,7 @@ fn warm_app_send_is_one_request_without_an_active_inbox_poll() {
     let sent = http.sent.lock().unwrap();
     assert_eq!(sent.len(), 1, "no catch-up, lookup, ack or prekey refill on send");
     assert_eq!(sent[0].0, "POST");
-    assert_eq!(sent[0].1, yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())));
+    assert_eq!(sent[0].1, yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id())));
 }
 
 /// The app's transport losing the hub's answer to a registration (the hub took it) and every request after it, until
@@ -1314,7 +1314,7 @@ impl HttpTransport for LostAnswer {
         if !self.down.load(std::sync::atomic::Ordering::Relaxed) {
             return self.app.request(method, path, headers, body);
         }
-        if path == yo_wire::api::REGISTER {
+        if path == yoip::net::api::REGISTER {
             self.app.request(method, path, headers, body);
         }
         lost()

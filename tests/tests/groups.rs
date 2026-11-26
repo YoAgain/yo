@@ -280,8 +280,8 @@ fn a_new_phone_gets_its_groups_back_before_any_yo() {
 
 /// Deliveries `of` sent to `to` signed by its device: requests (spec 4.10), counted in the hub's buckets.
 fn signed_to(of: &Http, to: &Client) -> usize {
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to.user_id()));
-    let signed = |hs: &[(String, String)]| hs.iter().any(|(n, _)| n == yo_wire::request::HEADER_DEVICE);
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(to.user_id()));
+    let signed = |hs: &[(String, String)]| hs.iter().any(|(n, _)| n == yoip::net::request::HEADER_DEVICE);
     of.recorded.lock().unwrap().iter().filter(|(_, p, hs, _)| *p == path && signed(hs)).count()
 }
 
@@ -388,7 +388,7 @@ fn a_burst_into_a_group_costs_its_deliveries_alone() {
         }
     }
     let paths: Vec<String> = ha.sent.lock().unwrap()[sent_before..].iter().map(|(_, p, _)| p.clone()).collect();
-    let to = |x: &Client| yo_wire::api::deliver_path(&yo_tests::user_id(x.user_id()));
+    let to = |x: &Client| yoip::net::api::deliver_path(&yo_tests::user_id(x.user_id()));
     assert!(paths.iter().all(|p| *p == to(&b) || *p == to(&c)), "deliveries only: {paths:?}");
     assert_eq!(paths.len(), 2 * N, "one per member and Yo");
     assert_eq!(a.waiting(), 0);
@@ -456,10 +456,10 @@ fn a_commitment_the_hub_lacks_is_told_again_and_not_asked_for_after_every_read()
     let told: usize =
         db.query_row("SELECT count(*) FROM profile_commitments WHERE user_id = ?1", [&user], |row| row.get(0)).unwrap();
     assert_eq!(told, 1, "the commitment is at the hub again");
-    let before = asked(&https[1], yo_wire::api::GROUP_CREDENTIAL);
+    let before = asked(&https[1], yoip::net::api::GROUP_CREDENTIAL);
     assert!(before <= 2, "its own credential asked for {before} times");
     rounds(&mut c, 10);
-    assert_eq!(asked(&https[1], yo_wire::api::GROUP_CREDENTIAL), before, "keyed: not asked for again");
+    assert_eq!(asked(&https[1], yoip::net::api::GROUP_CREDENTIAL), before, "keyed: not asked for again");
     // And the group works for it: Ann's Yo reaches the bot.
     a.send_group(&id, Content::Yo).unwrap();
     assert_eq!(group_yos(&take(&mut c)), [(id.clone(), a.user_id().to_owned())]);
@@ -480,10 +480,10 @@ fn an_own_credential_refused_for_good_is_asked_for_after_a_pause_only() {
     let (id, _) = a.create_group("BOTS", &[c.user_id().to_owned()]).unwrap();
     take(&mut c);
     for _ in 0..200 {
-        https[1].fault(yo_wire::api::GROUP_CREDENTIAL, yo_tests::Fault::Answer(404));
+        https[1].fault(yoip::net::api::GROUP_CREDENTIAL, yo_tests::Fault::Answer(404));
     }
-    let credential = |h: &Http| asked(h, yo_wire::api::GROUP_CREDENTIAL);
-    let access = |h: &Http| asked(h, yo_wire::api::ACCESS_KEY);
+    let credential = |h: &Http| asked(h, yoip::net::api::GROUP_CREDENTIAL);
+    let access = |h: &Http| asked(h, yoip::net::api::ACCESS_KEY);
     let (asked_before, told_before) = (credential(&https[1]), access(&https[1]));
     c.accept_group(&id).unwrap();
     rounds(&mut c, 20);
@@ -546,17 +546,18 @@ fn group_requests_name_no_account() {
     assert_eq!(group_yos(&take(&mut c)), [(id.clone(), b.user_id().to_owned())]);
     c.leave_group(&id).unwrap();
     a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
-    let is_group =
-        |path: &str| path.starts_with(&format!("{}/", yo_wire::api::GROUPS)) || path == yo_wire::api::GROUP_CREDENTIAL;
+    let is_group = |path: &str| {
+        path.starts_with(&format!("{}/", yoip::net::api::GROUPS)) || path == yoip::net::api::GROUP_CREDENTIAL
+    };
     let mut groups = 0;
     for http in &https {
         for (method, path, _) in http.sent.lock().unwrap().iter().filter(|(_, p, _)| is_group(p)) {
             groups += 1;
-            assert!(yo_wire::api::anonymous(method, path), "{method} {path} on the anonymous connection");
+            assert!(yoip::net::api::anonymous(method, path), "{method} {path} on the anonymous connection");
         }
         // Signed requests (those with headers) are recorded: none is a group's.
         for (method, path, headers, _) in http.recorded.lock().unwrap().iter().filter(|(_, p, _, _)| is_group(p)) {
-            let signed = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(yo_wire::request::HEADER_DEVICE));
+            let signed = headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(yoip::net::request::HEADER_DEVICE));
             assert!(!signed, "{method} {path} signed");
         }
     }

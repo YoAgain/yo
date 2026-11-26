@@ -120,7 +120,7 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
     if saved { StateChanged.post() }
   }
 
-  /// The account comes back by its backup (spec 7), never by an old copy of the state.
+  /// The account comes back by its backup (spec 2.4), never by an old copy of the state.
   static func excludeFromBackup(_ url: URL) {
     var url = url
     var values = URLResourceValues()

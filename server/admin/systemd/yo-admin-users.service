@@ -1,0 +1,38 @@
+[Unit]
+Description=Yo admin page: the users of both hubs
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/yo/admin.env
+ExecStart=/usr/bin/python3 -I /opt/yo/admin/users.py
+# users.json names the users: readable by the admin page (group yo-admin) only.
+Group=yo-admin
+RuntimeDirectory=yo-admin
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0027
+RestrictSUIDSGID=yes
+ProtectProc=invisible
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RemoveIPC=yes
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/private/yo /var/lib/private/yo-dev
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service

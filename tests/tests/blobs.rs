@@ -7,8 +7,8 @@ use yo_core::media::{self, Media};
 use yo_core::{Client, Error};
 use yo_hub::config::Config;
 use yo_tests::{random_u64, register, username, Http, TestHub};
-use yo_wire::api;
-use yo_wire::limits::MAX_BLOB_LEN;
+use yoip::net::api;
+use yoip::net::limits::MAX_BLOB_LEN;
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
 
@@ -166,7 +166,7 @@ fn an_upload_must_be_signed_whole_and_once() {
     let (mut alice, http) = someone(&hub);
     let (media, sealed) = media::seal(&noise(5000), 10, 10).unwrap();
     let path = api::blob_put_path(&media.id, 1);
-    let hash = vec![(api::HEADER_BODY_HASH.to_string(), yo_wire::b64(&media.sha256))];
+    let hash = vec![(api::HEADER_BODY_HASH.to_string(), yoip::b64(&media.sha256))];
     // Checked before anything else: a length (`411` without, sent chunked), a tag at least (`400`), fetches 1 to 64
     // (a group's members while each has one device), then the signature (`401` unsigned).
     assert_eq!(refused_by_head(&hub, &path, &hash, None), 411);

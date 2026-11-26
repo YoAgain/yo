@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Rust core (core/bindings) for the iPhone and its Swift bindings, into YoApp/build/core (ignored):
+# Builds the Rust core (app/core/bindings) for the iPhone and its Swift bindings, into YoApp/build/core (ignored):
 #   yoFFI.xcframework   libyo.a for arm64 iOS with yoFFI.h and its module map (Package.swift: binary target yoFFI)
 #   swift/yo.swift      UniFFI's Swift side (Package.swift: target YoCore)
 # Runs with the host's rustup (the toolchain of rust-toolchain.toml, plus `rustup target add aarch64-apple-ios`):

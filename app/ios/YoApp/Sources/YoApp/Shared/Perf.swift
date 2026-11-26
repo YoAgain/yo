@@ -1,4 +1,4 @@
-// Timings (../../TESTING.md, "Speed"): with YO_PERF each mark is a line in perf.log in the temporary folder
+// Timings (README.md, iOS): with YO_PERF each mark is a line in perf.log in the temporary folder
 // (YO_PERF=stderr, =syslog elsewhere): CACurrentMediaTime seconds, wall-clock ms (to compare across processes), what.
 // Without YO_PERF nothing is written or kept.
 import Foundation

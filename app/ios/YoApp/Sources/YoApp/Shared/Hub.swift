@@ -1,4 +1,4 @@
-// The hub through the Rust core (spec 6): which hub, HTTP for the core, the state file and its key. Every core call
+// The hub through the Rust core (spec 4): which hub, HTTP for the core, the state file and its key. Every core call
 // blocks (the core does one at a time): `Hub.run` takes it off the main actor.
 import Foundation
 import Observation
@@ -26,14 +26,14 @@ enum Hub {
   }
   static var transport: HubTransport { HubTransport(base: url) }
 
-  /// Keys each hub signs key-handing answers with (spec 6.10, `yo-hub hub-key public`): the one in use and an offline
+  /// Keys each hub signs key-handing answers with (spec 4.1, `yo-hub hub-key public`): the one in use and an offline
   /// spare, so a replaced hub key needs no app update. A hub with none here is not checked.
   static let keys: [String: [String]] = [
     "hub.justyo.app": ["X7-jqvmZLam-Oh_4VKIB2ozPLUACspOZ2K09v5R5yyY", "NJRBNxJ12bZa1JK8fCLCGFTgM1oJ658mrwKYCdgbmHY"],
     "dev.justyo.app": ["LPiW1TOvv_ricbn7bXmS_fNdVbgtEw_3o7OdelvEdVo", "nFQuDMd-2Ueoec6oYG-Ty7lHQELq1OHs4TVODmPmryg"],
   ]
 
-  /// Sender-certificate trust roots (spec 6.1): in use and an offline spare. A hub with none fails closed: no sealed
+  /// Sender-certificate trust roots (spec 4.1): in use and an offline spare. A hub with none fails closed: no sealed
   /// Yo opens and every Yo goes identified.
   static let trustRoots: [String: [String]] = [
     "hub.justyo.app": [
@@ -46,7 +46,7 @@ enum Hub {
     ],
   ]
 
-  /// zkgroup public params (spec 4.9). A hub with none fails closed: no groups.
+  /// zkgroup public params (spec 3.4). A hub with none fails closed: no groups.
   static let zkParams: [String: String] = [
     // live (`yo-hub zk public`; the secret in 1Password, Yo · Server secrets)
     "hub.justyo.app":
@@ -74,7 +74,7 @@ enum Hub {
     Diagnostics.attempt({ try client.setHubKeys(keys: pinned) })
   }
 
-  /// This hub's keys the app pins (spec 6.10): its signed answers (lookups, rosters, the backup's fetch) are taken
+  /// This hub's keys the app pins (spec 4.1): its signed answers (lookups, rosters, the backup's fetch) are taken
   /// only when one of them signed; none for a hub not listed.
   static var hubKeys: [Data] {
     guard let host = url.host(), let texts = keys[host] else { return [] }
@@ -97,7 +97,7 @@ enum Hub {
 
   private static let queue = DispatchQueue(label: "app.justyo.hub", qos: .userInitiated, attributes: .concurrent)
 
-  /// The user id's 32 hex digits as 16 bytes (a passkey's user handle, the backup's id, spec 7).
+  /// The user id's 32 hex digits as 16 bytes (a passkey's user handle, the backup's id, spec 2.4).
   static func bytes(_ id: String) -> Data? {
     let digits = Array(id.utf8)
     guard digits.count == 32 else { return nil }
@@ -110,7 +110,7 @@ enum Hub {
   }
 }
 
-/// The `Yo-App` header (spec 6.3), and whether the hub said this build is too old (426).
+/// The `Yo-App` header (spec 4.1), and whether the hub said this build is too old (426).
 @MainActor @Observable
 final class AppUpdate {
   static let shared = AppUpdate()
@@ -216,7 +216,7 @@ final class HubTransport: HttpTransport {
     let start = Perf.on ? CACurrentMediaTime() : 0
     let started = ContinuousClock.now
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
-    // Only what names nobody goes anonymous (yo_wire::api::anonymous, spec 1).
+    // Only what names nobody goes anonymous (yoip::net::api::anonymous, spec 1).
     let anonymous = !signed && anonymousRequest(method: method, path: path)
     let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
     let longPoll = method == "GET" && path.hasPrefix("/v1/inbox?wait=")
@@ -288,7 +288,7 @@ final class HubTransport: HttpTransport {
     var result = HttpResult(status: 0, body: Data(), error: "no answer")
   }
 
-  /// A 10 MiB blob with tag and padding is the largest answer (spec 6.3, 6.8).
+  /// A 10 MiB blob with tag and padding is the largest answer (spec 4.1, 4.3).
   static let largestAnswer = 11 * 1024 * 1024
 
   /// Cancelled once the answer says or grows past `largestAnswer`; `done` runs once.
@@ -535,7 +535,7 @@ enum Keychain {
 }
 
 extension Data {
-  /// base64url without padding (spec 6.1).
+  /// base64url without padding (spec 4.1).
   init?(base64URL text: String) {
     var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
     plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)

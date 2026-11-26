@@ -1,4 +1,4 @@
-// Photos and videos as they go (spec 5, 6.8): small, upright, without metadata. Shared with YoShare.
+// Photos and videos as they go (spec 3.2, 4.3): small, upright, without metadata. Shared with YoShare.
 import AVFoundation
 import Foundation
 import ImageIO

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use yo_core::media::{self, Media};
 use yo_core::{Client, Content, Event, Transport};
 
-/// What waits is answered and sent (spec 4) as the app does when it comes to the foreground.
+/// What waits is answered and sent (spec 3) as the app does when it comes to the foreground.
 const MAINTENANCE: Duration = Duration::from_secs(3600);
 /// The long poll's wait, in seconds.
 const WAIT_S: u64 = 25;
@@ -113,7 +113,7 @@ impl Listener<'_> {
 }
 
 /// Fetches the blobs of photos and videos sent to the account into nothing, one at a time, and acknowledges each that
-/// came whole, once: only that counts as fetched at the hub, which deletes a blob after its last (spec 6.8). Nothing
+/// came whole, once: only that counts as fetched at the hub, which deletes a blob after its last (spec 4.3). Nothing
 /// of them is kept, opened or printed.
 fn drainer(transport: &dyn Transport, blobs: &Receiver<Media>) {
     while let Ok(blob) = blobs.recv() {

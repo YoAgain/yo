@@ -1,0 +1,372 @@
+//! Waking a device (spec 4.2): a push says only "there is mail"; requests go through `Transport` for tests.
+
+use crate::config::{ApnsConfig, FcmConfig};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use serde_json::json;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+/// An urgent APNs push's text, shown as it is when the notification extension cannot read what came.
+pub const ALERT: &str = "You may have received a Yo";
+use yoip::net::api::{PUSH_APNS, PUSH_APNS_SANDBOX, PUSH_FCM};
+
+pub type Fut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Sends a request: the status and the body of the answer.
+pub trait Transport: Send + Sync {
+    fn send(&self, request: Request) -> Fut<Result<(u16, Vec<u8>), String>>;
+}
+
+/// HTTPS, one connection per service kept open with HTTP/2 pings, as APNs asks (a cold one costs ~300 ms).
+pub struct Https(reqwest::Client);
+
+impl Default for Https {
+    fn default() -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+            .pool_idle_timeout(None)
+            .tcp_keepalive(Duration::from_secs(30))
+            .http2_keep_alive_interval(Duration::from_secs(50))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
+            .build()
+            .expect("HTTP client");
+        Https(client)
+    }
+}
+
+impl Transport for Https {
+    fn send(&self, request: Request) -> Fut<Result<(u16, Vec<u8>), String>> {
+        let mut builder = self.0.post(&request.url).body(request.body);
+        for (name, value) in request.headers {
+            builder = builder.header(name, value);
+        }
+        // Without the URL: an APNs request's holds the device's token, which must not reach the log.
+        let error = |e: reqwest::Error| e.without_url().to_string();
+        Box::pin(async move {
+            let response = builder.send().await.map_err(error)?;
+            let status = response.status().as_u16();
+            let body = response.bytes().await.map_err(error)?.to_vec();
+            Ok((status, body))
+        })
+    }
+}
+
+/// Records every request and answers like the services would: tests, and a hub without push services.
+#[derive(Default)]
+pub struct Recorder {
+    pub sent: Mutex<Vec<Request>>,
+    /// The status pushes to devices are answered with; 200 when unset.
+    pub device_status: Mutex<Option<u16>>,
+}
+
+impl Transport for Recorder {
+    fn send(&self, request: Request) -> Fut<Result<(u16, Vec<u8>), String>> {
+        let answer = if request.url.contains("oauth2") {
+            (200, br#"{"access_token":"test","expires_in":3600}"#.to_vec())
+        } else {
+            (self.device_status.lock().unwrap_or_else(PoisonError::into_inner).unwrap_or(200), Vec::new())
+        };
+        self.sent.lock().unwrap_or_else(PoisonError::into_inner).push(request);
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Sent,
+    /// The service says the token is dead: forget it.
+    TokenInvalid,
+    Failed(Failure),
+    /// No service configured for the platform, or no token.
+    Skipped,
+}
+
+/// Why a push failed: the service, a short reason to group by (the status and the service's word for it, nothing of
+/// the device), and the whole answer for the log (the token taken out).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub service: &'static str,
+    pub reason: String,
+    pub detail: String,
+}
+
+impl Failure {
+    fn new(service: &'static str, reason: impl Into<String>, detail: impl Into<String>) -> Self {
+        Failure { service, reason: reason.into(), detail: detail.into() }
+    }
+}
+
+pub struct Pusher {
+    transport: Arc<dyn Transport>,
+    apns: Option<Apns>,
+    fcm: Option<Fcm>,
+}
+
+struct Cached {
+    value: String,
+    until: Instant,
+}
+
+struct Apns {
+    config: ApnsConfig,
+    key: EncodingKey,
+    jwt: Mutex<Option<Cached>>,
+}
+
+struct Fcm {
+    project_id: String,
+    client_email: String,
+    token_uri: String,
+    key: EncodingKey,
+    /// Async: concurrent pushes wait for one token exchange instead of each running their own.
+    access: tokio::sync::Mutex<Option<Cached>>,
+}
+
+/// A push service's answer: `dead` names a dead token; logged without the token, should it name it.
+fn outcome(
+    service: &'static str,
+    sent: Result<(u16, Vec<u8>), String>,
+    token: &str,
+    dead: fn(u16, &str) -> bool,
+) -> Outcome {
+    let (status, body) = match sent {
+        Ok(answer) => answer,
+        Err(error) => return Outcome::Failed(Failure::new(service, "no answer", error)),
+    };
+    match status {
+        200 => Outcome::Sent,
+        _ if dead(status, &String::from_utf8_lossy(&body)) => Outcome::TokenInvalid,
+        _ => {
+            // APNs says why in "reason", FCM in "error.status".
+            let said: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let word = said["reason"].as_str().or(said["error"]["status"].as_str()).unwrap_or("");
+            let reason =
+                format!("{status} {}", word.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>());
+            Outcome::Failed(Failure::new(
+                service,
+                reason.trim_end(),
+                format!("{service} {status} {}", told(&body, token)),
+            ))
+        }
+    }
+}
+
+fn told(body: &[u8], token: &str) -> String {
+    String::from_utf8_lossy(body).replace(token, "(token)")
+}
+
+impl Pusher {
+    pub fn new(
+        transport: Arc<dyn Transport>,
+        apns: Option<&ApnsConfig>,
+        fcm: Option<&FcmConfig>,
+    ) -> Result<Self, String> {
+        let apns = apns
+            .map(|config| {
+                Ok::<_, String>(Apns {
+                    key: EncodingKey::from_ec_pem(config.key_pem.as_bytes()).map_err(|e| format!("APNs key: {e}"))?,
+                    config: config.clone(),
+                    jwt: Mutex::new(None),
+                })
+            })
+            .transpose()?;
+        let fcm = fcm
+            .map(|config| {
+                let account: serde_json::Value = serde_json::from_str(&config.service_account_json)
+                    .map_err(|e| format!("FCM service account: {e}"))?;
+                let field = |name: &str| {
+                    account[name].as_str().map(str::to_owned).ok_or(format!("FCM service account: no {name}"))
+                };
+                Ok::<_, String>(Fcm {
+                    project_id: field("project_id")?,
+                    client_email: field("client_email")?,
+                    token_uri: field("token_uri")?,
+                    key: EncodingKey::from_rsa_pem(field("private_key")?.as_bytes())
+                        .map_err(|e| format!("FCM key: {e}"))?,
+                    access: tokio::sync::Mutex::new(None),
+                })
+            })
+            .transpose()?;
+        Ok(Pusher { transport, apns, fcm })
+    }
+
+    /// One wake per call. APNs urgent: constant alert, sound and mutable-content, push type alert, priority 10;
+    /// non-urgent: only `aps: {"content-available":1}`, type background, priority 5 (no alert, sound or NSE).
+    /// FCM: data-only (`yo: "1"`, `urgent: "true"/"false"`), Android priority HIGH or NORMAL.
+    /// Pacing (one push per device per window, backlog interval) is the caller's: `config.rs`, `push_window_*`.
+    pub async fn wake(&self, platform: u8, token: &[u8], urgent: bool) -> Outcome {
+        let Ok(token) = std::str::from_utf8(token) else { return Outcome::TokenInvalid };
+        if token.is_empty() {
+            return Outcome::Skipped;
+        }
+        match (platform, &self.apns, &self.fcm) {
+            // An APNs device token is hex; anything else would go into the request's path (`apns`).
+            (PUSH_APNS | PUSH_APNS_SANDBOX, ..) if !token.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                Outcome::TokenInvalid
+            }
+            (PUSH_APNS | PUSH_APNS_SANDBOX, Some(apns), _) => {
+                self.apns(apns, platform == PUSH_APNS_SANDBOX, token, urgent).await
+            }
+            (PUSH_FCM, _, Some(fcm)) => self.fcm(fcm, token, urgent).await,
+            _ => Outcome::Skipped,
+        }
+    }
+
+    async fn apns(&self, apns: &Apns, sandbox: bool, token: &str, urgent: bool) -> Outcome {
+        let jwt = {
+            let mut cached = apns.jwt.lock().unwrap_or_else(PoisonError::into_inner);
+            match cached.as_ref().filter(|c| c.until > Instant::now()) {
+                Some(c) => c.value.clone(),
+                None => {
+                    let mut header = Header::new(Algorithm::ES256);
+                    header.kid = Some(apns.config.key_id.clone());
+                    let claims = json!({ "iss": apns.config.team_id, "iat": crate::now_ms() / 1000 });
+                    let Ok(value) = jsonwebtoken::encode(&header, &claims, &apns.key) else {
+                        return Outcome::Failed(Failure::new("APNs", "token", "APNs token"));
+                    };
+                    // Apple accepts a token for an hour and refuses one renewed more than every 20 minutes.
+                    *cached =
+                        Some(Cached { value: value.clone(), until: Instant::now() + Duration::from_secs(40 * 60) });
+                    value
+                }
+            }
+        };
+        let host = if sandbox { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
+        let body = if urgent {
+            json!({ "aps": { "alert": { "body": ALERT }, "sound": "yo.caf", "category": "yo", "mutable-content": 1 } })
+        } else {
+            json!({ "aps": { "content-available": 1 } })
+        };
+        let request = Request {
+            url: format!("https://{host}/3/device/{token}"),
+            headers: vec![
+                ("authorization".into(), format!("bearer {jwt}")),
+                ("apns-topic".into(), apns.config.topic.clone()),
+                ("apns-push-type".into(), if urgent { "alert" } else { "background" }.into()),
+                ("apns-priority".into(), if urgent { "10" } else { "5" }.into()),
+                ("content-type".into(), "application/json".into()),
+            ],
+            body: body.to_string().into_bytes(),
+        };
+        let dead = |status: u16, body: &str| status == 410 || (status == 400 && body.contains("BadDeviceToken"));
+        outcome("APNs", self.transport.send(request).await, token, dead)
+    }
+
+    async fn fcm_access(&self, fcm: &Fcm) -> Result<String, String> {
+        let mut access = fcm.access.lock().await;
+        if let Some(c) = access.as_ref().filter(|c| c.until > Instant::now()) {
+            return Ok(c.value.clone());
+        }
+        let now = crate::now_ms() / 1000;
+        let claims = json!({
+            "iss": fcm.client_email,
+            "scope": "https://www.googleapis.com/auth/firebase.messaging",
+            "aud": fcm.token_uri,
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &fcm.key)
+            .map_err(|e| format!("FCM assertion: {e}"))?;
+        let request = Request {
+            url: fcm.token_uri.clone(),
+            headers: vec![("content-type".into(), "application/x-www-form-urlencoded".into())],
+            body: format!("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}")
+                .into_bytes(),
+        };
+        let (status, body) = self.transport.send(request).await?;
+        let answer: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+        let token = answer["access_token"].as_str().filter(|_| status == 200).ok_or(format!("FCM OAuth {status}"))?;
+        let lifetime = answer["expires_in"].as_u64().unwrap_or(3600).saturating_sub(300);
+        *access = Some(Cached { value: token.to_owned(), until: Instant::now() + Duration::from_secs(lifetime) });
+        Ok(token.to_owned())
+    }
+
+    async fn fcm(&self, fcm: &Fcm, token: &str, urgent: bool) -> Outcome {
+        let access = match self.fcm_access(fcm).await {
+            Ok(access) => access,
+            Err(error) => return Outcome::Failed(Failure::new("FCM", "OAuth", error)),
+        };
+        let body = json!({ "message": { "token": token, "data": { "yo": "1", "urgent": urgent.to_string() }, "android": { "priority": if urgent { "HIGH" } else { "NORMAL" } } } });
+        let request = Request {
+            url: format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", fcm.project_id),
+            headers: vec![
+                ("authorization".into(), format!("Bearer {access}")),
+                ("content-type".into(), "application/json".into()),
+            ],
+            body: body.to_string().into_bytes(),
+        };
+        let dead = |status: u16, body: &str| status == 404 || (status == 400 && body.contains("INVALID_ARGUMENT"));
+        outcome("FCM", self.transport.send(request).await, token, dead)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fcm_urgency_sets_data_and_android_priority() {
+        let config = FcmConfig {
+            service_account_json: json!({
+                "project_id": "yo-test", "client_email": "push@example.com",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "private_key": include_str!("../../../tests/fixtures/test-fcm.pem"),
+            })
+            .to_string(),
+        };
+        let recorder = Arc::new(Recorder::default());
+        let pusher = Pusher::new(recorder.clone(), None, Some(&config)).unwrap();
+        for urgent in [true, false] {
+            assert!(matches!(pusher.wake(PUSH_FCM, b"test-token", urgent).await, Outcome::Sent));
+            let sent = recorder.sent.lock().unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&sent.last().unwrap().body).unwrap();
+            assert_eq!(body["message"]["data"]["urgent"], urgent.to_string());
+            assert_eq!(body["message"]["android"]["priority"], if urgent { "HIGH" } else { "NORMAL" });
+            assert!(body["message"].get("notification").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_urgent_apns_push_carries_the_yo_category() {
+        let config = ApnsConfig {
+            key_pem: include_str!("../../../tests/fixtures/test-apns.p8").into(),
+            key_id: "KEY".into(),
+            team_id: "TEAM".into(),
+            topic: "app.example".into(),
+        };
+        let recorder = Arc::new(Recorder::default());
+        let pusher = Pusher::new(recorder.clone(), Some(&config), None).unwrap();
+        let token = "ab".repeat(32);
+        for urgent in [true, false] {
+            assert!(matches!(pusher.wake(PUSH_APNS, token.as_bytes(), urgent).await, Outcome::Sent));
+            let sent = recorder.sent.lock().unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&sent.last().unwrap().body).unwrap();
+            // "Yo Back" on the Lock Screen even when the notification extension runs out of time.
+            assert_eq!(body["aps"].get("category").and_then(|c| c.as_str()), urgent.then_some("yo"));
+            // Unread (a dead or locked extension), the push says so, as Signal's.
+            assert_eq!(body["aps"]["alert"]["body"].as_str(), urgent.then_some("You may have received a Yo"));
+            assert_eq!(body["aps"]["mutable-content"].as_i64(), urgent.then_some(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_does_not_name_the_device_token() {
+        let token = "ab".repeat(32);
+        // Nothing listens on port 1: the request fails before any answer.
+        let request = Request { url: format!("http://127.0.0.1:1/3/device/{token}"), headers: vec![], body: vec![] };
+        let error = Https::default().send(request).await.unwrap_err();
+        assert!(!error.contains(&token), "{error}");
+        assert_eq!(told(format!(r#"{{"token":"{token}"}}"#).as_bytes(), &token), r#"{"token":"(token)"}"#);
+    }
+}

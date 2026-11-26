@@ -7,7 +7,7 @@ import uniffi.yo.listBarTitle
 import uniffi.yo.productRequestRow
 import uniffi.yo.productText
 
-/** Yo's own words come from the core (`yo_product`), in English like iOS. */
+/** Yo's own words come from the core (`yo_ui`), in English like iOS. */
 internal val Words = ProductLanguage.ENGLISH
 /** Fixed for the language: asked of the core once each (a core call allocates JNA structures, ~50 µs on the A34,
  *  and every bar asked for "Sent Yo!" on each composition of the list). */

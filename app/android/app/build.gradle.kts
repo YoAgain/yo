@@ -59,7 +59,7 @@ android {
         // Debug and QA builds say "android/dev<build>": not a Play build, so the admin never takes one as the newest.
         buildConfigField("String", "YO_APP", "\"android/dev$yoBuild\"")
         buildConfigField("String", "YO_BUILD", "\"$yoBuild\"")
-        // A release's version (the tag, "1.0.0-RC36"), sent after the build in Yo-App (spec 6.3); other builds: "",
+        // A release's version (the tag, "1.0.0-RC36"), sent after the build in Yo-App (spec 4.1); other builds: "",
         // except the floss release, which F-Droid builds from a release tag with plain Gradle: version.properties'.
         buildConfigField("String", "YO_VERSION", "\"${providers.gradleProperty("yoVersionName").getOrElse("")}\"")
     }
@@ -109,7 +109,7 @@ android {
 val buildCore = tasks.register<Exec>("buildCore") {
     workingDir(rootDir)
     commandLine("bash", "dev/core.sh")
-    inputs.files(fileTree(rootProject.file("../../core")), rootProject.file("../../Cargo.lock"), rootProject.file("../../Cargo.toml"), rootProject.file("dev/core.sh"), rootProject.file("dev/uniffi.toml"), rootProject.file("dev/fix-bindings.py"))
+    inputs.files(fileTree(rootProject.file("../core")), fileTree(rootProject.file("../../yoip")), rootProject.file("../../Cargo.lock"), rootProject.file("../../Cargo.toml"), rootProject.file("dev/core.sh"), rootProject.file("dev/uniffi.toml"), rootProject.file("dev/fix-bindings.py"))
     outputs.dirs(file("build/generated/yo"), file("build/rustJniLibs"))
     // CI builds (or restores) the core once in a step before Gradle and passes -PyoCorePrebuilt; plain Gradle, as
     // F-Droid runs it, builds the core here.

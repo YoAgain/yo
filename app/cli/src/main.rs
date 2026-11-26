@@ -40,7 +40,7 @@ pub const HELP: &str =
   send TO [--photo JPEG | --media -]
                                     a Yo to a username, user id or group:ID, with a photo, or the photo
                                     or video of a received event sealed anew (its media.ref on stdin)
-  requests [on|off]                 \"Requests from Strangers\" (spec 4.10): off, what a stranger sends (1:1 or
+  requests [on|off]                 \"Requests from Strangers\" (spec 3.3): off, what a stranger sends (1:1 or
                                     into a group not joined) is dropped unseen
   groups [list]                     the groups
   groups create NAME MEMBER...      make a group (members by username or user id)

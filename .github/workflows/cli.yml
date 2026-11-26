@@ -5,7 +5,7 @@ name: CLI
 on:
   push:
     branches: ['**']  # not tags: a release runs once, by its release event
-    paths: ['app/cli/**', 'core/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/cli.yml']
+    paths: ['app/cli/**', 'app/core/**', 'yoip/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/cli.yml']
   release:
     types: [published]
 permissions:
@@ -36,7 +36,7 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cli-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      # YO_BUILD: the build's UTC minute, sent as the CLI's Yo-App (app/cli/README.md).
+      # YO_BUILD: the build's UTC minute, sent as the CLI's Yo-App (README.md, CLI).
       - name: Build
         run: YO_BUILD=$(date -u +%Y%m%d%H%M) cargo build --release --locked -p yo-cli
       - name: Package

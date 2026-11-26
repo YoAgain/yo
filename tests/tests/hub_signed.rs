@@ -1,4 +1,4 @@
-//! Spec 6.10: answers that hand out keys (a lookup, a delivery's `409`) are signed by the hub's key, which the app
+//! Spec 4.1: answers that hand out keys (a lookup, a delivery's `409`) are signed by the hub's key, which the app
 //! ships; a client that pins it takes no keys the hub did not sign for its very question.
 
 use std::sync::{Arc, Mutex};
@@ -24,9 +24,9 @@ struct Between {
 impl Transport for Between {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         let mut response = self.http.request(method, path, headers, body)?;
-        if path != yo_wire::api::LOOKUP
+        if path != yoip::net::api::LOOKUP
             || response.status != 200
-            || !headers.iter().any(|(name, _)| name == yo_wire::hubsig::NONCE_HEADER)
+            || !headers.iter().any(|(name, _)| name == yoip::net::hubsig::NONCE_HEADER)
         {
             return Ok(response);
         }
@@ -108,7 +108,7 @@ struct DuplicateNumber {
 
 impl Transport for DuplicateNumber {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
-        use yo_wire::api;
+        use yoip::net::api;
         let Some(account_key) = *self.account_key.lock().unwrap() else {
             return self.http.request(method, path, headers, body);
         };
@@ -117,19 +117,19 @@ impl Transport for DuplicateNumber {
         if delivery && !self.conflict.swap(true, std::sync::atomic::Ordering::Relaxed) {
             // The first delivery is not taken: a `409` naming two devices.
             let devices = api::Devices { account_key, devices: vec![other, api::Device { key: [8; 32], id: 1 }] };
-            return Ok(Response { status: 409, body: yo_wire::encode(&devices) });
+            return Ok(Response { status: 409, body: yoip::encode(&devices) });
         }
         let mut response = self.http.request(method, path, headers, body)?;
         if path == api::LOOKUP && response.status == 200 {
-            let mut answer: api::LookupBot = yo_wire::decode(&response.body).map_err(|e| e.to_string())?;
+            let mut answer: api::LookupBot = yoip::decode(&response.body).map_err(|e| e.to_string())?;
             answer.named.found.devices.insert(0, other);
-            response.body = yo_wire::encode(&answer);
+            response.body = yoip::encode(&answer);
         }
         Ok(response)
     }
 }
 
-/// Spec 4.4: a roster naming two keys at the same number is refused
+/// Spec 3.2: a roster naming two keys at the same number is refused
 /// before anything is pinned or changed: the session with the known device goes on.
 #[test]
 fn duplicate_device_numbers_change_nothing() {

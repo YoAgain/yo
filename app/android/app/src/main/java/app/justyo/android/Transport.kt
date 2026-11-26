@@ -31,7 +31,7 @@ class HubTransport(
         if (stopped.get()) return HttpResult(426u, byteArrayOf(), null)
         return try {
             require(path.startsWith("/") && !path.startsWith("//"))
-            val request = Request.Builder().url(BuildConfig.HUB + path).header("Yo-App", YO_APP_WIRE)
+            val request = Request.Builder().url(Hub.url + path).header("Yo-App", YO_APP_WIRE)
             headers.forEach { request.header(it.name, it.value) }
             request.method(method, if (method == "GET" || method == "HEAD") null else body.toRequestBody())
             val identified = headers.any { it.name.equals("yo-device", true) }
@@ -90,5 +90,5 @@ internal fun refusedForDates(e: Throwable) = generateSequence(e) { it.cause }.ta
                 it.reason == java.security.cert.CertPathValidatorException.BasicReason.NOT_YET_VALID))
 }
 
-/** Yo-App on the wire (spec 6.3): the build and, for a release, its version ("android/202611241344 1.0.0-RC36"). */
+/** Yo-App on the wire (spec 4.1): the build and, for a release, its version ("android/202611241344 1.0.0-RC36"). */
 private val YO_APP_WIRE = BuildConfig.YO_APP + if (BuildConfig.YO_VERSION.isEmpty()) "" else " ${BuildConfig.YO_VERSION}"

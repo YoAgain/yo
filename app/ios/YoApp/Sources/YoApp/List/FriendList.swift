@@ -385,7 +385,7 @@ struct FriendList: View {
           else { return }
           unconfirmed = Set(contacts.filter(\.unconfirmed).map(\.user))
         }
-        // A contact's account key changed (spec 3.2): said once; Contacts shows it until their details are opened.
+        // A contact's account key changed (spec 2.1): said once; Contacts shows it until their details are opened.
         .alert(
           "\(keyChanged?.name ?? "") Has a New Key",
           isPresented: Binding(
@@ -393,7 +393,7 @@ struct FriendList: View {
           presenting: keyChanged
         ) { friend in
           Button("OK", role: .cancel) {}
-          // Only for a contact that was verified: its Yos wait for this (spec 3.4).
+          // Only for a contact that was verified: its Yos wait for this (spec 2.3).
           if let user = friend.user, unconfirmed.contains(user) {
             Button("Confirm New Key") {
               Task { try? await Verification.confirm(user, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox) }

@@ -1,10 +1,10 @@
-//! The account's storage at the hub (spec 6.9): friends, blocks and the app's icon, sealed under a key from the
+//! The account's storage at the hub (spec 4.3): friends, blocks and the app's icon, sealed under a key from the
 //! account key; back on a new phone before the first message, merged when two writers meet, unreadable to the hub.
 
 use yo_core::storage::{self, Storage};
 use yo_core::{Client, Content, Error, Event, Push};
 use yo_tests::{random_u64, Http, TestHub};
-use yo_wire::api::{self, status};
+use yoip::net::api::{self, status};
 
 fn by_name(hub: &TestHub, name: &str, secret: Option<[u8; 32]>) -> Client {
     Client::register_username(Http::new(hub.url()), name, secret, None, Push::none()).unwrap()
@@ -23,7 +23,7 @@ fn texts(events: &[Event]) -> Vec<String> {
 fn stored(client: &mut Client) -> api::Storage {
     let response = client.signed_for_tests("GET", api::STORAGE, &[]).unwrap();
     assert_eq!(response.status, status::OK);
-    yo_wire::decode(&response.body).unwrap()
+    yoip::decode(&response.body).unwrap()
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn two_writers_merge_and_converge() {
     theirs.friends.get_mut(&"11".repeat(16)).unwrap().name = storage::Field { value: Some("Leon".into()), at: later };
     theirs.icon = storage::Field { value: None, at: later };
     theirs.version = 2; // as the hub will store it
-    let body = yo_wire::encode(&api::Storage {
+    let body = yoip::encode(&api::Storage {
         version: 1,
         data: storage::seal(&a.account_secret(), &user, &theirs).unwrap().into(),
     });
@@ -113,15 +113,15 @@ fn two_writers_merge_and_converge() {
     assert_eq!(merged.icon.value, None);
     assert_eq!(a.friends().len(), 3, "A has the merge too");
     // A stale write of the version before is refused with the current one.
-    let stale = yo_wire::encode(&api::Storage { version: 2, data: vec![1; 100].into() });
+    let stale = yoip::encode(&api::Storage { version: 2, data: vec![1; 100].into() });
     let response = a.signed_for_tests("PUT", api::STORAGE, &stale).unwrap();
     assert_eq!(response.status, status::CONFLICT);
-    assert_eq!(yo_wire::decode::<api::Storage>(&response.body).unwrap().version, 3);
+    assert_eq!(yoip::decode::<api::Storage>(&response.body).unwrap().version, 3);
     // Too large, or empty: refused.
     let large =
-        yo_wire::encode(&api::Storage { version: 3, data: vec![1; yo_wire::limits::MAX_STORAGE_LEN + 1].into() });
+        yoip::encode(&api::Storage { version: 3, data: vec![1; yoip::net::limits::MAX_STORAGE_LEN + 1].into() });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &large).unwrap().status, status::TOO_LARGE);
-    let empty = yo_wire::encode(&api::Storage { version: 3, data: Vec::new().into() });
+    let empty = yoip::encode(&api::Storage { version: 3, data: Vec::new().into() });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &empty).unwrap().status, status::BAD_REQUEST);
 }
 
@@ -150,7 +150,7 @@ fn a_replayed_storage_is_not_taken() {
     a.maintenance().unwrap();
     // The hub (or someone at it) puts the old blob, sealed as version 1, under version 2.
     let old = stored(&mut a).data;
-    let body = yo_wire::encode(&api::Storage { version: 1, data: old });
+    let body = yoip::encode(&api::Storage { version: 1, data: old });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
     let new = by_name(&hub, &name, Some(a.account_secret()));
     assert_eq!(new.app_icon(), None, "not taken: sealed as another version");
@@ -158,7 +158,7 @@ fn a_replayed_storage_is_not_taken() {
     assert!(a.set_friend(&"11".repeat(16), Some("x".repeat(65)), None).is_err(), "a name too long");
 }
 
-/// A blob that does not open here may be sealed under a key this device did not get (an old install's, spec 6.9):
+/// A blob that does not open here may be sealed under a key this device did not get (an old install's, spec 4.3):
 /// left standing at the hub, never written over, and never taken as saved.
 #[test]
 fn a_storage_that_does_not_open_is_left_standing() {
@@ -167,7 +167,7 @@ fn a_storage_that_does_not_open_is_left_standing() {
     let mut a = by_name(&hub, &name, None);
     a.set_app_icon(Some("Negative".into())).unwrap();
     a.maintenance().unwrap();
-    let body = yo_wire::encode(&api::Storage { version: 1, data: vec![7; 1024].into() });
+    let body = yoip::encode(&api::Storage { version: 1, data: vec![7; 1024].into() });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
     // As the answer to a write (a 409 to the phone that wrote before it): left standing too.
     a.set_app_icon(Some("Other".into())).unwrap();
@@ -248,7 +248,7 @@ fn saved_says_whether_the_hub_holds_it_all() {
     assert!(a.storage_saved_at().unwrap() >= first, "written");
 }
 
-/// The profile keys in the storage (spec 6.9, as Signal's storage service keeps them): a new phone goes on with the
+/// The profile keys in the storage (spec 4.3, as Signal's storage service keeps them): a new phone goes on with the
 /// account's key, so what its contacts hold stays good, and it has theirs, so its first Yo is a contact's, sealed.
 #[test]
 fn a_new_phone_keeps_the_profile_keys() {

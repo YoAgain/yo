@@ -87,7 +87,7 @@ fn nothing_waiting_goes_to_someone_blocked_meanwhile() {
     let mut b = by_name(Http::new(hub.url()), &format!("Yhs{n}"));
     a.send(b.user_id(), text("hello")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["hello"]);
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id()));
     http.fault(&to_b, Fault::Answer(503));
     a.send(b.user_id(), text("made offline")).unwrap();
     assert_eq!(a.waiting(), 1);
@@ -104,7 +104,7 @@ fn nothing_waiting_goes_to_someone_blocked_meanwhile() {
 }
 
 fn to(user: &str) -> String {
-    yo_wire::api::deliver_path(&yo_tests::user_id(user))
+    yoip::net::api::deliver_path(&yo_tests::user_id(user))
 }
 
 /// A name a contact gave up and someone else took: a send to the name still went to the contact, as this device

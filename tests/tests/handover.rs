@@ -1,4 +1,4 @@
-//! Events handed over before the hub hears of them (spec 4.7): `sync` returns once what arrived is saved; the hub's
+//! Events handed over before the hub hears of them (spec 3.2): `sync` returns once what arrived is saved; the hub's
 //! ack and the work after it (receipts, prekeys, the outbox, the storage) come with `after_sync` or the
 //! next `sync`. A crash in between loses nothing and shows nothing twice; a guest only reads and acknowledges.
 
@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Error, Event, Store};
 use yo_tests::{random_u64, register, user_id, username, Fault, Http, TestHub};
-use yo_wire::api::deliver_path;
+use yoip::net::api::deliver_path;
 
 const KEY: [u8; 32] = [3; 32];
 
@@ -231,7 +231,7 @@ fn a_guest_acknowledges_nothing_it_could_not_save() {
     guest.persist_to(disk.clone(), KEY).unwrap();
     disk.full.store(true, Ordering::Relaxed);
     // The send takes the inbox in first, then its lookup is refused: the call fails, and its save too.
-    guest_http.fault(yo_wire::api::LOOKUP, Fault::Answer(400));
+    guest_http.fault(yoip::net::api::LOOKUP, Fault::Answer(400));
     assert!(guest.send_yo(&username(random_u64() % 1_000_000_000)).is_err());
     requests(&guest_http);
     let _ = guest.after_sync();
@@ -286,7 +286,7 @@ fn a_guest_past_its_bound_still_reads_the_newest() {
 fn a_guest_after_one_that_did_not_acknowledge_shows_the_new_one() {
     let hub = TestHub::start();
     let (mut a, b, _, disk) = chat(&hub);
-    let n = 2 * yo_wire::limits::MAX_INBOX_FETCH + 10;
+    let n = 2 * yoip::net::limits::MAX_INBOX_FETCH + 10;
     for i in 0..n {
         a.send(b.user_id(), text(&format!("{i}"))).unwrap();
     }

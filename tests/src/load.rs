@@ -383,15 +383,15 @@ fn main() {
     println!("Yo to Yo: p50 {:.1} ms, p99 {:.1} ms", yo_to_yo.percentile(0.50), yo_to_yo.percentile(0.99));
 
     // ---- phase 2: the hub alone ----
-    // Each user with its device check, learned once as any sender would (spec 4.4), and its access key, as a contact
-    // shows it (spec 4.10): a delivery without it is a request, refused unsigned.
+    // Each user with its device check, learned once as any sender would (spec 3.2), and its access key, as a contact
+    // shows it (spec 3.3): a delivery without it is a request, refused unsigned.
     let targets: Vec<(String, String, Option<String>)> = peers
         .iter()
         .map(|peer| {
             let c = &peer.client;
             let access = c.access_key_for_tests();
             let hash = yo_tests::devices_hash_with(&url, c.user_id(), access.as_deref()).expect("a registered user");
-            (yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())), yo_wire::b64(&hash), access)
+            (yoip::net::api::deliver_path(&yo_tests::user_id(c.user_id())), yoip::b64(&hash), access)
         })
         .collect();
     let envelope = yo_tests::junk(0x5A);
@@ -411,9 +411,9 @@ fn main() {
                         k += 1;
                         let t = Instant::now();
                         let mut request =
-                            client.post(format!("{url}{path}")).header(yo_wire::api::HEADER_DEVICES, hash.as_str());
+                            client.post(format!("{url}{path}")).header(yoip::net::api::HEADER_DEVICES, hash.as_str());
                         if let Some(access) = access {
-                            request = request.header(yo_wire::api::HEADER_ACCESS, access.as_str());
+                            request = request.header(yoip::net::api::HEADER_ACCESS, access.as_str());
                         }
                         let request = request.body(envelope.clone());
                         match request.send().await {

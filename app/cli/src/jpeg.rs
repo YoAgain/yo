@@ -1,4 +1,4 @@
-//! A JPEG as a photo goes (spec 5): no metadata, at most 1600 px a side. The apps do this with the system's image
+//! A JPEG as a photo goes (spec 3.2): no metadata, at most 1600 px a side. The apps do this with the system's image
 //! tools; a server has none.
 
 /// A JPEG's width and height from its frame header, if it has one where it should.

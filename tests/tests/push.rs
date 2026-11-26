@@ -1,11 +1,11 @@
-//! Push (spec 6.7): the hub wakes a device through APNs or FCM, with nothing in the push but "there is mail".
+//! Push (spec 4.2): the hub wakes a device through APNs or FCM, with nothing in the push but "there is mail".
 
 use std::time::{Duration, Instant};
 use yo_core::{Client, Push};
 use yo_hub::config::{ApnsConfig, Config, FcmConfig};
 use yo_hub::push::Request;
 use yo_tests::{random_u64, register, username, Http, TestHub};
-use yo_wire::api::{PUSH_APNS, PUSH_FCM};
+use yoip::net::api::{PUSH_APNS, PUSH_FCM};
 
 fn hub() -> TestHub {
     let mut config = Config::for_tests();

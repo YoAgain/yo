@@ -51,5 +51,5 @@ for p in crates:
     out.append(f"{p['name']} {p['version']}: {p.get('license') or 'see its texts'} {shown} {p.get('repository') or ''}".rstrip())
 for text, n in texts.items():
     out += ["", f"[{n}]", text]
-out += ["", "GNU Affero General Public License, version 3", "=" * 44, (root / "LICENSES/AGPL-3.0.txt").read_text()]
+out += ["", "GNU Affero General Public License, version 3", "=" * 44, (root / "app/core/LICENSE-AGPL.md").read_text()]
 print("\n".join(out))

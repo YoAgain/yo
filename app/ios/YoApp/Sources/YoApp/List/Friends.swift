@@ -1,5 +1,5 @@
 // Your friends: usernames you add, and whoever sends you a Yo. Friends known by user id are kept for the account by
-// the core (its storage at the hub, spec 6.9); this list is the phone's cache of it. Friends known only by a typed name
+// the core (its storage at the hub, spec 4.3); this list is the phone's cache of it. Friends known only by a typed name
 // stay on this phone until the hub names them.
 import Foundation
 import Observation
@@ -11,14 +11,14 @@ struct Friend: Codable, Hashable, Identifiable {
   /// Their place in the palette (Color.rows), for good.
   var color: Int
   var user: String?
-  /// A group's bar (spec 4.9): the group's id. No user id then.
+  /// A group's bar (spec 3.4): the group's id. No user id then.
   var group: String?
   var blocked = false
   /// Their account is deleted: the bar says "Not on Yo". The name added again may be someone else's now.
   var gone = false
-  /// Their account key changed (spec 3.2): Contacts says so until their details are opened.
+  /// Their account key changed (spec 2.1): Contacts says so until their details are opened.
   var keyChanged = false
-  /// A request (spec 4.10): nothing goes to them until it is said yes to.
+  /// A request (spec 3.3): nothing goes to them until it is said yes to.
   var request = false
   /// "Undo Before Sending" (Per Contact): a Yo to them waits `undoSeconds` under the undo ring, as a photo does.
   var undoFirst = false
@@ -157,8 +157,8 @@ final class Friends {
 
   private static func typed(_ friend: Friend) -> Bool { friend.user == nil && friend.group == nil }
 
-  /// One bar per group this account is in (spec 4.9), new ones at the bottom until a Yo (the one sent as it is made)
-  /// lifts them (`yo_product::list`); a group left goes.
+  /// One bar per group this account is in (spec 3.4), new ones at the bottom until a Yo (the one sent as it is made)
+  /// lifts them (`yo_ui::list`); a group left goes.
   func takeGroups(_ groups: [YoGroup]) {
     Perf.timed("friends.groups") {
       var list = all
@@ -206,7 +206,7 @@ final class Friends {
     return Color.rows.indices.min { (used[$0] ?? 0, $0) < (used[$1] ?? 0, $1) } ?? 0
   }
 
-  /// Adds a name at the bottom (the Yo the add sends lifts it, `yo_product::list`); an empty or known one (in any
+  /// Adds a name at the bottom (the Yo the add sends lifts it, `yo_ui::list`); an empty or known one (in any
   /// spelling) is ignored. A gone friend gives its place to the name's new owner. Where both user ids are known, they
   /// decide.
   func add(_ typed: String, user: String? = nil) {
@@ -360,7 +360,7 @@ final class Friends {
     all[index].undoSeconds = seconds
   }
 
-  /// Contacts not yet said yes to are requests (spec 4.10).
+  /// Contacts not yet said yes to are requests (spec 3.3).
   func markRequests(_ contacts: [YoContact]) {
     Perf.timed("friends.requests") {
       let open = Set(contacts.filter { !$0.accepted && !$0.blocked }.map(\.user))
@@ -387,7 +387,7 @@ final class Friends {
     }
   }
 
-  /// The account's storage (spec 6.9) into this list: missing friends come at the end in their colour, known ones take
+  /// The account's storage (spec 4.3) into this list: missing friends come at the end in their colour, known ones take
   /// its name, colour and block, and with `prune` those it no longer has go. Typed-only friends stay. With `seed`
   /// (once, for an account from before the storage) what the storage lacks goes up and none go.
   func take(_ kept: [YoFriend], names: [String: String] = [:], seed: Bool, prune: Bool) {
@@ -424,7 +424,7 @@ final class Friends {
     }
   }
 
-  /// A name as the storage keeps it (spec 6.9): 1 to 64 bytes of UTF-8 without control characters, else none.
+  /// A name as the storage keeps it (spec 4.3): 1 to 64 bytes of UTF-8 without control characters, else none.
   static func storedName(_ name: String) -> String? {
     let name = name.precomposedStringWithCanonicalMapping
     guard !name.isEmpty, name.utf8.count <= 64, !name.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })

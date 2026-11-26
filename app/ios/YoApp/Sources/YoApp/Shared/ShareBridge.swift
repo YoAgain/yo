@@ -175,7 +175,7 @@ enum ShareBridge {
     return all.sorted { $0.sentAtMs > $1.sentAtMs }
   }
 
-  /// Contacts and groups not accepted yet (spec 4.10).
+  /// Contacts and groups not accepted yet (spec 3.3).
   static func requests(of client: YoClient) -> Set<String> {
     Set(client.contacts().filter { !$0.accepted }.map(\.user))
       .union(((Diagnostics.attempt({ try client.groups() })) ?? []).filter { !$0.accepted && !$0.left }.map { "group:" + $0.id })

@@ -25,12 +25,12 @@ fn group_yos(events: &[Event], from: &Client) -> usize {
 
 /// Signed deliveries `of` sent to `to`: requests, which the hub's buckets count.
 fn signed_to(of: &Http, to: &Client) -> usize {
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to.user_id()));
-    let signed = |hs: &[(String, String)]| hs.iter().any(|(n, _)| n == yo_wire::request::HEADER_DEVICE);
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(to.user_id()));
+    let signed = |hs: &[(String, String)]| hs.iter().any(|(n, _)| n == yoip::net::request::HEADER_DEVICE);
     of.recorded.lock().unwrap().iter().filter(|(_, p, hs, _)| *p == path && signed(hs)).count()
 }
 
-/// A hub with the production request buckets (spec 6.6); the rest unlimited as on every test hub.
+/// A hub with the production request buckets (spec 4.1); the rest unlimited as on every test hub.
 fn hub_with_buckets() -> TestHub {
     let mut config = yo_hub::config::Config::for_tests();
     (config.limits.requests_per_pair, config.limits.request_recipients_per_sender) = (10, 20);
@@ -61,7 +61,7 @@ fn a_strangers_group_reaches_the_victim_only_as_requests() {
     assert!(shown < 10, "at most the pair bucket (the group's tag took one): {shown}");
 }
 
-/// "Requests from Strangers" off (spec 4.10): a stranger's group, its tag and its Yos, are dropped unseen: no group
+/// "Requests from Strangers" off (spec 3.3): a stranger's group, its tag and its Yos, are dropped unseen: no group
 /// shows, no change is told to the app, no Yo.
 #[test]
 fn requests_off_hides_a_strangers_group_and_its_yos() {
@@ -146,13 +146,13 @@ fn unhex(id: &str) -> Vec<u8> {
     (0..id.len()).step_by(2).map(|i| u8::from_str_radix(&id[i..i + 2], 16).unwrap()).collect()
 }
 
-fn stored(db: &rusqlite::Connection, id: &str) -> yo_wire::api::GroupState {
+fn stored(db: &rusqlite::Connection, id: &str) -> yoip::net::api::GroupState {
     let state: Vec<u8> = db.query_row("SELECT state FROM zk_groups WHERE id = ?1", [unhex(id)], |r| r.get(0)).unwrap();
-    yo_wire::decode(&state).unwrap()
+    yoip::decode(&state).unwrap()
 }
 
-fn store(db: &rusqlite::Connection, id: &str, state: &yo_wire::api::GroupState) {
-    db.execute("UPDATE zk_groups SET state = ?2 WHERE id = ?1", (unhex(id), yo_wire::encode(state))).unwrap();
+fn store(db: &rusqlite::Connection, id: &str, state: &yoip::net::api::GroupState) {
+    db.execute("UPDATE zk_groups SET state = ?2 WHERE id = ?1", (unhex(id), yoip::encode(state))).unwrap();
 }
 
 fn view(c: &Client, id: &str) -> yo_core::groups::GroupView {
@@ -161,11 +161,11 @@ fn view(c: &Client, id: &str) -> yo_core::groups::GroupView {
 
 /// Group requests `of` sent for the group `id` (fetches and changes).
 fn group_requests(of: &Http, id: &str) -> usize {
-    let path = yo_wire::api::group_path(&unhex(id).try_into().unwrap());
+    let path = yoip::net::api::group_path(&unhex(id).try_into().unwrap());
     of.sent.lock().unwrap().iter().filter(|(_, p, _)| *p == path).count()
 }
 
-/// Audit G2. Spec 4.10: "one a stranger added it to is a request until a yes (leaving says no)". A group left and
+/// Audit G2. Spec 3.3: "one a stranger added it to is a request until a yes (leaving says no)". A group left and
 /// then added back to by a stranger (whose key of this account is old: invited) is a request again, not joined; added
 /// back by a contact it is joined at once.
 #[test]
@@ -279,7 +279,7 @@ fn a_tag_naming_a_revision_that_is_not_there_makes_one_fetch() {
     take(&mut b);
     let key: [u8; 32] = unhex(&b.saved().state.groups[&id].key).try_into().unwrap();
     for from in [&mut b, &mut x] {
-        let lie = Content::Group(yo_wire::content::GroupTag { key, revision: u32::MAX });
+        let lie = Content::Group(yoip::protocol::content::GroupTag { key, revision: u32::MAX });
         from.send(a.user_id(), lie).unwrap();
         let before = group_requests(&ha, &id);
         rounds(&mut a);

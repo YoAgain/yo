@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Event, Store};
 use yo_hub::config::Config;
 use yo_tests::{deliver_raw, new_phone, random_u64, register, user_of, username, Fault, Http, TestHub};
-use yo_wire::api;
+use yoip::net::api;
 
 fn yos(events: &[Event]) -> usize {
     events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count()
@@ -44,7 +44,7 @@ fn a_passing_refusal_does_not_drop_a_first_message() {
     let mut a = register(Http::new(hub.url()), &pa, None);
     let mut b = register(hb.clone(), &pb, None);
     a.send_yo(&pb).unwrap();
-    // B's check of A's identity hits a rate limit: the first message is kept on B's device for later (spec 4.7),
+    // B's check of A's identity hits a rate limit: the first message is kept on B's device for later (spec 3.2),
     // the inbox goes on.
     hb.fault("/v1/lookup", Fault::Answer(429));
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
@@ -63,9 +63,9 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     // Acknowledge the setup's already-processed mail without running account maintenance;
     // this fixture deliberately tests the legacy inbox with no access check yet.
     let response = b.signed_for_tests("GET", "/v1/inbox?wait=0", &[]).unwrap();
-    let inbox: api::Inbox = yo_wire::decode(&response.body).unwrap();
+    let inbox: api::Inbox = yoip::decode(&response.body).unwrap();
     let ids = inbox.items.into_iter().map(|item| item.id).collect();
-    b.signed_for_tests("POST", api::INBOX_ACK, &yo_wire::encode(&api::Ack { ids })).unwrap();
+    b.signed_for_tests("POST", api::INBOX_ACK, &yoip::encode(&api::Ack { ids })).unwrap();
     let junk = yo_tests::junk(7);
     // A stranger fills B's inbox with well-formed junk...
     let statuses: Vec<u16> = (0..6).map(|_| deliver_raw(&hub.url(), b.user_id(), junk.clone())).collect();
@@ -75,7 +75,7 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     assert_eq!(a.waiting(), 1);
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
     b.after_sync().unwrap();
-    // A's sync takes B's identified answer in; its key goes back to B with the work after it (spec 4.10).
+    // A's sync takes B's identified answer in; its key goes back to B with the work after it (spec 3.3).
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
@@ -127,7 +127,7 @@ fn new_chats(events: &[Event]) -> usize {
     events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count()
 }
 
-const TARGET: u64 = yo_wire::limits::PREKEY_TARGET as u64;
+const TARGET: u64 = yoip::net::limits::PREKEY_TARGET as u64;
 
 /// A refill the hub took whose answer was lost is sent again as it was (the hub keeps one of each id once): the
 /// device holds the private keys of every prekey the hub hands out.
@@ -199,7 +199,7 @@ fn a_refused_rotation_is_made_anew_with_its_signed_prekey() {
         .unwrap()
         .iter()
         .filter(|(method, path, _)| method == "PUT" && path == api::PREKEYS)
-        .map(|(_, _, body)| yo_wire::decode(body).unwrap())
+        .map(|(_, _, body)| yoip::decode(body).unwrap())
         .collect();
     let last = uploads.last().expect("an upload made anew");
     assert!(last.signed.is_some() && last.last_resort.is_some(), "the rotation still in it");
@@ -258,7 +258,7 @@ fn a_signed_put_saves_its_signing_time() {
 }
 
 /// The first Yo to a new friend while the hub cannot answer who they are (its lookups limited, 429): an error the app
-/// keeps and tries again ("not now", one rule for all, spec 6.6), and the Yo goes once it can.
+/// keeps and tries again ("not now", one rule for all, spec 4.1), and the Yo goes once it can.
 #[test]
 fn a_first_yo_the_hub_cannot_look_up_now_goes_when_tried_again() {
     let hub = TestHub::start();
@@ -294,7 +294,7 @@ fn sending_leaves_inbox_reception_and_acknowledgement_to_sync() {
     assert_eq!(yos(&b.sync(0).unwrap()), 0, "and it does not come again");
 }
 
-/// A message queued and saved is sent, whatever the hub says to its delivery now (spec 4.7): the send succeeds and it
+/// A message queued and saved is sent, whatever the hub says to its delivery now (spec 3.2): the send succeeds and it
 /// waits in the outbox. An app that took "not now" for "not sent" would send it again itself (a share's photo, twice).
 #[test]
 fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
@@ -322,7 +322,7 @@ fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
     assert_eq!(yos(&b.sync(0).unwrap()), 2, "each once");
 }
 
-/// A contact's delivery past the recipient's inbound bytes (`429 recipient SECONDS`, spec 6.6) waits for the seconds
+/// A contact's delivery past the recipient's inbound bytes (`429 recipient SECONDS`, spec 4.1) waits for the seconds
 /// the hub named, for that contact alone: never posted again at once, and the next send to someone else goes.
 #[test]
 fn a_contacts_rate_limit_waits_its_time_and_holds_no_one_else() {
@@ -378,7 +378,7 @@ fn an_unacknowledged_send_is_retried_after_restart() {
 }
 
 /// Saves that fail after the message was queued and saved (the disk filling up as it went): the send is not reported
-/// as failed, so the app does not send it a second time (spec 4.7); it arrives once.
+/// as failed, so the app does not send it a second time (spec 3.2); it arrives once.
 #[test]
 fn a_save_failing_after_the_message_was_saved_does_not_make_it_unsent() {
     struct Filling(Mutex<Vec<u8>>, std::sync::atomic::AtomicU32);

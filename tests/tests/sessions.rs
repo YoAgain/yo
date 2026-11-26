@@ -1,4 +1,4 @@
-//! Sessions (spec 4): what the Double Ratchet, Signal's decryption errors and receipts make of lost, duplicated and reordered
+//! Sessions (spec 3): what the Double Ratchet, Signal's decryption errors and receipts make of lost, duplicated and reordered
 //! messages, a session out of step, and a month away.
 
 use std::sync::{Arc, Mutex};
@@ -25,7 +25,7 @@ fn text(t: &str) -> Content {
 
 /// The envelopes A posted to B's inbox, in order, whether the hub got them or not.
 fn posted(http: &Http, to: &str) -> Vec<Vec<u8>> {
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to));
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(to));
     http.sent.lock().unwrap().iter().filter(|(m, p, _)| m == "POST" && *p == path).map(|(_, _, b)| b.clone()).collect()
 }
 
@@ -48,7 +48,7 @@ fn pair(hub: &TestHub, tag: &str) -> (Client, Client, Arc<Http>) {
 }
 
 /// The work after a sync, both ways, until each has the other's profile key and a sender certificate: from then on
-/// what one sends the other goes sealed, a contact's (spec 4.10, 6.1). `b` has said yes to `a`, or written to it.
+/// what one sends the other goes sealed, a contact's (spec 3.3, 4.1). `b` has said yes to `a`, or written to it.
 fn keys_both_ways(a: &mut Client, b: &mut Client) {
     for _ in 0..2 {
         a.after_sync().unwrap();
@@ -61,7 +61,7 @@ fn keys_both_ways(a: &mut Client, b: &mut Client) {
 /// The last envelope posted to `to` went sealed.
 fn assert_sealed(http: &Http, to: &Client) {
     let last = posted(http, to.user_id()).pop().unwrap();
-    assert_eq!(last[0], yo_wire::envelope::SEALED, "a contact's delivery, sealed");
+    assert_eq!(last[0], yoip::protocol::envelope::SEALED, "a contact's delivery, sealed");
 }
 
 #[derive(Default)]
@@ -90,7 +90,7 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     let kinds = |http: &Http, to: &Client| -> Vec<u8> {
         let last = posted(http, to.user_id()).pop().unwrap();
         let (opened, _) = yo_core::sealed::testing::open(&to.account_secret(), &last).unwrap();
-        let payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+        let payload: yoip::protocol::envelope::Payload = yoip::decode(&opened).unwrap();
         payload.copies.iter().map(|c| c.kind).collect()
     };
     a.send(b.user_id(), text("1")).unwrap();
@@ -114,14 +114,14 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     b.after_sync().unwrap();
     assert!(posted(&hb, a.user_id()).iter().any(|e| yo_core::sealed::testing::open(&a.account_secret(), e).is_ok_and(
         |(opened, _)| {
-            yo_wire::decode::<yo_wire::envelope::Payload>(&opened)
-                .is_ok_and(|p| p.copies.iter().any(|c| c.kind == yo_wire::envelope::KIND_PLAINTEXT))
+            yoip::decode::<yoip::protocol::envelope::Payload>(&opened)
+                .is_ok_and(|p| p.copies.iter().any(|c| c.kind == yoip::protocol::envelope::KIND_PLAINTEXT))
         }
     )));
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     // A's session archived: what goes again starts a new one.
-    assert_eq!(kinds(&ha, &b), [yo_wire::envelope::KIND_PREKEY]);
+    assert_eq!(kinds(&ha, &b), [yoip::protocol::envelope::KIND_PREKEY]);
     let mut recovered = texts(&b.sync(0).unwrap());
     for _ in 0..4 {
         b.after_sync().unwrap();
@@ -156,7 +156,7 @@ fn access_refresh_fetches_a_session_archived_while_reading_the_inbox() {
     b.after_sync().unwrap();
 
     // Reading B's decryption error during access-key recovery archives A's session.
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id()));
     ha.fault(&path, Fault::Answer(403));
     a.send(b.user_id(), text("next send")).unwrap();
     assert_eq!(a.waiting(), 0);
@@ -177,7 +177,7 @@ fn a_first_message_opens_after_four_weeks_away() {
     let mut a = by_name(ha.clone(), &format!("Awa{n}"));
     let mut b = by_name(Http::new(hub.url()), &format!("Way{n}"));
     // Held back from the hub until B's weeks are over (posted by hand then), as if it waited in the inbox.
-    ha.fault(&yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())), Fault::Answer(202));
+    ha.fault(&yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id())), Fault::Answer(202));
     a.send(b.user_id(), text("waiting")).unwrap();
     let first = posted(&ha, b.user_id()).pop().unwrap();
     let start = yo_hub::now_ms();
@@ -187,8 +187,8 @@ fn a_first_message_opens_after_four_weeks_away() {
         b.maintenance().unwrap();
     }
     // A request (A has no key of B's yet): identified and signed by A, posted again as it was.
-    assert_eq!(first[0], yo_wire::VERSION, "a request goes identified");
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    assert_eq!(first[0], yoip::VERSION, "a request goes identified");
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id()));
     assert_eq!(yo_tests::deliver_held(&hub.url(), &ha, &to_b), 202);
     assert_eq!(texts(&b.sync(0).unwrap()), ["waiting"]);
     b.send(a.user_id(), text("back")).unwrap();
@@ -204,7 +204,7 @@ fn a_forged_payload_changes_nothing() {
     let (mut a, mut b, ha) = pair(&hub, "Fog");
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
-    let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+    let mut payload: yoip::protocol::envelope::Payload = yoip::decode(&opened).unwrap();
     payload.device_id = 7;
     let mut message = payload.copies[0].message.as_slice().to_vec();
     let last = message.len() - 1;
@@ -212,8 +212,7 @@ fn a_forged_payload_changes_nothing() {
     payload.copies[0].message = message.into();
     let account = yo_tests::account_key(&b.account_secret());
     let forged =
-        yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
-            .unwrap();
+        yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yoip::encode(&payload)).unwrap();
     assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     assert_eq!(b.dropped(), 1);
@@ -257,17 +256,16 @@ fn a_sender_whose_state_went_back_is_asked_again() {
 fn a_device_key_the_hub_does_not_name_is_not_taken_in() {
     let hub = TestHub::start();
     let (mut a, mut b, ha) = pair(&hub, "Dkn");
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id()));
     ha.fault(&to_b, Fault::Answer(202));
     a.send(b.user_id(), text("held")).unwrap();
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
-    let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+    let mut payload: yoip::protocol::envelope::Payload = yoip::decode(&opened).unwrap();
     payload.device_key = [9; 32];
     let account = yo_tests::account_key(&b.account_secret());
     let forged =
-        yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
-            .unwrap();
+        yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yoip::encode(&payload)).unwrap();
     assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
     // Another key at A's number: the hub's roster says it is not A's device there, so it is not even opened.
     assert!(texts(&b.sync(0).unwrap()).is_empty());
@@ -286,7 +284,7 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
     let c = yo_tests::register(Http::new(hub.url()), &yo_tests::username(random_u64() % 1_000_000_000), None);
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
-    let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+    let mut payload: yoip::protocol::envelope::Payload = yoip::decode(&opened).unwrap();
     payload.account_key = yo_tests::account_key(&c.account_secret());
     let mut message = payload.copies[0].message.as_slice().to_vec();
     let last = message.len() - 1;
@@ -294,8 +292,7 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
     payload.copies[0].message = message.into();
     let account = yo_tests::account_key(&b.account_secret());
     let forged =
-        yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
-            .unwrap();
+        yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yoip::encode(&payload)).unwrap();
     assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     assert!(b.contacts().iter().all(|k| k.user != c.user_id()), "not pinned by a message that did not open");
@@ -321,7 +318,7 @@ fn forgeries_cannot_use_up_the_lookups() {
     assert_sealed(&ha, &b);
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
-    let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+    let mut payload: yoip::protocol::envelope::Payload = yoip::decode(&opened).unwrap();
     let account = yo_tests::account_key(&b.account_secret());
     let clock = Arc::new(AtomicU64::new(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
@@ -329,7 +326,7 @@ fn forgeries_cannot_use_up_the_lookups() {
     let read = clock.clone();
     b.set_clock(Arc::new(move || read.load(Ordering::Relaxed)));
     let lookups =
-        || hb.sent.lock().unwrap().iter().filter(|(m, p, _)| m == "POST" && p == yo_wire::api::LOOKUP).count();
+        || hb.sent.lock().unwrap().iter().filter(|(m, p, _)| m == "POST" && p == yoip::net::api::LOOKUP).count();
     let before = lookups();
     for i in 0..30u8 {
         clock.fetch_add(61_000, Ordering::Relaxed);
@@ -338,7 +335,7 @@ fn forgeries_cannot_use_up_the_lookups() {
         message[last] ^= i.wrapping_add(1);
         payload.copies[0].message = message.into();
         let forged =
-            yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
+            yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yoip::encode(&payload))
                 .unwrap();
         assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
         b.sync(0).unwrap();
@@ -373,18 +370,18 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
         let ha = Http::new(hub.url());
         let mut a3 = Client::restore(ha.clone(), &a.saved()).unwrap();
         // The model of the forgery is not delivered itself (its bytes would be seen, the forgery skipped unasked).
-        ha.fault(&yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())), Fault::Answer(202));
+        ha.fault(&yoip::net::api::deliver_path(&yo_tests::user_id(b.user_id())), Fault::Answer(202));
         let _ = a3.send(b.user_id(), text("forged"));
         posted(&ha, b.user_id()).pop()
     };
     let real = real.expect("the forgery's model was sent");
     {
         let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
-        let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+        let mut payload: yoip::protocol::envelope::Payload = yoip::decode(&opened).unwrap();
         payload.device_key = [8; 32];
         let account = yo_tests::account_key(&b.account_secret());
         let forged =
-            yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
+            yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yoip::encode(&payload))
                 .unwrap();
         assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
         b.sync(0).unwrap();
@@ -516,7 +513,7 @@ fn first_yos_crossing_at_once_all_arrive() {
         .collect();
     let users: Vec<String> = strangers.iter().map(|(_, c)| c.user_id().to_owned()).collect();
     let bea_id = bea.lock().unwrap().user_id().to_owned();
-    let to_bea = yo_wire::api::deliver_path(&yo_tests::user_id(&bea_id));
+    let to_bea = yoip::net::api::deliver_path(&yo_tests::user_id(&bea_id));
     let handles: Vec<_> = strangers
         .into_iter()
         .enumerate()

@@ -1,11 +1,11 @@
-//! The app's version (spec 6.3): `Yo-App` kept per device, and an app older than the hub's minimum for its platform
+//! The app's version (spec 4.1): `Yo-App` kept per device, and an app older than the hub's minimum for its platform
 //! answered `426`, so it asks to be updated.
 
 use std::sync::Arc;
 use yo_core::{Client, Error, Push, Response, Transport};
 use yo_hub::config::Config;
 use yo_tests::{random_u64, Http, TestHub};
-use yo_wire::api::{status, HEADER_APP};
+use yoip::net::api::{status, HEADER_APP};
 
 /// The platform's HTTP with the app's header on every request, as the apps send it.
 struct App(Arc<Http>, &'static str);
@@ -39,7 +39,7 @@ struct Registering(Arc<Http>);
 impl Transport for Registering {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         let mut headers = headers.to_vec();
-        if path == yo_wire::api::REGISTER {
+        if path == yoip::net::api::REGISTER {
             headers.push((HEADER_APP.into(), "ios/202611140619".into()));
         }
         self.0.request(method, path, &headers, body)

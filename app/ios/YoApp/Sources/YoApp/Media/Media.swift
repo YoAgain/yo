@@ -1,4 +1,4 @@
-// Photos and videos (spec 5, 6.8): sealed by the core, kept in an outbox until the hub has the blob, only then their
+// Photos and videos (spec 3.2, 4.3): sealed by the core, kept in an outbox until the hub has the blob, only then their
 // Yo goes. What arrives is fetched at once, kept until seen once, then deleted.
 import AVFoundation
 import CryptoKit
@@ -48,7 +48,7 @@ enum MediaStorage {
   }
 }
 
-/// The manifests hold media keys, so they are sealed (spec 2): ChaCha20-Poly1305 under HKDF-SHA256("yo media
+/// The manifests hold media keys, so they are sealed (spec 1.2): ChaCha20-Poly1305 under HKDF-SHA256("yo media
 /// manifest v1") of the state key. On disk: "YOM1" || nonce || ciphertext || tag. Older plain JSON is read once and
 /// written again sealed.
 enum ManifestSeal {
@@ -477,7 +477,7 @@ final class MediaOutbox {
     }
   }
 
-  /// `held`: friend blocked or new key unconfirmed (spec 4.8, 3.4); goes after `retryNow`, as the core's outbox does.
+  /// `held`: friend blocked or new key unconfirmed (spec 3.3, 2.3); goes after `retryNow`, as the core's outbox does.
   /// `dropped`: not this account's any more (signed out, another account); `refused`: kept until a tap.
   private enum Outcome: Equatable {
     case uploaded, sent, held, dropped, replaced, stopped
@@ -614,7 +614,7 @@ actor ReceivedMedia {
   private var arrived: (@MainActor (Arrival) -> Void)?
   /// The hub no longer has it: off its bar.
   private var dropped: (@MainActor (String) -> Void)?
-  /// Swiped away before its download finished: still fetched and acknowledged (spec 6.8), then deleted.
+  /// Swiped away before its download finished: still fetched and acknowledged (spec 4.3), then deleted.
   private var unwanted: Set<String> = []
   /// Counts sign-outs: a fetch begun before one keeps nothing.
   private var generation = 0

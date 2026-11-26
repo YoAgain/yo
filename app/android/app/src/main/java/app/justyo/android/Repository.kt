@@ -435,7 +435,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         vault.delete("left")
     }
 
-    /** The hub's keys this build pins (spec 6.10): a backup's fetch takes only the hub's signed answer. */
+    /** The hub's keys this build pins (spec 4.1): a backup's fetch takes only the hub's signed answer. */
     private fun hubKeys(): List<ByteArray> = Hub.hubKeys.map(::decodeUrl)
 
     private fun registerCore(name: String, account: ByteArray): YoClient {
@@ -526,7 +526,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     /**
      * "Turn Off Recovery Key" (iOS `newRecoveryKey`): the backup is made at once under a new key and a new K (the core
-     * makes it, spec 7), so the saved key, with any copy of the record it opened, stops working now; the new one shows
+     * makes it, spec 2.4), so the saved key, with any copy of the record it opened, stops working now; the new one shows
      * "Not Saved" until it is saved. A passkey door is made anew too: `askPasskey` (the system's sheet) gives its PRF;
      * cancelled, nothing changes. The new key is staged first (`recovery-pending`): if the hub's answer is lost, the
      * next try opens the backup with it.
@@ -747,7 +747,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     fun widgetAccount() = client?.userId()
 
     /** A name typed in: added at the bottom once the hub said who it is, then sent a Yo (the first goes as a request,
-     *  as "Add & Yo"): "Sent Yo" where the bar stands, then it rises (`yo_product::list`). YoGPT at sign-up: no Yo. */
+     *  as "Add & Yo"): "Sent Yo" where the bar stands, then it rises (`yo_ui::list`). YoGPT at sign-up: no Yo. */
     suspend fun add(typed: String, yo: Boolean = true) {
         val c = client ?: return
         val name = usernameCanonical(typed)
@@ -832,7 +832,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 val events = c.send(sendTarget(friend.target), MessageKind.Yo)
                 Lat.mark("send.end")
                 // The hub has it: the bar says so now; what the send brought along and the bookkeeping follow. A
-                // request past the hub's bucket (spec 4.10) waits by itself, at once with their yes: the bar says
+                // request past the hub's bucket (spec 3.3) waits by itself, at once with their yes: the bar says
                 // "Waiting to Send", no banner.
                 if (friend.user?.let { c.requestHeld(it) } == true) {
                     listFriends()
@@ -1017,7 +1017,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         media.wake()
     }
     /** Threads shown in this app (a user id, or "group:" and a group id): this account's other devices clear their
-     *  notifications of them, through the newest message the core received (Sync Read, spec 5). */
+     *  notifications of them, through the newest message the core received (Sync Read, spec 3.2). */
     private fun markSeen(c: YoClient, targets: Collection<String>) {
         if (targets.isEmpty()) return
         val threads = targets.map { it.removePrefix("group:") }.distinct()
@@ -1057,7 +1057,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (name == null) {
             crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
         }
-        // Shown in front: this account's other devices let theirs go (Sync Read, spec 5).
+        // Shown in front: this account's other devices let theirs go (Sync Read, spec 3.2).
         if (inFront) client?.let { markSeen(it, listOf(friend.target)) }
         try {
             if (!inFront) notifications.show(friend.target, id, kind, friend, name, user, sender?.color,
@@ -1174,7 +1174,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 friend.user?.takeIf { contact!=null }?.let { c.safetyCode(it) })
         } catch (e: CancellationException) { throw e } catch (e: Exception) { failed(e); null }
     }
-    /** Verified only when the code scanned off the contact's screen matches (spec 3.4). */
+    /** Verified only when the code scanned off the contact's screen matches (spec 2.3). */
     suspend fun verifyScan(friend: Friend, scanned: ByteArray): Boolean {
         val c = client ?: return false
         if (!c.safetyCodeMatches(friend.target, scanned)) return false

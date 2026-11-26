@@ -1,4 +1,4 @@
-// Contacts in the profile: every friend and whether its encryption is as it should be (spec 3, 4).
+// Contacts in the profile: every friend and whether its encryption is as it should be (spec 2, 3).
 import SwiftUI
 import UIKit
 import YoCore
@@ -56,7 +56,7 @@ struct ContactState: Sendable {
   }
 }
 
-/// Verifying a contact and confirming their new key (spec 3.4); then what waited for them goes again.
+/// Verifying a contact and confirming their new key (spec 2.3); then what waited for them goes again.
 @MainActor
 enum Verification {
   static func setVerified(

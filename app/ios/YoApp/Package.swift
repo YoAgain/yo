@@ -38,8 +38,8 @@ let package = Package(
     .target(name: "YoShare", dependencies: ["YoCore"], path: "Sources/Extensions/YoShare", swiftSettings: constValues("YoShare")),
     .target(name: "YoNotify", dependencies: ["YoCore"], path: "Sources/Extensions/YoNotify", swiftSettings: constValues("YoNotify")),
     .target(name: "YoControls", dependencies: ["YoCore"], path: "Sources/Extensions/YoControls", swiftSettings: constValues("YoControls")),
-    // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
-    // (ignored); run it before the first build and after a change in core/ (dev/push.sh does).
+    // The Rust core (app/core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
+    // (ignored); run it before the first build and after a change in app/core/ or yoip/ (dev/push.sh does).
     // The core keeps the state shared with the extensions in SQLite: the system's (libsqlite3 of the SDK).
     .target(name: "YoCore", dependencies: ["yoFFI"], path: "build/core/swift", linkerSettings: [.linkedLibrary("sqlite3")]),
     .binaryTarget(name: "yoFFI", path: "build/core/yoFFI.xcframework"),

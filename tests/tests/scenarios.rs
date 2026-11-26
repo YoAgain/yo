@@ -1,10 +1,10 @@
-//! Scenarios: a real hub, real clients over HTTP, the protocol end to end (spec/v1.md).
+//! Scenarios: a real hub, real clients over HTTP, the protocol end to end (yoip/SPEC.md).
 
 use std::sync::Arc;
 use yo_core::backup::Door;
 use yo_core::{Client, Content, Error, Event, Push};
 use yo_tests::{deliver_raw, random_u64, register, user_of, username, Http, Lying, TestHub};
-use yo_wire::api;
+use yoip::net::api;
 
 fn pair(hub: &TestHub) -> (Client, Client, String, String) {
     let n = random_u64() % 1_000_000_000;
@@ -242,7 +242,11 @@ fn garbage_from_a_stranger_is_dropped_and_harms_nothing() {
     assert_eq!(deliver_raw(&hub.url(), b.user_id(), vec![1, 2, 3]), api::status::BAD_REQUEST);
     // Not sealed: refused at the door; sealed to nobody: taken, and dropped by the device that cannot open it.
     assert_eq!(
-        deliver_raw(&hub.url(), b.user_id(), yo_wire::envelope::pad(b"bare", &yo_wire::envelope::BUCKETS).unwrap()),
+        deliver_raw(
+            &hub.url(),
+            b.user_id(),
+            yoip::protocol::envelope::pad(b"bare", &yoip::protocol::envelope::BUCKETS).unwrap()
+        ),
         api::status::BAD_REQUEST
     );
     assert_eq!(deliver_raw(&hub.url(), b.user_id(), yo_tests::junk(7)), api::status::ACCEPTED);
@@ -400,7 +404,7 @@ fn a_backup_is_found_by_user_id_and_by_locator() {
     // Malformed records are refused, by the core and by the hub.
     let bad = api::Backup { version: 2, ..backup(Vec::new()) };
     assert!(t.put_backup(&bad).is_err());
-    for body in [yo_wire::encode(&bad), yo_wire::encode(&backup(vec![1; 15])), vec![1, 2, 3], Vec::new()] {
+    for body in [yoip::encode(&bad), yoip::encode(&backup(vec![1; 15])), vec![1, 2, 3], Vec::new()] {
         assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &body).unwrap().status, api::status::BAD_REQUEST);
     }
     assert_eq!(fetch(&http, &user), Ok(Some(backup(vec![8; 16]))), "nothing changed");
@@ -494,11 +498,11 @@ fn feedback_reaches_the_operator_within_its_limit() {
     help::send_message(&*http, &phone, "More colors, please", "1.0 (1)").unwrap();
     help::send_message(&*http, &phone, &"ä".repeat(1000), "1.0 (1)").unwrap();
     // Too long or empty: the core does not send it, and the hub refuses it anyway.
-    let limit = yo_wire::limits::MAX_FEEDBACK_LEN;
+    let limit = yoip::net::limits::MAX_FEEDBACK_LEN;
     assert!(help::send_message(&*http, &phone, &"x".repeat(limit + 1), "1.0 (1)").is_err());
     assert!(help::send_message(&*http, &phone, "", "1.0 (1)").is_err());
     let raw = |text: Vec<u8>, version: &str| {
-        yo_wire::encode(&api::Feedback { text: text.into(), app_version: version.as_bytes().to_vec().into() })
+        yoip::encode(&api::Feedback { text: text.into(), app_version: version.as_bytes().to_vec().into() })
     };
     let headers = [(api::HEADER_INSTALL.to_owned(), phone.clone())];
     for body in [
@@ -575,14 +579,14 @@ fn a_copied_registration_registers_no_one() {
     let name = username(random_u64() % 1_000_000_000);
     register(http.clone(), &name, None);
     let (_, _, body) = http.sent.lock().unwrap().iter().find(|(_, path, _)| path == api::REGISTER).cloned().unwrap();
-    let mut copied: api::Register = yo_wire::decode(&body).unwrap();
+    let mut copied: api::Register = yoip::decode(&body).unwrap();
     // Someone copies certificate and prekeys and puts in their own auth key: the proof no longer fits. (The
     // name is taken too, but the proof is checked first.)
     copied.device.auth_key = [7; 32];
     copied.device.device_id = [7; 16];
     let replay = reqwest::blocking::Client::new()
         .post(format!("{}{}", hub.url(), api::REGISTER))
-        .body(yo_wire::encode(&copied))
+        .body(yoip::encode(&copied))
         .send()
         .unwrap();
     assert_eq!(replay.status().as_u16(), api::status::BAD_REQUEST);
@@ -594,7 +598,7 @@ fn a_copied_registration_registers_no_one() {
 fn an_ack_past_the_largest_id_is_a_bad_request() {
     let hub = TestHub::start();
     let mut t = by_name(&hub, &format!("ACK{}", random_u64() % 100_000), None).unwrap();
-    let ack = |ids: Vec<u64>| yo_wire::encode(&api::Ack { ids });
+    let ack = |ids: Vec<u64>| yoip::encode(&api::Ack { ids });
     for ids in [vec![u64::MAX], vec![1, i64::MAX as u64 + 1]] {
         assert_eq!(t.signed_for_tests("POST", api::INBOX_ACK, &ack(ids)).unwrap().status, api::status::BAD_REQUEST);
     }

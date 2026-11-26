@@ -1,4 +1,4 @@
-//! What the chaos runs found (tests/CHAOS.md), each the smallest case that showed it, kept so it stays fixed.
+//! What the chaos runs found (README.md, Tests), each the smallest case that showed it, kept so it stays fixed.
 
 use yo_core::{Client, Content, Error, Event, Push};
 use yo_tests::{random_u64, Fault, Http, TestHub};
@@ -66,7 +66,7 @@ fn a_signature_the_hub_saw_already_is_made_anew() {
 }
 
 /// A send whose receive-first step met a passing refusal (`429`, `5xx`) failed as a whole, the message never
-/// queued, though "not now" is never "never" (spec 4.7).
+/// queued, though "not now" is never "never" (spec 3.2).
 #[test]
 fn a_send_goes_into_the_outbox_when_receiving_first_is_refused_for_now() {
     let hub = TestHub::start();
@@ -148,7 +148,7 @@ fn a_chat_started_while_blocked_works_after_the_unblock() {
 }
 
 /// A phone whose clock ran two hours ahead signed with that time and saved it as the floor for every later
-/// signature (spec 6.2: strictly increasing). With the clock set right again every request stayed two hours ahead,
+/// signature (spec 4.1: strictly increasing). With the clock set right again every request stayed two hours ahead,
 /// refused (`401`), until the real time caught up: the device was cut off for as long as its clock had been wrong.
 /// And a phone whose clock is off by more than the hub's window got `401` on every request, silently (the Android
 /// hunt): now the hub tells its time and the device signs and dates its messages by it.
@@ -162,7 +162,7 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
     let mut b = by_name(Http::new(hub.url()), &format!("Early{n}"), None).unwrap();
     const HOUR: i64 = 3_600_000;
     let near = |offset: i64, want: i64| (offset - want).abs() < 10_000;
-    // Sent before the hub told its time: dated two hours ahead, the floor of every later time (spec 6.2's rule
+    // Sent before the hub told its time: dated two hours ahead, the floor of every later time (spec 4.1's rule
     // for signing times holds for them too: a floor far ahead of the clock is dropped).
     b.sync(0).unwrap();
     a.set_clock_skew(2 * HOUR);

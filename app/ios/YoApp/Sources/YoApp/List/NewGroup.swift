@@ -1,4 +1,4 @@
-// Add Group (spec 4.9): a name and up to 19 friends known by user id (a name the hub never confirmed can't join yet).
+// Add Group (spec 3.4): a name and up to 19 friends known by user id (a name the hub never confirmed can't join yet).
 import SwiftUI
 import YoCore
 

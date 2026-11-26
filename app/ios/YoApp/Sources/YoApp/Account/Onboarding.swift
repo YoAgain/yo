@@ -217,7 +217,7 @@ struct Onboarding: View {
       // Taken by this phone's own lost try (its key is kept): Continue takes it (`NewAccountKey`).
       checked[skeleton] = free || NewAccountKey.has(typed)
     } catch YoError.Refused(status: 400) {
-      // The minimum length is the hub's switch (spec 3.3); shown after the 1.5 s pause.
+      // The minimum length is the hub's switch (spec 2.2); shown after the 1.5 s pause.
       short.insert(skeleton)
     } catch {}
   }
@@ -270,7 +270,7 @@ struct Onboarding: View {
       checked[Username.skeleton(asked)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch AccountError.hub(.Refused(status: 400)) {
-      // The hub's refusal of the name (its least length, spec 3.3) reads as too short. `register` throws the
+      // The hub's refusal of the name (its least length, spec 2.2) reads as too short. `register` throws the
       // hub's errors wrapped in AccountError: a bare YoError never comes here.
       short.insert(Username.skeleton(asked))
       tooShort = true

@@ -17,7 +17,7 @@ use std::time::Instant;
 use yo_core::{Backup, Client, Error, Push};
 use yo_hub::config::{Config, Limits};
 use yo_tests::{random_u64, user_id, Http, TestHub};
-use yo_wire::api::{self, status};
+use yoip::net::api::{self, status};
 
 struct Args {
     accounts: usize,
@@ -277,8 +277,8 @@ fn main() {
         check(status == status::BAD_REQUEST, &format!("garbage registration answers {status}"));
     }
     if let Some((_, client)) = clients.iter_mut().skip(n_again).last() {
-        let bad_version = yo_wire::encode(&Backup { version: 9, ..record(0, 3) });
-        let short_locator = yo_wire::encode(&Backup { locator: vec![4; 15].into(), ..record(0, 3) });
+        let bad_version = yoip::encode(&Backup { version: 9, ..record(0, 3) });
+        let short_locator = yoip::encode(&Backup { locator: vec![4; 15].into(), ..record(0, 3) });
         for body in garbage.iter().cloned().chain([bad_version, short_locator]) {
             let status = client.signed_for_tests("PUT", api::BACKUP, &body).unwrap().status;
             statuses.push(status);

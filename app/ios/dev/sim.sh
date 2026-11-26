@@ -15,12 +15,12 @@
 # XCODEGEN names XcodeGen when it is not on the PATH; dev/local.env (ignored) may set it, and RUSTUP_TOOLCHAIN when
 # the Mac's rustup has another toolchain than rust-toolchain.toml's. Yo Dev talks to the dev hub. Passkeys do not work
 # in the Simulator (no team in the app's id for the passkey domain), nor does the iCloud Keychain sync; Face ID does
-# (Features ▸ Face ID, or `simctl spawn … notifyutil`). See ../TESTING.md.
+# (Features ▸ Face ID, or `simctl spawn … notifyutil`). See README.md, iOS.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [ -f "$here/local.env" ] && . "$here/local.env"
 derived=${YO_SIM_DERIVED:-$here/sim/build}
-# YO_SIM_CONFIG=Release: the app optimized, as on the iPhone (for measuring, TESTING.md); Debug by default.
+# YO_SIM_CONFIG=Release: the app optimized, as on the iPhone (for measuring); Debug by default.
 config=${YO_SIM_CONFIG:-Debug}
 PATH="$HOME/.cargo/bin:$PATH"
 

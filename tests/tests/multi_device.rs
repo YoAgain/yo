@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 use yo_core::{media, Client, Content, Event, Response, Transport};
 use yo_hub::{config::Config, Hub};
 use yo_tests::{Http, TestHub};
-use yo_wire::api::Push;
+use yoip::net::api::Push;
 
 fn config() -> Config {
     Config { add_devices: true, ..Config::for_tests() }

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use yo_core::{help, Client, Error, Event};
 use yo_hub::config::Config;
 use yo_tests::{junk, new_phone, random_u64, register, user_id, username, Http, TestHub};
-use yo_wire::api::{self, status};
-use yo_wire::handle::Handle;
-use yo_wire::{decode, encode};
+use yoip::net::api::{self, status};
+use yoip::net::handle::Handle;
+use yoip::{decode, encode};
 
 /// A request as anyone can send it: method, path, headers, body; the status and the body of the answer.
 fn raw(hub: &TestHub, method: &str, path: &str, headers: &[(&str, String)], body: Vec<u8>) -> (u16, Vec<u8>) {
@@ -109,9 +109,9 @@ fn every_signed_route_wants_its_devices_signature() {
     let (_, _, borrowed, _) = http.recorded.lock().unwrap().last().cloned().unwrap();
     let borrowed: Vec<(&str, String)> = borrowed.iter().map(|(n, v)| (n.as_str(), v.clone())).collect();
     let stranger = [
-        ("yo-device", yo_wire::b64(&[7; 16])),
+        ("yo-device", yoip::b64(&[7; 16])),
         ("yo-time", yo_hub::now_ms().to_string()),
-        ("yo-signature", yo_wire::b64(&[1; 64])),
+        ("yo-signature", yoip::b64(&[1; 64])),
     ];
     for (method, path, body) in signed_routes(&me) {
         for headers in [&[][..], &borrowed[..], &stranger[..]] {
@@ -160,7 +160,7 @@ fn a_time_outside_the_window_is_told_the_hubs_time() {
     for off in [-3_600_000i64, 6 * 60 * 1000, 3_600_000] {
         let (code, body) = raw(&hub, "GET", &path, &with_time(yo_hub::now_ms().saturating_add_signed(off)), Vec::new());
         assert_eq!(code, status::UNAUTHORIZED);
-        let told = yo_wire::request::clock_of(&body).expect("the hub's time");
+        let told = yoip::net::request::clock_of(&body).expect("the hub's time");
         assert!(told.abs_diff(yo_hub::now_ms()) < 10_000, "{off}: {told}");
     }
     // Within the window but signed for another time (a bad signature), or a replay: no time.
@@ -191,30 +191,30 @@ fn a_malformed_body_is_400_on_every_route() {
     }
     let hash = yo_tests::devices_hash(&hub.url(), &me).unwrap();
     let deliver = |body: Vec<u8>| {
-        raw(&hub, "POST", &api::deliver_path(&user_id(&me)), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], body).0
+        raw(&hub, "POST", &api::deliver_path(&user_id(&me)), &[(api::HEADER_DEVICES, yoip::b64(&hash))], body).0
     };
     let mut unsealed = junk(1);
     unsealed[0] = 1;
     let mut longer = junk(1);
     longer.push(0);
-    for bad in [Vec::new(), vec![yo_wire::envelope::SEALED; 1023], longer, unsealed] {
+    for bad in [Vec::new(), vec![yoip::protocol::envelope::SEALED; 1023], longer, unsealed] {
         assert_eq!(deliver(bad), status::BAD_REQUEST);
     }
-    for size in yo_wire::envelope::BUCKETS {
+    for size in yoip::protocol::envelope::BUCKETS {
         let mut envelope = vec![0; size];
-        envelope[0] = yo_wire::envelope::SEALED;
+        envelope[0] = yoip::protocol::envelope::SEALED;
         assert_eq!(deliver(envelope), status::ACCEPTED, "a bucket of {size}");
     }
     // The device check: missing or not 32 bytes of base64url.
     let path = api::deliver_path(&user_id(&me));
     assert_eq!(raw(&hub, "POST", &path, &[], junk(1)).0, status::BAD_REQUEST);
-    for bad in ["!!", "AAAA", &yo_wire::b64(&[0; 33])] {
+    for bad in ["!!", "AAAA", &yoip::b64(&[0; 33])] {
         assert_eq!(raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, bad.to_owned())], junk(1)).0, status::BAD_REQUEST);
     }
     // A user id that is not 16 bytes of base64url is no route.
-    for user in ["!!", "AAAA", &yo_wire::b64(&[0; 17])] {
+    for user in ["!!", "AAAA", &yoip::b64(&[0; 17])] {
         let (code, _) =
-            raw(&hub, "POST", &format!("/v1/inbox/{user}"), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(1));
+            raw(&hub, "POST", &format!("/v1/inbox/{user}"), &[(api::HEADER_DEVICES, yoip::b64(&hash))], junk(1));
         assert_eq!(code, status::NOT_FOUND, "{user}");
     }
 }
@@ -225,7 +225,7 @@ fn bodies_are_held_to_their_limits() {
     let hub = TestHub::start();
     let (mut a, _, _) = account(&hub);
     let me = a.user_id().to_owned();
-    let most = yo_wire::limits::MAX_BODY;
+    let most = yoip::net::limits::MAX_BODY;
     for (method, path, _) in signed_routes(&me) {
         if method == "GET" || method == "DELETE" {
             continue;
@@ -246,7 +246,7 @@ fn bodies_are_held_to_their_limits() {
     assert_eq!(too_large(api::REGISTER, Vec::new()), status::TOO_LARGE);
     let hash = yo_tests::devices_hash(&hub.url(), &me).unwrap();
     let path = api::deliver_path(&user_id(&me));
-    assert_eq!(too_large(&path, vec![(api::HEADER_DEVICES, yo_wire::b64(&hash))]), status::TOO_LARGE);
+    assert_eq!(too_large(&path, vec![(api::HEADER_DEVICES, yoip::b64(&hash))]), status::TOO_LARGE);
 
     // Prekeys (6.6): 32 one-time of each kind per upload, 2 KiB each, signatures of 64 bytes.
     let mut put = |prekeys: &api::Prekeys| signed(&mut a, "PUT", api::PREKEYS, &encode(prekeys)).0;
@@ -297,8 +297,8 @@ fn bodies_are_held_to_their_limits() {
     assert_eq!(signed(&mut a, "POST", api::LOOKUP, &except(17)).0, status::BAD_REQUEST);
     for handle in [
         Handle { kind: 9, value: vec![1; 16].into() },
-        Handle { kind: yo_wire::handle::KIND_USER, value: vec![1; 15].into() },
-        Handle { kind: yo_wire::handle::KIND_ACCOUNT_KEY, value: vec![1; 31].into() },
+        Handle { kind: yoip::net::handle::KIND_USER, value: vec![1; 15].into() },
+        Handle { kind: yoip::net::handle::KIND_ACCOUNT_KEY, value: vec![1; 31].into() },
         Handle::username("_x"),
     ] {
         assert_eq!(signed(&mut a, "POST", api::LOOKUP, &lookup_body(handle, 0, Vec::new())).0, status::BAD_REQUEST);
@@ -580,7 +580,7 @@ fn prekeys_are_handed_out_as_the_spec_says() {
     // The device's next sync sees 0 left and refills.
     target.sync(0).unwrap();
     target.after_sync().unwrap();
-    assert_eq!(prekeys_left(&mut target), yo_wire::limits::PREKEY_TARGET);
+    assert_eq!(prekeys_left(&mut target), yoip::net::limits::PREKEY_TARGET);
     let upload = http.sent.lock().unwrap().iter().rev().find(|(_, p, _)| p == api::PREKEYS).unwrap().2.clone();
     let first = bundles(&mut looker, &who, Vec::new());
     let one = first.bundles[0].one_time.as_ref().unwrap().id;
@@ -588,8 +588,8 @@ fn prekeys_are_handed_out_as_the_spec_says() {
     assert!(seen.insert(one));
     // The refill sent again (its answer lost): nothing comes back of what was handed out.
     assert_eq!(signed(&mut target, "PUT", api::PREKEYS, &upload).0, status::NO_CONTENT);
-    assert_eq!(prekeys_left(&mut target), yo_wire::limits::PREKEY_TARGET - 1);
-    for _ in 1..yo_wire::limits::PREKEY_TARGET {
+    assert_eq!(prekeys_left(&mut target), yoip::net::limits::PREKEY_TARGET - 1);
+    for _ in 1..yoip::net::limits::PREKEY_TARGET {
         let found = bundles(&mut looker, &who, Vec::new());
         assert!(seen.insert(found.bundles[0].one_time.as_ref().unwrap().id));
     }
@@ -637,13 +637,13 @@ fn a_delivery_names_the_devices_or_gets_them() {
     let (mut looker, _, _) = account(&hub);
     let who = b.user_id().to_owned();
     let path = api::deliver_path(&user_id(&who));
-    let deliver = |hash: &[u8]| raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(hash))], junk(3));
+    let deliver = |hash: &[u8]| raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yoip::b64(hash))], junk(3));
     let (code, body) = deliver(&[0; 32]);
     assert_eq!(code, status::CONFLICT);
     let devices: api::Devices = decode(&body).unwrap();
     let found = bundles(&mut looker, &who, Vec::new());
     assert_eq!((devices.account_key, devices.devices.clone()), (found.account_key, found.devices.clone()));
-    let hash = yo_wire::devices::hash(&devices.account_key, &devices.keys());
+    let hash = yoip::net::devices::hash(&devices.account_key, &devices.keys());
     assert_eq!(deliver(&hash).0, status::ACCEPTED);
     let (code, body) = signed(&mut b, "GET", &api::inbox_path(0), &[]);
     assert_eq!((code, decode::<api::Inbox>(&body).unwrap().items.len()), (status::OK, 1), "only the good one stored");
@@ -655,12 +655,12 @@ fn a_delivery_names_the_devices_or_gets_them() {
     assert_eq!(now.account_key, devices.account_key);
     assert_eq!(now.devices.len(), 1);
     assert_ne!(now.devices[0].key, devices.devices[0].key);
-    assert_eq!(deliver(&yo_wire::devices::hash(&now.account_key, &now.keys())).0, status::ACCEPTED);
+    assert_eq!(deliver(&yoip::net::devices::hash(&now.account_key, &now.keys())).0, status::ACCEPTED);
     assert_eq!(phone.sync(0).unwrap(), vec![], "junk, dropped");
     phone.delete_account().unwrap();
     assert_eq!(deliver(&hash).0, status::NOT_FOUND);
     assert_eq!(
-        raw(&hub, "POST", &api::deliver_path(&[0; 16]), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(1)).0,
+        raw(&hub, "POST", &api::deliver_path(&[0; 16]), &[(api::HEADER_DEVICES, yoip::b64(&hash))], junk(1)).0,
         404
     );
 }
@@ -706,7 +706,7 @@ fn the_inbox_answers_and_takes_acks() {
     let hash = yo_tests::devices_hash(&hub.url(), a.user_id()).unwrap();
     let path = api::deliver_path(&user_id(a.user_id()));
     for i in 0..101u8 {
-        let (code, _) = raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(i));
+        let (code, _) = raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yoip::b64(&hash))], junk(i));
         assert_eq!(code, status::ACCEPTED);
     }
     let fetch = |a: &mut Client| decode::<api::Inbox>(&signed(a, "GET", &api::inbox_path(0), &[]).1).unwrap();
@@ -806,11 +806,11 @@ fn backups_are_stored_once_per_locator() {
     let path = api::backup_path(&[4; 16]);
     let sign = |seed: [u8; 32], time: u64| {
         let key = libsignal_protocol::PrivateKey::deserialize(&seed).unwrap();
-        key.calculate_signature(&yo_wire::request::to_be_signed("GET", &path, time, &[]), &mut rand::rng()).unwrap()
+        key.calculate_signature(&yoip::net::request::to_be_signed("GET", &path, time, &[]), &mut rand::rng()).unwrap()
     };
     // XEdDSA signs anew each time: a replay sends the same signature again.
     let fetch = |signature: &[u8], time: u64| {
-        let headers = [("yo-time", time.to_string()), ("yo-signature", yo_wire::b64(signature))];
+        let headers = [("yo-time", time.to_string()), ("yo-signature", yoip::b64(signature))];
         raw(&hub, "GET", &path, &headers, Vec::new())
     };
     assert_eq!(fetch(&sign([8; 32], time), time).0, status::NOT_FOUND);
@@ -832,7 +832,7 @@ fn an_old_delivery_token_is_ignored() {
     let hash = yo_tests::devices_hash(&hub.url(), a.user_id()).unwrap();
     let path = api::deliver_path(&user_id(a.user_id()));
     let headers =
-        [(api::HEADER_DEVICES, yo_wire::b64(&hash)), ("authorization", "PrivateToken token=\"AAAA\"".to_owned())];
+        [(api::HEADER_DEVICES, yoip::b64(&hash)), ("authorization", "PrivateToken token=\"AAAA\"".to_owned())];
     assert_eq!(raw(&hub, "POST", &path, &headers, junk(1)).0, status::ACCEPTED);
     assert_eq!(raw(&hub, "POST", &path, &headers, junk(2)).0, status::RATE_LIMITED, "by address all the same");
     assert_eq!(raw(&hub, "GET", "/.well-known/private-token-issuer-directory", &[], Vec::new()).0, status::NOT_FOUND);
@@ -844,12 +844,12 @@ fn an_old_delivery_token_is_ignored() {
 fn signed_requests_are_limited_per_device() {
     let hub = hub_with(|l| l.signed_per_device_minute = 5);
     let (mut a, _, _) = account(&hub);
-    let device = yo_wire::b64(&a.device_id());
+    let device = yoip::b64(&a.device_id());
     for _ in 0..10 {
         let headers = [
             ("yo-device", device.clone()),
             ("yo-time", yo_hub::now_ms().to_string()),
-            ("yo-signature", yo_wire::b64(&[1; 64])),
+            ("yo-signature", yoip::b64(&[1; 64])),
         ];
         assert_eq!(raw(&hub, "GET", &api::inbox_path(0), &headers, Vec::new()).0, status::UNAUTHORIZED);
     }
@@ -925,7 +925,7 @@ fn one_time_prekeys_go_once_also_to_lookups_at_once() {
         .collect();
     let ids: Vec<u32> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
     let distinct: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
-    assert_eq!(ids.len(), yo_wire::limits::PREKEY_TARGET as usize, "32 handed out, 8 lookups got the last resort");
+    assert_eq!(ids.len(), yoip::net::limits::PREKEY_TARGET as usize, "32 handed out, 8 lookups got the last resort");
     assert_eq!(distinct.len(), ids.len(), "none twice");
 }
 
@@ -990,7 +990,7 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
     let hash = yo_tests::devices_hash(&hub.url(), user).unwrap();
     let path = api::deliver_path(&user_id(user));
     for (index, value) in [None, Some("true"), Some("false")].into_iter().enumerate() {
-        let mut headers = vec![(api::HEADER_DEVICES, yo_wire::b64(&hash))];
+        let mut headers = vec![(api::HEADER_DEVICES, yoip::b64(&hash))];
         if let Some(value) = value {
             headers.push((api::HEADER_URGENT, value.into()));
         }
@@ -1024,7 +1024,7 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
             &hub,
             "POST",
             &path,
-            &[(api::HEADER_DEVICES, yo_wire::b64(&hash)), (api::HEADER_URGENT, "invalid".into())],
+            &[(api::HEADER_DEVICES, yoip::b64(&hash)), (api::HEADER_URGENT, "invalid".into())],
             junk(4)
         )
         .0,
@@ -1182,7 +1182,7 @@ fn the_live_stream_is_the_operators_and_tells_each_yo_at_once() {
     let hash = yo_tests::devices_hash(&hub.url(), a.user_id()).unwrap();
     let path = api::deliver_path(&user_id(a.user_id()));
     for i in 0..3u8 {
-        let (code, _) = raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(i));
+        let (code, _) = raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yoip::b64(&hash))], junk(i));
         assert_eq!(code, status::ACCEPTED);
     }
     // Each Yo as it is counted, long before the minute's flush; its kind only, nothing of who.

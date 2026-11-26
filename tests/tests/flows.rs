@@ -127,7 +127,7 @@ fn friends(hub: &TestHub) -> (Phone, Phone) {
     assert_eq!(yos(&b.drain(), &a.user()), 1);
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
-    // Each has the other's profile key (spec 4.10).
+    // Each has the other's profile key (spec 3.3).
     b.drain();
     a.drain();
     (a, b)
@@ -175,14 +175,14 @@ fn yo_times(events: &[YoEvent], from: &str) -> Vec<u64> {
 
 /// The envelopes posted to a user's inbox, in order, whether the hub got them or not.
 fn posted(http: &Http, to: &str) -> Vec<Vec<u8>> {
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to));
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(to));
     http.sent.lock().unwrap().iter().filter(|(m, p, _)| m == "POST" && *p == path).map(|(_, _, b)| b.clone()).collect()
 }
 
 /// What an envelope to `to` carries, opened with its account secret.
-fn payload(to: &Phone, envelope: &[u8]) -> yo_wire::envelope::Payload {
+fn payload(to: &Phone, envelope: &[u8]) -> yoip::protocol::envelope::Payload {
     let (payload, _) = yo_core::sealed::testing::open(&to.account_secret().try_into().unwrap(), envelope).unwrap();
-    yo_wire::decode(&payload).unwrap()
+    yoip::decode(&payload).unwrap()
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn many_yos_fast_arrive_each_once_in_order_both_ways() {
 fn lost_duplicated_and_reordered_envelopes() {
     let hub = TestHub::start();
     let (a, b) = friends(&hub);
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(&b.user()));
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(&b.user()));
     // Lost: A is told the hub took it.
     a.http.fault(&to_b, Fault::Answer(202));
     a.send_yo(b.user()).unwrap();
@@ -370,7 +370,7 @@ fn a_hub_restart_in_the_middle_of_a_send_loses_and_repeats_nothing() {
     let (config, dir) = hub_on_file();
     let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
     let (a, b) = friends(&hub);
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(&b.user()));
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(&b.user()));
     a.http.fault(&to_b, Fault::LoseAnswer);
     a.send_yo(b.user()).unwrap();
     assert_eq!(a.waiting(), 1);
@@ -401,7 +401,7 @@ fn a_hub_restart_in_the_middle_of_a_send_loses_and_repeats_nothing() {
 fn a_crash_before_or_after_a_save_loses_nothing_and_shows_nothing_twice() {
     let hub = TestHub::start();
     let (a, b) = friends(&hub);
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(&b.user()));
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(&b.user()));
     // Before the save: nothing leaves, the call says so.
     a.file.full.store(true, Ordering::Relaxed);
     assert!(matches!(a.send_yo(b.user()), Err(YoError::Save { .. })));
@@ -555,7 +555,7 @@ fn a_restored_phone_keeps_friends_made_by_writing_and_by_saying_yes() {
 fn a_replaced_device_still_sending_is_not_heard() {
     let hub = TestHub::start();
     let (a, b) = friends(&hub);
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(&b.user()));
+    let to_b = yoip::net::api::deliver_path(&yo_tests::user_id(&b.user()));
     // A Yo of the old phone held back, posted later by hand (it can still deliver).
     a.http.fault(&to_b, Fault::Answer(202));
     a.send_yo(b.user()).unwrap();
@@ -591,16 +591,16 @@ fn exhausted_prekeys_fall_back_to_the_last_resort() {
     let mut stranger =
         yo_core::Client::register_username(Http::new(hub.url()), &username(n + 1), None, None, yo_core::Push::none())
             .unwrap();
-    let lookup = yo_wire::encode(&yo_wire::api::Lookup {
-        handle: yo_wire::handle::Handle::user(&yo_tests::user_id(&b.user())),
-        flags: yo_wire::api::LOOKUP_PREKEYS,
+    let lookup = yoip::encode(&yoip::net::api::Lookup {
+        handle: yoip::net::handle::Handle::user(&yo_tests::user_id(&b.user())),
+        flags: yoip::net::api::LOOKUP_PREKEYS,
         except: Vec::new(),
     });
     let mut last = None;
-    for _ in 0..yo_wire::limits::PREKEY_TARGET + 2 {
-        let response = stranger.signed_for_tests("POST", yo_wire::api::LOOKUP, &lookup).unwrap();
+    for _ in 0..yoip::net::limits::PREKEY_TARGET + 2 {
+        let response = stranger.signed_for_tests("POST", yoip::net::api::LOOKUP, &lookup).unwrap();
         assert_eq!(response.status, 200);
-        last = Some(yo_wire::decode::<yo_wire::api::LookupResult>(&response.body).unwrap());
+        last = Some(yoip::decode::<yoip::net::api::LookupResult>(&response.body).unwrap());
     }
     let bundle = &last.unwrap().bundles[0];
     assert!(bundle.one_time.is_none(), "none left");
@@ -615,8 +615,8 @@ fn exhausted_prekeys_fall_back_to_the_last_resort() {
         assert_eq!(yos(&sender.drain(), &b.user()), 1);
     }
     // Refilled: the next lookup has a one-time prekey again.
-    let response = stranger.signed_for_tests("POST", yo_wire::api::LOOKUP, &lookup).unwrap();
-    let found = yo_wire::decode::<yo_wire::api::LookupResult>(&response.body).unwrap();
+    let response = stranger.signed_for_tests("POST", yoip::net::api::LOOKUP, &lookup).unwrap();
+    let found = yoip::decode::<yoip::net::api::LookupResult>(&response.body).unwrap();
     assert!(found.bundles[0].one_time.is_some(), "refilled");
 }
 
@@ -640,7 +640,7 @@ fn a_blocked_friend_is_not_heard_and_not_written_to() {
     assert_eq!(yos(&a.drain(), &b.user()), 1);
 }
 
-/// Silent receipts (spec 4.5): B never sends anything, yet each sync of B answers A's Yos with a receipt, so A's
+/// Silent receipts (spec 3.2): B never sends anything, yet each sync of B answers A's Yos with a receipt, so A's
 /// session is acknowledged and its ratchet moves: A's Yos stop being prekey messages after B's first receipt.
 #[test]
 fn silent_receipts_heal_a_one_way_stream() {
@@ -654,7 +654,7 @@ fn silent_receipts_heal_a_one_way_stream() {
     assert_eq!(kinds(&a, &b), [1, 1, 1], "the name and two Yos, unacknowledged: prekey messages");
     assert_eq!(yos(&b.drain(), &a.user()), 2);
     assert!(b.contacts().iter().any(|c| c.user == a.user() && !c.accepted), "a request");
-    // B says yes (spec 4.10): from now on receipts. A takes in B's receipt: nothing to show.
+    // B says yes (spec 3.3): from now on receipts. A takes in B's receipt: nothing to show.
     b.accept(a.user()).unwrap();
     let events = a.drain();
     assert!(events.iter().all(|e| matches!(e, YoEvent::Profile { .. })), "{}", describe(&events));
@@ -729,7 +729,7 @@ fn sealed_bytes_reveal_nothing() {
         ("the blob key", sealed_photo.media.key.clone()),
     ];
     for envelope in &envelopes {
-        assert_eq!(envelope[0], yo_wire::envelope::SEALED);
+        assert_eq!(envelope[0], yoip::protocol::envelope::SEALED);
         for (what, bytes) in &secrets {
             assert!(!envelope.windows(bytes.len()).any(|w| w == bytes.as_slice()), "{what} in an envelope");
         }

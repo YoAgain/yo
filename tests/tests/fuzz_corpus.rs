@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 use yo_core::Store;
 use yo_tests::{random_u64, register, username, Http, TestHub};
-use yo_wire::api;
+use yoip::net::api;
 
 #[derive(Default)]
 struct Saved(Mutex<Vec<u8>>);
@@ -24,7 +24,7 @@ const KEY: [u8; 32] = [0x42; 32];
 
 fn write(dir: &str, name: &str, bytes: &[u8]) {
     let dir = format!(
-        "{}/../fuzz/seeds/{}",
+        "{}/fuzz/seeds/{}",
         env!("CARGO_MANIFEST_DIR"),
         dir.trim_start_matches("corpus/").trim_start_matches("seeds")
     );
@@ -53,9 +53,9 @@ fn write_fuzz_corpus() {
         .iter()
         .find(|(_, path, _)| path == api::REGISTER)
         .map(|(_, _, body)| {
-            let device = yo_wire::decode::<api::Register>(body).unwrap().device;
+            let device = yoip::decode::<api::Register>(body).unwrap().device;
             let certificate =
-                yo_wire::cert::DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key).unwrap();
+                yoip::net::cert::DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key).unwrap();
             (certificate.account_key, device.device_key)
         })
         .unwrap();
@@ -66,7 +66,7 @@ fn write_fuzz_corpus() {
         bundles: vec![],
     };
     let named = api::LookupNamed { found: lookup, username: Some(pa.as_bytes().to_vec().into()) };
-    write("seeds", "core_lookup.bin", &yo_wire::encode(&api::LookupBot { named, bot: 0 }));
+    write("seeds", "core_lookup.bin", &yoip::encode(&api::LookupBot { named, bot: 0 }));
     // A's first message (with its profile), then more.
     a.send_yo(&pb).unwrap();
     a.send_yo(&pb).unwrap();
@@ -103,7 +103,7 @@ fn write_fuzz_corpus() {
     // The other targets: requests as sent, certificates, contents.
     for (i, (_, path, body)) in ha.sent.lock().unwrap().iter().enumerate().filter(|(_, (_, _, b))| !b.is_empty()) {
         if path == api::REGISTER {
-            let device = yo_wire::decode::<api::Register>(body).unwrap().device;
+            let device = yoip::decode::<api::Register>(body).unwrap().device;
             let mut cert_input = device.device_key.to_vec();
             cert_input.extend_from_slice(device.certificate.as_slice());
             write("corpus/wire_cert", "certificate", &cert_input);
@@ -112,7 +112,7 @@ fn write_fuzz_corpus() {
         write("corpus/hub_routes", &format!("request-{i}"), &route_input(path, body));
     }
     for content in [yo_core::Content::Yo, yo_tests::tagged("hi".into())] {
-        let bytes = yo_wire::content::Message { sent_at_ms: 1, group: None, content }.encode().unwrap();
+        let bytes = yoip::protocol::content::Message { sent_at_ms: 1, group: None, content }.encode().unwrap();
         write("corpus/wire_content", &format!("content-{}", bytes.len()), &bytes);
     }
 }
@@ -150,8 +150,8 @@ fn write_backup_seeds() {
     use yo_core::backup::{self, PasskeyDoor};
     let code = yo_tests::backup::recovery_key([1; 16]);
     let record = backup::make(&[2; 32], b"{}", &yo_tests::backup::pool(&code), PasskeyDoor::New(&[3; 32])).unwrap();
-    write("corpus/wire_api", "backup-2", &yo_wire::encode(&record));
+    write("corpus/wire_api", "backup-2", &yoip::encode(&record));
     // Route 13 is `PUT /v1/backup`, 27 the signed `GET /v1/backup/{id}` (fuzz_targets/hub_routes.rs).
-    write("corpus/hub_routes", "backup-put", &[&[13u8][..], &yo_wire::encode(&record)].concat());
+    write("corpus/hub_routes", "backup-put", &[&[13u8][..], &yoip::encode(&record)].concat());
     write("corpus/hub_routes", "backup-get", &[27]);
 }

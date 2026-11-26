@@ -19,7 +19,7 @@ import uniffi.yo.syncedItemUpgraded
 /**
  * The account item in Google Block Store, as iOS keeps it in the iCloud Keychain (format and parsing: the core's
  * `keychain` module): a new phone with the same Google account signs in by itself. Key material goes to Google's cloud
- * only end-to-end encrypted (spec/v1.md, "Key material only in an end-to-end encrypted cloud"): without that
+ * only end-to-end encrypted (yoip/SPEC.md, "Key material only in an end-to-end encrypted cloud"): without that
  * assurance the item stays on the phone for a device-to-device transfer only. Callers run on IO.
  *
  * Block Store's cloud copy travels in Google's device backup: `isEndToEndEncryptionAvailable()` is false both without

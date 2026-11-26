@@ -132,7 +132,7 @@ struct ClockFade: ViewModifier {
 }
 
 extension ProductText {
-  /// The core's English copy (`yo_product::Text`), as the app shows it.
+  /// The core's English copy (`yo_ui::Text`), as the app shows it.
   var english: String { productText(text: self, lang: .english) }
 }
 

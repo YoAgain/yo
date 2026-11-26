@@ -66,7 +66,7 @@ fn run(seed: u64, clients: usize, steps: usize) {
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: {from} -> {to}: {e}"));
             collect(events, &mut received, &from);
             // Not asserted taken: one to a contact on a new phone waits for the next inbox read, where its new
-            // profile key is (spec 4.10); the quiet-down below checks that all went.
+            // profile key is (spec 3.3); the quiet-down below checks that all went.
             expected.entry(to).or_default().push((from, text));
         } else if roll < 85 {
             let to = devices[i].user.clone();
@@ -93,7 +93,7 @@ fn run(seed: u64, clients: usize, steps: usize) {
                 }
             }
             // What the old one had not received yet may still wait in a sender's outbox (one kept for the next
-            // inbox read, spec 4.10): it may come to the new one, or not.
+            // inbox read, spec 3.3): it may come to the new one, or not.
             let got = received.insert(to.clone(), Vec::new()).unwrap_or_default();
             let unseen: Vec<_> =
                 expected.remove(&to).unwrap_or_default().into_iter().filter(|m| !got.contains(m)).collect();
@@ -124,9 +124,9 @@ fn run(seed: u64, clients: usize, steps: usize) {
         }
     }
     for d in &devices {
-        // Only what a replaced device sent may be dropped (spec 4.6), and is among `may_be_lost`.
+        // Only what a replaced device sent may be dropped (spec 3.2), and is among `may_be_lost`.
         // A payload kept for a roster ("later") is no drop, once a later sync decided it; nor is one sent identified
-        // for want of a sender certificate (spec 6.1: it went, unsealed).
+        // for want of a sender certificate (spec 4.1: it went, unsealed).
         assert!(
             d.client
                 .drop_reasons()
@@ -234,7 +234,7 @@ fn many_clients_at_once() {
 /// Replay the UI inputs alongside each network seed. Two clocks with different tick
 /// cadence must produce identical rows, and pauses must never spend visible time.
 fn simulate_list(seed: u64, steps: usize) {
-    use yo_product::list::{Friend, Input, Kind, List};
+    use yo_ui::list::{Friend, Input, Kind, List};
     let mut rng = Rng(seed.max(1));
     let mut a = List::new();
     let mut b = List::new();

@@ -266,7 +266,7 @@ struct YoApp: App {
           Task { await accounts.takeStorage(into: friends) }
         }
         Launch.later { CrashReports.shared.flush() }
-        // Receipts, retries and prekeys due (spec 4.1, 4.5), also for a phone that only receives.
+        // Receipts, retries and prekeys due (spec 3.1, 3.2), also for a phone that only receives.
         Launch.later { await inbox.maintain(accounts: accounts, friends: friends) }
       }
         .environment(inbox)

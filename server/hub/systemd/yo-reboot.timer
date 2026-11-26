@@ -1,0 +1,7 @@
+[Unit]
+Description=At most one reboot a week, Sunday 08:00 Berlin, if an update needs it
+[Timer]
+OnCalendar=Sun *-*-* 08:00 Europe/Berlin
+Persistent=false
+[Install]
+WantedBy=timers.target

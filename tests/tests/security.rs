@@ -1,9 +1,9 @@
 //! What a stranger tries at the hub: spending someone else's requests, filling the disk without an identity
-//! (hub/SECURITY.md).
+//! (SECURITY.md, Hub).
 
 use yo_hub::config::Config;
 use yo_tests::{devices_hash, random_u64, register, user_id, username, Http, TestHub};
-use yo_wire::api;
+use yoip::net::api;
 
 fn now_ms() -> u64 {
     yo_hub::now_ms()
@@ -13,7 +13,7 @@ fn now_ms() -> u64 {
 fn post_envelope(url: &str, user: &str, hash: &[u8; 32], extra: &[(&str, &str)]) -> u16 {
     let mut request = reqwest::blocking::Client::new()
         .post(format!("{url}{}", api::deliver_path(&user_id(user))))
-        .header(api::HEADER_DEVICES, yo_wire::b64(hash))
+        .header(api::HEADER_DEVICES, yoip::b64(hash))
         .body(yo_tests::junk(7));
     for (name, value) in extra {
         request = request.header(*name, *value);
@@ -27,14 +27,14 @@ fn a_stranger_who_knows_a_device_id_cannot_spend_its_requests() {
     config.limits.signed_per_device_minute = 5;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let mut a = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
-    let device = yo_wire::b64(&a.device_id());
+    let device = yoip::b64(&a.device_id());
     let client = reqwest::blocking::Client::new();
     for _ in 0..20 {
         let status = client
             .get(format!("{}{}", hub.url(), api::inbox_path(0)))
-            .header(yo_wire::request::HEADER_DEVICE, &device)
-            .header(yo_wire::request::HEADER_TIME, now_ms().to_string())
-            .header(yo_wire::request::HEADER_SIGNATURE, yo_wire::b64(&[1; 64]))
+            .header(yoip::net::request::HEADER_DEVICE, &device)
+            .header(yoip::net::request::HEADER_TIME, now_ms().to_string())
+            .header(yoip::net::request::HEADER_SIGNATURE, yoip::b64(&[1; 64]))
             .send()
             .unwrap()
             .status()
@@ -85,7 +85,7 @@ fn nothing_is_stored_without_identity_while_the_disk_is_nearly_full() {
     let url = hub.url();
     let probe = reqwest::blocking::Client::new()
         .post(format!("{url}{}", api::deliver_path(&user_id(b.user_id()))))
-        .header(api::HEADER_DEVICES, yo_wire::b64(&[0; 32]))
+        .header(api::HEADER_DEVICES, yoip::b64(&[0; 32]))
         .body(yo_tests::junk(0))
         .send()
         .unwrap();

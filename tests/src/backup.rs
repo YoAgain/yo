@@ -1,4 +1,4 @@
-//! The backup record as the app makes and opens it (spec 7; `BackupRecord` in app/ios Account.swift), for the tests:
+//! The backup record as the app makes and opens it (spec 2.4; `BackupRecord` in app/ios Account.swift), for the tests:
 //! the crypto is the core's (`yo_core::backup`), the sealed part the app's JSON (`Data` as base64).
 
 use base64::Engine as _;
@@ -7,7 +7,7 @@ use yo_core::backup::{self as core, AccountEntropyPool, Door, PasskeyDoor};
 use yo_core::Backup;
 
 /// A recovery key of 16 bytes of seed, the same each time: 64 characters a–z and 0–9 (libsignal's account entropy
-/// pool, spec 7).
+/// pool, spec 2.4).
 pub fn recovery_key(seed: [u8; 16]) -> String {
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     (0..64u8)
@@ -24,7 +24,7 @@ pub fn pool(key: &str) -> AccountEntropyPool {
 }
 
 /// Where the recovery key alone finds its record.
-pub fn locator(key: &str) -> [u8; yo_wire::api::LOCATOR_LEN] {
+pub fn locator(key: &str) -> [u8; yoip::net::api::LOCATOR_LEN] {
     core::locator(&pool(key))
 }
 

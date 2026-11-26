@@ -1,10 +1,10 @@
 name: Android
 on:
   pull_request:
-    paths: ['app/android/**', 'core/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/android.yml']
+    paths: ['app/android/**', 'app/core/**', 'yoip/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/android.yml']
   push:
     branches: ['**']  # not tags: a release runs once, by its release event
-    paths: ['app/android/**', 'core/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/android.yml']
+    paths: ['app/android/**', 'app/core/**', 'yoip/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/android.yml']
   release:
     types: [published]
 permissions:
@@ -44,7 +44,7 @@ jobs:
             app/android/app/build/rustJniLibs
             app/android/app/build/generated/yo
             target/android/debug/libyo.so
-          key: core-android-${{ hashFiles('core/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/android/dev/core.sh', 'app/android/dev/uniffi.toml', 'app/android/dev/fix-bindings.py') }}
+          key: core-android-${{ hashFiles('app/core/**', 'yoip/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/android/dev/core.sh', 'app/android/dev/uniffi.toml', 'app/android/dev/fix-bindings.py') }}
       - id: cargo
         if: steps.core.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v6
@@ -53,7 +53,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/android
-          key: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('core/**') }}
+          key: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('app/core/**', 'yoip/**') }}
           restore-keys: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Rust core
         if: steps.core.outputs.cache-hit != 'true'
@@ -77,7 +77,7 @@ jobs:
             ~/.cargo/git
             target/android
           key: ${{ steps.cargo.outputs.cache-primary-key }}
-      # Two flavors (app/android/README.md): play, the Google Play build, and floss, the F-Droid build (unsigned here:
+      # Two flavors (README.md, Android): play, the Google Play build, and floss, the F-Droid build (unsigned here:
       # F-Droid signs its own build; a release signs a copy with Yo's own floss key for direct installs). The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; other builds keep app/android/version.properties'.
       - name: Build, unit tests and lint
         env:

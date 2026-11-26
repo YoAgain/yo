@@ -1,11 +1,11 @@
 //! An account of before the keys were libsignal's (state 1, hub schema 2; `fixtures/state-1`, made by the code of
-//! then): an iCloud Keychain item of then (the seed) signs in again, and the storage (spec 6.9), sealed under the
+//! then): an iCloud Keychain item of then (the seed) signs in again, and the storage (spec 4.3), sealed under the
 //! Ed25519 seed's key, is taken in and written again under the new one.
 
 use yo_core::{identity, storage, Client, Push, Store};
 use yo_hub::config::Config;
 use yo_tests::{random_u64, Http, TestHub};
-use yo_wire::api::{self, status};
+use yoip::net::api::{self, status};
 
 const STATE: &[u8] = include_bytes!("../fixtures/state-1/jo.state");
 const SEED: &[u8] = include_bytes!("../fixtures/state-1/jo.seed");
@@ -40,7 +40,7 @@ fn ids() -> (String, String) {
 fn stored_friends(client: &mut Client, secret: &[u8; 32]) -> Option<Vec<String>> {
     let response = client.signed_for_tests("GET", api::STORAGE, &[]).unwrap();
     assert_eq!(response.status, status::OK);
-    let stored: api::Storage = yo_wire::decode(&response.body).unwrap();
+    let stored: api::Storage = yoip::decode(&response.body).unwrap();
     let user = yo_core::state::unhex(client.user_id()).unwrap();
     let opened = storage::open(secret, &user, stored.data.as_slice()).ok()?;
     Some(opened.friends.keys().cloned().collect())
@@ -75,13 +75,13 @@ fn an_icloud_item_of_before_brings_the_friends_back() {
     assert_eq!(stored_friends(&mut lost, &secret), None);
     let user = yo_core::state::unhex(lost.user_id()).unwrap();
     let response = lost.signed_for_tests("GET", api::STORAGE, &[]).unwrap();
-    let stored: api::Storage = yo_wire::decode(&response.body).unwrap();
+    let stored: api::Storage = yoip::decode(&response.body).unwrap();
     assert!(storage::open_under(&old_key, &user, stored.data.as_slice()).is_ok(), "the old storage stands");
     // With it, from the item's seed or from a converted local state with an item of now (no seed in it): the
     // friends are back, and the storage is written under the new key.
     let converted = std::env::temp_dir().join(format!("yo-converted-{}", random_u64()));
     std::fs::write(&converted, include_bytes!("../fixtures/keychain-v1/state-v2.sealed")).unwrap();
-    let local = yo_core::legacy::read_identity(&converted, &KEY, 0).unwrap();
+    let local = yo_core::migrations::keychain_v1::read_identity(&converted, &KEY, 0).unwrap();
     std::fs::remove_file(&converted).unwrap();
     assert_eq!((local.secret, local.ed25519, local.storage_key), (secret, false, Some(old_key)));
     for legacy in [Some(old_key), local.storage_key] {
@@ -96,8 +96,8 @@ fn an_icloud_item_of_before_brings_the_friends_back() {
 #[test]
 fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_key() {
     use std::{fs, sync::Arc};
+    use yo_core::migrations::keychain_v1::legacy_account_secret;
     use yo_core::statedb::{DbStore, Loaded, StateDb};
-    use yo_wire::legacy::legacy_account_secret;
 
     let temporary = std::env::temp_dir().join(format!("yo-keychain-fixtures-{}", random_u64()));
     fs::create_dir(&temporary).unwrap();
@@ -122,7 +122,9 @@ fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_k
     let sources = [(flat_v1, 0), (flat_v2, 0), (flat_shared, 1), (single_row, 2), (old_tables, 3)];
     let local = sources
         .into_iter()
-        .map(|(path, format)| yo_core::legacy::read_identity(&path, &KEY, format).expect("fixture identity"))
+        .map(|(path, format)| {
+            yo_core::migrations::keychain_v1::read_identity(&path, &KEY, format).expect("fixture identity")
+        })
         .map(|found| {
             // A converted state keeps the key the storage of then is sealed under; a seed's gives it.
             assert_eq!(found.storage_key, Some(storage::key(SEED.try_into().unwrap())));
@@ -169,7 +171,8 @@ fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_k
 
     // Busy (another process holds it, or the file is locked until the phone is unlocked): not now, read again later.
     // Missing or damaged: never there.
-    let read = |name: &str, format| yo_core::legacy::read_identity(&temporary.join(name), &KEY, format);
+    let read =
+        |name: &str, format| yo_core::migrations::keychain_v1::read_identity(&temporary.join(name), &KEY, format);
     // Android's one-time sign-in (`legacy_identity`): an old `yo-state` or tables database gives its key material,
     // one without a recovery key too; none is none; one not readable now is asked again, never taken as none.
     let android = |name: &str, format, keys: Vec<Vec<u8>>| {
@@ -197,7 +200,7 @@ fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_k
     fs::remove_dir_all(temporary).unwrap();
 }
 
-/// YoGPT's state file of the build before the database (`app/cli/README.md`): taken into the database offline, the
+/// YoGPT's state file of the build before the database (README.md, CLI): taken into the database offline, the
 /// bot goes on as the same device, with its sessions and what waited in its outbox and at the hub.
 #[test]
 fn a_bot_state_file_goes_on_as_the_same_device() {
@@ -230,7 +233,7 @@ fn a_bot_state_file_goes_on_as_the_same_device() {
     let blob = yo_core::state::seal_legacy(&serde_json::to_vec(&json).unwrap(), &saved.records, &KEY);
     drop(bot);
 
-    let (state, records) = yo_core::legacy::read_state(&blob, &KEY).unwrap();
+    let (state, records) = yo_core::migrations::keychain_v1::read_state(&blob, &KEY).unwrap();
     let path = std::env::temp_dir().join(format!("yo-bot-{}.sqlite", random_u64()));
     let db = Arc::new(StateDb::open_fresh(&path, KEY, Arc::new(|_| {})).unwrap());
     DbStore::new(db.clone(), None, None).save_state(&state, records).unwrap();

@@ -1,0 +1,58 @@
+[Unit]
+Description=Yo hub (with Litestream)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/yo/yo-hub
+
+[Service]
+ExecStart=/opt/yo/litestream replicate -config /opt/yo/litestream.yml -exec /opt/yo/yo-hub
+EnvironmentFile=/etc/yo/hub.env
+LoadCredential=apns.p8:/etc/yo/apns.p8
+Environment=YO_DB=/var/lib/yo/yo-hub.sqlite YO_LISTEN=127.0.0.1:8080
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+DynamicUser=yes
+StateDirectory=yo yo-backup
+UMask=0077
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+# Litestream sets the owner of its backup files (to its own user: without capabilities it cannot do more)
+SystemCallFilter=@chown
+LoadCredential=assetlinks.json:/etc/yo/assetlinks.json
+LoadCredential=fcm.json:/etc/yo/fcm-service-account.json
+Environment=YO_FCM_SERVICE_ACCOUNT_FILE=%d/fcm.json
+LoadCredential=hub-key:/etc/yo/hub-key
+Environment=YO_HUB_KEY_FILE=/run/credentials/yo-hub.service/hub-key
+MemoryHigh=1G
+MemoryMax=1536M
+LoadCredential=server-cert:/etc/yo/server-cert
+Environment=YO_SERVER_CERT_FILE=/run/credentials/yo-hub.service/server-cert
+LoadCredential=zk-params:/etc/yo/zk-params
+Environment=YO_ZK_PARAMS_FILE=/run/credentials/yo-hub.service/zk-params
+
+[Install]
+WantedBy=multi-user.target

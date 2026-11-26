@@ -25,11 +25,11 @@ const BUILD: &str = match option_env!("YO_BUILD") {
 pub struct Config {
     pub state: PathBuf,
     pub hub: Option<String>,
-    /// The hub's public keys, pinned (spec 6.10): the current one and a spare.
+    /// The hub's public keys, pinned (spec 4.1): the current one and a spare.
     pub hub_keys: Vec<[u8; 32]>,
-    /// The hub's sender-certificate trust roots (spec 6.1): without one no sealed Yo opens.
+    /// The hub's sender-certificate trust roots (spec 4.1): without one no sealed Yo opens.
     pub trust_roots: Vec<[u8; 32]>,
-    /// The hub's zkgroup public params (spec 4.9): without them no group.
+    /// The hub's zkgroup public params (spec 3.4): without them no group.
     pub zk_params: Option<Vec<u8>>,
     /// Roster lookups a day for messages from a replaced phone (`YO_RECOVERY_LOOKUPS`; else the core's 10): a bot the
     /// hub does not limit raises it, or messages from users with new phones wait for days.
@@ -37,7 +37,7 @@ pub struct Config {
 }
 
 fn key32(what: &str, text: &str) -> Result<[u8; 32], Failure> {
-    yo_wire::unb64(text.trim())
+    yoip::unb64(text.trim())
         .ok()
         .and_then(|k| k.try_into().ok())
         .ok_or_else(|| Failure::usage(format!("{what}: 32 bytes, base64url")))
@@ -82,7 +82,7 @@ impl Config {
                 list("YO_TRUST_ROOTS").iter().map(|k| key32("YO_TRUST_ROOTS", k)).collect::<Result<_, _>>()?;
         }
         let zk_params = match zk {
-            Some(p) => Some(yo_wire::unb64(p.trim()).map_err(|_| Failure::usage("--zk-params: base64url"))?),
+            Some(p) => Some(yoip::unb64(p.trim()).map_err(|_| Failure::usage("--zk-params: base64url"))?),
             None => None,
         };
         let recovery_lookups = env("YO_RECOVERY_LOOKUPS").as_deref().map(lookups).transpose()?;
@@ -109,17 +109,17 @@ impl Transport for Http {
         let url = format!("{}{}", self.base, path);
         // Only what names nobody goes anonymously; a registration or a backup's fetch names the account (spec 1).
         let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device"));
-        let anonymous = !signed && yo_wire::api::anonymous(method, path);
+        let anonymous = !signed && yoip::net::api::anonymous(method, path);
         let client = if anonymous { &self.anonymous } else { &self.client };
         let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        // Its build, as an app names its own (spec 6.3), on what names the account anyway: never on an anonymous one.
+        // Its build, as an app names its own (spec 4.1), on what names the account anyway: never on an anonymous one.
         if signed {
-            request = request.header(yo_wire::api::HEADER_APP, format!("yogpt/{BUILD}"));
+            request = request.header(yoip::net::api::HEADER_APP, format!("yogpt/{BUILD}"));
         }
-        // Without the URL: a blob's path is its capability (spec 6.8), never for an error or a log.
+        // Without the URL: a blob's path is its capability (spec 4.3), never for an error or a log.
         let response = request.send().map_err(|e| e.without_url().to_string())?;
         let status = response.status().as_u16();
         let mut body = Vec::new();
@@ -218,7 +218,7 @@ fn take_old_state(db: &Arc<StateDb>, old: &Path, key: [u8; 32]) -> Result<(), St
     }
     if db.word().map_err(|e| e.to_string())?.is_none() {
         let blob = std::fs::read(old).map_err(|e| e.to_string())?;
-        let (state, records) = yo_core::legacy::read_state(&blob, &key).map_err(|e| e.to_string())?;
+        let (state, records) = yo_core::migrations::keychain_v1::read_state(&blob, &key).map_err(|e| e.to_string())?;
         yo_core::Store::save_state(&DbStore::new(db.clone(), None, None), &state, records)?;
     }
     std::fs::rename(old, old.with_extension("v2")).map_err(|e| e.to_string())
@@ -257,7 +257,7 @@ pub fn open(config: &Config) -> Result<Open, Failure> {
 }
 
 /// Registers `username` in the directory: with its account secret if it has one (the same account, a new device).
-/// Saved before it is sent (spec 6.4): a lost answer loses neither key nor prekeys, and `register` again finishes it.
+/// Saved before it is sent (spec 4.2): a lost answer loses neither key nor prekeys, and `register` again finishes it.
 /// A directory with a state it cannot open (no `key`, a wrong one, damaged) is refused without `force`: registering
 /// there replaces the account's device and loses its sessions.
 pub fn register(config: &Config, username: &str, force: bool) -> Result<Open, Failure> {

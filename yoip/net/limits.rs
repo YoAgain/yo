@@ -1,0 +1,48 @@
+//! The numbers both sides rely on (spec 4.2, 4.1). Rate limits live in the hub's configuration.
+
+/// The largest prekey accepted: a Kyber-1024 public key is 1569 bytes.
+pub const MAX_PREKEY_LEN: usize = 2048;
+/// The largest prekey signature: XEdDSA's 64 bytes.
+pub const MAX_PREKEY_SIGNATURE_LEN: usize = 64;
+/// The most one-time prekeys of each kind in one upload.
+pub const MAX_PREKEYS_PER_UPLOAD: usize = 32;
+/// How many one-time prekeys of each kind a device keeps at the hub: a registration with as many Kyber keys still fits
+/// one request.
+pub const PREKEY_TARGET: u32 = 32;
+/// The core refills below this many.
+pub const PREKEY_REFILL_BELOW: u32 = 16;
+/// The most envelopes one fetch returns.
+pub const MAX_INBOX_FETCH: usize = 100;
+/// The most ids one ack names.
+pub const MAX_ACK: usize = 1000;
+/// The longest a fetch waits for mail, in seconds.
+pub const MAX_WAIT_S: u64 = 60;
+/// The largest blob (spec 4.3): a photo or a short video, encrypted.
+pub const MAX_BLOB_LEN: usize = 10 * 1024 * 1024;
+/// The most fetches one blob is stored for: every device it goes to, 16 devices of a 20-member group (spec 4.3).
+pub const MAX_BLOB_FETCHES: u32 = 320;
+/// The most while every account has one device (the hub replaces, spec 3.2): a 20-member group and room.
+pub const MAX_BLOB_FETCHES_ONE_DEVICE: u32 = 64;
+/// The largest request body: the largest envelope bucket and some room.
+pub const MAX_BODY: usize = 64 * 1024 + 1024;
+/// The largest delivery (spec 3.2): one envelope per device of the user, together at most this.
+pub const MAX_DELIVERY_BODY: usize = 256 * 1024 + 1024;
+/// A signed request's time may differ from the hub's clock by this much.
+pub const MAX_SKEW_MS: u64 = 5 * 60 * 1000;
+/// The longest a push token may be.
+pub const MAX_PUSH_TOKEN_LEN: usize = 512;
+/// The most devices a lookup answers with.
+pub const MAX_DEVICES: usize = 16;
+/// The largest wrapped K in a backup record: its 32 bytes with ChaCha20-Poly1305's nonce and tag are 60.
+pub const MAX_BACKUP_WRAP_LEN: usize = 256;
+/// The largest sealed part of a backup record: the account and its friends, and the record still one request.
+pub const MAX_BACKUP_SEALED_LEN: usize = 60 * 1024;
+/// The sizes a sealed storage blob and a backup's sealed part can have (spec 4.3, 2.4): padded like an envelope, then
+/// sealed, so the hub sees a size class. The largest is both limits.
+pub const SEALED_SIZES: [usize; 4] = [1024, 4096, 16 * 1024, 60 * 1024];
+/// The longest feedback text, in bytes of UTF-8 (spec 4.1).
+pub const MAX_FEEDBACK_LEN: usize = 2000;
+/// The account's sealed storage (spec 4.3).
+pub const MAX_STORAGE_LEN: usize = 60 * 1024;
+/// The longest app version sent with feedback.
+pub const MAX_APP_VERSION_LEN: usize = 64;

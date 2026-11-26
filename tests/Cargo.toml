@@ -42,11 +42,11 @@ name = "speed"
 path = "tests/speed.rs"
 
 [dependencies]
-yo-wire = { path = "../core/wire" }
-yo-core = { path = "../core/client", features = ["test-support"] }
-yo-product = { path = "../core/product" }
-yo-hub = { path = "../hub" }
-yo-bindings = { path = "../core/bindings", features = ["test-support"] }
+yoip = { path = "../yoip" }
+yo-core = { path = "../app/core", features = ["test-support"] }
+yo-ui = { path = "../app/core/ui" }
+yo-hub = { path = "../server/hub" }
+yo-bindings = { path = "../app/core/bindings", features = ["test-support"] }
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 serde_json = { workspace = true }

@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// Blocking: block a contact, refuse strangers, the blocked contacts (spec 4.8); its own page under Yodentity › the account.
+/// Blocking: block a contact, refuse strangers, the blocked contacts (spec 3.3); its own page under Yodentity › the account.
 @MainActor
 struct BlockedPage: View {
   @Environment(AccountStore.self) private var accounts

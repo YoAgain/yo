@@ -11,13 +11,13 @@ name = "yo"
 path = "src/main.rs"
 
 [dependencies]
-yo-core = { path = "../../core/client" }
-yo-wire = { path = "../../core/wire" }
+yo-core = { path = "../core" }
+yoip = { path = "../../yoip" }
 reqwest = { workspace = true, features = ["blocking"] }
 getrandom = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-yo-core = { path = "../../core/client", features = ["test-support"] }
+yo-core = { path = "../core", features = ["test-support"] }
 yo-tests = { path = "../../tests" }
-yo-hub = { path = "../../hub" }
+yo-hub = { path = "../../server/hub" }

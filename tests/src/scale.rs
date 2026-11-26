@@ -456,7 +456,7 @@ impl Proc {
                 let _ = self.net.send(&m, &p, &h, &b, &self.ip);
             }
         }
-        let upload = method == "PUT" && path.starts_with(yo_wire::api::BLOBS);
+        let upload = method == "PUT" && path.starts_with(yoip::net::api::BLOBS);
         if upload && self.roll(1000) < 120 {
             // Cut off halfway; now and then the connection hangs on a while (the hub has it "under way").
             let keep = self.roll(body.len() as u64 + 1) as usize;
@@ -468,7 +468,7 @@ impl Proc {
         if self.roll(1000) >= self.faults {
             return self.net.send(method, path, headers, body, &self.ip);
         }
-        let delivery = method == "POST" && path.starts_with("/v1/inbox/") && path != yo_wire::api::INBOX_ACK;
+        let delivery = method == "POST" && path.starts_with("/v1/inbox/") && path != yoip::net::api::INBOX_ACK;
         let kind = self.roll(if delivery { 8 } else { 6 });
         self.note(format_args!("fault {kind} on {method} {path}"));
         self.stats.count(format!(
@@ -1206,7 +1206,7 @@ fn fetch_photo(w: &World, a: &Acct, m: &yo_core::Media, info: Option<MediaInfo>,
         }
         Ok(None) if !uploaded => w.stats.count("photo never uploaded: not there"),
         Ok(None) if sender_gone => w.stats.count("photo gone with its sender"),
-        // Cut off after the hub handed on its last byte (into the socket's buffers): counted (tests/CHAOS.md).
+        // Cut off after the hub handed on its last byte (into the socket's buffers): counted (README.md, Tests).
         Ok(None) if roll < 10 => w.stats.count("photo gone: the cut fetch had it all handed on"),
         Ok(None) => w.stats.violation(format!(
             "{}: photo gone before its fetch ({} bytes, roll {roll}, {} kills so far)",
@@ -3037,7 +3037,7 @@ fn check_groups(w: &World) -> serde_json::Value {
         let alive = w.alive(&w.user_of(from)) && w.alive(&w.user_of(to));
         let blocked = groups.blocked_ever.contains(&(to, from)) || groups.blocked_ever.contains(&(from, to));
         // A member's new phone is a device the others may not know: a member who never wrote to them asks the hub at
-        // most 10 times a day (recovery lookups) and keeps the rest for later (tests/CHAOS.md).
+        // most 10 times a day (recovery lookups) and keeps the rest for later (README.md, Tests).
         let new_phone = groups.new_phones.contains(&from);
         if touched || !alive || blocked || new_phone {
             loose += 1;

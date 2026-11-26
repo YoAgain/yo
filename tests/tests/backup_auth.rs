@@ -1,4 +1,4 @@
-//! Who may fetch a backup record (spec 7): only a request signed by one of its doors' auth keys, fresh and once; any
+//! Who may fetch a backup record (spec 2.4): only a request signed by one of its doors' auth keys, fresh and once; any
 //! other answer is the `404` of no record, also for a record without the keys (from before them), which the app makes
 //! anew. What K and the storage key seal lands on the sizes the hub may see.
 
@@ -7,9 +7,9 @@ use yo_core::backup::{self, AccountEntropyPool, Door, PasskeyDoor};
 use yo_core::{Backup, Client, Push};
 use yo_hub::db::{BackupAuth, Db};
 use yo_tests::{random_u64, Http, TestHub};
-use yo_wire::api;
-use yo_wire::limits::SEALED_SIZES;
-use yo_wire::request::{to_be_signed, HEADER_SIGNATURE, HEADER_TIME};
+use yoip::net::api;
+use yoip::net::limits::SEALED_SIZES;
+use yoip::net::request::{to_be_signed, HEADER_SIGNATURE, HEADER_TIME};
 
 fn register(hub: &TestHub) -> Client {
     let name = format!("Safe{}", random_u64() % 1_000_000);
@@ -27,13 +27,13 @@ fn get_as(hub: &TestHub, id: &[u8], signed: Option<(Vec<u8>, u64)>) -> (u16, Vec
     let path = api::backup_path(id);
     let mut request = reqwest::blocking::Client::new().get(format!("{}{path}", hub.url()));
     if let Some((signature, time)) = signed {
-        request = request.header(HEADER_TIME, time.to_string()).header(HEADER_SIGNATURE, yo_wire::b64(&signature));
+        request = request.header(HEADER_TIME, time.to_string()).header(HEADER_SIGNATURE, yoip::b64(&signature));
     }
     let response = request.send().unwrap();
     (response.status().as_u16(), response.bytes().unwrap().to_vec())
 }
 
-/// A door's XEdDSA signature (spec 7).
+/// A door's XEdDSA signature (spec 2.4).
 fn sign(key: &PrivateKey, message: &[u8]) -> Vec<u8> {
     key.calculate_signature(message, &mut rand::rng()).unwrap().to_vec()
 }
@@ -62,22 +62,22 @@ fn only_a_door_fetches_a_record() {
     // The same as for no record at all, also signed.
     assert_eq!(get(&hub, &[6; 16], Some((&by_code, now))), not_found);
     // Either door's key, by the user id or by the locator.
-    let body = yo_wire::encode(&record);
+    let body = yoip::encode(&record);
     let first = sign(&by_code, &to_be_signed("GET", &api::backup_path(&user), now, b""));
     assert_eq!(get_as(&hub, &user, Some((first.clone(), now))), (200, body.clone()));
     assert_eq!(get(&hub, &locator, Some((&by_code, now + 1))), (200, body.clone()));
     assert_eq!(get(&hub, &user, Some((&by_passkey, now + 2))), (200, body.clone()));
     // Each signature once; none out of the window; none for another path.
     assert_eq!(get_as(&hub, &user, Some((first, now))), not_found, "replayed");
-    let stale = now - yo_wire::limits::MAX_SKEW_MS - 1000;
+    let stale = now - yoip::net::limits::MAX_SKEW_MS - 1000;
     assert_eq!(get(&hub, &user, Some((&by_code, stale))), not_found, "stale");
-    assert_eq!(get(&hub, &user, Some((&by_code, now + yo_wire::limits::MAX_SKEW_MS + 60_000))), not_found, "ahead");
+    assert_eq!(get(&hub, &user, Some((&by_code, now + yoip::net::limits::MAX_SKEW_MS + 60_000))), not_found, "ahead");
     let path = api::backup_path(&locator);
     let signature = sign(&by_code, &to_be_signed("GET", &path, now + 3, b""));
     let wrong_path = reqwest::blocking::Client::new()
         .get(format!("{}{}", hub.url(), api::backup_path(&user)))
         .header(HEADER_TIME, (now + 3).to_string())
-        .header(HEADER_SIGNATURE, yo_wire::b64(&signature))
+        .header(HEADER_SIGNATURE, yoip::b64(&signature))
         .send()
         .unwrap();
     assert_eq!(wrong_path.status().as_u16(), 404, "signed for the locator, sent for the user id");
@@ -90,7 +90,7 @@ fn only_a_door_fetches_a_record() {
     assert_eq!(*Client::open_backup(&*http, None, &Door::Code(&code), &[]).unwrap().unwrap().k, k);
     // A record whose auth key is no canonical Curve25519 key is refused.
     let bad = Backup { auth_code: vec![0xff; 32].into(), ..without };
-    assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &yo_wire::encode(&bad)).unwrap().status, 400);
+    assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &yoip::encode(&bad)).unwrap().status, 400);
 }
 
 /// A hub on a database file, and that file opened beside it: the test's way to store a record as an older hub did,
@@ -110,7 +110,7 @@ fn a_record_without_auth_keys_is_never_served_and_the_app_makes_a_new_one() {
     let (hub, db) = hub_on_file();
     let mut t = register(&hub);
     let (user, secret) = (yo_tests::user_id(t.user_id()), t.account_secret());
-    let old = yo_wire::encode(&backup::make(&old_k, b"{}", &code, PasskeyDoor::New(&prf)).unwrap());
+    let old = yoip::encode(&backup::make(&old_k, b"{}", &code, PasskeyDoor::New(&prf)).unwrap());
     db.put_backup(&t.device_id(), Some(&backup::locator(&code)), &old, &BackupAuth::default(), 0).unwrap();
     // To no one: unsigned, or signed by either door.
     let http = Http::new(hub.url());
@@ -152,7 +152,7 @@ fn what_k_and_the_storage_key_seal_lands_on_the_sizes() {
         }
         t.maintenance().unwrap();
         let response = t.signed_for_tests("GET", api::STORAGE, &[]).unwrap();
-        let stored: api::Storage = yo_wire::decode(&response.body).unwrap();
+        let stored: api::Storage = yoip::decode(&response.body).unwrap();
         assert!(SEALED_SIZES.contains(&stored.data.as_slice().len()), "{}", stored.data.as_slice().len());
         seen.insert(stored.data.as_slice().len());
     }
@@ -224,7 +224,7 @@ impl yo_core::Transport for Replaying {
 }
 
 /// B2 (rollback): with the hub's key pinned, a backup's fetch asks with a nonce and takes only the hub's answer to
-/// it (spec 6.10): an older record kept by a party between (made with a recovery key since replaced) is refused,
+/// it (spec 4.1): an older record kept by a party between (made with a recovery key since replaced) is refused,
 /// though it would open with that old key. An app without pinned keys, or an older hub's unsigned answer, as before.
 #[test]
 fn a_pinned_fetch_takes_only_the_hubs_answer_to_it() {
@@ -256,7 +256,7 @@ fn a_pinned_fetch_takes_only_the_hubs_answer_to_it() {
     let taken = Client::open_backup(&between, Some(&user), &Door::Passkey(&prf), &[]).unwrap().unwrap();
     assert_eq!(taken.plain, b"{\"old\":1}", "the old record, opened by the passkey's door it kept");
     // The answer stripped of its signature, or signed by another key: refused.
-    let plain = yo_wire::encode(&backup::make(&[3; 32], b"{}", &new_code, PasskeyDoor::None).unwrap());
+    let plain = yoip::encode(&backup::make(&[3; 32], b"{}", &new_code, PasskeyDoor::None).unwrap());
     *between.kept.lock().unwrap() = Some(plain);
     assert!(Client::fetch_backup(&between, &user, &Door::Code(&new_code), &pinned).is_err(), "unsigned");
     let stranger = libsignal_protocol::KeyPair::generate(&mut rand::rng());
@@ -276,24 +276,24 @@ fn open_plain(record: Backup, code: &AccountEntropyPool) -> Vec<u8> {
 }
 
 /// B2 at the hub: a fetch asked with `Yo-Nonce` is answered with the record and the hub's signature over the nonce,
-/// the path and the record (spec 6.10); without the header, the record alone, as before.
+/// the path and the record (spec 4.1); without the header, the record alone, as before.
 #[test]
 fn the_hub_signs_a_fetch_asked_with_a_nonce() {
     let hub = TestHub::start();
     let mut t = register(&hub);
     let user = yo_tests::user_id(t.user_id());
     let code = words(13);
-    let record = yo_wire::encode(&backup::make(&[5; 32], b"{}", &code, PasskeyDoor::None).unwrap());
-    t.put_backup(&yo_wire::decode(&record).unwrap()).unwrap();
+    let record = yoip::encode(&backup::make(&[5; 32], b"{}", &code, PasskeyDoor::None).unwrap());
+    t.put_backup(&yoip::decode(&record).unwrap()).unwrap();
     let path = api::backup_path(&user);
     let fetch = |nonce: Option<[u8; 16]>, time: u64| {
         let signature = sign(&Door::Code(&code).auth_key(), &to_be_signed("GET", &path, time, b""));
         let mut request = reqwest::blocking::Client::new()
             .get(format!("{}{path}", hub.url()))
             .header(HEADER_TIME, time.to_string())
-            .header(HEADER_SIGNATURE, yo_wire::b64(&signature));
+            .header(HEADER_SIGNATURE, yoip::b64(&signature));
         if let Some(nonce) = nonce {
-            request = request.header(yo_wire::hubsig::NONCE_HEADER, yo_wire::b64(&nonce));
+            request = request.header(yoip::net::hubsig::NONCE_HEADER, yoip::b64(&nonce));
         }
         let response = request.send().unwrap();
         (response.status().as_u16(), response.bytes().unwrap().to_vec())
@@ -303,6 +303,6 @@ fn the_hub_signs_a_fetch_asked_with_a_nonce() {
     let (status, signed) = fetch(Some([7; 16]), now + 1);
     assert_eq!(status, 200);
     let key = yo_tests::hub_key();
-    assert_eq!(yo_wire::hubsig::open(&key, &[7; 16], &path, b"", &signed), Ok(record.as_slice()));
-    assert!(yo_wire::hubsig::open(&key, &[8; 16], &path, b"", &signed).is_err(), "for its nonce only");
+    assert_eq!(yoip::net::hubsig::open(&key, &[7; 16], &path, b"", &signed), Ok(record.as_slice()));
+    assert!(yoip::net::hubsig::open(&key, &[8; 16], &path, b"", &signed).is_err(), "for its nonce only");
 }

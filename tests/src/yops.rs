@@ -19,9 +19,9 @@ use yo_core::identity::{self, Key};
 use yo_core::signal::{self, Records};
 use yo_core::state::{self, State};
 use yo_core::{sealed, Content};
-use yo_wire::content::Message;
-use yo_wire::envelope::{ForDevice, Payload, Plain};
-use yo_wire::{decode, encode};
+use yoip::protocol::content::Message;
+use yoip::protocol::envelope::{ForDevice, Payload, Plain};
+use yoip::{decode, encode};
 
 /// The MLS core's numbers (930e34e, one E-core of an Intel Core Ultra X7 358H): us per op, without and with saving.
 const MLS: [(f64, f64); 6] =

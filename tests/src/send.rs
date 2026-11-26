@@ -1,4 +1,4 @@
-//! yo-send: an account that sends Yos, for timing the apps against a hub (app/ios/TESTING.md, "Speed").
+//! yo-send: an account that sends Yos, for timing the apps against a hub (README.md, iOS).
 //!
 //!   yo-send --url https://dev.justyo.app --state FILE --name NAME --to NAME [--count 1] [--every-ms 0] [--sync]
 //!           [--photo FILE | --video FILE] [--group] [--delete]
@@ -55,7 +55,7 @@ fn main() {
             "--remove" => remove = args.next(),
             "--rename" => rename = args.next(),
             "--trust-root" => trust_roots.push(
-                yo_wire::unb64(&args.next().expect("--trust-root"))
+                yoip::unb64(&args.next().expect("--trust-root"))
                     .ok()
                     .and_then(|k| k.try_into().ok())
                     .expect("--trust-root: 32 bytes, base64url"),
@@ -74,12 +74,12 @@ fn main() {
     };
     // The dev hub's pins, as the app has them (app/ios/YoApp/Sources/YoApp/Shared/Hub.swift): hub keys, trust roots, zk params.
     if dev {
-        let key = |text: &str| -> [u8; 32] { yo_wire::unb64(text).ok().and_then(|k| k.try_into().ok()).expect("pin") };
+        let key = |text: &str| -> [u8; 32] { yoip::unb64(text).ok().and_then(|k| k.try_into().ok()).expect("pin") };
         client.set_hub_keys(DEV_HUB_KEYS.iter().map(|k| key(k)).collect());
         if trust_roots.is_empty() {
             trust_roots = DEV_TRUST_ROOTS.iter().map(|k| key(k)).collect();
         }
-        client.set_zk_params(&yo_wire::unb64(DEV_ZK_PARAMS).expect("zk params")).expect("zk params");
+        client.set_zk_params(&yoip::unb64(DEV_ZK_PARAMS).expect("zk params")).expect("zk params");
     }
     // The hub's trust roots (`--trust-root`, base64url), else the test hubs'.
     if !trust_roots.is_empty() {

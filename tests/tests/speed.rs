@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use yo::{HttpResult, HttpTransport, YoClient, YoError};
 use yo_hub::config::{ApnsConfig, Config};
 use yo_tests::{random_u64, username, AppClient, Disk, Http, TestHub};
-use yo_wire::api::PUSH_APNS;
+use yoip::net::api::PUSH_APNS;
 
 /// The app's HTTP: counts the requests and remembers their routes; with `rtt`, each takes that much longer (half
 /// on the way there, half back), as a phone's.

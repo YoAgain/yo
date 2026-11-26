@@ -1,4 +1,4 @@
-// The account (spec 3, 6.4, 7): username, user id, account key, and the backup opened by passkey PRF or recovery key.
+// The account (spec 2, 4.2, 2.4): username, user id, account key, and the backup opened by passkey PRF or recovery key.
 import AuthenticationServices
 import CryptoKit
 import Foundation
@@ -20,7 +20,7 @@ struct Account: Codable, Equatable {
   var byCode: Bool? = false
   var codeAuth: Bool? = nil
   var passkeyAuth: Bool? = nil
-  /// Nil: a 12-word account whose backup no longer opens (spec 7).
+  /// Nil: a 12-word account whose backup no longer opens (spec 2.4).
   var backupVersion: Int? = Account.backupVersion
 
   static let backupVersion = 3
@@ -28,7 +28,7 @@ struct Account: Codable, Equatable {
   var secured: Bool { byPasskey || byCode == true }
 }
 
-/// Usernames (spec 3.3): the rules are the core's; names are compared by skeleton ("Y0GPT" is "YoGPT").
+/// Usernames (spec 2.2): the rules are the core's; names are compared by skeleton ("Y0GPT" is "YoGPT").
 enum Username {
   static func problem(_ name: String) -> String? {
     if name.isEmpty { return "Type a name." }
@@ -52,7 +52,7 @@ enum Username {
   static func skeleton(_ name: String) -> String { usernameSkeleton(name: name) }
 }
 
-/// The recovery key (spec 7): libsignal's account entropy pool, 64 characters a–z and 0–9, shown in 16 blocks of 4.
+/// The recovery key (spec 2.4): libsignal's account entropy pool, 64 characters a–z and 0–9, shown in 16 blocks of 4.
 enum RecoveryCode {
   static func make() -> String { YoCore.newRecoveryKey() }
 
@@ -73,7 +73,7 @@ enum RecoveryCode {
   static func shown(_ key: String) -> String { blocks(key).joined(separator: " ") }
 }
 
-/// The backup (spec 7): the core makes and opens the record (`YoBackup`); this is what its key K seals.
+/// The backup (spec 2.4): the core makes and opens the record (`YoBackup`); this is what its key K seals.
 enum BackupRecord {
   /// One salt for all Yo passkeys, so a new phone asks once before it knows who it is.
   static let prfSalt = Data(SHA256.hash(data: Data("yo backup v1".utf8)))
@@ -461,7 +461,7 @@ final class AccountStore {
     if let item { _ = try? await restore(synced: item) }
   }
 
-  /// Registers `username` (spec 6.4), or with `secret` takes that key's account back under its current name. One at a
+  /// Registers `username` (spec 4.2), or with `secret` takes that key's account back under its current name. One at a
   /// time: a second registration would replace the first. `replacing`: the account shown during migration.
   private func register(
     _ username: String, secret: Data?, legacySeed: Data? = nil, legacyStorageKey: Data? = nil,
@@ -527,7 +527,7 @@ final class AccountStore {
     passkeyTurnedOff = false
   }
 
-  // MARK: Securing the name (spec 7)
+  // MARK: Securing the name (spec 2.4)
 
   func createPasskey() async throws {
     guard let account, let client else { throw Diagnostics.failure(AccountError.noBackup) }
@@ -609,7 +609,7 @@ final class AccountStore {
 
   /// Through the client the change began with. New words are staged first and settled once the hub has them, so a
   /// failure leaves the words the backup opens with here. K is the core's: the same only while both doors stay
-  /// (`keep` under the same words), new with any other door (spec 7).
+  /// (`keep` under the same words), new with any other door (spec 2.4).
   private func put(_ account: Account, code: String, passkey: YoPasskeyDoor, by client: YoClient)
     async throws
   {
@@ -668,7 +668,7 @@ final class AccountStore {
     let door: YoPasskeyDoor
     switch passkey {
     case .keep where words != code && !record.byPasskey.isEmpty:
-      // New words come with a new K (spec 7): the passkey's door is made anew, so the passkey is asked once more.
+      // New words come with a new K (spec 2.4): the passkey's door is made anew, so the passkey is asked once more.
       let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
       guard let prf = answer.prf else { throw Diagnostics.expected(AccountError.noPRF) }
       guard answer.userID == account.userID else { throw Diagnostics.expected(AccountError.noBackup) }
@@ -719,7 +719,7 @@ final class AccountStore {
     throw Diagnostics.failure(AccountError.noBackup)
   }
 
-  /// Records from before the doors' auth keys (spec 7) are rewrapped once, silently; retried at each start until done.
+  /// Records from before the doors' auth keys (spec 2.4) are rewrapped once, silently; retried at each start until done.
   private func addAuthKeys() async {
     await backupTurn {
       guard let account, account.secured, account.codeAuth != true, let words = RecoveryWords.load(),
@@ -944,7 +944,7 @@ final class AccountStore {
     return true
   }
 
-  // MARK: The account's storage (spec 6.9)
+  // MARK: The account's storage (spec 4.3)
 
   func store(_ changed: [Friend], removed: [String]) {
     // Names over 64 bytes are stored by user id alone.
@@ -1039,7 +1039,7 @@ final class AccountStore {
     try await hub { try $0.report(who: who, reason: reason, install: install) }
   }
 
-  /// Spec 6.4. Also tells the password manager the passkeys are no longer valid; the caller then resets.
+  /// Spec 4.2. Also tells the password manager the passkeys are no longer valid; the caller then resets.
   func deleteAccount() async throws {
     guard let account else { throw Diagnostics.failure(AccountError.noBackup) }
     try await hub { try $0.deleteAccount() }
@@ -1211,7 +1211,7 @@ enum RecoveryWords {
   private static func key(_ data: Data) -> String? { RecoveryCode.parse(String(decoding: data, as: UTF8.self)) }
 }
 
-/// Accounts in the iCloud Keychain (spec 7): bring one back after reinstall or on a new iPhone, and list them on Sign
+/// Accounts in the iCloud Keychain (spec 2.4): bring one back after reinstall or on a new iPhone, and list them on Sign
 /// In. One item per hub and user id; signed-out items stay, marked, and are never restored silently.
 enum SyncedAccount {
   typealias Item = SyncedItem

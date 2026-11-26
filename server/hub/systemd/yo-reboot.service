@@ -1,0 +1,5 @@
+[Unit]
+Description=Reboot if an update needs it (a new kernel)
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "[ -f /var/run/reboot-required ] && systemctl reboot || true"

@@ -16,7 +16,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 # By part of the project: the server (hub, admin page), the shared core, the apps (iOS, Android, YoGPT), tests (tests/,
-# fuzz/ and test files anywhere). Development scripts (dev/ and the like) are not counted.
+# tests/fuzz/ and test files anywhere). Development scripts (dev/ and the like) are not counted.
 KINDS = ("Hub", "Admin", "Core", "Apps", "Tests")
 COLORS = ("#bc7540", "#ad62be", "#468bc2", "#589663")
 EXTENSIONS = {".rs": "Rust", ".swift": "Swift", ".kt": "Kotlin", ".kts": "Kotlin"}
@@ -28,8 +28,10 @@ def part(path):
     """Which part of the project a source file belongs to, or None."""
     if is_test(path):
         return "Tests"
-    top = path.split("/", 1)[0]
-    return {"hub": "Hub", "admin": "Admin", "core": "Core", "app": "Apps"}.get(top)
+    if path.startswith(("app/core/", "protocol/")):  # the core before and after its move (core/ in the history)
+        return "Core"
+    top = "/".join(path.split("/", 2)[:2]) if path.startswith("server/") else path.split("/", 1)[0]
+    return {"hub": "Hub", "admin": "Admin", "server/hub": "Hub", "server/admin": "Admin", "core": "Core", "app": "Apps"}.get(top)
 
 
 def is_test(path):
@@ -89,7 +91,7 @@ def history():
 
 
 # Today's client by app, tests not counted.
-APPS = (("Core", "core/"), ("iOS", "app/ios/"), ("Android", "app/android/"), ("CLI", "app/cli/"))
+APPS = (("Core", "app/core/"), ("Core", "protocol/"), ("iOS", "app/ios/"), ("Android", "app/android/"), ("CLI", "app/cli/"))
 
 
 def app_counts():

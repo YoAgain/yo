@@ -70,7 +70,7 @@ extension FriendList {
     // A group's bar just shrank back: a tap in the next half second on a bar that slid under the finger goes nowhere.
     guard !tapLocked(friend) else { return }
     tapped(friend.key)
-    // A request asks first (spec 4.10): a tap on its bar is the yes.
+    // A request asks first (spec 3.3): a tap on its bar is the yes.
     if friend.request { chooseRequest(friend, yes: true); return }
     // "Not Sent · Tap to Retry": the tap sends what waits for it again, not one more.
     if bars.of(friend).modelUnsent, !cameraOn || picked.isEmpty, swiped == nil {
@@ -173,7 +173,7 @@ extension FriendList {
   }
 
   /// The Yo a person's add sends (a contact typed in, a request accepted, a group made): "Sent Yo" where the bar
-  /// stands, then it rises (`yo_product::list`); if it does not go, the bar says why instead and stays.
+  /// stands, then it rises (`yo_ui::list`); if it does not go, the bar says why instead and stays.
   func yoNow(_ bar: Friend) async {
     syncListFriends()  // the list model has the bar before its Yo is told
     showSent(to: bar, BarSendText.sentYo, thenOnTop: true)

@@ -281,7 +281,7 @@ class YoCamera(private val context: Context) {
         video = null
     }
 }
-/** Media limits and encoding, the core's (`yo_product`). A longer shared video is refused: Android has no trimmer. */
+/** Media limits and encoding, the core's (`yo_ui`). A longer shared video is refused: Android has no trimmer. */
 internal val VideoLimitMs = uniffi.yo.productVideoLimitMs().toLong()
 /** How long a stopped recording may take to finalize before it counts as failed (a stuck encoder). */
 private const val StopTimeoutMs = 5_000L

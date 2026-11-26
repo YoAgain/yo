@@ -28,9 +28,9 @@ impl Yo {
         vec![
             ("YO_STATE", self.state.display().to_string()),
             ("YO_HUB", self.hub.clone()),
-            ("YO_HUB_KEYS", yo_wire::b64(&yo_tests::hub_key())),
-            ("YO_TRUST_ROOTS", yo_wire::b64(&yo_tests::trust_root())),
-            ("YO_ZK_PARAMS", yo_wire::b64(&yo_tests::zk_params())),
+            ("YO_HUB_KEYS", yoip::b64(&yo_tests::hub_key())),
+            ("YO_TRUST_ROOTS", yoip::b64(&yo_tests::trust_root())),
+            ("YO_ZK_PARAMS", yoip::b64(&yo_tests::zk_params())),
             ("YO_BIN", YO.to_owned()),
         ]
     }

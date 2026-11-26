@@ -81,7 +81,7 @@ final class Inbox {
   /// Group members' names by user id, as their Yos came: who a group's photo is from in the viewer.
   var memberNames: [String: String] = [:]
 
-  /// Who a group's photo or video is from (their user id, hex): its id is the group's id (64 hex, spec 4.9), the
+  /// Who a group's photo or video is from (their user id, hex): its id is the group's id (64 hex, spec 3.4), the
   /// sender's (32 hex), then the rest (`mediaID`).
   static func sender(of arrival: Arrival) -> String? {
     let head = arrival.id.split(separator: "/").first.map(String.init) ?? ""
@@ -194,7 +194,7 @@ final class Inbox {
 
   // MARK: The hub
 
-  /// A Yo through the hub (spec 4.7): nil when it went, else what the bar says instead. A friend's Yos go in the order
+  /// A Yo through the hub (spec 3.2): nil when it went, else what the bar says instead. A friend's Yos go in the order
   /// tapped (a burst waits here, not in threads blocked on the core); Yos to other friends go meanwhile.
   func send(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
     let key = Username.skeleton(friend.name)
@@ -217,7 +217,7 @@ final class Inbox {
     if lastSend[key] == this { lastSend[key] = nil }
     // Their old app: the bar says "Needs Update" and the Yo waits for it; nothing failed here. A group nobody else is
     // in: the list asks to delete it, a "Not Sent · Tap to Retry" beside that would only fail again (as Android).
-    // A request past the hub's bucket waits by itself: the bar says so, no banner (nothing went wrong, spec 4.10).
+    // A request past the hub's bucket waits by itself: the bar says so, no banner (nothing went wrong, spec 3.3).
     if problem != nil, problem != productText(text: .needsUpdate, lang: .english), problem != Self.groupEmpty,
       problem != Self.requestWaiting {
       let retry: (@MainActor () -> Void)?
@@ -273,7 +273,7 @@ final class Inbox {
   }
 
   static let groupEmpty = productText(text: .groupEmpty, lang: .english)
-  /// The bar's words for Yos a stranger's request bucket holds (spec 4.10): they go at the hub's time, or at once
+  /// The bar's words for Yos a stranger's request bucket holds (spec 3.3): they go at the hub's time, or at once
   /// with their yes.
   static let requestWaiting = productText(text: .waitingToSend, lang: .english)
 
@@ -382,7 +382,7 @@ final class Inbox {
     }
   }
 
-  /// Yos the hub did not take yet (its per-sender rate, spec 6.6, or no network): sent again from the core's outbox
+  /// Yos the hub did not take yet (its per-sender rate, spec 4.1, or no network): sent again from the core's outbox
   /// after a second, then less and less often (up to 30 s), until none waits.
   private func deliverLater(accounts: AccountStore, friends: Friends) {
     deliverAgain = true
@@ -413,7 +413,7 @@ final class Inbox {
     }
   }
 
-  /// What the core held for a friend goes now: their new key confirmed (spec 3.4), or unblocked.
+  /// What the core held for a friend goes now: their new key confirmed (spec 2.3), or unblocked.
   func resume(accounts: AccountStore, friends: Friends) {
     let round = unsent
     unsent = [:]
@@ -428,7 +428,7 @@ final class Inbox {
   @ObservationIgnored private var delivering: Task<Void, Never>?
   @ObservationIgnored private var deliverAgain = false
 
-  /// While the list is on screen: the inbox's long wait at the hub (spec 6.3). Replaced elsewhere: signed out; this
+  /// While the list is on screen: the inbox's long wait at the hub (spec 4.1). Replaced elsewhere: signed out; this
   /// build too old (426): no more waits.
   func listen(accounts: AccountStore, friends: Friends) async {
     var respelled = false
@@ -498,7 +498,7 @@ final class Inbox {
   @ObservationIgnored private weak var seenClient: YoClient?
 
   /// Threads shown in this app (user or group id): this account's other devices clear their notifications of them,
-  /// through the newest message the core received (Sync Read, spec 5). The core asks nobody while it has one device.
+  /// through the newest message the core received (Sync Read, spec 3.2). The core asks nobody while it has one device.
   private func markSeen(_ threads: Set<String>, client: YoClient) {
     guard !threads.isEmpty else { return }
     let ids = threads.map(Self.threadID)
@@ -590,7 +590,7 @@ final class Inbox {
     await take(events, contacts: contacts, client: client, friends: friends)
   }
 
-  /// When the core opens and on each foreground (spec 4.4): due key updates and the storage's write.
+  /// When the core opens and on each foreground (spec 3.2): due key updates and the storage's write.
   @discardableResult
   func maintain(accounts: AccountStore, friends: Friends) async -> Bool {
     guard let client = accounts.client, !HubTransport.unsupported else { return false }
@@ -637,7 +637,7 @@ final class Inbox {
       }
     }
     let resolved = friends.reconcile(contacts, users: users, changedKeys: changedKeys)
-    // Shown in the front: this account's other devices let their notifications of these threads go (Sync, spec 5).
+    // Shown in the front: this account's other devices let their notifications of these threads go (Sync, spec 3.2).
     if UIApplication.shared.applicationState == .active {
       markSeen(Set(events.compactMap { event -> String? in
         switch event {
@@ -676,7 +676,7 @@ final class Inbox {
       for event in events {
         switch event {
         case .message(let user, let sentAtMs, let kind):
-          // A kind Yo does not show yet (text, link, place) is shown as a Yo (spec 5).
+          // A kind Yo does not show yet (text, link, place) is shown as a Yo (spec 3.2).
           let sender = friend(user)
           received(id: "\(user)/\(sentAtMs)", from: sender.name)
           count(from: sender.name)
@@ -813,7 +813,7 @@ final class Inbox {
       try? await center.setBadgeCount(0)
       return (waiting, threads)
     }.value
-    // Shown now: this account's other devices let theirs go too (Sync, spec 5).
+    // Shown now: this account's other devices let theirs go too (Sync, spec 3.2).
     if let client = seenClient { markSeen(threads, client: client) }
     Perf.timed("inbox.notifications.apply") {
       for (arrival, name) in waiting { received(id: arrival.id, from: arrival.from, senderName: name) }

@@ -120,7 +120,7 @@ fn failed_probe_is_not_retried_by_a_later_sync() {
     let http = Http::new(hub.url());
     let mut alice = register(http.clone(), "ALICE", None);
     let mut ping = register(Http::new(hub.url()), "PING", None);
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(ping.user_id()));
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(ping.user_id()));
     http.fault(&path, yo_tests::Fault::Answer(503));
     assert_eq!(alice.round_trip_probe("PING", 30).unwrap(), None);
     let state = alice.saved().state;
@@ -164,7 +164,7 @@ fn warm_probe_reuses_session_without_catch_up() {
     assert!(sent
         .iter()
         .filter(|(method, _, _)| method == "POST")
-        .all(|(_, _, body)| body[0] == yo_wire::envelope::SEALED));
+        .all(|(_, _, body)| body[0] == yoip::protocol::envelope::SEALED));
     assert!(routes.contains(&("GET", "/v1/inbox?wait=3")));
     assert!(!routes.iter().any(|(_, path)| path.contains("lookup") || *path == "/v1/inbox?wait=0"));
 }
@@ -219,7 +219,7 @@ fn normal_warm_request_counts() {
     );
     assert_eq!(sent.len(), 1, "warm send is exactly one POST");
     assert_eq!(sent[0].0, "POST");
-    assert_eq!(sent[0].2[0], yo_wire::envelope::SEALED, "the single request uses sealed sender");
+    assert_eq!(sent[0].2[0], yoip::protocol::envelope::SEALED, "the single request uses sealed sender");
     bh.sent.lock().unwrap().clear();
     bob.sync(25).unwrap();
     let received = bh.sent.lock().unwrap().clone();
@@ -302,7 +302,7 @@ fn failed_probe_keeps_an_added_pingtests_ordinary_outbox() {
     ping.echo_yo(alice.user_id()).unwrap();
     alice.sync(0).unwrap();
     alice.after_sync().unwrap();
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(ping.user_id()));
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(ping.user_id()));
     // Leave a normal Yo queued, then refuse every attempted delivery during a probe.
     for _ in 0..12 {
         http.fault(&path, yo_tests::Fault::Answer(503));
@@ -315,8 +315,8 @@ fn failed_probe_keeps_an_added_pingtests_ordinary_outbox() {
         .iter()
         .filter(|item| item.user == ping.user_id())
         .map(|item| {
-            let plain: yo_wire::envelope::Plain = yo_wire::decode(&item.plain).unwrap();
-            yo_wire::content::Message::decode(plain.content.as_slice()).unwrap().content
+            let plain: yoip::protocol::envelope::Plain = yoip::decode(&item.plain).unwrap();
+            yoip::protocol::content::Message::decode(plain.content.as_slice()).unwrap().content
         })
         .collect();
     assert!(contents.contains(&Content::Yo));

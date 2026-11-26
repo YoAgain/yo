@@ -18,7 +18,10 @@ fun utf8Limit(text: String, bytes: Int): String {
 /** yo://services/NAME/connect?code=CODE, from a service's connect page (justyo.co/services/NAME/connect). */
 data class ConnectRequest(val service: String, val code: String)
 fun isServiceLink(uri: Uri) = uri.scheme?.lowercase() == "yo" && uri.host?.lowercase() == "services"
+/** Off until services launch: a connect link is swallowed and nothing is asked or sent. */
+const val SERVICES_CONNECT = false
 fun connectRequest(uri: Uri): ConnectRequest? {
+    if (!SERVICES_CONNECT) return null
     if (!isServiceLink(uri) || uri.pathSegments.size != 2 || uri.pathSegments[1] != "connect") return null
     val service = uri.pathSegments[0].takeIf { Regex("[A-Za-z0-9._]{1,32}").matches(it) } ?: return null
     val code = uri.getQueryParameter("code")?.takeIf { Regex("[A-Za-z0-9_-]{43}").matches(it) } ?: return null
@@ -97,7 +100,7 @@ data class AppState(
     val invitation: Invitation? = null,
     /** A service to connect, waiting for "Allow" (not saved). */
     val connecting: ConnectRequest? = null,
-    /** A contact whose account key changed (spec 3.2), said once in a dialog; `confirm`: their Yos wait for it (was verified). */
+    /** A contact whose account key changed (spec 2.1), said once in a dialog; `confirm`: their Yos wait for it (was verified). */
     val keyChanged: KeyChange? = null,
     /** A group with nobody else in it any more, after a Yo to it: asked whether to delete it (iOS). */
     val emptyGroup: Friend? = null,

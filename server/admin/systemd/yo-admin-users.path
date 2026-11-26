@@ -1,0 +1,10 @@
+[Unit]
+Description=Yo admin page: collect on request
+After=systemd-tmpfiles-setup.service
+
+[Path]
+PathModified=/run/yo-admin-request/want
+Unit=yo-admin-users.service
+
+[Install]
+WantedBy=multi-user.target

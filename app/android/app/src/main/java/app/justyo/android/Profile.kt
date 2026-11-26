@@ -540,7 +540,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         onDismissRequest = { turningOffKey = false },
         title = { Text(stringResource(R.string.turn_off_recovery_key)) },
         text = { Text(stringResource(if (BuildConfig.FLOSS || passkeyConfigured || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
-        // A passkey door is made anew with the new key's new K: the passkey is asked once more (spec 7).
+        // A passkey door is made anew with the new key's new K: the passkey is asked once more (spec 2.4).
         confirmButton = { TextButton(onClick = {
             turningOffKey = false
             repo.command { turnOffRecovery { withContext(Dispatchers.Main) { Passkeys.assert(context) } } }

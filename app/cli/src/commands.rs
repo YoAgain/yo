@@ -7,7 +7,7 @@ use yo_core::connect::ConnectRequest;
 use yo_core::media::{self, Media};
 use yo_core::shared::{self, Locked, Target, GROUP_PREFIX as GROUP};
 use yo_core::{Client, Content, Event};
-use yo_wire::content::{CONNECT, CONNECTED, CONNECT_DECLINED, CONNECT_ENDED, CONNECT_REFUSED};
+use yoip::protocol::content::{CONNECT, CONNECTED, CONNECT_DECLINED, CONNECT_ENDED, CONNECT_REFUSED};
 
 /// The largest photo read for `send --photo`, as a reply picture may be.
 const MAX_PHOTO: usize = 512 * 1024;
@@ -80,12 +80,12 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             Ok(json!({ "acked": true }))
         }
         ["echo-probe", user, token] => {
-            let token = yo_wire::unb64(token).ok().and_then(|t| t.try_into().ok());
+            let token = yoip::unb64(token).ok().and_then(|t| t.try_into().ok());
             let token = token.ok_or_else(|| Failure::usage("echo-probe USER TOKEN: a token of 32 bytes"))?;
             done(context, |c| c.echo_probe(user, token))
         }
         [word @ ("connect" | "decline"), service, code] => {
-            let code = yo_wire::unb64(code).ok().and_then(|c| c.try_into().ok());
+            let code = yoip::unb64(code).ok().and_then(|c| c.try_into().ok());
             let code =
                 code.ok_or_else(|| Failure::usage("connect|decline SERVICE CODE: the code of its connect link"))?;
             done(context, |c| match *word {
@@ -110,7 +110,7 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
                 "ended" => CONNECT_ENDED,
                 _ => return Err(Failure::usage("service-answer USER connected|refused|ended CODE")),
             };
-            let code = yo_wire::unb64(code).ok().and_then(|c| c.try_into().ok());
+            let code = yoip::unb64(code).ok().and_then(|c| c.try_into().ok());
             let code = code.ok_or_else(|| Failure::usage("service-answer: a code of 32 bytes"))?;
             done(context, |c| c.answer_connection(user, kind, code))
         }
@@ -266,12 +266,12 @@ pub fn connect((user, kind, code): &ConnectRequest) -> Value {
         CONNECT_DECLINED => "decline",
         _ => "disconnect",
     };
-    json!({ "type": kind, "from": user, "code": yo_wire::b64(code) })
+    json!({ "type": kind, "from": user, "code": yoip::b64(code) })
 }
 
 /// A probe request for an echo service: answered with `echo-probe`.
 pub fn probe(user: &str, token: &[u8; 32]) -> Value {
-    json!({ "type": "probe", "from": user, "token": yo_wire::b64(token) })
+    json!({ "type": "probe", "from": user, "token": yoip::b64(token) })
 }
 
 /// An event as JSON. A photo's or video's `media.ref` (with `refs`) is what `send --media` takes: its blob's id and
@@ -328,11 +328,11 @@ fn media_ref(content: &Content) -> String {
     bytes.extend_from_slice(&m.size.to_le_bytes());
     bytes.extend_from_slice(&m.width.to_le_bytes());
     bytes.extend_from_slice(&m.height.to_le_bytes());
-    yo_wire::b64(&bytes)
+    yoip::b64(&bytes)
 }
 
 fn content_of_ref(text: &str) -> Option<Content> {
-    let b = yo_wire::unb64(text).ok()?;
+    let b = yoip::unb64(text).ok()?;
     if b.len() != 93 {
         return None;
     }
@@ -364,7 +364,7 @@ fn read(path: &str, max: usize) -> Result<Vec<u8>, Failure> {
 }
 
 /// A Yo, with a photo from a file or a received photo or video sealed anew. No video from a file: the CLI could check
-/// neither its length nor take out its metadata (spec 5).
+/// neither its length nor take out its metadata (spec 3.2).
 fn send(context: &Context, to: &str, args: &[&str]) -> Outcome {
     let content = match args {
         [] => Content::Yo,
@@ -389,7 +389,7 @@ fn send(context: &Context, to: &str, args: &[&str]) -> Outcome {
 /// the same bytes, never stored. Its fetch is acknowledged, so the hub may let it go.
 fn resend(context: &Context, to: &str, content: Content) -> Result<Content, Failure> {
     let (Content::Photo(m) | Content::Video { media: m, .. }) = &content else { unreachable!("media only") };
-    if m.size as usize > yo_wire::limits::MAX_BLOB_LEN {
+    if m.size as usize > yoip::net::limits::MAX_BLOB_LEN {
         return Err(Failure::new("larger than a blob may be"));
     }
     let transport = context.client().transport();

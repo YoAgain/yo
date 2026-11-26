@@ -1,4 +1,4 @@
-//! Photos and videos end to end (spec 5, 6.8): a Yo that carries one, its blob uploaded first, fetched and opened by
+//! Photos and videos end to end (spec 3.2, 4.3): a Yo that carries one, its blob uploaded first, fetched and opened by
 //! the receiver once, then gone at the hub; a hub that says "not now" holds the upload until there is room.
 
 use yo_core::media::{self, Media};

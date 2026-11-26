@@ -1,18 +1,10 @@
 # Builds the iPhone app on macOS and uploads it to TestFlight with omarchy-apple-dev's ship.sh, the same path as
-# on Linux. Every push to main goes to the internal testers; a published GitHub release (pre-release included) also
-# goes to the outside testers. The App Store Connect key and the distribution identity are secrets of the
+# on Linux. Only a published GitHub release (pre-release included) or a manual run
+# builds: internal and outside testers. The App Store Connect key and the distribution identity are secrets of the
 # environment `testflight` (main and tags v*); never run this on pull requests.
 name: TestFlight
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - app/ios/**
-      - core/**
-      - Cargo.lock
-      - rust-toolchain.toml
-      - .github/workflows/testflight.yml
   release:
     types: [published]
   workflow_dispatch:
@@ -220,7 +212,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: app/ios/YoApp/build/core
-          key: core-${{ env.DEVELOPER_DIR }}-${{ hashFiles('core/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/ios/dev/core.sh') }}
+          key: core-${{ env.DEVELOPER_DIR }}-${{ hashFiles('app/core/**', 'yoip/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/ios/dev/core.sh') }}
       - id: cargo
         if: steps.core.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v6
@@ -229,7 +221,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/ios
-          key: cargo-ios-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('core/**') }}
+          key: cargo-ios-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('app/core/**', 'yoip/**') }}
           restore-keys: cargo-ios-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Rust core
         if: steps.core.outputs.cache-hit != 'true'
@@ -298,7 +290,7 @@ jobs:
           plutil -replace CFBundleShortVersionString -string "${BASH_REMATCH[1]}" app/ios/YoApp/Info.plist
           echo "version ${BASH_REMATCH[1]} from $TAG"
           # The whole tag's version (1.0.0-RC36) goes into YoVersion, which the app sends after its build in Yo-App
-          # (spec 6.3), so the admin names a release's build; builds of main have no key.
+          # (spec 4.1), so the admin names a release's build; builds of main have no key.
           plutil -replace YoVersion -string "${TAG#v}" app/ios/YoApp/Info.plist
           # The suffix (RC19) goes into YoReleaseName, which About shows as "1.0.0 RC19"; builds of main have no key.
           if [ -n "${BASH_REMATCH[2]}" ]; then

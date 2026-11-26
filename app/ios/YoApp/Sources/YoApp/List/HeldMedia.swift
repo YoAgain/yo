@@ -250,14 +250,14 @@ struct HeldMedia: View {
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
     shows(current)
-    // A video is 10 s at most (spec 5): a longer one, from a sender that ignores it, is cut there. The bar runs over
+    // A video is 10 s at most (spec 3.2): a longer one, from a sender that ignores it, is cut there. The bar runs over
     // its real length, not the sender's word.
     seconds = length > 0 ? min(length, Self.longestVideo) : photoSeconds
   }
 
   static let longestVideo = MediaFile.longestVideo + 0.5
 
-  /// At most 2048 px on the longer side, whatever the sender said (spec 5: the receiver checks the bytes).
+  /// At most 2048 px on the longer side, whatever the sender said (spec 3.2: the receiver checks the bytes).
   nonisolated static func fitted(_ file: URL) -> UIImage? {
     guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return nil }
     let options: [CFString: Any] = [

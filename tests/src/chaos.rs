@@ -354,7 +354,7 @@ fn lookalikes(name: &str) -> Vec<String> {
     all.push(name.replace(['o', 'O'], "0"));
     all.push(name.replace('e', "é").replace('E', "É"));
     all.push(name.replace("🔥", "🔥\u{FE0F}"));
-    all.retain(|n| n != name && yo_wire::handle::check_username_form(n).is_ok());
+    all.retain(|n| n != name && yoip::net::handle::check_username_form(n).is_ok());
     all.dedup();
     all
 }

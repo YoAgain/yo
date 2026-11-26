@@ -1,4 +1,4 @@
-// "Account Recovery" (spec 7), one full-height screen each, without cards: the symbol, title and line, then at the
+// "Account Recovery" (spec 2.4), one full-height screen each, without cards: the symbol, title and line, then at the
 // bottom the step as a small line over one big white button and quiet links beneath.
 // The recovery key (from the red badge and the account page's Recovery Key row): save it through the share sheet,
 // or show it; either keeps it, and only then the button becomes Done. The passkey (from its row): create it, then try

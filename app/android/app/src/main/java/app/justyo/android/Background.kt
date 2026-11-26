@@ -46,6 +46,7 @@ class YoApplication : Application(), CameraXConfig.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        Hub.init(this)
         if (Build.VERSION.SDK_INT >= 35) appScope.launch { publishWidgetPreviews(this@YoApplication) }
         Push.init(this)
     }

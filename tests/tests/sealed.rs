@@ -1,4 +1,4 @@
-//! Sealed sender (spec 6.1): what the hub sees of a chat is envelopes to inboxes, nothing that ties them together.
+//! Sealed sender (spec 4.1): what the hub sees of a chat is envelopes to inboxes, nothing that ties them together.
 
 use yo_core::{Client, Event, Push};
 use yo_tests::{random_u64, Http, TestHub};
@@ -15,12 +15,12 @@ fn texts(c: &mut Client) -> Vec<String> {
 
 /// The envelopes a client posted to a user's inbox.
 fn delivered(http: &Http, to: &str) -> Vec<Vec<u8>> {
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to));
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(to));
     let sent = http.sent.lock().unwrap();
     sent.iter().filter(|(m, p, _)| m == "POST" && *p == path).map(|(_, _, b)| b.clone()).collect()
 }
 
-/// A first message each way (a request is signed, unsealed: spec 4.10), then both take in each other's profile key
+/// A first message each way (a request is signed, unsealed: spec 3.3), then both take in each other's profile key
 /// and sender certificate (the work after a sync): from here on every delivery is sealed. How many envelopes each
 /// inbox got by then, to look only at what came after.
 fn contacts(a: &mut Client, ha: &Http, b: &mut Client, hb: &Http) -> (usize, usize) {
@@ -65,7 +65,7 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
         }
     }
     for envelope in &to_b {
-        assert_eq!(envelope[0], yo_wire::envelope::SEALED);
+        assert_eq!(envelope[0], yoip::protocol::envelope::SEALED);
         assert!(yo_core::sealed::testing::open(&b.account_secret(), envelope).is_ok());
         assert!(yo_core::sealed::testing::open(&a.account_secret(), envelope).is_err());
     }
@@ -95,7 +95,7 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     let dropped = a.dropped();
     let key = a.access_key_for_tests();
     // Bare: the hub refuses it. Sealed to someone else: taken, and dropped by A.
-    let bare = yo_wire::envelope::pad(&payload, &yo_wire::envelope::BUCKETS).unwrap();
+    let bare = yoip::protocol::envelope::pad(&payload, &yoip::protocol::envelope::BUCKETS).unwrap();
     assert_eq!(yo_tests::deliver_raw_with(&hub.url(), a.user_id(), a.access_key_for_tests().as_deref(), bare), 400);
     assert_eq!(
         yo_tests::deliver_raw_with(
@@ -209,7 +209,11 @@ fn the_certificate_is_refreshed_before_it_expires() {
     assert_ne!(a.sender_certificate_for_tests().unwrap(), first, "22 h: a new one");
     a.send(b.user_id(), yo_tests::tagged("sealed".into())).unwrap();
     assert_eq!(texts(&mut b), ["sealed"]);
-    assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yo_wire::envelope::SEALED, "the Yo after the refresh");
+    assert_eq!(
+        delivered(&ha, b.user_id()).last().unwrap()[0],
+        yoip::protocol::envelope::SEALED,
+        "the Yo after the refresh"
+    );
 }
 
 /// Offline for 31 days (its certificate long expired): what goes first (a receipt, a Yo) goes at once, identified;
@@ -233,7 +237,7 @@ fn back_after_a_month_offline() {
     a.send(b.user_id(), yo_tests::tagged("two".into())).unwrap();
     let firsts = |sent: &[Vec<u8>]| sent.iter().map(|e| e[0]).collect::<Vec<_>>();
     let to_b = firsts(&delivered(&ha, b.user_id())[before..]);
-    assert_eq!((to_b[0], *to_b.last().unwrap()), (yo_wire::VERSION, yo_wire::envelope::SEALED), "{to_b:?}");
+    assert_eq!((to_b[0], *to_b.last().unwrap()), (yoip::VERSION, yoip::protocol::envelope::SEALED), "{to_b:?}");
     // Today: B, offline since, receives both (the sealed one with a certificate that expired 19 days ago).
     hub.hub.shift_clock(0);
     shift(&mut b, 0);
@@ -244,7 +248,7 @@ fn back_after_a_month_offline() {
     shift(&mut a, 0);
     assert_eq!(texts(&mut a), ["back", "again"]);
     let to_a = firsts(&delivered(&hb, a.user_id())[before..]);
-    assert_eq!((to_a[0], *to_a.last().unwrap()), (yo_wire::VERSION, yo_wire::envelope::SEALED), "{to_a:?}");
+    assert_eq!((to_a[0], *to_a.last().unwrap()), (yoip::VERSION, yoip::protocol::envelope::SEALED), "{to_a:?}");
     assert_eq!(a.dropped() + b.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b.drop_reasons());
 }
 
@@ -263,8 +267,8 @@ fn clocks_hours_off_still_seal() {
     assert_eq!(texts(&mut b), ["ahead"]);
     b.send(a.user_id(), yo_tests::tagged("behind".into())).unwrap();
     assert_eq!(texts(&mut a), ["behind"]);
-    assert!(delivered(&ha, b.user_id())[sent_a..].iter().all(|e| e[0] == yo_wire::envelope::SEALED));
-    assert!(delivered(&hb, a.user_id())[sent_b..].iter().all(|e| e[0] == yo_wire::envelope::SEALED));
+    assert!(delivered(&ha, b.user_id())[sent_a..].iter().all(|e| e[0] == yoip::protocol::envelope::SEALED));
+    assert!(delivered(&hb, a.user_id())[sent_b..].iter().all(|e| e[0] == yoip::protocol::envelope::SEALED));
 }
 
 /// The hub answers the certificate request with an error: the Yo goes at once, identified (signed), and B shows it as
@@ -274,7 +278,7 @@ fn without_a_certificate_a_yo_goes_identified() {
     let hub = TestHub::start();
     let (mut a, mut b, ha, _) = pair(&hub, "Idf");
     a.set_sender_certificate_for_tests(None);
-    ha.fault(yo_wire::api::CERTIFICATE, yo_tests::Fault::Answer(500));
+    ha.fault(yoip::net::api::CERTIFICATE, yo_tests::Fault::Answer(500));
     a.send(b.user_id(), yo_tests::tagged("identified".into())).unwrap();
     let events: Vec<Event> = (0..3).flat_map(|_| b.sync(0).unwrap()).collect();
     assert!(events.iter().any(
@@ -283,14 +287,14 @@ fn without_a_certificate_a_yo_goes_identified() {
     assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. })), "a contact's, no request");
     assert!(b.contacts().iter().any(|c| c.user == a.user_id() && c.accepted));
     let to_b = delivered(&ha, b.user_id());
-    assert_eq!(to_b.last().unwrap()[0], yo_wire::VERSION);
+    assert_eq!(to_b.last().unwrap()[0], yoip::VERSION);
     assert!(a.sender_certificate_for_tests().is_none(), "the hub refused it");
     // A minute on, the hub gives one: the next Yo after it goes sealed.
     a.set_clock(clock(61_000));
     a.maintenance().unwrap();
     a.send(b.user_id(), yo_tests::tagged("sealed".into())).unwrap();
     assert_eq!(texts(&mut b), ["sealed"]);
-    assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yo_wire::envelope::SEALED);
+    assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yoip::protocol::envelope::SEALED);
 }
 
 /// A clock set back after the certificate came does not stretch its day: noticed, the next Yo goes identified, a new
@@ -307,5 +311,5 @@ fn a_clock_set_back_is_noticed() {
     a.send(b.user_id(), yo_tests::tagged("later".into())).unwrap();
     assert_eq!(texts(&mut b), ["noon", "morning", "later"]);
     let firsts: Vec<u8> = delivered(&ha, b.user_id())[before..].iter().map(|e| e[0]).collect();
-    assert_eq!(firsts, [yo_wire::VERSION, yo_wire::envelope::SEALED]);
+    assert_eq!(firsts, [yoip::VERSION, yoip::protocol::envelope::SEALED]);
 }

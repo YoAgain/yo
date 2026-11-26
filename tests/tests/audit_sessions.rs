@@ -28,26 +28,26 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
-/// An identified envelope (spec 6.1: `Padded(Payload)`, first byte 1) posted by `from` (signed by its own device, as
+/// An identified envelope (spec 4.1: `Padded(Payload)`, first byte 1) posted by `from` (signed by its own device, as
 /// any registered account can) to `to`, as a request: its payload claims whatever the poster likes.
-fn post_identified(url: &str, from: &Client, to: &Client, payload: &yo_wire::envelope::Payload) -> u16 {
-    let envelope = yo_wire::envelope::pad(&yo_wire::encode(payload), &yo_wire::envelope::BUCKETS).unwrap();
-    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to.user_id()));
+fn post_identified(url: &str, from: &Client, to: &Client, payload: &yoip::protocol::envelope::Payload) -> u16 {
+    let envelope = yoip::protocol::envelope::pad(&yoip::encode(payload), &yoip::protocol::envelope::BUCKETS).unwrap();
+    let path = yoip::net::api::deliver_path(&yo_tests::user_id(to.user_id()));
     // The device check from public keys (a stranger learns them from a lookup or a 409).
     let to_state = to.saved().state;
-    let hash = yo_wire::devices::hash(&yo_tests::account_key(&to.account_secret()), &[to_state.device_key]);
+    let hash = yoip::net::devices::hash(&yo_tests::account_key(&to.account_secret()), &[to_state.device_key]);
     let state = from.saved().state;
     let time = now_ms();
     let signature = yo_core::identity::sign_with(
         &state.auth_secret,
-        &yo_wire::request::to_be_signed("POST", &path, time, &envelope),
+        &yoip::net::request::to_be_signed("POST", &path, time, &envelope),
     );
     reqwest::blocking::Client::new()
         .post(format!("{url}{path}"))
-        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&hash))
-        .header(yo_wire::request::HEADER_DEVICE, yo_wire::b64(&state.device_id))
-        .header(yo_wire::request::HEADER_TIME, time.to_string())
-        .header(yo_wire::request::HEADER_SIGNATURE, yo_wire::b64(&signature))
+        .header(yoip::net::api::HEADER_DEVICES, yoip::b64(&hash))
+        .header(yoip::net::request::HEADER_DEVICE, yoip::b64(&state.device_id))
+        .header(yoip::net::request::HEADER_TIME, time.to_string())
+        .header(yoip::net::request::HEADER_SIGNATURE, yoip::b64(&signature))
         .body(envelope)
         .send()
         .unwrap()
@@ -56,7 +56,7 @@ fn post_identified(url: &str, from: &Client, to: &Client, payload: &yo_wire::env
 }
 
 /// C, a stranger, posts identified envelopes whose payload claims to be from B's contact A (A's public account key,
-/// A's device number, a made-up device key). None of them opens, so none makes B ask the hub for A's roster (spec 4.6)
+/// A's device number, a made-up device key). None of them opens, so none makes B ask the hub for A's roster (spec 3.2)
 /// nor parks anything: A's real message comes at once, B's recovery lookups are all left, nothing waits.
 #[test]
 fn a_strangers_forged_sender_claim_holds_back_nothing() {
@@ -86,12 +86,16 @@ fn a_strangers_forged_sender_claim_holds_back_nothing() {
     b.set_recovery_lookups_per_day(2);
 
     let (a_state, b_state) = (a.saved().state, b.saved().state);
-    let forged = |kind: u8, message: Vec<u8>| yo_wire::envelope::Payload {
+    let forged = |kind: u8, message: Vec<u8>| yoip::protocol::envelope::Payload {
         account_key: yo_tests::account_key(&a.account_secret()),
         device_key: [8; 32],
         device_id: a_state.device_number,
         sent_at: now_ms(),
-        copies: vec![yo_wire::envelope::ForDevice { device_key: b_state.device_key, kind, message: message.into() }],
+        copies: vec![yoip::protocol::envelope::ForDevice {
+            device_key: b_state.device_key,
+            kind,
+            message: message.into(),
+        }],
     };
     // Garbage, and a well-formed session message between A's and B's identities that no device of A's made (it does
     // not decrypt): twenty of each, a minute apart. The well-formed ones may spend B's lookups on a decryption error's

@@ -1,18 +1,9 @@
-# Builds the signed Android App Bundle and uploads it to Google Play, as testflight.yml does for the iPhone. Every
-# push to main goes to internal testing; a published GitHub release (pre-release included) also goes to closed
-# testing (track alpha). The upload key (Play App Signing holds the app signing key) and the Play service account are
+# Builds the signed Android App Bundle and uploads it to Google Play, as testflight.yml does for the iPhone. Only a
+# published GitHub release (pre-release included) or a manual run builds: internal testing and closed testing (alpha). The upload key (Play App Signing holds the app signing key) and the Play service account are
 # secrets of the environment `play` (main and tags v*); never run this on pull requests.
 name: Google Play
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - app/android/**
-      - core/**
-      - Cargo.lock
-      - rust-toolchain.toml
-      - .github/workflows/play.yml
   release:
     types: [published]
   workflow_dispatch:
@@ -56,7 +47,7 @@ jobs:
             app/android/app/build/rustJniLibs
             app/android/app/build/generated/yo
             target/android/debug/libyo.so
-          key: core-android-${{ hashFiles('core/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/android/dev/core.sh', 'app/android/dev/uniffi.toml', 'app/android/dev/fix-bindings.py') }}
+          key: core-android-${{ hashFiles('app/core/**', 'yoip/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/android/dev/core.sh', 'app/android/dev/uniffi.toml', 'app/android/dev/fix-bindings.py') }}
       - id: cargo
         if: steps.core.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v6
@@ -65,7 +56,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/android
-          key: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('core/**') }}
+          key: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('app/core/**', 'yoip/**') }}
           restore-keys: cargo-android-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
       - name: Rust core
         if: steps.core.outputs.cache-hit != 'true'

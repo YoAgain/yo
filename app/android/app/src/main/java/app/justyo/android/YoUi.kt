@@ -204,7 +204,7 @@ import uniffi.yo.usernameValid
     val availability = remember { mutableStateMapOf<String, Boolean>() }
     val free = availability[name]
     val valid = remember(name) { usernameValid(name) }
-    // How short a name may be only the hub knows (spec 3.3): its 400 marks a name too short.
+    // How short a name may be only the hub knows (spec 2.2): its 400 marks a name too short.
     val hubShortNames = remember { mutableStateMapOf<String, Boolean>() }
     val rejectedAsShort = hubShortNames[name] == true
     var tooShort by remember { mutableStateOf(false) }

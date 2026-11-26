@@ -207,8 +207,8 @@ impl Transport for Http {
         if self.record {
             // A delivery of one copy per device is kept as its envelopes, each as a body of its own (the
             // single-envelope body the hub still takes), so tests look at and post again what one device got.
-            let copies = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(yo_wire::api::HEADER_COPIES));
-            let bodies = match copies.then(|| yo_wire::decode::<yo_wire::api::Copies>(body).ok()).flatten() {
+            let copies = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(yoip::net::api::HEADER_COPIES));
+            let bodies = match copies.then(|| yoip::decode::<yoip::net::api::Copies>(body).ok()).flatten() {
                 Some(c) => c.copies.into_iter().map(|c| c.envelope.as_slice().to_vec()).collect(),
                 None => vec![body.to_vec()],
             };
@@ -248,22 +248,22 @@ pub fn username(i: u64) -> String {
     format!("u{i:09}")
 }
 
-/// The account key of an account secret (any 32 bytes are one): its libsignal identity key's 32 bytes (spec 3).
+/// The account key of an account secret (any 32 bytes are one): its libsignal identity key's 32 bytes (spec 2).
 pub fn account_key(secret: &[u8; 32]) -> [u8; 32] {
     yo_core::identity::account_key(&yo_core::identity::account_pair(secret).unwrap())
 }
 
-/// The public key of the test hubs' signing key (`Config::for_tests`), as an app ships its hub's (spec 6.10).
+/// The public key of the test hubs' signing key (`Config::for_tests`), as an app ships its hub's (spec 4.1).
 pub fn hub_key() -> [u8; 32] {
     yo_hub::config::hub_public_key(&yo_hub::config::TEST_HUB_KEY)
 }
 
-/// The public key of the test hubs' trust root (`yo_wire::envelope::TEST_TRUST_ROOT`), as an app pins its hub's.
+/// The public key of the test hubs' trust root (`yoip::protocol::envelope::TEST_TRUST_ROOT`), as an app pins its hub's.
 pub fn trust_root() -> [u8; 32] {
     yo_hub::certificate::Signer::from_bytes(&TEST_SIGNER).unwrap().root()
 }
 
-/// The test hubs' zkgroup public params (spec 4.9), as an app pins them.
+/// The test hubs' zkgroup public params (spec 3.4), as an app pins them.
 pub fn zk_params() -> Vec<u8> {
     yo_hub::groups::Zk::from_bytes(&yo_hub::groups::test_params()).expect("params").public().to_vec()
 }
@@ -328,19 +328,19 @@ impl Rng {
 }
 
 /// A user's id from its hex form.
-pub fn user_id(user: &str) -> yo_wire::UserId {
+pub fn user_id(user: &str) -> yoip::UserId {
     (0..16).map(|i| u8::from_str_radix(&user[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap()
 }
 
-/// A well-formed envelope as a stranger can make one: a bucket, sealed to nobody (spec 6.1).
+/// A well-formed envelope as a stranger can make one: a bucket, sealed to nobody (spec 4.1).
 pub fn junk(fill: u8) -> Vec<u8> {
-    let mut envelope = vec![fill; yo_wire::envelope::BUCKETS[0]];
-    envelope[0] = yo_wire::envelope::SEALED;
+    let mut envelope = vec![fill; yoip::protocol::envelope::BUCKETS[0]];
+    envelope[0] = yoip::protocol::envelope::SEALED;
     envelope
 }
 
 /// The device check for a user, as any stranger can learn it: from the hub's 409 to a delivery with a wrong one.
-/// `None` for a user the hub does not know, or one that takes no delivery without its profile key (spec 4.10).
+/// `None` for a user the hub does not know, or one that takes no delivery without its profile key (spec 3.3).
 pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
     devices_hash_with(url, user, None)
 }
@@ -348,17 +348,17 @@ pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
 /// `devices_hash` showing a profile key (`Yo-Access`, as sent).
 pub fn devices_hash_with(url: &str, user: &str, access: Option<&str>) -> Option<[u8; 32]> {
     let mut probe = reqwest::blocking::Client::new()
-        .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
-        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&[0; 32]));
+        .post(format!("{url}{}", yoip::net::api::deliver_path(&user_id(user))))
+        .header(yoip::net::api::HEADER_DEVICES, yoip::b64(&[0; 32]));
     if let Some(access) = access {
-        probe = probe.header(yo_wire::api::HEADER_ACCESS, access);
+        probe = probe.header(yoip::net::api::HEADER_ACCESS, access);
     }
     let probe = probe.body(junk(0)).send().unwrap();
     if probe.status().as_u16() != 409 {
         return None;
     }
-    let devices: yo_wire::api::Devices = yo_wire::decode(&probe.bytes().unwrap()).unwrap();
-    Some(yo_wire::devices::hash(&devices.account_key, &devices.keys()))
+    let devices: yoip::net::api::Devices = yoip::decode(&probe.bytes().unwrap()).unwrap();
+    Some(yoip::net::devices::hash(&devices.account_key, &devices.keys()))
 }
 
 /// Delivers raw bytes to a user as any stranger could (sealed sender), with the device check learned from the hub.
@@ -371,10 +371,10 @@ pub fn deliver_raw(url: &str, user: &str, body: Vec<u8>) -> u16 {
 pub fn deliver_raw_with(url: &str, user: &str, access: Option<&str>, body: Vec<u8>) -> u16 {
     let Some(hash) = devices_hash_with(url, user, access) else { return 404 };
     let mut request = reqwest::blocking::Client::new()
-        .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
-        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&hash));
+        .post(format!("{url}{}", yoip::net::api::deliver_path(&user_id(user))))
+        .header(yoip::net::api::HEADER_DEVICES, yoip::b64(&hash));
     if let Some(access) = access {
-        request = request.header(yo_wire::api::HEADER_ACCESS, access);
+        request = request.header(yoip::net::api::HEADER_ACCESS, access);
     }
     request.body(body).send().unwrap().status().as_u16()
 }
@@ -393,14 +393,14 @@ pub fn deliver_held(url: &str, http: &Http, path: &str) -> u16 {
 
 /// The profile key `http`'s client showed in its last delivery to `to` (`Yo-Access`), if it did.
 pub fn access_shown(http: &Http, to: &str) -> Option<String> {
-    let path = yo_wire::api::deliver_path(&user_id(to));
+    let path = yoip::net::api::deliver_path(&user_id(to));
     let recorded = http.recorded.lock().unwrap();
     recorded.iter().rev().filter(|(_, p, _, _)| *p == path).find_map(|(_, _, headers, _)| {
-        headers.iter().find(|(n, _)| n == yo_wire::api::HEADER_ACCESS).map(|(_, v)| v.clone())
+        headers.iter().find(|(n, _)| n == yoip::net::api::HEADER_ACCESS).map(|(_, v)| v.clone())
     })
 }
 
-/// A hub that lies to one client (spec 3.4), once told to: asked for `user`, it answers with the keys and devices of
+/// A hub that lies to one client (spec 2.3), once told to: asked for `user`, it answers with the keys and devices of
 /// another account, the stand-in, under the user's id and name, and hands what is sent to the user to the stand-in.
 /// What a hub that gives out a key not the user's would do; the client must notice.
 pub struct Lying {
@@ -409,9 +409,9 @@ pub struct Lying {
 }
 
 struct Lie {
-    user: yo_wire::UserId,
+    user: yoip::UserId,
     name: String,
-    stand_in: yo_wire::UserId,
+    stand_in: yoip::UserId,
     stand_in_name: String,
     /// The stand-in's profile key, if it made one: the hub takes what goes to it as a contact's.
     stand_in_key: Option<String>,
@@ -458,36 +458,36 @@ impl Transport for Lying {
         let mut lie = self.lie.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(lie) = lie.as_mut() else { return self.http.request(method, path, headers, body) };
         let lookup =
-            (path == yo_wire::api::LOOKUP).then(|| yo_wire::decode::<yo_wire::api::Lookup>(body).ok()).flatten();
+            (path == yoip::net::api::LOOKUP).then(|| yoip::decode::<yoip::net::api::Lookup>(body).ok()).flatten();
         let response = match lookup {
             Some(mut lookup)
                 if lookup.handle.user_id() == Some(lie.user)
-                    || (lookup.handle.kind == yo_wire::handle::KIND_USERNAME
-                        && yo_wire::handle::same_name(&lookup.handle.display(), &lie.name)) =>
+                    || (lookup.handle.kind == yoip::net::handle::KIND_USERNAME
+                        && yoip::net::handle::same_name(&lookup.handle.display(), &lie.name)) =>
             {
-                lookup.handle = yo_wire::handle::Handle::user(&lie.stand_in);
-                let body = yo_wire::encode(&lookup);
-                lie.asker.signed_for_tests("POST", yo_wire::api::LOOKUP, &body).map_err(|e| e.to_string())?
+                lookup.handle = yoip::net::handle::Handle::user(&lie.stand_in);
+                let body = yoip::encode(&lookup);
+                lie.asker.signed_for_tests("POST", yoip::net::api::LOOKUP, &body).map_err(|e| e.to_string())?
             }
             // The hub itself hands it on: a request's signature (over the user's path) and a key are no check of it.
-            _ if path == yo_wire::api::deliver_path(&lie.user) => {
+            _ if path == yoip::net::api::deliver_path(&lie.user) => {
                 let mut headers: Vec<_> = headers
                     .iter()
                     .filter(|(n, _)| {
                         ![
-                            yo_wire::request::HEADER_DEVICE,
-                            yo_wire::request::HEADER_TIME,
-                            yo_wire::request::HEADER_SIGNATURE,
-                            yo_wire::api::HEADER_ACCESS,
+                            yoip::net::request::HEADER_DEVICE,
+                            yoip::net::request::HEADER_TIME,
+                            yoip::net::request::HEADER_SIGNATURE,
+                            yoip::net::api::HEADER_ACCESS,
                         ]
                         .contains(&n.as_str())
                     })
                     .cloned()
                     .collect();
                 if let Some(key) = &lie.stand_in_key {
-                    headers.push((yo_wire::api::HEADER_ACCESS.to_owned(), key.clone()));
+                    headers.push((yoip::net::api::HEADER_ACCESS.to_owned(), key.clone()));
                 }
-                self.http.request(method, &yo_wire::api::deliver_path(&lie.stand_in), &headers, body)?
+                self.http.request(method, &yoip::net::api::deliver_path(&lie.stand_in), &headers, body)?
             }
             _ => self.http.request(method, path, headers, body)?,
         };

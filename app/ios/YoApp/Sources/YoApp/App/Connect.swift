@@ -13,9 +13,12 @@ final class Connect {
     var id: String { code }
   }
 
+  /// Off until services launch: a connect link is swallowed and nothing is asked or sent.
+  nonisolated static let enabled = false
+
   var pending: Request?
 
-  func open(_ url: URL) { pending = Self.request(in: url) }
+  func open(_ url: URL) { pending = Self.enabled ? Self.request(in: url) : nil }
 
   nonisolated static func link(_ url: URL) -> Bool {
     url.scheme?.lowercased() == "yo" && url.host()?.lowercased() == "services"
