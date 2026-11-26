@@ -295,6 +295,8 @@ impl Hub {
             .route(api::CERTIFICATE, get(account::get_certificate))
             .route(api::PUSH, put(account::put_push))
             .route(api::BOT, put(account::put_bot))
+            .route(api::DEVICES, get(account::get_devices))
+            .route("/v1/devices/{n}", delete(account::delete_device))
             .route(api::ACCESS_KEY, put(account::put_access_key))
             .route(api::ACCOUNT, delete(account::delete_account))
             .route(api::STORAGE, get(account::get_storage).put(account::put_storage))

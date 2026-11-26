@@ -107,6 +107,16 @@ pub struct SeenThread {
     pub through_ms: u64,
 }
 
+/// One of this account's devices (`own_devices`): its number, when it registered and was last seen (ms since 1970,
+/// to the hour), and the app it named ("ios/202611241344", empty if none).
+#[derive(uniffi::Record)]
+pub struct YoDevice {
+    pub number: u8,
+    pub created_at_ms: u64,
+    pub last_seen_ms: u64,
+    pub app: String,
+}
+
 #[derive(uniffi::Record)]
 pub struct SupportThread {
     pub messages: Vec<SupportMessage>,
@@ -1609,6 +1619,25 @@ impl YoClient {
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
     pub fn delete_account(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.delete_account())??)
+    }
+
+    /// This account's devices as the hub lists them, for the owner to choose one to remove (multi-device).
+    pub fn own_devices(&self) -> Result<Vec<YoDevice>, YoError> {
+        let devices = self.with(|c| c.own_devices())??;
+        Ok(devices
+            .into_iter()
+            .map(|d| YoDevice {
+                number: d.number,
+                created_at_ms: d.created_at,
+                last_seen_ms: d.last_seen_at,
+                app: String::from_utf8_lossy(d.app.as_slice()).into_owned(),
+            })
+            .collect())
+    }
+
+    /// Removes another device of this account: it gets `Replaced` from then on and forgets what it held.
+    pub fn remove_device(&self, number: u8) -> Result<(), YoError> {
+        Ok(self.with(|c| c.remove_device(number))??)
     }
 
     /// Fetches, verifies and opens media without the client. The app stores it, then acknowledges it (`ack_media`).

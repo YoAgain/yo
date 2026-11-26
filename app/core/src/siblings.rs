@@ -44,6 +44,22 @@ impl Client {
         Ok(())
     }
 
+    /// This account's devices as the hub lists them (number, registered, last seen, app), for the owner to choose one
+    /// to remove (`remove_device`).
+    pub fn own_devices(&mut self) -> Result<Vec<api::OwnDevice>> {
+        let response = expect(self.signed("GET", api::DEVICES, &[])?, status::OK)?;
+        Ok(decode::<api::OwnDevices>(&response.body)?.devices)
+    }
+
+    /// Removes another device of this account at the hub (by its number): it gets `410` from then on and forgets
+    /// what it held. `Refused(404)`: none of that number; `Refused(400)`: this device itself.
+    pub fn remove_device(&mut self, number: u8) -> Result<()> {
+        expect(self.signed("DELETE", &api::device_path(number), &[])?, status::NO_CONTENT)?;
+        // Asked again with the next roster refresh: its sessions go then.
+        self.state.siblings.retain(|d| d.slot != number);
+        self.persist()
+    }
+
     /// Notes the newest message of a thread (user or group id), for what `mark_seen` names.
     pub(super) fn note_in(&mut self, thread: &str, sent_at_ms: u64) {
         let at = self.state.last_in.entry(thread.to_owned()).or_default();

@@ -41,6 +41,9 @@ pub const BLOBS: &str = "/v1/blobs";
 pub const ACCESS_KEY: &str = "/v1/access-key";
 /// `PUT`, signed, one byte: whether the account is a bot (1) or not (0), for everyone who looks it up.
 pub const BOT: &str = "/v1/bot";
+/// `GET`, signed: this account's devices (`OwnDevices`, multi-device). `DELETE {DEVICES}/{number}`, signed: removes
+/// one of them; its own requests answer `410` from then on (`404`: no such number, `400`: the signing device itself).
+pub const DEVICES: &str = "/v1/devices";
 /// `GET`, signed: a sender certificate for the signing device (spec 4.1), libsignal's `SenderCertificate`.
 pub const CERTIFICATE: &str = "/v1/certificate";
 /// The public key of the hub's sender-certificate trust root, 32 bytes (spec 4.1): for tools; apps pin their own copy.
@@ -318,6 +321,26 @@ pub struct Lookup {
 pub struct Device {
     pub key: [u8; KEY_LEN],
     pub id: u8,
+}
+
+/// One of the account's devices as `GET /v1/devices` lists it: its number, when it registered and was last seen
+/// (ms, kept to the hour), and the app it named (`Yo-App`, empty if none).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct OwnDevice {
+    pub number: u8,
+    pub created_at: u64,
+    pub last_seen_at: u64,
+    pub app: VLBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct OwnDevices {
+    pub devices: Vec<OwnDevice>,
+}
+
+/// The path that removes device `number` (`DELETE`, signed).
+pub fn device_path(number: u8) -> String {
+    format!("{DEVICES}/{number}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]

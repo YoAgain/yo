@@ -44,10 +44,12 @@ fn exercise(http: Arc<dyn Transport>) {
         assert_eq!(yos(&a.sync(0).unwrap()), 1);
         assert_eq!(yos(&a.sync(0).unwrap()), 0);
     }
-    // What A2 sends goes to B alone: no copy of it to A1.
+    // What A2 sends goes to B, and to A1 as a sent transcript: A1's thread shows it as sent.
     a2.send_yo(b.user_id()).unwrap();
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
-    assert!(a1.sync(0).unwrap().is_empty());
+    let sent = a1.sync(0).unwrap();
+    assert!(matches!(&sent[..], [Event::Sent { user, content: Content::Yo, .. }] if user == b.user_id()), "{sent:?}");
+    assert_eq!(yos(&sent), 0);
 
     // A2 shows B's thread: A1 lets its notifications of it go, through B's Yo (its sent time, not a clock).
     let through = a2.saved().state.last_in[b.user_id()];
@@ -110,6 +112,17 @@ fn exercise(http: Arc<dyn Transport>) {
     // A3 restored the account's storage (its groups); no message of A1's reached it.
     let left = a3.sync(0).unwrap();
     assert!(!left.iter().any(|e| matches!(e, Event::Message { .. } | Event::GroupMessage { .. })), "{left:?}");
+
+    // A1 lists the account's devices and removes A3: A3 gets 410 (Replaced) and forgets.
+    let devices = a1.own_devices().unwrap();
+    assert_eq!(devices.len(), 3);
+    let number = a3.saved().state.device_number;
+    assert!(devices.iter().any(|d| d.number == number && d.last_seen_at > 0));
+    assert_eq!(a1.remove_device(a1.saved().state.device_number), Err(yo_core::Error::Refused(400)));
+    a1.remove_device(number).unwrap();
+    assert_eq!(a1.remove_device(number), Err(yo_core::Error::Refused(404)));
+    assert_eq!(a1.own_devices().unwrap().len(), 2);
+    assert_eq!(a3.sync(0), Err(yo_core::Error::Replaced));
 }
 
 #[test]

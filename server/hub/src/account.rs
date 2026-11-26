@@ -237,6 +237,26 @@ pub(crate) async fn put_push(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `GET /v1/devices` (multi-device): the account's devices, for the owner to choose one to remove.
+pub(crate) async fn get_devices(State(hub): Hubs, Auth(device, _): Auth) -> Res<Vec<u8>> {
+    let devices = hub.db.own_devices(&device.device_id)?.done()?;
+    Ok(encode(&api::OwnDevices { devices }))
+}
+
+/// `DELETE /v1/devices/{n}` (multi-device): removes another device of the account; it gets `410` from then on and
+/// forgets what it held. Its own number is `400`, an unknown one `404`.
+pub(crate) async fn delete_device(
+    State(hub): Hubs,
+    axum::extract::Path(number): axum::extract::Path<u8>,
+    Auth(device, _): Auth,
+) -> Res<StatusCode> {
+    match hub.db.remove_own_device(&device.device_id, number, now_ms())?.done()? {
+        Some(true) => Ok(StatusCode::NO_CONTENT),
+        Some(false) => Err(bad()),
+        None => Err(refuse(StatusCode::NOT_FOUND)),
+    }
+}
+
 /// `PUT /v1/bot` (spec 2.1, 4.1): marks the account a bot for everyone who looks it up; never cleared (`409`).
 pub(crate) async fn put_bot(State(hub): Hubs, Auth(device, body): Auth) -> Res<StatusCode> {
     let bot = match body[..] {

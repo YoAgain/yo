@@ -321,6 +321,24 @@ fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Re
     Ok(())
 }
 
+/// Removes one device of a user, by its number, with its prekeys and envelopes; its own requests answer 410 from
+/// then on. `false`: none of that number.
+fn retire_device(tx: &Transaction<'_>, user: &UserId, number: u8, now: u64) -> rusqlite::Result<bool> {
+    let Some(id): Option<Vec<u8>> =
+        row(tx, "SELECT id FROM account_device WHERE user_id = ?1 AND number = ?2", params![user, number], |row| {
+            row.get(0)
+        })?
+    else {
+        return Ok(false);
+    };
+    tx.execute("INSERT OR REPLACE INTO account_device_gone (id, gone_at) VALUES (?1, ?2)", params![id, now])?;
+    for table in ["account_prekey", "message"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE device_id = ?1"), [&id])?;
+    }
+    tx.execute("DELETE FROM account_device WHERE id = ?1", [&id])?;
+    Ok(true)
+}
+
 /// The user of a device, in a transaction: none for a device replaced since it authenticated.
 fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<Option<UserId>> {
     row(tx, "SELECT user_id FROM account_device WHERE id = ?1", [device], |row| array(row.get(0)?))
@@ -617,6 +635,39 @@ impl Db {
                 app: row.get(3)?,
                 version: row.get(4)?,
             })
+        })
+    }
+
+    /// The signing device's account's devices, by number (`GET /v1/devices`).
+    pub fn own_devices(&self, device: &DeviceId) -> rusqlite::Result<Write<Vec<api::OwnDevice>>> {
+        self.as_device(device, |tx, user| {
+            let devices = tx
+                .prepare_cached(
+                    "SELECT number, created_at, last_seen_at, coalesce(app, '') FROM account_device
+                     WHERE user_id = ?1 ORDER BY number",
+                )?
+                .query_map([user], |row| {
+                    Ok(api::OwnDevice {
+                        number: row.get(0)?,
+                        created_at: row.get::<_, i64>(1)? as u64,
+                        last_seen_at: row.get::<_, i64>(2)? as u64,
+                        app: row.get::<_, String>(3)?.into_bytes().into(),
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(Write::Done(devices))
+        })
+    }
+
+    /// Removes another device of the signing device's account (`DELETE /v1/devices/{n}`): `None` none of that
+    /// number, `Some(false)` the signing device itself.
+    pub fn remove_own_device(&self, device: &DeviceId, number: u8, now: u64) -> rusqlite::Result<Write<Option<bool>>> {
+        self.as_device(device, |tx, user| {
+            let own: u8 = tx.query_row("SELECT number FROM account_device WHERE id = ?1", [device], |r| r.get(0))?;
+            if own == number {
+                return Ok(Write::Done(Some(false)));
+            }
+            Ok(Write::Done(retire_device(tx, &user, number, now)?.then_some(true)))
         })
     }
 

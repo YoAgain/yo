@@ -149,6 +149,7 @@ fn describe(events: &[YoEvent]) -> String {
             format!("group {} message {} {}", &group[..8], &user[..8], kind_name(kind))
         }
         YoEvent::GroupChanged { group } => format!("group {} changed", &group[..8]),
+        YoEvent::Sent { user, kind, .. } => format!("sent {} {}", &user[..8], kind_name(kind)),
         YoEvent::ConnectionChanged { user } => format!("connection {}", &user[..8]),
         YoEvent::DeviceAdded { user } => format!("device added {}", &user[..8]),
     };
