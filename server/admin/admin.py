@@ -398,11 +398,20 @@ def replies() -> list[dict]:
     out = []
     for n in names:
         try:
-            version = int(os.stat(os.path.join(REPLIES, n)).st_mtime)
+            version = int(os.stat(under(REPLIES, n)).st_mtime)
         except OSError:
             continue
         out.append({"name": n, "number": int(n[:-4]), "idea": ideas.get(n), "v": version})
     return out
+
+
+def under(base: str, name: str) -> str:
+    """`name` inside the folder `base`, never above it (names are checked by their callers already)."""
+    root = os.path.abspath(base)
+    path = os.path.abspath(os.path.join(root, name))
+    if not path.startswith(root + os.sep):
+        raise OSError(f"{name!r} is outside {base}")
+    return path
 
 
 def read_bytes(path: str) -> bytes:
@@ -679,7 +688,7 @@ FILES = {"/app.css": "text/css; charset=utf-8", "/app.js": "text/javascript; cha
 
 
 def page(name: str) -> bytes:
-    with open(os.path.join(HERE, name), "rb") as f:
+    with open(under(HERE, name), "rb") as f:
         return f.read()
 
 
@@ -789,7 +798,7 @@ class Admin(BaseHTTPRequestHandler):
             if not REPLY_NAME.fullmatch(name):
                 return self.send(404, b"Not found", "text/plain")
             try:
-                body = read_bytes(os.path.join(REPLIES, name))
+                body = read_bytes(under(REPLIES, name))
             except OSError:
                 return self.send(404, b"Not found", "text/plain")
             return self.send(200, body, "image/jpeg", {"Cache-Control": "private, max-age=3600"})

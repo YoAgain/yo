@@ -447,7 +447,7 @@ fn a_connection_both_ways() {
     assert_eq!(exchange(&code, secret, "", true).0, 400, "where it goes back to is asked for");
     assert_eq!(exchange(&code, secret, back, true).0, 200);
     let out = bot.book("SELECT out FROM services_secrets");
-    assert!(out.len() > 43 && secrets.contains(out.split('\'').nth(1).unwrap()), "{out} {secrets}");
+    assert!(out.len() > 43 && secrets.contains(out.split('\'').nth(1).unwrap()), "the secret kept is one handed out");
     let _ = entrance.kill();
     let _ = entrance.wait();
 }
