@@ -354,7 +354,7 @@ S.settings = p => { const a = hub.account; return `<div class="grab"></div><div 
   <div class="card"><div class="r" data-a="go" data-s="account" style="min-height:124px;align-items:flex-start;flex-direction:column;justify-content:center;gap:8px">
     <div style="display:flex;align-items:center;gap:14px;width:100%"><span class="avatar" style="background:${avatarColor(a.name)}">${esc(a.name[0].toUpperCase())}</span>${a.passkey ? '' : '<span class="badge">1</span>'}<span style="flex:1"></span><span class="qrbtn" data-a="go" data-s="code">${svg('qr', 20, '#9b59b6')}</span>${chev}</div>
     <div class="yo" style="font-size:26px;color:#000">${esc(a.name)}</div></div></div>
-  <div class="card"><div class="r" data-a="go" data-s="appearance">${tile('paint', '#9b59b6')}<span class="t">Appearance</span>${chev}</div></div>
+  <div class="card"><div class="r" data-a="go" data-s="appearance">${tile('paint', '#9b59b6')}<span class="t">Look</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">About</span>${chev}</div>
     <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Feedback</span>${chev}</div></div></div>`; };
 
@@ -741,7 +741,7 @@ $('reset').addEventListener('click', () => { history.replaceState(null, '', loca
 const JUMPS = [
   ['Start', [['signup','Sign-up'],['signin','Sign In'],['recover','Sign In with a key',1]]],
   ['List', [['list','List'],['list-new','List, just signed up',1],['adding','Add a friend',1],['requests','Request (Yo / No)',1],['yos','Yos waiting (! Yo 3)',1],['banner','“New device linked”',1]]],
-  ['Settings', [['settings','Settings'],['account','Account',1],['contacts','Contacts',2],['blocked','Blocked',2],['devices','Devices',2],['rkey','Account Security',2],['code','Your Code',1],['appearance','Appearance',1],['lefthanded','Left-Handed on',2],['help','Help & About',1],['signout','Sign Out?',1],['delete','Delete Your Account?',1]]],
+  ['Settings', [['settings','Settings'],['account','Account',1],['contacts','Contacts',2],['blocked','Blocked',2],['devices','Devices',2],['rkey','Account Security',2],['code','Your Code',1],['appearance','Look',1],['lefthanded','Left-Handed on',2],['help','Help & About',1],['signout','Sign Out?',1],['delete','Delete Your Account?',1]]],
   ['Devices & Linking (§2.5)', [['scan','Old device: scan',1],['confirm','Old device: confirm',1],['linked','Old device: linked',1],['linkqr','New device: QR',1],['link2','Both phones linking',1],['replace','16-device limit',1],['removed','Removed elsewhere',1]]],
 ];
 function side() {
