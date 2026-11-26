@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yo App Mockup</title>
+<style>
+  :root { --amethyst:#9b59b6; --field:rgba(255,255,255,.16); --bg:#f2f2f7; --card:#fff; --sep:#c6c6c8; --sub:#8e8e93; --blue:#007aff; --red:#ff3b30; --green:#34c759; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#e5e5ea; font:16px -apple-system, "SF Pro Text", system-ui, sans-serif; color:#000; }
+  .stage { display:flex; gap:24px; justify-content:center; align-items:flex-start; padding:24px 16px; flex-wrap:wrap; }
+  .phonewrap { display:flex; flex-direction:column; align-items:center; gap:8px; }
+  .phonewrap > .tag { font-size:13px; font-weight:600; color:#555; }
+  .phone { width:390px; height:844px; max-width:calc(100vw - 32px); border-radius:48px; background:var(--amethyst); position:relative; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.25); border:10px solid #111; }
+  .scr { position:absolute; inset:0; display:flex; flex-direction:column; }
+  .status { height:44px; flex:none; display:flex; justify-content:space-between; align-items:center; padding:0 28px; font-size:15px; font-weight:600; color:#fff; }
+  .light .status { color:#000; }
+  .light { background:var(--bg); color:#000; }
+  .purple { background:var(--amethyst); color:#fff; align-items:center; padding:0 28px; }
+  .purple .status { width:calc(100% + 56px); }
+  .logo { font-weight:800; font-size:96px; margin:46px 0 40px; letter-spacing:-2px; }
+  .field { width:100%; height:64px; border-radius:32px; background:var(--field); position:relative; display:flex; align-items:center; }
+  .field input { all:unset; width:100%; text-align:center; font-size:30px; font-weight:600; padding:0 56px; caret-color:#fff; color:#fff; }
+  .field input.small { font-size:17px; padding:0 20px; }
+  .mark { position:absolute; right:16px; width:30px; height:30px; display:flex; align-items:center; justify-content:center; color:#fff; }
+  .ok { background:var(--green); border-radius:50%; } .warn { background:#ff9500; border-radius:50%; font-weight:800; }
+  .spin { width:22px; height:22px; border:3px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:r .8s linear infinite; display:inline-block; }
+  .spin.dark { border-color:rgba(0,0,0,.15); border-top-color:#000; }
+  @keyframes r { to { transform:rotate(360deg) } }
+  .hint { min-height:22px; margin-top:10px; font-size:15px; font-weight:600; color:rgba(255,255,255,.75); text-align:center; }
+  .spacer { flex:1; }
+  .msg { min-height:44px; font-size:15px; font-weight:600; text-align:center; margin-bottom:10px; }
+  .msg a, .link { color:#fff; text-decoration:underline; cursor:pointer; }
+  .wbtn { width:100%; height:56px; border-radius:28px; background:#fff; color:#000; font-size:19px; font-weight:700; border:0; display:flex; align-items:center; justify-content:center; cursor:pointer; margin-bottom:12px; font-family:inherit; }
+  .wbtn.ghost { background:transparent; color:#fff; font-weight:600; font-size:17px; }
+  .wbtn:disabled { opacity:.5; cursor:default; }
+  .terms { font-size:12px; color:rgba(255,255,255,.7); margin-bottom:28px; text-align:center; }
+  .shake { animation:s .35s; } @keyframes s { 25%{transform:translateX(-8px)} 75%{transform:translateX(8px)} }
+  .ptext { font-size:17px; line-height:1.4; text-align:center; color:rgba(255,255,255,.9); }
+  .ptitle { font-size:28px; font-weight:800; margin:24px 0 8px; text-align:center; }
+  .qr { background:#fff; padding:14px; border-radius:20px; margin:18px 0; }
+  .mono { font:13px ui-monospace, Menlo, monospace; word-break:break-all; }
+  /* nav + lists */
+  .nav { height:52px; flex:none; display:flex; align-items:center; justify-content:space-between; padding:0 12px; }
+  .nav .t { font-weight:600; font-size:17px; }
+  .nav button { all:unset; color:var(--blue); font-size:17px; cursor:pointer; min-width:60px; }
+  .nav button:last-child { text-align:right; }
+  .large { font-size:34px; font-weight:700; padding:0 16px 8px; }
+  .body { flex:1; overflow-y:auto; padding-bottom:24px; }
+  .sect { margin:0 16px 22px; background:var(--card); border-radius:10px; overflow:hidden; }
+  .sh { font-size:13px; color:var(--sub); text-transform:uppercase; margin:0 32px 6px; }
+  .sf { font-size:13px; color:var(--sub); margin:-16px 32px 22px; line-height:1.35; }
+  .row { display:flex; align-items:center; gap:12px; min-height:44px; padding:10px 16px; border-bottom:.5px solid var(--sep); cursor:pointer; }
+  .row:last-child { border-bottom:0; }
+  .row .ic { width:29px; height:29px; border-radius:7px; background:var(--amethyst); color:#fff; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none; }
+  .row .tx { flex:1; min-width:0; } .row .tx small { display:block; color:var(--sub); font-size:13px; }
+  .row .val { color:var(--sub); } .row .chev::after { content:"›"; color:#c4c4c6; font-size:22px; }
+  .row.red { color:var(--red); } .row.blue { color:var(--blue); }
+  .row.static { cursor:default; }
+  .pill { font-size:12px; background:var(--amethyst); color:#fff; border-radius:8px; padding:1px 7px; margin-left:6px; }
+  /* friend list */
+  .list { flex:1; overflow-y:auto; background:var(--amethyst); }
+  .bar { height:96px; display:flex; align-items:center; padding:0 20px; color:#fff; font-weight:800; font-size:30px; cursor:pointer; gap:12px; white-space:nowrap; user-select:none; position:relative; }
+  .bar .lead { flex:none; }            /* "!" first, then Yo and counts: never shrink */
+  .bar .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:right; }
+  .bar.req { flex-direction:column; align-items:stretch; justify-content:center; height:auto; padding:16px 20px; gap:10px; font-size:22px; }
+  .bar.req .btns { display:flex; gap:8px; }
+  .bar.req button { flex:1; height:40px; border-radius:20px; border:0; background:#fff; color:#000; font-weight:700; font-size:15px; cursor:pointer; font-family:inherit; }
+  .bar.add { background:rgba(0,0,0,.18); justify-content:center; }
+  .bar.add input { all:unset; flex:1; color:#fff; font-size:28px; font-weight:800; text-align:center; }
+  .bar.add input::placeholder { color:rgba(255,255,255,.6); }
+  .listtop { position:absolute; top:44px; right:12px; z-index:2; }
+  .round { width:40px; height:40px; border-radius:20px; border:0; background:#fff; color:#000; font-size:20px; cursor:pointer; }
+  .banner { margin:8px 12px; background:#fff; color:#000; border-radius:14px; padding:12px 14px; font-size:15px; display:flex; gap:10px; align-items:center; box-shadow:0 4px 18px rgba(0,0,0,.2); }
+  .banner b { flex:1; } .banner a { color:var(--blue); cursor:pointer; font-weight:600; }
+  .banner .x { cursor:pointer; color:var(--sub); }
+  /* sheets */
+  .dim { position:absolute; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:flex-end; z-index:10; }
+  .sheet { width:100%; background:var(--bg); border-radius:14px 14px 0 0; padding:20px 16px 34px; color:#000; }
+  .sheet h3 { margin:0 0 6px; font-size:20px; text-align:center; } .sheet p { margin:0 0 16px; text-align:center; color:#3c3c43; font-size:15px; line-height:1.4; }
+  .sbtn { width:100%; height:50px; border-radius:12px; border:0; font-size:17px; font-weight:600; margin-top:8px; cursor:pointer; font-family:inherit; background:#fff; color:var(--blue); }
+  .sbtn.pri { background:#000; color:#fff; } .sbtn.red { color:var(--red); }
+  .alert { position:absolute; inset:0; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center; z-index:11; }
+  .alert > div { width:270px; background:rgba(242,242,247,.97); border-radius:14px; text-align:center; overflow:hidden; color:#000; }
+  .alert h4 { margin:18px 16px 4px; font-size:17px; } .alert p { margin:0 16px 16px; font-size:13px; }
+  .alert .ab { display:flex; border-top:.5px solid var(--sep); }
+  .alert .ab button { all:unset; flex:1; padding:11px; color:var(--blue); font-size:17px; cursor:pointer; }
+  .alert .ab button + button { border-left:.5px solid var(--sep); font-weight:600; }
+  .alert .ab button.red { color:var(--red); }
+  .toast { position:absolute; left:50%; bottom:40px; transform:translateX(-50%); background:rgba(0,0,0,.8); color:#fff; padding:10px 16px; border-radius:20px; font-size:14px; z-index:12; white-space:nowrap; }
+  .cam { flex:1; background:#111; display:flex; flex-direction:column; align-items:center; justify-content:center; color:#fff; gap:16px; padding:24px; text-align:center; }
+  .finder { width:240px; height:240px; border:4px solid #fff; border-radius:28px; display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.6); font-size:14px; padding:20px; }
+  .keybox { margin:0 16px 22px; background:#fff; border-radius:10px; padding:16px; font:17px ui-monospace, Menlo, monospace; line-height:1.7; word-spacing:6px; text-align:center; }
+  textarea { width:100%; height:90px; border-radius:16px; border:0; padding:12px; font:15px ui-monospace, Menlo, monospace; background:var(--field); color:#fff; resize:none; }
+  textarea::placeholder { color:rgba(255,255,255,.6); }
+  /* panel */
+  .panel { width:320px; max-width:calc(100vw - 32px); background:#fff; border-radius:16px; padding:20px; color:#111; position:sticky; top:24px; }
+  .panel h2 { font-size:17px; margin:0 0 12px; } .panel label { display:block; margin:10px 0; font-size:14px; }
+  .panel p { font-size:13px; color:#555; line-height:1.4; } .panel select, .panel input[type=range] { width:100%; }
+  .panel button { font:inherit; font-size:14px; padding:6px 10px; margin:4px 4px 0 0; border-radius:8px; border:1px solid #ccc; background:#f7f7f7; cursor:pointer; }
+  .panel button:disabled { opacity:.4; cursor:default; }
+  code { background:#f2f2f7; padding:1px 4px; border-radius:4px; }
+  @media (max-width:440px) { .stage { padding:12px 8px; gap:16px; } .phone { border-width:6px; border-radius:36px; height:780px; } }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="phonewrap"><div class="tag" id="tagA">This phone</div><div class="phone" id="A"></div></div>
+  <div class="phonewrap" id="wrapB" style="display:none"><div class="tag">Second device</div><div class="phone" id="B"></div></div>
+  <div class="panel">
+    <h2>Simulate</h2>
+    <label>Device check
+      <select id="att"><option value="ok">attested → min 4</option><option value="no">not verifiable → min 12</option></select></label>
+    <label>Network delay: <b id="dl">600</b> ms<input type="range" id="delay" min="50" max="3000" step="50" value="600"></label>
+    <label><input type="checkbox" id="off"> Offline</label>
+    <label>Devices on the account: <b id="nd">1</b><input type="range" id="ndev" min="1" max="16" value="1"></label>
+    <label><input type="checkbox" id="second"> Second device (two phones side by side)</label>
+    <div>
+      <button id="incoming">Stranger wants to Yo</button>
+      <button id="friendyo">Anna Yos you</button>
+      <button id="approve">Old device confirms link</button>
+      <button id="remoteRemove">Other device removes this one</button>
+    </div>
+    <p><button id="reset">Reset everything</button></p>
+    <p><b>Sign-up:</b> taken <code>anna</code> <code>peter</code> <code>chris</code>; reserved <code>apple</code> <code>admin</code>. Forbidden characters show quietly under the field (“No spaces”). While a check runs only the spinner shows; a result appears only for exactly this text.</p>
+    <p><b>Linking (§2.5):</b> turn on “Second device”. Right phone: Got Yo? Sign In › Link from Another Device shows a QR. Left phone (signed in): Settings › Devices › Link a Device › scan. One confirming tap, then the new device registers. At 16 devices the new device picks one to replace. No old device: “Use a key” (§2.4).</p>
+    <p><b>Bars:</b> “!” first, Yo and counts never shrink, the name comes last and is the only thing that gets cut. Bots <code>/NAME</code>, groups <code>#NAME</code>.</p>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const TAKEN = ['anna','peter','chris'], RESERVED = ['apple','admin'];
+const COLORS = ['#1abc9c','#2ecc71','#3498db','#34495e','#16a085','#27ae60','#2980b9','#8e44ad','#2c3e50','#f39c12','#e67e22','#e74c3c','#c0392b'];
+const KEYCH = 'abcdefghijklmnopqrstuvwxyz0123456789';
+const rnd = n => Array.from({length:n}, () => KEYCH[Math.random()*36|0]).join('');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const delay = () => +$('delay').value;
+async function net(ms) { await sleep(ms ?? delay()); if ($('off').checked) throw new Error('offline'); }
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const PLATFORMS = [['iPad','iPadOS'],['MacBook','macOS'],['Pixel 8','Android'],['yo (CLI)','Linux'],['iPhone 12','iOS'],['Galaxy Tab','Android']];
+
+/* ---------- hub (shared server state) ---------- */
+let hub;
+function freshHub() {
+  hub = { account:null, links:{}, seq:1 };
+}
+function newAccount(name) {
+  hub.account = { name, key:rnd(64), passkey:false, devices:[] };
+}
+function addDevice(phoneId, name, platform) {
+  const d = { id:hub.seq++, name, platform, last:'now', phone:phoneId };
+  hub.account.devices.push(d); syncSlider(); return d;
+}
+function syncSlider() { const n = hub.account ? hub.account.devices.length : 1; $('ndev').value = n; $('nd').textContent = n; }
+
+/* ---------- friends ---------- */
+function freshFriends() {
+  return [
+    { name:'ANNA', kind:'friend', count:0, bang:false },
+    { name:'YOGPT', kind:'bot', count:0, bang:false },
+    { name:'FAMILY', kind:'group', count:2, bang:false },
+    { name:'PETER', kind:'friend', count:0, bang:true },
+    { name:'MAXIMILIANVONHOHENZOLLERN', kind:'friend', count:12, bang:false },
+  ];
+}
+// mirrors core list_bar_title: bots "/NAME", groups "#NAME"
+const barTitle = f => (f.kind === 'bot' ? '/' : f.kind === 'group' ? '#' : '') + f.name;
+
+/* ---------- phones ---------- */
+const phones = {};
+function Phone(id) {
+  const p = { id, el:$(id), screen:'intro', stack:[], overlay:null, toast:null, deviceId:null,
+    friends:freshFriends(), requests:[], banner:null, sent:{}, adding:null,
+    su:{ seq:0, result:null, checking:false, pending:false, attest:null, name:'' },
+    link:null, recovery:{ text:'', err:'', busy:false }, busy:null, err:'' };
+  phones[id] = p; return p;
+}
+const isPurple = s => ['intro','signin','linkqr','linkwait','replace','recover','removed','welcome'].includes(s);
+
+function go(p, screen) { p.stack.push(p.screen); p.screen = screen; p.err = ''; render(p); }
+function back(p) { p.screen = p.stack.pop() || (p.deviceId ? 'list' : 'intro'); p.err = ''; render(p); }
+function home(p, screen) { p.stack = []; p.screen = screen; p.err = ''; render(p); }
+function toast(p, text) { p.toast = text; render(p); setTimeout(() => { if (p.toast === text) { p.toast = null; render(p); } }, 1800); }
+function me(p) { return hub.account && hub.account.devices.find(d => d.id === p.deviceId); }
+
+/* ---------- screens ---------- */
+const S = {};
+const status = () => `<div class="status"><span>9:41</span><span>●●● ▮</span></div>`;
+
+S.intro = p => `${status()}
+  <div class="logo">Yo</div>
+  <div class="field" data-f="field"><input data-in="name" placeholder="" autocomplete="off" spellcheck="false" value="${esc(p.su.name)}"><div class="mark" data-f="mark"></div></div>
+  <div class="hint" data-f="hint"></div>
+  <div class="spacer"></div>
+  <div class="msg" data-f="msg"></div>
+  <button class="wbtn" data-a="signup" data-f="go">Sign Up</button>
+  <button class="wbtn ghost" data-a="toSignin">Got Yo? Sign In</button>
+  <div class="terms">By continuing you agree to the <span class="link" data-a="terms">Terms</span>.</div>`;
+
+S.signin = p => `${status()}
+  <div class="ptitle" style="margin-top:60px">Sign In</div>
+  <div class="ptext">Have Yo on another phone or computer? Link this device to it. No old device? Use your passkey or recovery key.</div>
+  <div class="spacer"></div>
+  <div class="msg">${esc(p.err)}</div>
+  <button class="wbtn" data-a="startLink">${p.busy === 'link' ? '<span class="spin dark"></span>' : 'Link from Another Device'}</button>
+  <button class="wbtn" data-a="toRecover">Use a Key: Passkey or Recovery Key</button>
+  <button class="wbtn ghost" data-a="back" style="margin-bottom:28px">Back</button>`;
+
+function qrSvg(seed) {
+  let h = 0; for (const c of seed) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const n = 25, cell = 8; let r = '';
+  const finder = (x, y) => (x < 7 && y < 7) || (x >= n - 7 && y < 7) || (x < 7 && y >= n - 7);
+  const fon = (x, y) => { const fx = x >= n - 7 ? x - (n - 7) : x, fy = y >= n - 7 ? y - (n - 7) : y; return fx === 0 || fy === 0 || fx === 6 || fy === 6 || (fx >= 2 && fx <= 4 && fy >= 2 && fy <= 4); };
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    let on; if (finder(x, y)) on = fon(x, y); else { h = (h * 1103515245 + 12345) >>> 0; on = (h >> 16) & 1; }
+    if (on) r += `<rect x="${x*cell}" y="${y*cell}" width="${cell}" height="${cell}"/>`;
+  }
+  return `<svg width="200" height="200" viewBox="0 0 ${n*cell} ${n*cell}">${r}</svg>`;
+}
+S.linkqr = p => { const l = p.link; return `${status()}
+  <div class="ptitle">Link This Device</div>
+  <div class="ptext">On your other device open Yo › Settings › Devices › Link a Device and scan this code.</div>
+  <div class="qr">${qrSvg(l.code)}</div>
+  <div class="ptext" style="font-size:15px"><span class="spin"></span>&nbsp; Waiting for your other device… · expires in ${l.left}</div>
+  ${p.showCode ? `<div class="mono" style="margin-top:12px;background:var(--field);padding:10px;border-radius:12px">${esc(l.code)}</div>` : ''}
+  <div class="spacer"></div>
+  <button class="wbtn" data-a="showCode">${p.showCode ? 'Copy Code' : 'Can’t Scan? Show Code'}</button>
+  <button class="wbtn ghost" data-a="cancelLink" style="margin-bottom:28px">Cancel</button>`; };
+
+S.linkwait = p => `${status()}
+  <div class="spacer"></div><div class="spin" style="width:44px;height:44px"></div>
+  <div class="ptitle">Linking…</div><div class="ptext">Getting your account from your other device.</div>
+  <div class="spacer"></div>`;
+
+S.replace = p => `${status()}
+  <div class="ptitle" style="margin-top:40px">16 Devices</div>
+  <div class="ptext">Your account has the most devices it can have. Choose one to remove; it gets signed out.</div>
+  <div style="width:100%;flex:1;overflow:auto;margin:16px 0">
+    ${hub.account.devices.map(d => `<button class="wbtn" style="justify-content:space-between;padding:0 20px;font-size:16px;${p.pick === d.id ? 'outline:4px solid #000' : ''}" data-a="pick" data-id="${d.id}"><span>${esc(d.name)}</span><span style="color:#8e8e93;font-weight:500">${esc(d.platform)} · ${esc(d.last)}</span></button>`).join('')}
+  </div>
+  <div class="msg">${esc(p.err)}</div>
+  <button class="wbtn" data-a="doReplace" ${p.pick ? '' : 'disabled'}>${p.busy === 'replace' ? '<span class="spin dark"></span>' : 'Remove and Link'}</button>
+  <button class="wbtn ghost" data-a="cancelLink" style="margin-bottom:28px">Cancel</button>`;
+
+S.recover = p => { const r = p.recovery; return `${status()}
+  <div class="ptitle" style="margin-top:40px">Recovery Key</div>
+  <div class="ptext">Type or paste the 64 characters. Case, spaces and dashes don’t matter.</div>
+  <div style="width:100%;margin-top:20px"><textarea data-in="rkey" placeholder="abcd efgh …">${esc(r.text)}</textarea></div>
+  <div class="hint">${esc(r.err)}</div>
+  <span class="link" data-a="demoKey" style="font-size:14px">Paste the account’s key</span>
+  <div class="spacer"></div>
+  <button class="wbtn" data-a="useKey">${r.busy === 'key' ? '<span class="spin dark"></span>' : 'Sign In'}</button>
+  <button class="wbtn" data-a="usePasskey">${r.busy === 'pk' ? '<span class="spin dark"></span>' : 'Use Passkey'}</button>
+  <button class="wbtn" data-a="scanKey">Scan Recovery Key</button>
+  <button class="wbtn ghost" data-a="back" style="margin-bottom:28px">Back</button>`; };
+
+S.removed = p => `${status()}
+  <div class="spacer"></div><div class="logo" style="margin:0 0 20px">Yo</div>
+  <div class="ptitle">Signed Out</div>
+  <div class="ptext">This device was removed from your account on another device.</div>
+  <div class="spacer"></div>
+  <button class="wbtn" data-a="toIntro" style="margin-bottom:40px">OK</button>`;
+
+S.welcome = p => `${status()}
+  <div class="spacer"></div><div class="logo" style="margin:0">Yo</div>
+  <div class="ptitle">Welcome, ${esc(hub.account.name.toUpperCase())} 👋</div>
+  <div class="ptext">${p.welcomeText || ''}</div>
+  <div class="spacer"></div>
+  <button class="wbtn" data-a="toList" style="margin-bottom:40px">Start</button>`;
+
+function bar(f, i, p) {
+  const sent = p.sent[f.name];
+  const lead = [f.bang ? '!' : '', f.count ? `Yo ${f.count}` : ''].filter(Boolean).join(' ');
+  return `<div class="bar" style="background:${COLORS[i % COLORS.length]}" data-a="yo" data-n="${esc(f.name)}">
+    ${sent ? `<span class="name" style="text-align:center">${sent === 'busy' ? '<span class="spin"></span>' : esc(sent)}</span>`
+      : `${lead ? `<span class="lead">${lead}</span>` : ''}<span class="name" style="${lead ? '' : 'text-align:center'}">${esc(barTitle(f))}</span>`}</div>`;
+}
+S.list = p => {
+  const b = p.banner ? `<div class="banner"><span>📱</span><b>${esc(p.banner)}</b><a data-a="toDevices">Devices</a><span class="x" data-a="closeBanner">✕</span></div>` : '';
+  const reqs = p.requests.map(r => `<div class="bar req" style="background:#34495e">
+    <div><b>${esc(r)}</b> <span style="font-weight:600;opacity:.8">wants to Yo</span></div>
+    <div class="btns"><button data-a="accept" data-n="${esc(r)}">Accept and Yo</button><button data-a="decline" data-n="${esc(r)}">Decline</button><button data-a="block" data-n="${esc(r)}">Block</button></div></div>`).join('');
+  const add = p.adding !== null
+    ? `<div class="bar add"><input data-in="addname" placeholder="Name…" value="${esc(p.adding)}"><button class="round" data-a="addGo">${p.busy === 'add' ? '<span class="spin dark"></span>' : '→'}</button></div>
+       ${p.err ? `<div class="bar add" style="font-size:18px;height:48px">${esc(p.err)}</div>` : ''}`
+    : `<div class="bar add" data-a="addOpen">+ Add Friend</div>`;
+  return `${status()}<div class="listtop"><button class="round" data-a="toSettings" title="Settings">⚙︎</button></div>
+    <div class="list" style="padding-top:8px">${b}${reqs}${p.friends.map((f, i) => bar(f, i, p)).join('')}${add}
+    <div style="text-align:center;color:rgba(255,255,255,.7);font-size:13px;padding:14px">Tap to Send Yo · ${esc(hub.account.name.toUpperCase())}</div></div>`;
+};
+
+const nav = (title, left = 'Back', right = '') => `${status()}<div class="nav"><button data-a="back">${left ? '‹ ' + left : ''}</button><span class="t">${title}</span><button data-a="${right ? 'navRight' : 'back'}">${right}</button></div>`;
+S.settings = p => `${nav('', 'Yo', 'Done')}<div class="large">Settings</div><div class="body">
+  <div class="sect">
+    <div class="row" data-a="go" data-s="account"><span class="ic">👤</span><span class="tx">${esc(hub.account.name.toUpperCase())}<small>Account, Recovery Key, Passkey</small></span><span class="chev"></span></div>
+    <div class="row" data-a="toDevices"><span class="ic">📱</span><span class="tx">Devices</span><span class="val">${hub.account.devices.length}</span><span class="chev"></span></div>
+  </div>
+  <div class="sect">
+    <div class="row" data-a="toast" data-t="App icon chosen"><span class="ic">🎨</span><span class="tx">App Icon</span><span class="chev"></span></div>
+    <div class="row" data-a="toggleLeft"><span class="ic">✋</span><span class="tx">Left-Handed</span><span class="val">${p.left ? 'On' : 'Off'}</span></div>
+  </div>
+  <div class="sect">
+    <div class="row" data-a="toast" data-t="Opened Help & About"><span class="ic">?</span><span class="tx">Help &amp; About</span><span class="chev"></span></div>
+    <div class="row" data-a="toast" data-t="Feedback sent"><span class="ic">✉︎</span><span class="tx">Send Feedback</span><span class="chev"></span></div>
+  </div>
+  <div class="sect"><div class="row red" data-a="askSignOut">Sign Out</div></div></div>`;
+
+S.account = p => `${nav('Account')}<div class="body" style="padding-top:12px">
+  <div class="sect"><div class="row static"><span class="tx">Username</span><span class="val">${esc(hub.account.name.toUpperCase())}</span></div>
+    <div class="row" data-a="toast" data-t="Your code: 3141 5926 5358"><span class="tx">Show Your Code</span><span class="chev"></span></div></div>
+  <div class="sh">Account Backup</div>
+  <div class="sect">
+    <div class="row" data-a="go" data-s="rkey"><span class="ic">🔑</span><span class="tx">Recovery Key</span><span class="chev"></span></div>
+    <div class="row" data-a="passkey"><span class="ic">🔐</span><span class="tx">Passkey</span><span class="val">${p.busy === 'pk' ? '<span class="spin dark"></span>' : hub.account.passkey ? 'On' : 'Set Up'}</span></div>
+  </div>
+  <div class="sf">Either one brings your account back on a new phone when you have no other device.${p.err ? ' <b style="color:var(--red)">' + esc(p.err) + '</b>' : ''}</div>
+  <div class="sect"><div class="row" data-a="toast" data-t="How Account Recovery Works: see §2.4"><span class="tx blue" style="color:var(--blue)">How Account Recovery Works</span></div></div>
+  <div class="sect"><div class="row red" data-a="askDelete">Delete Your Account</div></div></div>`;
+
+S.rkey = p => `${nav('Recovery Key')}<div class="body" style="padding-top:12px">
+  <div class="keybox">${hub.account.key.match(/.{4}/g).join(' ')}</div>
+  <div class="sf" style="margin-top:-12px">Write it down or keep it in your password manager. Anyone with it can take over your account.</div>
+  <div class="sect">
+    <div class="row blue" data-a="toast" data-t="Copied">Copy</div>
+    <div class="row blue" data-a="toast" data-t="Saved to iCloud Keychain">Save Recovery Key Again</div>
+    <div class="row blue" data-a="newKey">${p.busy === 'key' ? '<span class="spin dark"></span>' : 'New Recovery Key'}</div>
+  </div><div class="sf">${esc(p.err)}</div></div>`;
+
+S.devices = p => { const a = hub.account; return `${nav('Devices')}<div class="body" style="padding-top:12px">
+  <div class="sh">${a.devices.length} of 16 devices</div>
+  <div class="sect">${a.devices.map(d => `<div class="row ${d.id === p.deviceId ? 'static' : ''}" ${d.id === p.deviceId ? '' : `data-a="askRemove" data-id="${d.id}"`}>
+     <span class="ic">${/Android/.test(d.platform) ? '🤖' : /Linux/.test(d.platform) ? '⌨︎' : '📱'}</span>
+     <span class="tx">${esc(d.name)}${d.id === p.deviceId ? '<span class="pill">This Device</span>' : ''}<small>${esc(d.platform)} · last seen ${esc(d.last)}</small></span>
+     ${d.id === p.deviceId ? '' : '<span style="color:var(--red);font-size:15px">Remove</span>'}</div>`).join('')}</div>
+  <div class="sect"><div class="row blue" data-a="toScan">＋ Link a Device</div></div>
+  <div class="sf">A new phone or computer shows a code; scan it here. ${a.devices.length >= 16 ? 'At 16 devices the new one picks which to replace.' : ''}</div></div>`; };
+
+S.scan = p => `${nav('Link a Device', 'Back')}
+  <div class="cam"><div class="finder">${p.busy === 'scan' ? '<span class="spin"></span>' : 'Point the camera at the code on your new device'}</div>
+  <div style="font-size:14px;opacity:.8">${esc(p.err)}</div>
+  <button class="wbtn" data-a="doScan">Scan Code (simulated)</button>
+  <button class="wbtn" data-a="pasteOpen" style="background:transparent;color:#fff;border:1px solid #fff">Paste Code Instead</button>
+  ${p.pasting ? `<textarea data-in="paste" placeholder="yo-link:…" style="height:60px">${esc(p.paste || '')}</textarea><button class="wbtn" data-a="pasteGo">Link</button>` : ''}</div>`;
+
+S.linked = p => `${nav('Linked', '', 'Done')}<div class="body" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px">
+  <div style="font-size:64px;color:var(--green)">✓</div><h2>${esc(p.linkedName)} is linked</h2>
+  <p style="color:var(--sub)">It now has your friends and Yos. You can remove it any time in Devices.</p>
+  <button class="sbtn" data-a="toDevices">Show Devices</button></div>`;
+
+/* ---------- render ---------- */
+function render(p) {
+  const s = p.screen, cls = isPurple(s) ? 'purple' : s === 'list' ? '' : 'light';
+  const fresh = p.el.dataset.screen !== s || s !== 'intro';
+  if (fresh) {
+    const focus = document.activeElement && p.el.contains(document.activeElement) ? document.activeElement.dataset.in : null;
+    p.el.innerHTML = `<div class="scr ${cls}">${S[s](p)}</div>${overlay(p)}${p.toast ? `<div class="toast">${esc(p.toast)}</div>` : ''}`;
+    p.el.dataset.screen = s;
+    if (focus) { const i = p.el.querySelector(`[data-in="${focus}"]`); if (i) { i.focus(); const v = i.value; i.setSelectionRange?.(v.length, v.length); } }
+  } else {
+    p.el.querySelectorAll('.dim,.alert,.toast').forEach(e => e.remove());
+    p.el.insertAdjacentHTML('beforeend', overlay(p) + (p.toast ? `<div class="toast">${esc(p.toast)}</div>` : ''));
+  }
+  if (s === 'intro') renderSignup(p);
+}
+function overlay(p) {
+  const o = p.overlay; if (!o) return '';
+  if (o.type === 'alert') return `<div class="alert"><div><h4>${o.title}</h4><p>${o.text}</p><div class="ab"><button data-a="closeOverlay">Cancel</button><button class="${o.red ? 'red' : ''}" data-a="${o.act}">${o.ok}</button></div></div></div>`;
+  if (o.type === 'confirmLink') return `<div class="dim"><div class="sheet">
+    <div style="text-align:center;font-size:40px">📱</div><h3>Link this device?</h3>
+    <p><b>This device gets access to your account</b>: your name, friends and Yos. Only continue if the code is on a device in front of you.</p>
+    <button class="sbtn pri" data-a="confirmLink">${p.busy === 'confirm' ? '<span class="spin" style="border-color:rgba(255,255,255,.3);border-top-color:#fff"></span>' : 'Link Device'}</button>
+    <button class="sbtn" data-a="closeOverlay">Cancel</button>${p.err ? `<p style="color:var(--red);margin-top:10px">${esc(p.err)}</p>` : ''}</div></div>`;
+  return '';
+}
+
+/* ---------- sign-up name field (from the signup-name mockup, unchanged logic) ---------- */
+function renderSignup(p) {
+  const q = f => p.el.querySelector(`[data-f="${f}"]`), su = p.su, name = su.name;
+  const mark = q('mark'), hint = q('hint'), msg = q('msg'), btn = q('go');
+  mark.className = 'mark'; mark.textContent = ''; hint.textContent = ''; msg.textContent = '';
+  if (su.checking && name) mark.innerHTML = '<div class="spin"></div>';
+  else if (su.result && name) {
+    const r = su.result;
+    if (r.kind === 'invalid') hint.textContent = r.bad.map(c => /\s/.test(c) ? 'No spaces' : `No ${c}`).join(' · ');
+    else if (r.min) hint.textContent = `Minimum ${r.min} characters`;
+    if (r.kind === 'ok') { mark.className = 'mark ok'; mark.textContent = '✓'; }
+    else {
+      mark.className = 'mark warn'; mark.textContent = '!';
+      if (r.kind !== 'invalid') msg.innerHTML = {
+        taken: 'Name taken. Yours? <a data-a="toSignin">Sign In</a>',
+        short: r.min === 12 ? '' : 'Choose a longer name.',
+        reserved: 'This name is reserved.',
+        offline: 'No connection. Try again when connected.',
+      }[r.kind];
+    }
+  }
+  if (su.err) msg.textContent = su.err;
+  btn.innerHTML = su.pending ? '<div class="spin dark"></div>' : 'Sign Up';
+  btn.disabled = !!(su.result && !su.checking && su.result.kind !== 'ok' && name);
+}
+function suAnswer(p, name) {
+  if ($('off').checked) return { kind:'offline' };
+  const min = p.su.attest === 'ok' ? 4 : 12, len = [...name].length;
+  const bad = [...new Set(name.match(/[\s@.,!?#/\\]/g) || [])];
+  if (bad.length) return { kind:'invalid', min, bad };
+  if (RESERVED.includes(name.toLowerCase())) return { kind:'reserved', min };
+  if (TAKEN.includes(name.toLowerCase()) || (hub.account && hub.account.name.toLowerCase() === name.toLowerCase())) return { kind:'taken', min };
+  if (len < min) return { kind:'short', min };
+  return { kind:'ok', min };
+}
+function deviceCheck(p) {   // runs once, in parallel with the first name check
+  if (p.su.attest) return Promise.resolve();
+  return sleep(delay()).then(() => { p.su.attest = $('att').value; });
+}
+async function suCheck(p) {
+  const su = p.su, my = ++su.seq, name = su.name;
+  su.result = null; su.checking = !!name; su.err = ''; renderSignup(p);
+  if (!name) { su.pending = false; renderSignup(p); return; }
+  await sleep(300);                                       // typing pause
+  if (my !== su.seq) return;
+  await Promise.all([deviceCheck(p), sleep(delay())]);
+  if (my !== su.seq) return;                              // a newer text: drop this answer
+  su.result = suAnswer(p, name); su.checking = false;
+  if (su.pending) { su.pending = false; suFinish(p); }
+  if (p.screen === 'intro') renderSignup(p);
+}
+async function suFinish(p) {
+  const su = p.su;
+  if (su.result && su.result.kind === 'ok') {
+    su.pending = true; renderSignup(p);
+    try { await net(); } catch { su.pending = false; su.err = 'Couldn’t sign up. Check your connection and try again.'; renderSignup(p); return; }
+    su.pending = false;
+    if (hub.account) { su.result = { kind:'taken', min:su.result.min }; renderSignup(p); return; }
+    newAccount(su.name);
+    const d = addDevice(p.id, 'iPhone 15', 'iOS 18'); p.deviceId = d.id;
+    for (let i = 1; i < +$('ndev').value; i++) addDevice(null, ...PLATFORMS[(i - 1) % PLATFORMS.length]);
+    syncSlider();
+    p.welcomeText = 'Save your recovery key in Settings › Account. It brings your account back if you lose this phone.';
+    home(p, 'welcome');
+  } else { const f = p.el.querySelector('[data-f="field"]'); f.classList.remove('shake'); void f.offsetWidth; f.classList.add('shake'); }
+}
+
+/* ---------- linking (§2.5) ---------- */
+async function startLink(p) {
+  p.busy = 'link'; render(p);
+  try { await net(); } catch { p.busy = null; p.err = 'No connection. Try again when connected.'; render(p); return; }
+  p.busy = null;
+  const id = rnd(26), code = `yo-link:${id}.${rnd(43)}`;
+  hub.links[id] = { from:p.id, bundle:null, created:Date.now() };
+  p.link = { id, code, left:'10:00' }; p.showCode = false;
+  go(p, 'linkqr'); tickLink(p);
+}
+function tickLink(p) {
+  clearInterval(p.timer);
+  p.timer = setInterval(() => {
+    if (p.screen !== 'linkqr' || !p.link) { clearInterval(p.timer); return; }
+    const s = 600 - Math.floor((Date.now() - hub.links[p.link.id].created) / 1000);
+    if (s <= 0) { delete hub.links[p.link.id]; p.link = null; clearInterval(p.timer); p.err = 'The code expired. Make a new one.'; home(p, 'signin'); return; }
+    p.link.left = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    const t = p.el.querySelector('.ptext span.spin'); if (t) t.parentNode.lastChild.textContent = ` Waiting for your other device… · expires in ${p.link.left}`;
+  }, 1000);
+}
+function waitingPhone() { return Object.values(phones).find(q => q.screen === 'linkqr' && q.link && hub.links[q.link.id]); }
+async function oldDeviceScanned(old, code) {   // old device has the code; ask once
+  const m = /^yo-link:([a-z0-9]+)\.[a-z0-9]+$/.exec(code.trim());
+  if (!m || !hub.links[m[1]]) { old.err = 'That isn’t a current Yo link code.'; render(old); return; }
+  old.scanned = m[1]; old.err = ''; old.overlay = { type:'confirmLink' }; render(old);
+}
+async function confirmLink(old) {
+  old.busy = 'confirm'; render(old);
+  try { await net(); } catch { old.busy = null; old.err = 'No connection. Try again when connected.'; render(old); return; }
+  old.busy = null; old.overlay = null;
+  const l = hub.links[old.scanned]; if (!l) { old.err = 'The code expired.'; render(old); return; }
+  l.bundle = { by:old.id };                      // PUT /v1/link/{id}: sealed LinkBundle
+  const nw = phones[l.from]; old.linkedName = nw ? 'iPhone 13' : 'New device';
+  go(old, 'linked');
+  if (nw) newDeviceReceives(nw); else { addDevice(null, 'iPhone 13', 'iOS 18'); delete hub.links[old.scanned]; bannerAll('New device linked: iPhone 13'); }
+}
+async function newDeviceReceives(nw) {           // GET /v1/link/{id} returns, open bundle, register
+  delete hub.links[nw.link.id]; clearInterval(nw.timer);
+  home(nw, 'linkwait');
+  await sleep(delay());
+  if (hub.account.devices.length >= 16) { nw.pick = null; home(nw, 'replace'); return; }
+  await registerNew(nw);
+}
+async function registerNew(nw) {
+  try { await net(); } catch { nw.err = 'No connection. Try again when connected.'; home(nw, 'signin'); return; }
+  const d = addDevice(nw.id, 'iPhone 13', 'iOS 18'); nw.deviceId = d.id;
+  nw.friends = phones.A.friends.map(f => ({ ...f })); nw.link = null;
+  bannerAll('New device linked: iPhone 13', nw);
+  nw.welcomeText = 'This device is linked. Your friends and Yos are here.'; home(nw, 'welcome');
+}
+function bannerAll(text, except) {
+  Object.values(phones).forEach(q => { if (q !== except && q.deviceId && me(q)) { q.banner = text; render(q); } });
+}
+async function removeDevice(p, id) {
+  p.overlay = null; p.busy = 'rm'; render(p);
+  try { await net(); } catch { p.busy = null; toast(p, 'No connection'); return; }
+  p.busy = null;
+  hub.account.devices = hub.account.devices.filter(d => d.id !== id); syncSlider();
+  Object.values(phones).forEach(q => { if (q.deviceId === id) signedOut(q); });
+  render(p); toast(p, 'Device removed');
+}
+function signedOut(q) { q.deviceId = null; q.banner = null; q.overlay = null; resetSignup(q); home(q, 'removed'); }
+function resetSignup(q) { q.su = { seq:0, result:null, checking:false, pending:false, attest:null, name:'' }; }
+
+/* ---------- actions ---------- */
+const A = {
+  signup(p) {
+    const su = p.su;
+    if (!su.name) { suFinish(p); p.el.querySelector('[data-in="name"]').focus(); return; }
+    if (su.checking) { su.pending = true; renderSignup(p); return; }
+    suFinish(p);
+  },
+  toSignin: p => go(p, 'signin'),
+  terms: p => toast(p, 'justyo.co/p/terms'),
+  back: p => back(p),
+  navRight: p => home(p, 'list'),
+  startLink, toRecover: p => { p.recovery = { text:'', err:'', busy:false }; go(p, 'recover'); },
+  showCode: p => { if (p.showCode) toast(p, 'Copied'); else { p.showCode = true; render(p); } },
+  cancelLink: p => { if (p.link) delete hub.links[p.link.id]; p.link = null; clearInterval(p.timer); home(p, 'intro'); },
+  pick: (p, e) => { p.pick = +e.dataset.id; render(p); },
+  async doReplace(p) {
+    p.busy = 'replace'; render(p);
+    try { await net(); } catch { p.busy = null; p.err = 'No connection. Try again when connected.'; render(p); return; }
+    p.busy = null; const id = p.pick;
+    hub.account.devices = hub.account.devices.filter(d => d.id !== id);
+    Object.values(phones).forEach(q => { if (q.deviceId === id) signedOut(q); });
+    registerNew(p);
+  },
+  demoKey(p) {
+    if (!hub.account) { newAccount('chris'); for (let i = 0; i < +$('ndev').value; i++) addDevice(null, ...PLATFORMS[i % PLATFORMS.length]); }
+    p.recovery.text = hub.account.key.match(/.{4}/g).join('-').toUpperCase(); p.recovery.err = ''; render(p);
+  },
+  async useKey(p) {
+    const r = p.recovery, k = r.text.toLowerCase().replace(/[\s-]/g, '');
+    if (k.length !== 64 || /[^a-z0-9]/.test(k) || !hub.account || k !== hub.account.key) { r.err = 'That doesn’t match a recovery key. Check it and try again.'; render(p); return; }
+    r.busy = 'key'; render(p);
+    try { await net(); } catch { r.busy = false; r.err = 'No connection. Try again when connected.'; render(p); return; }
+    r.busy = false; recovered(p);
+  },
+  async usePasskey(p) {
+    const r = p.recovery;
+    if (!hub.account || !hub.account.passkey) { r.err = 'No passkey for Yo on this device. Use your recovery key.'; render(p); return; }
+    r.busy = 'pk'; render(p);
+    try { await net(); } catch { r.busy = false; r.err = 'No connection. Try again when connected.'; render(p); return; }
+    r.busy = false; recovered(p);
+  },
+  scanKey: p => { A.demoKey(p); toast(p, 'Recovery key scanned'); },
+  toIntro: p => home(p, 'intro'),
+  toList: p => home(p, 'list'),
+  toSettings: p => go(p, 'settings'),
+  toDevices: p => { p.banner = null; if (p.screen !== 'devices') { if (p.screen === 'list' || p.screen === 'linked') { p.stack = ['list', 'settings']; p.screen = 'devices'; render(p); } else go(p, 'devices'); } },
+  closeBanner: p => { p.banner = null; render(p); },
+  go: (p, e) => go(p, e.dataset.s),
+  toast: (p, e) => toast(p, e.dataset.t),
+  toggleLeft: p => { p.left = !p.left; render(p); },
+  askSignOut: p => { p.overlay = { type:'alert', title:'Sign Out?', text:'Your other devices stay signed in. Without them you need your recovery key to come back.', ok:'Sign Out', act:'signOut', red:true }; render(p); },
+  signOut: p => { hub.account.devices = hub.account.devices.filter(d => d.id !== p.deviceId); syncSlider(); p.deviceId = null; p.overlay = null; resetSignup(p); home(p, 'intro'); },
+  askDelete: p => { p.overlay = { type:'alert', title:'Delete Your Account?', text:'Can’t be undone. Friends can’t reach you anymore and all your devices are signed out.', ok:'Delete', act:'doDelete', red:true }; render(p); },
+  async doDelete(p) { p.overlay = null; render(p); try { await net(); } catch { toast(p, 'No connection'); return; }
+    const name = hub.account.name; hub.account = null; syncSlider();
+    Object.values(phones).forEach(q => { if (q.deviceId) { q.deviceId = null; resetSignup(q); home(q, 'intro'); } }); toast(p, `Username “${name}” is free again.`); },
+  closeOverlay: p => { p.overlay = null; p.err = ''; render(p); },
+  async passkey(p) {
+    if (hub.account.passkey) { p.overlay = { type:'alert', title:'Turn Off Passkey?', text:'Delete the passkey yourself in your password manager.', ok:'Turn Off', act:'pkOff', red:true }; render(p); return; }
+    p.busy = 'pk'; p.err = ''; render(p);
+    try { await net(); hub.account.passkey = true; } catch { p.err = 'No connection.'; }
+    p.busy = null; render(p);
+  },
+  pkOff: p => { hub.account.passkey = false; p.overlay = null; render(p); },
+  async newKey(p) { p.busy = 'key'; render(p); try { await net(); hub.account.key = rnd(64); p.err = ''; } catch { p.err = 'No connection. Your old key still works.'; } p.busy = null; render(p); },
+  askRemove(p, e) { const d = hub.account.devices.find(x => x.id === +e.dataset.id);
+    p.overlay = { type:'alert', title:`Remove ${esc(d.name)}?`, text:'It gets signed out and can’t send or get Yos until it’s linked again.', ok:'Remove', act:'doRemove', red:true }; p.rmId = d.id; render(p); },
+  doRemove: p => removeDevice(p, p.rmId),
+  toScan: p => { p.pasting = false; p.paste = ''; go(p, 'scan'); },
+  async doScan(p) {
+    p.busy = 'scan'; p.err = ''; render(p); await sleep(700); p.busy = null;
+    const w = waitingPhone();
+    if (w && w !== p) return oldDeviceScanned(p, w.link.code);
+    // no second phone frame: a simulated new device shows its code
+    const id = rnd(26); hub.links[id] = { from:null, created:Date.now() };
+    oldDeviceScanned(p, `yo-link:${id}.${rnd(43)}`);
+  },
+  pasteOpen: p => { p.pasting = true; render(p); },
+  pasteGo: p => oldDeviceScanned(p, p.paste || ''),
+  confirmLink,
+  async yo(p, e) {
+    const n = e.dataset.n, f = p.friends.find(x => x.name === n);
+    if (p.sent[n]) return;
+    p.sent[n] = 'busy'; render(p);
+    try { await net(); p.sent[n] = 'Sent Yo'; f.count = 0; f.bang = false; } catch { p.sent[n] = 'Failed'; }
+    render(p); setTimeout(() => { delete p.sent[n]; render(p); }, 1200);
+  },
+  addOpen: p => { p.adding = ''; p.err = ''; render(p); p.el.querySelector('[data-in="addname"]').focus(); },
+  async addGo(p) {
+    const n = (p.adding || '').trim().toUpperCase();
+    if (!n) { p.adding = null; render(p); return; }
+    p.busy = 'add'; p.err = ''; render(p);
+    try { await net(); } catch { p.busy = null; p.err = 'No connection'; render(p); return; }
+    p.busy = null;
+    if (['NOBODY','XYZ'].includes(n) || n.length < 3) { p.err = 'No Such User'; render(p); return; }
+    const kind = /BOT$|GPT$/.test(n) ? 'bot' : 'friend';
+    p.friends.unshift({ name:n, kind, count:0, bang:false }); p.adding = null; render(p); toast(p, `Sent Yo to ${kind === 'bot' ? '/' : ''}${n}`);
+  },
+  accept: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); p.friends.unshift({ name:e.dataset.n, kind:'friend', count:0, bang:false }); render(p); A.yo(p, { dataset:{ n:e.dataset.n } }); },
+  decline: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); render(p); },
+  block: (p, e) => { p.requests = p.requests.filter(r => r !== e.dataset.n); render(p); toast(p, `${e.dataset.n} blocked`); },
+};
+function recovered(p) {
+  const old = hub.account.devices.filter(d => d.phone === null);
+  if (hub.account.devices.length >= 16) { p.pick = null; p.link = null; home(p, 'replace'); return; }
+  const d = addDevice(p.id, 'iPhone 15', 'iOS 18'); p.deviceId = d.id;
+  bannerAll('New device linked: iPhone 15', p);
+  p.welcomeText = 'Your account is back. Friends see a new safety code for you.'; home(p, 'welcome');
+}
+
+/* ---------- wiring ---------- */
+function wire(p0) {
+  const id = p0.id, el = p0.el; if (el.dataset.wired) return; el.dataset.wired = '1';
+  const cur = () => phones[id];
+  el.addEventListener('click', e => { const p = cur(); if (!p) return;
+    const t = e.target.closest('[data-a]'); if (!t || t.disabled) return;
+    const f = A[t.dataset.a]; if (f) f(p, t);
+  });
+  el.addEventListener('input', e => { const p = cur(); if (!p) return;
+    const k = e.target.dataset.in;
+    if (k === 'name') { p.su.name = e.target.value; suCheck(p); }
+    if (k === 'rkey') p.recovery.text = e.target.value;
+    if (k === 'addname') p.adding = e.target.value;
+    if (k === 'paste') p.paste = e.target.value;
+  });
+  el.addEventListener('keydown', e => { const p = cur(); if (!p) return; if (e.key === 'Enter' && e.target.dataset.in === 'addname') A.addGo(p); if (e.key === 'Enter' && e.target.dataset.in === 'name') A.signup(p); });
+}
+
+$('delay').addEventListener('input', e => $('dl').textContent = e.target.value);
+$('att').addEventListener('change', () => Object.values(phones).forEach(p => { p.su.attest = null; if (p.screen === 'intro') suCheck(p); }));
+$('off').addEventListener('change', () => Object.values(phones).forEach(p => { if (p.screen === 'intro') suCheck(p); }));
+$('ndev').addEventListener('input', e => {
+  const n = +e.target.value; $('nd').textContent = n; if (!hub.account) return;
+  const a = hub.account;
+  while (a.devices.length < n) addDevice(null, ...PLATFORMS[a.devices.length % PLATFORMS.length]);
+  while (a.devices.length > n) { const i = a.devices.map(d => d.phone).lastIndexOf(null); if (i < 0) break; a.devices.splice(i, 1); }
+  syncSlider(); Object.values(phones).forEach(render);
+});
+$('second').addEventListener('change', e => {
+  $('wrapB').style.display = e.target.checked ? '' : 'none'; $('tagA').textContent = e.target.checked ? 'Old device' : 'This phone';
+  if (e.target.checked && !phones.B) { wire(Phone('B')); render(phones.B); }
+  if (!e.target.checked && phones.B) { const b = phones.B; if (b.deviceId && hub.account) hub.account.devices = hub.account.devices.filter(d => d.id !== b.deviceId); clearInterval(b.timer); delete phones.B; $('B').innerHTML = ''; delete $('B').dataset.screen; syncSlider(); render(phones.A); }
+});
+$('incoming').addEventListener('click', () => { const p = Object.values(phones).find(q => q.screen === 'list') || phones.A;
+  if (!p.deviceId) return toast(p, 'Sign up first'); const n = ['LUKAS','SOPHIE','JONAS'][p.requests.length % 3]; if (!p.requests.includes(n)) p.requests.push(n); home(p, 'list'); });
+$('friendyo').addEventListener('click', () => Object.values(phones).forEach(p => { if (!p.deviceId) return toast(p, 'Sign up first'); const f = p.friends.find(x => x.name === 'ANNA'); if (f) { f.count++; f.bang = true; } render(p); }));
+$('approve').addEventListener('click', () => { const w = waitingPhone(); const p = phones.A;
+  if (!w) return toast(p, 'No device is showing a link code. Open Sign In › Link from Another Device.');
+  if (!hub.account) { newAccount('chris'); for (let i = 0; i < +$('ndev').value; i++) addDevice(null, ...PLATFORMS[i % PLATFORMS.length]); }
+  hub.links[w.link.id].bundle = { by:'simulated' }; newDeviceReceives(w); });
+$('remoteRemove').addEventListener('click', () => { const p = Object.values(phones).find(q => q.deviceId); if (!p) return toast(phones.A, 'No signed-in device'); hub.account.devices = hub.account.devices.filter(d => d.id !== p.deviceId); syncSlider(); signedOut(p); });
+$('reset').addEventListener('click', () => {
+  Object.values(phones).forEach(p => clearInterval(p.timer));
+  freshHub(); for (const k in phones) delete phones[k]; $('A').innerHTML = ''; $('B').innerHTML = ''; delete $('A').dataset.screen; delete $('B').dataset.screen;
+  $('off').checked = false; wire(Phone('A')); render(phones.A);
+  if ($('second').checked) { wire(Phone('B')); render(phones.B); }
+});
+freshHub(); wire(Phone('A')); render(phones.A);
+// deep links for reviews: #list, #devices, #link (two phones mid-linking)
+(function deep(h) {
+  if (!h) return; const a = phones.A;
+  newAccount('chris'); a.deviceId = addDevice('A', 'iPhone 15', 'iOS 18').id;
+  if (h !== 'list') { $('ndev').value = 4; $('ndev').dispatchEvent(new Event('input')); }
+  a.friends[0].count = 3; a.friends[0].bang = true; a.requests = ['LUKAS'];
+  if (h === 'list') return home(a, 'list');
+  a.stack = ['list', 'settings']; a.screen = 'devices'; if (h === 'devices') { a.banner = null; return render(a); }
+  $('delay').value = 50; $('second').checked = true; $('second').dispatchEvent(new Event('change'));
+  const b = phones.B; b.stack = ['intro']; b.screen = 'signin'; startLink(b).then(() => { a.stack.push('devices'); a.screen = 'scan'; render(a); A.doScan(a); });
+})(location.hash.slice(1));
+</script>
+</body>
+</html>
