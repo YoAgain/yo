@@ -101,6 +101,7 @@ fn client(app: Arc<App>, file: Arc<File>, name: &str, token: &str) -> Arc<YoClie
         platform,
         token.into(),
         None,
+        None,
     )
     .unwrap()
 }
@@ -120,6 +121,7 @@ fn db_client(app: Arc<App>, disk: &Disk, name: &str, token: &str) -> Arc<YoClien
         None,
         platform,
         token.into(),
+        None,
         None,
     )
     .unwrap()

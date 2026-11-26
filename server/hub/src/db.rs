@@ -321,6 +321,22 @@ fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Re
     Ok(())
 }
 
+/// A user's devices by number: registered, last seen, the app it named.
+fn devices_of(conn: &Connection, user: &UserId) -> rusqlite::Result<Vec<api::OwnDevice>> {
+    conn.prepare_cached(
+        "SELECT number, created_at, last_seen_at, coalesce(app, '') FROM account_device WHERE user_id = ?1 ORDER BY number",
+    )?
+    .query_map([user], |row| {
+        Ok(api::OwnDevice {
+            number: row.get(0)?,
+            created_at: row.get::<_, i64>(1)? as u64,
+            last_seen_at: row.get::<_, i64>(2)? as u64,
+            app: row.get::<_, String>(3)?.into_bytes().into(),
+        })
+    })?
+    .collect()
+}
+
 /// Removes one device of a user, by its number, with its prekeys and envelopes; its own requests answer 410 from
 /// then on. `false`: none of that number.
 fn retire_device(tx: &Transaction<'_>, user: &UserId, number: u8, now: u64) -> rusqlite::Result<bool> {
@@ -640,23 +656,12 @@ impl Db {
 
     /// The signing device's account's devices, by number (`GET /v1/devices`).
     pub fn own_devices(&self, device: &DeviceId) -> rusqlite::Result<Write<Vec<api::OwnDevice>>> {
-        self.as_device(device, |tx, user| {
-            let devices = tx
-                .prepare_cached(
-                    "SELECT number, created_at, last_seen_at, coalesce(app, '') FROM account_device
-                     WHERE user_id = ?1 ORDER BY number",
-                )?
-                .query_map([user], |row| {
-                    Ok(api::OwnDevice {
-                        number: row.get(0)?,
-                        created_at: row.get::<_, i64>(1)? as u64,
-                        last_seen_at: row.get::<_, i64>(2)? as u64,
-                        app: row.get::<_, String>(3)?.into_bytes().into(),
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(Write::Done(devices))
-        })
+        self.as_device(device, |tx, user| Ok(Write::Done(devices_of(tx, &user)?)))
+    }
+
+    /// A user's devices as `own_devices` lists them (none for no user): for `409 device_limit`.
+    pub fn devices_of_user(&self, user: &UserId) -> rusqlite::Result<Vec<api::OwnDevice>> {
+        devices_of(&self.conn(), user)
     }
 
     /// Removes another device of the signing device's account (`DELETE /v1/devices/{n}`): `None` none of that
@@ -716,6 +721,7 @@ impl Db {
         device: &NewDevice,
         prekeys: &api::Prekeys,
         most: u32,
+        replace: Option<u8>,
         now: u64,
     ) -> rusqlite::Result<Write<(UserId, Option<String>, u8)>> {
         self.write(|tx| {
@@ -756,6 +762,10 @@ impl Db {
             if !self.add_devices {
                 retire_devices(tx, &user, now)?;
             } else {
+                // The one the owner chose to go for this one (`RegisterReplacing`), if it is there.
+                if let Some(number) = replace {
+                    retire_device(tx, &user, number, now)?;
+                }
                 let count: usize =
                     tx.query_row("SELECT count(*) FROM account_device WHERE user_id = ?1", [&user], |r| r.get(0))?;
                 // Never one removed by itself: the new device asks which one may go (multi-device phase 2).
@@ -1790,7 +1800,8 @@ mod tests {
     fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<(UserId, Option<String>, u8)> {
         let spelling = std::str::from_utf8(name).unwrap();
         let skeleton = yoip::net::handle::skeleton(spelling);
-        db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &prekeys(0), 100, now).unwrap()
+        db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &prekeys(0), 100, None, now)
+            .unwrap()
     }
 
     #[test]
@@ -2756,7 +2767,8 @@ mod tests {
         // Opened again: schema 3 now. The user's own key registers it again (an app updated, a new phone).
         let db = Db::open(&path).unwrap();
         let skeleton = yoip::net::handle::skeleton("Christopher");
-        let again = db.register(skeleton.as_bytes(), "Christopher", &[9; 16], &curve, &device(9), &prekeys(0), 100, 0);
+        let again =
+            db.register(skeleton.as_bytes(), "Christopher", &[9; 16], &curve, &device(9), &prekeys(0), 100, None, 0);
         assert_eq!(user(again.unwrap()), [1; 16]);
         assert_eq!(db.lookup(KIND_USER, &[1; 16], true, &[]).unwrap().unwrap().bundles.len(), 1);
         assert_eq!(db.audit().unwrap(), []);
@@ -2777,7 +2789,8 @@ mod tests {
     fn add_devices_adds_up_to_sixteen_and_never_retires_one_by_itself() {
         let mut db = Db::open(":memory:").unwrap();
         db.add_devices = true;
-        let add = |n, now| db.register(b"test", "Test", &[1; 16], &[2; 32], &device(n), &prekeys(0), 100, now).unwrap();
+        let add =
+            |n, now| db.register(b"test", "Test", &[1; 16], &[2; 32], &device(n), &prekeys(0), 100, None, now).unwrap();
         for n in 1..=16 {
             assert!(matches!(add(n, 0), Write::Done((_, _, slot)) if slot == n));
         }
@@ -2796,10 +2809,20 @@ mod tests {
             assert_eq!(db.fetch(&device(n).device_id, 10).unwrap().len(), 1);
         }
         assert!(db.device(&device(17).device_id).unwrap().is_none());
+        assert_eq!(db.devices_of_user(&[1; 16]).unwrap().len(), 16);
+
+        // The owner's choice: the 17th in place of number 5, which is gone (410) with its mail.
+        let replacing = db
+            .register(b"test", "Test", &[1; 16], &[2; 32], &device(17), &prekeys(0), 100, Some(5), 7_200_002)
+            .unwrap();
+        assert!(matches!(replacing, Write::Done((_, _, 5))));
+        assert!(db.is_gone(&device(5).device_id).unwrap());
+        assert!(db.fetch(&device(5).device_id, 10).unwrap().is_empty());
+        assert_eq!(db.devices_of_user(&[1; 16]).unwrap().len(), 16);
 
         db.add_devices = false;
         let replaced =
-            db.register(b"test", "Test", &[1; 16], &[2; 32], &device(18), &prekeys(0), 100, 8_000_000).unwrap();
+            db.register(b"test", "Test", &[1; 16], &[2; 32], &device(18), &prekeys(0), 100, None, 8_000_000).unwrap();
         assert!(matches!(replaced, Write::Done((_, _, 1))));
         assert_eq!(db.lookup(KIND_USER, &[1; 16], false, &[]).unwrap().unwrap().devices.len(), 1);
     }
@@ -2811,7 +2834,7 @@ mod tests {
         let mut db = Db::open(":memory:").unwrap();
         db.add_devices = true;
         for n in 1..=3 {
-            db.register(b"test", "Test", &[1; 16], &[2; 32], &device(n), &prekeys(0), 100, 0).unwrap();
+            db.register(b"test", "Test", &[1; 16], &[2; 32], &device(n), &prekeys(0), 100, None, 0).unwrap();
         }
         let keys = |ns: &[u8]| ns.iter().map(|n| device(*n).device_key).collect::<Vec<_>>();
         let hash = |ns: &[u8]| yoip::net::devices::hash(&[2; 32], &keys(ns));
@@ -3032,7 +3055,7 @@ mod tests {
         let mut dan = device(4);
         (dan.push_platform, dan.push_token) = (1, b"phone".to_vec());
         let skeleton = yoip::net::handle::skeleton("DAN");
-        db.register(skeleton.as_bytes(), "DAN", &[4; 16], &[4; 32], &dan, &prekeys(0), 100, 0).unwrap();
+        db.register(skeleton.as_bytes(), "DAN", &[4; 16], &[4; 32], &dan, &prekeys(0), 100, None, 0).unwrap();
         assert_eq!(token(2), (0, Vec::new()));
         assert_eq!(token(4), (1, b"phone".to_vec()));
         // Signing out sets no token: nobody else's is cleared.

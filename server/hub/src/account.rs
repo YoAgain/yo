@@ -81,7 +81,7 @@ pub(crate) async fn post_register(
     body: Bytes,
 ) -> Res<Vec<u8>> {
     hub.limit_expensive(peer, &headers)?;
-    let request = api::Register::decode_any(&body).map_err(|_| bad())?;
+    let (request, replace) = api::Register::decode_replacing(&body).map_err(|_| bad())?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
     let device = &request.device;
@@ -129,7 +129,16 @@ pub(crate) async fn post_register(
     let spelling = std::str::from_utf8(handle.value.as_slice()).map_err(|_| bad())?;
     let skeleton = hub.stored_handle(&handle);
     let most = PREKEY_TARGET * 2;
-    let registered = hub.db.register(&skeleton, spelling, &fresh, &account_key, &new, &device.prekeys, most, now)?;
+    let registered =
+        hub.db.register(&skeleton, spelling, &fresh, &account_key, &new, &device.prekeys, most, replace, now)?;
+    // Past the account's devices (a hub that adds them): `409 device_limit` with the devices, for the owner to
+    // choose the one that goes (`RegisterReplacing`). Only the account key's holder gets here (its proof above).
+    if let db::Write::Refused(db::Conflict::DeviceLimit) = registered {
+        let user = hub.db.user_of_account_key(&account_key)?.ok_or_else(|| refuse(StatusCode::CONFLICT))?;
+        let devices = hub.db.devices_of_user(&user)?;
+        let body = [api::DEVICE_LIMIT, &encode(&api::OwnDevices { devices })].concat();
+        return Err(Refusal(StatusCode::CONFLICT, body));
+    }
     let (user_id, username, device_id) = registered.done()?;
     // Recorded as the account's attestation, as `POST /attest` would.
     if let Some(checked) = checked {

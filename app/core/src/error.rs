@@ -24,6 +24,10 @@ pub enum Error {
     /// The contact was verified and its account key changed: confirm the new key first (spec 2.3).
     #[error("identity not confirmed")]
     Unconfirmed,
+    /// A registration past the account's devices (a hub that adds devices, `409 device_limit`): these are its
+    /// devices; the owner chooses one to go (`replace_on_register`) and the registration is finished again.
+    #[error("the account has the most devices")]
+    DeviceLimit(Vec<yoip::net::api::OwnDevice>),
     /// This device was replaced by another registration of the account.
     #[error("this device was replaced")]
     Replaced,

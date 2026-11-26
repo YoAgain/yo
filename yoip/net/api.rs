@@ -175,14 +175,36 @@ pub struct RegisterLegacy {
     pub device: NewDevice,
 }
 
+/// `Register` naming one of the account's devices (its number) that goes for this one (multi-device, a hub that
+/// adds devices): what a new device sends after `409 device_limit`, the owner having chosen.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct RegisterReplacing {
+    pub username: VLBytes,
+    pub attest: Option<Attest>,
+    pub device: NewDevice,
+    pub replace: u8,
+}
+
+/// The body of `409` for a registration past the account's devices: this, then `OwnDevices` (to choose one).
+pub const DEVICE_LIMIT: &[u8] = b"device_limit";
+
 impl Register {
     /// A `Register` of either form: the current one, else the legacy one without `attest`. Decoding is exact,
     /// so a body only ever fits one of them.
     pub fn decode_any(bytes: &[u8]) -> Result<Self, crate::Error> {
-        crate::decode::<Register>(bytes).or_else(|_| {
-            let old: RegisterLegacy = crate::decode(bytes)?;
-            Ok(Register { username: old.username, attest: None, device: old.device })
-        })
+        Self::decode_replacing(bytes).map(|(register, _)| register)
+    }
+
+    /// `decode_any`, or a `RegisterReplacing` with the number of the device it replaces.
+    pub fn decode_replacing(bytes: &[u8]) -> Result<(Self, Option<u8>), crate::Error> {
+        if let Ok(register) = crate::decode::<Register>(bytes) {
+            return Ok((register, None));
+        }
+        if let Ok(r) = crate::decode::<RegisterReplacing>(bytes) {
+            return Ok((Register { username: r.username, attest: r.attest, device: r.device }, Some(r.replace)));
+        }
+        let old: RegisterLegacy = crate::decode(bytes)?;
+        Ok((Register { username: old.username, attest: None, device: old.device }, None))
     }
 }
 

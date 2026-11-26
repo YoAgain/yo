@@ -48,6 +48,9 @@ pub enum YoError {
     Unconfirmed,
     #[error("this device was replaced")]
     Replaced,
+    /// The account has the most devices (multi-device): register again with `replace` naming one of these.
+    #[error("the account has the most devices")]
+    DeviceLimit { devices: Vec<YoDevice> },
     #[error("protocol: {message}")]
     Protocol { message: String },
     #[error("state")]
@@ -78,6 +81,9 @@ impl From<yo_core::Error> for YoError {
             E::Outdated => YoError::Outdated,
             E::Unconfirmed => YoError::Unconfirmed,
             E::Replaced => YoError::Replaced,
+            E::DeviceLimit(devices) => {
+                YoError::DeviceLimit { devices: devices.into_iter().map(YoDevice::from).collect() }
+            }
             E::State => YoError::State,
             E::Save(message) => YoError::Save { message },
             other => YoError::Protocol { message: other.to_string() },
@@ -109,12 +115,23 @@ pub struct SeenThread {
 
 /// One of this account's devices (`own_devices`): its number, when it registered and was last seen (ms since 1970,
 /// to the hour), and the app it named ("ios/202611241344", empty if none).
-#[derive(uniffi::Record)]
+#[derive(Debug, uniffi::Record)]
 pub struct YoDevice {
     pub number: u8,
     pub created_at_ms: u64,
     pub last_seen_ms: u64,
     pub app: String,
+}
+
+impl From<yo_core::OwnDevice> for YoDevice {
+    fn from(d: yo_core::OwnDevice) -> Self {
+        YoDevice {
+            number: d.number,
+            created_at_ms: d.created_at,
+            last_seen_ms: d.last_seen_at,
+            app: String::from_utf8_lossy(d.app.as_slice()).into_owned(),
+        }
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -1179,8 +1196,9 @@ impl YoClient {
     }
 
     /// Registers a username into `db` under the turn, replacing what is there; saved before the request leaves. The
-    /// same account's registration still unanswered there is finished instead, with the device it made.
-    #[uniffi::constructor(default(attest = None))]
+    /// same account's registration still unanswered there is finished instead, with the device it made; `replace`
+    /// (after `DeviceLimit`, the owner's choice) names the account's device that goes for it.
+    #[uniffi::constructor(default(attest = None, replace = None))]
     #[allow(clippy::too_many_arguments)]
     pub fn register_username_db(
         transport: Arc<dyn HttpTransport>,
@@ -1195,6 +1213,7 @@ impl YoClient {
         push_platform: u8,
         push_token: String,
         attest: Option<YoAttest>,
+        replace: Option<u8>,
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
         let attest =
@@ -1215,6 +1234,9 @@ impl YoClient {
                     turn.store = Some(shared.store.clone());
                 }
                 client.persist_to(shared.store.clone(), key)?;
+                if let Some(number) = replace {
+                    client.replace_on_register(number)?;
+                }
                 client.finish_registration()?;
                 drop(turn);
                 return Ok(Self::on(client, shared));
@@ -1623,16 +1645,7 @@ impl YoClient {
 
     /// This account's devices as the hub lists them, for the owner to choose one to remove (multi-device).
     pub fn own_devices(&self) -> Result<Vec<YoDevice>, YoError> {
-        let devices = self.with(|c| c.own_devices())??;
-        Ok(devices
-            .into_iter()
-            .map(|d| YoDevice {
-                number: d.number,
-                created_at_ms: d.created_at,
-                last_seen_ms: d.last_seen_at,
-                app: String::from_utf8_lossy(d.app.as_slice()).into_owned(),
-            })
-            .collect())
+        Ok(self.with(|c| c.own_devices())??.into_iter().map(YoDevice::from).collect())
     }
 
     /// Removes another device of this account: it gets `Replaced` from then on and forgets what it held.

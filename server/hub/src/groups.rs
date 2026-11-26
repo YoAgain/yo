@@ -604,7 +604,7 @@ mod tests {
             version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
-        hub.db.register(b"ANN", "ANN", &ann, &[1; 32], &device, &prekeys, 10, 0).unwrap();
+        hub.db.register(b"ANN", "ANN", &ann, &[1; 32], &device, &prekeys, 10, None, 0).unwrap();
         let send = |method: &str, path: String, body: Vec<u8>, ip: [u8; 4], signed: bool| {
             let mut request = Request::builder().method(method).uri(&path);
             if signed {

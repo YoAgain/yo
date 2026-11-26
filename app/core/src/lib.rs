@@ -38,7 +38,9 @@ pub use testing::{Memory, Saved};
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
 pub use yoip::net::api::anonymous as anonymous_request;
-pub use yoip::net::api::{Backup, Push, SupportThread, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
+pub use yoip::net::api::{
+    Backup, OwnDevice, Push, SupportThread, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM,
+};
 pub use yoip::protocol::content::{Content, Media};
 /// Usernames as the hub takes and compares them (spec 2.2), for the apps.
 pub use yoip::{net::handle, unb64};
@@ -818,6 +820,21 @@ impl Client {
         Ok(client)
     }
 
+    /// After `DeviceLimit`: the registration names the account's device `number` to go for this one (the owner's
+    /// choice); `finish_registration` sends it.
+    pub fn replace_on_register(&mut self, number: u8) -> Result<()> {
+        let pending = self.state.registering.as_mut().ok_or(Error::Protocol("not registering"))?;
+        let register = api::Register::decode_any(&pending.request)?;
+        let replacing = api::RegisterReplacing {
+            username: register.username,
+            attest: register.attest,
+            device: register.device,
+            replace: number,
+        };
+        pending.request = encode(&replacing);
+        self.persist()
+    }
+
     /// Whether the registration is unanswered: `finish_registration` before anything else.
     pub fn is_registering(&self) -> bool {
         self.state.registering.is_some()
@@ -967,8 +984,13 @@ impl Client {
     }
 
     fn registered(&mut self, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<()> {
-        let response =
-            expect(self.transport.request("POST", path, headers, body).map_err(Error::Network)?, status::OK)?;
+        let response = self.transport.request("POST", path, headers, body).map_err(Error::Network)?;
+        if response.status == status::CONFLICT {
+            if let Some(listed) = response.body.strip_prefix(api::DEVICE_LIMIT) {
+                return Err(Error::DeviceLimit(decode::<api::OwnDevices>(listed)?.devices));
+            }
+        }
+        let response = expect(response, status::OK)?;
         let registered: api::Registered = decode(&response.body)?;
         self.state.user_id = hex(&registered.user_id);
         self.state.attestation.at_registration = true;

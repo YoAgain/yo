@@ -625,7 +625,7 @@ mod tests {
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
         assert!(matches!(
-            hub.db.register(b"deletable", "Deletable", &user, &[7; 32], &device, &prekeys, 100, 1).unwrap(),
+            hub.db.register(b"deletable", "Deletable", &user, &[7; 32], &device, &prekeys, 100, None, 1).unwrap(),
             Write::Done(_)
         ));
         let path = format!("/v1/admin/users/{}", "07".repeat(16));
@@ -1025,7 +1025,7 @@ mod tests {
             version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
-        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, None, 0).unwrap();
         let (quota, blob) = (config.limits.blob_quota(), ([7; 16], 5));
         assert_eq!(hub.db.put_blob(&[1; 16], &blob.0, 16, 1, blob.1, &quota).unwrap(), db::BlobPut::Stored);
         let (file, incoming) = hub.blobs.incoming().unwrap();
@@ -1066,7 +1066,7 @@ mod tests {
             version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
-        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, None, 0).unwrap();
         let waiter = hub.waiter([1; 16]);
         let notified = waiter.notify.notified();
         tokio::pin!(notified);
@@ -1184,7 +1184,7 @@ mod tests {
             version: None,
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
-        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, None, 0).unwrap();
         yoip::net::devices::hash(&[1; 32], &[[1; 32]])
     }
 

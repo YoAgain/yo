@@ -260,6 +260,7 @@ enum Diagnostics {
     case .Outdated: "Outdated"
     case .Unconfirmed: "Unconfirmed"
     case .Replaced: "Replaced"
+    case .DeviceLimit: "DeviceLimit"
     case .Protocol(let message):
       "Protocol/" + (message.hasPrefix("session") ? "session" : String(message.prefix(60)))
     case .State: "State"

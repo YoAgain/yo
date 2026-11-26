@@ -75,6 +75,7 @@ impl Phone {
             0,
             String::new(),
             None,
+            None,
         )
         .unwrap();
         Phone { client, app, http, file, name: name.into() }
@@ -873,6 +874,7 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
         None,
     )
     .unwrap();

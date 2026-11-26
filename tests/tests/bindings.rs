@@ -566,6 +566,7 @@ fn shared_client(transport: Arc<App>, disk: &Arc<Disk>, username: &str, name: Op
         0,
         String::new(),
         None,
+        None,
     )
     .unwrap()
 }
@@ -680,6 +681,7 @@ fn the_app_layer_syncs_its_outbox_without_holding_the_turn() {
         0,
         String::new(),
         None,
+        None,
     )
     .unwrap();
     let b = client(&hub, &pb, "BOB", Disk::new());
@@ -727,6 +729,7 @@ fn the_app_layer_maintains_without_holding_the_turn_for_its_outbox() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
         None,
     )
     .unwrap();
@@ -813,6 +816,7 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
         Some("ALICE".into()),
         0,
         String::new(),
+        None,
         None,
     )
     .unwrap();
@@ -1143,6 +1147,7 @@ fn a_refused_shared_turn_can_be_retried() {
         0,
         String::new(),
         None,
+        None,
     )
     .unwrap();
     lock.refused.store(true, Ordering::Relaxed);
@@ -1197,6 +1202,7 @@ fn a_turn_taken_back_writes_nothing_and_the_next_step_starts_from_the_database()
         None,
         0,
         String::new(),
+        None,
         None,
     )
     .unwrap();
@@ -1469,4 +1475,49 @@ fn the_name_field_takes_the_hubs_minimum_by_attestation() {
     assert_eq!((state.phase, state.min, state.decided), (YoNamePhase::TooShort, Some(12), Some(YoSignUp::Shake)));
     assert_eq!(field.typed("An na".into(), false), None);
     assert_eq!(field.state().bad, vec![" ".to_string()]);
+}
+
+/// Multi-device (a hub that adds devices): past 16 the registration is `DeviceLimit` with the account's devices; the
+/// same registration again with `replace` takes the chosen one's place, which gets `Replaced`.
+#[test]
+fn the_app_layer_registers_past_the_device_limit_in_place_of_a_chosen_device() {
+    let hub = TestHub::start_with(
+        yo_hub::config::Config { add_devices: true, ..yo_hub::config::Config::for_tests() },
+        "127.0.0.1:0",
+    );
+    let app = || Arc::new(App(Http::new(hub.url())));
+    let name = username(random_u64() % 1_000_000_000);
+    let first = client(&hub, &name, "MANY", Disk::new());
+    let secret = first.account_secret();
+    for _ in 2..=16 {
+        register_on(app(), Disk::new(), vec![7; 32], name.clone(), Some(secret.clone()), None, None, 0, "".into())
+            .unwrap();
+    }
+    let disk = Disk::new();
+    let register = |replace: Option<u8>| {
+        YoClient::register_username_db(
+            app(),
+            disk.db(),
+            vec![7; 32],
+            Some(Process::new(&disk)),
+            name.clone(),
+            Some(secret.clone()),
+            None,
+            None,
+            None,
+            0,
+            String::new(),
+            None,
+            replace,
+        )
+    };
+    let devices = match register(None) {
+        Err(yo::YoError::DeviceLimit { devices }) => devices,
+        other => panic!("{:?}", other.map(|_| ())),
+    };
+    assert_eq!(devices.len(), 16);
+    let last = register(Some(1)).unwrap();
+    assert_eq!(last.user_id(), first.user_id());
+    assert!(matches!(first.sync(0), Err(yo::YoError::Replaced)));
+    assert_eq!(last.own_devices().unwrap().len(), 16);
 }

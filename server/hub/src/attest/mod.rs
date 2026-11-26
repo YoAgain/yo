@@ -222,7 +222,7 @@ mod tests {
         };
         let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: vec![], kyber: vec![] };
         hub.db
-            .register(b"test", "test", &rand::random(), &rand::random(), &device, &prekeys, 10, 0)
+            .register(b"test", "test", &rand::random(), &rand::random(), &device, &prekeys, 10, None, 0)
             .unwrap()
             .done()
             .unwrap();
