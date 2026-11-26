@@ -175,6 +175,18 @@ def multi_device(db, now, threshold):
     return out
 
 
+def ohttp_share(db, now):
+    """Issue #8: per platform, the phones seen within 30 days and of them those that came inside OHTTP in that time
+    (account_device.ohttp_at, written by the hub at most once a day); counts only, None before the hub has the column."""
+    if not db.execute("SELECT count(*) FROM pragma_table_info('account_device') WHERE name = 'ohttp_at'").fetchone()[0]:
+        return None
+    since = now - 30 * DAY_MS
+    return {platform: dict(zip(("seen", "ohttp"), db.execute(
+        "SELECT count(*), count(CASE WHEN ohttp_at > ? THEN 1 END) FROM account_device"
+        " WHERE last_seen_at > ? AND app LIKE ?", (since, since, platform + "/%")).fetchone()))
+        for platform in ("ios", "android")}
+
+
 def yogpt_min():
     """YoGPT's build as deployed: the deploy minute (UTC) of YOGPT_VERSION_FILE, less 2 minutes of slack."""
     import datetime
@@ -755,6 +767,8 @@ def hub(name: str, path: str) -> dict:
             # Multi-device's 80 % gate (#4): devices seen in 30 days on a build with it, per platform.
             "multi_device": part("multi_device", lambda: multi_device(
                 db, now, env_value(name, "YO_MULTI_DEVICE_APP")) if has_app else None),
+            # OHTTP's share (#8): devices seen in 30 days that came inside OHTTP in that time, per platform.
+            "ohttp": part("ohttp", lambda: ohttp_share(db, now) if has_app else None),
             "yogpt_min": yogpt_min(),
             "yogpt_contacts": yogpt_contacts(name),
             "apps": part("apps", lambda: db.execute(

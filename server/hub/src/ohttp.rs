@@ -148,6 +148,21 @@ pub(crate) async fn direct_gone(
     next.run(request).await
 }
 
+/// The header that tells a route its request came inside OHTTP or by a ticket (`Hub::authenticate` records it per
+/// device, for the admin's share on OHTTP): set from `Inside` only, never taken from the wire.
+pub(crate) const INSIDE_HEADER: &str = "x-yo-inside";
+
+/// Sets `INSIDE_HEADER` on a request served inside, and removes one a direct request sent.
+pub(crate) async fn mark_inside(mut request: Request<Body>, next: axum::middleware::Next) -> Response {
+    let inside = request.extensions().get::<Inside>().is_some();
+    let headers = request.headers_mut();
+    headers.remove(INSIDE_HEADER);
+    if inside {
+        headers.insert(INSIDE_HEADER, HeaderValue::from_static("1"));
+    }
+    next.run(request).await
+}
+
 fn outer(status: StatusCode) -> Response {
     let mut response = status.into_response();
     response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -419,6 +434,51 @@ mod tests {
         assert_eq!(keys.headers()[CONTENT_TYPE], api::OHTTP_KEYS_TYPE);
         let keys = to_bytes(keys.into_body(), usize::MAX).await.unwrap();
         assert!(KeyConfig::decode_list(&keys).is_ok());
+    }
+
+    /// A device's requests inside OHTTP are recorded (`ohttp_at`, the admin's share, #8); a direct request that sends
+    /// the marker itself is not taken for one.
+    #[tokio::test]
+    async fn a_devices_request_inside_is_recorded_and_the_marker_is_never_taken_from_the_wire() {
+        let hub = hub(Config::for_tests());
+        let pair = libsignal_protocol::KeyPair::generate(&mut rand::rng());
+        let device = crate::db::NewDevice {
+            device_id: [1; 16],
+            device_key: [1; 32],
+            auth_key: pair.public_key.public_key_bytes().try_into().unwrap(),
+            registration_id: 1,
+            push_platform: 0,
+            push_token: Vec::new(),
+            app: None,
+            version: None,
+        };
+        let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
+        hub.db.register(b"ANN", "ANN", &[1; 16], &[1; 32], &device, &prekeys, 10, None, 0).unwrap();
+        let signed = || {
+            let time = crate::now_ms();
+            let message = yoip::net::request::to_be_signed("GET", api::DEVICES, time, b"");
+            let signature = pair.private_key.calculate_signature(&message, &mut rand::rng()).unwrap();
+            [
+                (yoip::net::request::HEADER_DEVICE, yoip::b64(&[1; 16])),
+                (yoip::net::request::HEADER_TIME, time.to_string()),
+                (yoip::net::request::HEADER_SIGNATURE, yoip::b64(&signature)),
+            ]
+        };
+        let ohttp_at = || hub.db.device(&[1; 16]).unwrap().unwrap().ohttp_at;
+        let mut direct = Request::get(api::DEVICES).header(INSIDE_HEADER, "1");
+        for (name, value) in signed() {
+            direct = direct.header(name, value);
+        }
+        let mut direct = direct.body(Body::empty()).unwrap();
+        direct.extensions_mut().insert(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 1))));
+        assert_eq!(hub.router().oneshot(direct).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(ohttp_at(), None, "direct, whatever it says");
+        let headers = signed();
+        let headers: Vec<_> = headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        let (wrapped, opener) = wrap("GET", api::DEVICES, &headers, std::time::SystemTime::now());
+        let (status, _) = open(post(&hub, wrapped, [192, 0, 2, 1]).await, opener).await;
+        assert_eq!(status, 200);
+        assert!(ohttp_at().is_some(), "inside: recorded at once, though seen just now");
     }
 
     #[tokio::test]

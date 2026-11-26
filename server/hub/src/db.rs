@@ -51,6 +51,8 @@ pub struct Device {
     pub app: Option<String>,
     /// The version that app named with it ("1.0.0-RC36"), if any.
     pub version: Option<String>,
+    /// When it last made a request inside OHTTP, to the day (`touch`); none before it did.
+    pub ohttp_at: Option<u64>,
 }
 
 pub struct NewDevice {
@@ -642,7 +644,7 @@ impl Db {
     // ---- users and devices ----
 
     pub fn device(&self, device: &DeviceId) -> rusqlite::Result<Option<Device>> {
-        let sql = "SELECT user_id, auth_key, last_seen_at, app, version FROM account_device WHERE id = ?1";
+        let sql = "SELECT user_id, auth_key, last_seen_at, app, version, ohttp_at FROM account_device WHERE id = ?1";
         row(&self.conn(), sql, [device], |row| {
             Ok(Device {
                 user_id: array(row.get(0)?)?,
@@ -650,6 +652,7 @@ impl Db {
                 last_seen_at: row.get::<_, i64>(2)? as u64,
                 app: row.get(3)?,
                 version: row.get(4)?,
+                ohttp_at: row.get::<_, Option<i64>>(5)?.map(|at| at as u64),
             })
         })
     }
@@ -681,13 +684,20 @@ impl Db {
     }
 
     /// Seen at `now` (kept to the hour), with the app it names and that app's version (no app: the one it had stays,
-    /// with its version).
-    pub fn touch(&self, device: &DeviceId, now: u64, app: Option<(&str, Option<&str>)>) -> rusqlite::Result<()> {
+    /// with its version); `inside` OHTTP, seen there at `now` too.
+    pub fn touch(
+        &self,
+        device: &DeviceId,
+        now: u64,
+        app: Option<(&str, Option<&str>)>,
+        inside: bool,
+    ) -> rusqlite::Result<()> {
         let (app, version) = (app.map(|(a, _)| a), app.and_then(|(_, v)| v));
         self.run(
             "UPDATE account_device SET last_seen_at = ?2, app = coalesce(?3, app),
-                 version = CASE WHEN ?3 IS NULL THEN version ELSE ?4 END WHERE id = ?1",
-            params![device, to_the_hour(now), app, version],
+                 version = CASE WHEN ?3 IS NULL THEN version ELSE ?4 END,
+                 ohttp_at = CASE WHEN ?5 THEN ?2 ELSE ohttp_at END WHERE id = ?1",
+            params![device, to_the_hour(now), app, version, inside],
         )
     }
 
@@ -2463,9 +2473,9 @@ mod tests {
         assert!(matches!(register(&db, b"bob", 2, 2, now - 25 * hour), Write::Done(_)));
         assert_eq!(seen(1), to_the_hour(now - 23 * hour));
         assert_eq!(seen(1) % hour, 0, "registered: to the hour");
-        db.touch(&[2; 16], now - 25 * hour + 59_999, Some(("ios/1", None))).unwrap();
+        db.touch(&[2; 16], now - 25 * hour + 59_999, Some(("ios/1", None)), false).unwrap();
         assert_eq!(seen(2), to_the_hour(now - 25 * hour), "touched: to the hour");
-        db.touch(&[1; 16], now - 23 * hour + 1, Some(("ios/1", None))).unwrap();
+        db.touch(&[1; 16], now - 23 * hour + 1, Some(("ios/1", None)), false).unwrap();
         let install = [7u8; 16];
         let payload =
             serde_json::json!({"app": "ios/1", "os": "26", "model": "x", "domain": "d", "code": "1", "place": "p"});
@@ -3228,7 +3238,7 @@ mod tests {
         assert!(!is_bot_app(Some("ios/202611191257")) && !is_bot_app(Some("android/3")) && !is_bot_app(None));
         let db = Db::open(":memory:").unwrap();
         let bot = user(register(&db, b"BOT", 1, 1, 0));
-        db.touch(&[1; 16], 0, Some(("cli/7", None))).unwrap();
+        db.touch(&[1; 16], 0, Some(("cli/7", None)), false).unwrap();
         let devices_hash = yoip::net::devices::hash(&[1; 32], &[[1; 32]]);
         let delivered = db
             .deliver(&[Incoming { user: bot, devices_hash, from: None, copies: Copies::Legacy(b"envelope") }], 0, 10)
@@ -3251,11 +3261,11 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         register(&db, b"ANN", 1, 1, 0);
         let version = || db.device(&[1; 16]).unwrap().map(|d| (d.app, d.version)).unwrap();
-        db.touch(&[1; 16], 0, Some(("ios/202611241344", Some("1.0.0-RC36")))).unwrap();
+        db.touch(&[1; 16], 0, Some(("ios/202611241344", Some("1.0.0-RC36"))), false).unwrap();
         assert_eq!(version(), (Some("ios/202611241344".into()), Some("1.0.0-RC36".into())));
-        db.touch(&[1; 16], 0, None).unwrap();
+        db.touch(&[1; 16], 0, None, false).unwrap();
         assert_eq!(version().1.as_deref(), Some("1.0.0-RC36"), "no app named: both stay");
-        db.touch(&[1; 16], 0, Some(("ios/202611250000", None))).unwrap();
+        db.touch(&[1; 16], 0, Some(("ios/202611250000", None)), false).unwrap();
         assert_eq!(version(), (Some("ios/202611250000".into()), None), "a build without one has none");
     }
 

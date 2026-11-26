@@ -350,6 +350,7 @@ impl Hub {
         let inner = router
             .layer(from_fn_with_state(self.clone(), too_old))
             .layer(from_fn_with_state(self.clone(), ohttp::direct_gone))
+            .layer(axum::middleware::from_fn(ohttp::mark_inside))
             .layer(from_fn_with_state(self.clone(), request::counted))
             .layer(DefaultBodyLimit::max(limits::MAX_BODY))
             .with_state(self.clone());

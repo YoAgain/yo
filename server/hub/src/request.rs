@@ -199,11 +199,14 @@ impl Hub {
         let signed = Signed { device_id, user_id: device.user_id };
         self.limit_signed(&signed, "signed", &device_id, self.config.limits.signed_per_device_minute, MINUTE)
             .map_err(|_| error::limited("device", None))?;
-        // Last seen is kept to the hour (spec 1) and written once a day; the app it names, when it changes.
+        // Last seen is kept to the hour (spec 1) and written once a day; the app it names, when it changes; and,
+        // as often, when it last came inside OHTTP (the admin's share on OHTTP, #8).
         let app = named_app(headers);
         let new_app = app.is_some_and(|(a, v)| device.app.as_deref() != Some(a) || device.version.as_deref() != v);
-        if new_app || now.saturating_sub(device.last_seen_at) >= DAY_MS {
-            self.db.touch(&device_id, now, app)?;
+        let inside = headers.contains_key(crate::ohttp::INSIDE_HEADER);
+        let ohttp_due = inside && device.ohttp_at.is_none_or(|at| now.saturating_sub(at) >= DAY_MS);
+        if new_app || ohttp_due || now.saturating_sub(device.last_seen_at) >= DAY_MS {
+            self.db.touch(&device_id, now, app, inside)?;
         }
         Ok(signed)
     }

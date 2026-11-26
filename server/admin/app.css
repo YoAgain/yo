@@ -1477,4 +1477,4 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .diag-still-note { color: #e67e22; }
 .diag-recent { color: #e67e22; font-weight: 700; }
 
-#attestation, #multidevice { font-size: .8rem; font-variant-numeric: tabular-nums; padding: .35rem 0; }
+#attestation, #multidevice, #ohttpshare { font-size: .8rem; font-variant-numeric: tabular-nums; padding: .35rem 0; }

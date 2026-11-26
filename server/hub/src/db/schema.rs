@@ -13,6 +13,10 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
         to_11(conn)?;
     }
     conn.execute_batch(SCHEMA)?;
+    // A column of its own, no schema step, so the hub before it still opens the store (#8).
+    if !has_column(conn, "account_device", "ohttp_at")? {
+        conn.execute_batch("ALTER TABLE account_device ADD COLUMN ohttp_at INTEGER")?;
+    }
     skeletons_of_today(conn)
 }
 
@@ -217,7 +221,9 @@ CREATE TABLE IF NOT EXISTS account_device (
     -- again, so a key handed out once is not handed out again.
     prekey_max INTEGER NOT NULL DEFAULT 0,
     -- The version its app named with it (`Yo-App`, spec 4.1: 1.0.0-RC36), if any.
-    version TEXT
+    version TEXT,
+    -- When it last made a request inside OHTTP (spec 4.1), to the hour and written once a day; none before it did.
+    ohttp_at INTEGER
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS account_device_by_user ON account_device(user_id);
 -- Devices that were replaced: their own requests answer 410.

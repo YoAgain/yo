@@ -1038,6 +1038,17 @@ if (document.body.classList.contains("login")) {
         + (r.min == null ? " · no YO_MULTI_DEVICE_APP build set" : ` on build ${r.min} or newer`))
         .concat("Gate: 80 % per platform before YO_MIN_APP is raised.").join("\n");
     }
+    // OHTTP's share (#8): devices seen in 30 days that came inside OHTTP in that time, per platform.
+    const oh = $("ohttpshare");
+    oh.hidden = !hubNow?.ohttp;
+    if (!oh.hidden) {
+      const rows = Object.entries(h.ohttp);
+      const platform = p => p === "ios" ? "iOS" : "Android";
+      oh.textContent = "On OHTTP (30 d) · " + rows.map(([p, r]) =>
+        `${platform(p)} ${r.seen ? pctText(r.ohttp * 100 / r.seen) : "–"}`).join(" · ");
+      oh.title = rows.map(([p, r]) => `${platform(p)}: ${num(r.ohttp)} of ${num(r.seen)} devices seen in 30 days came via /v1/ohttp`)
+        .concat("Recorded by the hub at most once a day per device.").join("\n");
+    }
     if (!hubNow) {
       set("problem-n", "–");
       state("problem-dial", null);
