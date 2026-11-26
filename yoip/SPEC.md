@@ -38,7 +38,8 @@ Yo protects message content and who talks to whom against everyone but the endpo
 | Adversary | Can | Cannot | Because |
 |---|---|---|---|
 | Network observer | see the hub's address, timing, padded sizes, IPs | read content, see recipients or senders | TLS, padding (§4.1) |
-| Curious hub or its TLS proxy (Cloudflare) | see the data in §1.1: accounts, devices, lookups, requests, inbox time, size and IP | read content, groups, storage or backups; link a sealed sender | sealed sender, zkgroup, client-side encryption |
+| Curious hub | see the data in §1.1: accounts, devices, lookups, requests, inbox time, size and IP | read content, groups, storage or backups; link a sealed sender | sealed sender, zkgroup, client-side encryption |
+| TLS proxy (Cloudflare) | over OHTTP: IP, time and size only; direct and ticket requests: what the hub sees, and redeem a ticket it observes | read content; over OHTTP, see what a request is | OHTTP (§4.1), sealed sender, client-side encryption |
 | Malicious hub | drop, delay or withhold; hide devices; serve an older backup (§5.1); refuse service | decrypt; forge a pinned `🔐 account key` or a device; impersonate a sender | device certificates need the `🔐 account key`; pinning raises `IdentityChanged`; signed answers (§4.1) |
 | Stranger | send requests and look up usernames, within limits | reach a contact's sealed inbox; get past a block | `🔑 access key` (§3.3), request limits (§4.1) |
 | Contact | send until blocked | read other devices' copies; resend another sender's content | per-device sessions; decryption errors only repeat own content (§3.2) |
@@ -352,12 +353,16 @@ Bridge    other service ──► api.justyo.app/NAME/… ──► entrance ─
 ### 4.1 Transport
 The hub is reached only over HTTPS (plain HTTP redirects, HSTS 6 months).
 
-**Oblivious HTTP.** Clients SHOULD wrap every request to the hub's `🔐 OHTTP key` (RFC 9458, Binary HTTP RFC 9292) and `POST` it to `/v1/ohttp`; the hub unwraps it, serves it as if sent directly and wraps the answer. The TLS proxy in front of the hub then sees only IP, time and size.
-- Both directions MUST be padded to fixed buckets; a Yo MUST fit the smallest, ≤ 1 KiB. Bucket sizes: `net/limits.rs`.
-- Media does not go through OHTTP. Over OHTTP the client gets a one-time ticket and streams the blob with `PUT` or `GET /v1/blobs/t/{ticket}`; a ticket works once, for one blob, in one direction.
-- The separate connections of §1.1 hold inside OHTTP too: anonymous and signed requests MUST NOT share a connection, so the hub cannot link a sealed delivery to the account that fetched an inbox on the same line.
-- The hub MUST limit `/v1/ohttp` per IP before unwrapping. It keeps the direct endpoints until most active devices use OHTTP (§5.2).
-- The key config is served at `/.well-known/yo-ohttp`; apps pin current and spare.
+**Oblivious HTTP.** Clients that support it MUST wrap every request to the hub's `🔐 OHTTP key` (RFC 9458 with Binary HTTP, RFC 9292) and `POST` it to `/v1/ohttp`. Only key discovery and ticket transfers stay direct. A failing OHTTP path or pin MUST NOT fall back to direct requests. The TLS proxy then sees only IP, time and size; the hub still sees the IP (limits, §1.1).
+- **Suite.** DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM. The key config is served at `/.well-known/yo-ohttp` (`application/ohttp-keys`); apps pin current and spare by app update, discovery never adds a pin.
+- **Dispatch.** The hub serves only the YoIP routes of the endpoint table inside OHTTP (no admin, support, discovery, ticket or nested OHTTP), with their usual signatures, signed answers and limits. Once unwrapped, every answer, errors included, goes back padded and wrapped in an outer `200`; only failures before unwrapping use outer errors.
+- **Replay.** Each request carries an inner `Date`; the hub MUST refuse dates off by more than 5 minutes and any `enc` it accepted within that window. Clients MUST NOT retry a wrapped request automatically unless they know it was not processed.
+- **Padding.** Both directions MUST be padded with Binary HTTP zero padding to fixed buckets of the whole wrapped body (`net/limits.rs`). A one-device Yo MUST fit the smallest bucket.
+- **Tickets.** Media does not go through OHTTP. Inside OHTTP the client asks for a ticket for one blob and one direction (`PUT` with length and digest bound by the signed request, `GET` with the blob capability); it is ≥ 128 random bits, works once and expires after 5 minutes. The transfer is `PUT` or `GET /v1/blobs/t/{ticket}`, direct, `Cache-Control: no-store`; the hub checks length and digest before keeping an upload. Logs MUST NOT keep tickets.
+- **Connections.** The separate connections of §1.1 hold for OHTTP too: anonymous and signed requests use separate connection pools to the proxy that never coalesce, so connection reuse links nothing. IP, size and timing can still be correlated (§5.1).
+- **Limits.** Before unwrapping, the hub MUST limit `/v1/ohttp` per IP (§4.1 limits) and by body size, taking the IP only from the proxy.
+- **Rotation.** A new key gets a new key id; the old one stays accepted for the config's cache lifetime. A compromised key is dropped at once. Retired private keys MUST be erased everywhere, backups included.
+- **Migration.** Direct routes stay for older apps until at least 80 % of devices active over 30 days use OHTTP (§5.2); then only discovery, `/v1/ohttp` and ticket transfers remain direct.
 
 Contact deliveries use unsigned, padded, sealed envelopes. The hub sees inbox and size. Without a valid 24 h `🎟️ sender certificate`, send once identified and fetch one.
 ```
@@ -374,7 +379,7 @@ envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
 |---|---|---|---|
 | 🔐 Hub key (+ spare) | Curve25519 XEdDSA | yes, current and spare | signed answers (§4.1) |
 | 🔐 Trust root (+ spare) | Curve25519, kept offline | yes, current and spare | signs the server certificate |
-| 🎟️ Server certificate | Curve25519, signed by the trust root | no | signs 🎟️ sender certificates (§4.1) |
+| 🎟️ Server signing key and its certificate | Curve25519, certificate signed by the trust root | no | signs 🎟️ sender certificates (§4.1) |
 | 🔐 zkgroup `ServerSecretParams` | zkgroup | public params | group credentials and endorsements (§3.4) |
 | 🔑 APNs key, FCM service account | provider credentials | no | push (§4.2) |
 | 🔑 Play Integrity keys | Google-issued | no | attestation (§4.2) |
