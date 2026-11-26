@@ -38,23 +38,6 @@ pub fn pinned(host: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn the_pinned_configs_decode_with_the_suite() {
-        for host in ["hub.justyo.app", "https://dev.justyo.app/"] {
-            let configs = super::pinned(host);
-            assert_eq!(configs.len(), 2);
-            for config in configs {
-                assert!(::ohttp::ClientRequest::from_encoded_config(&config).is_ok());
-                // Key id, X25519 (0x0020), its 32-byte key, one suite: HKDF-SHA256 (1), AES-128-GCM (1).
-                assert_eq!((config.len(), &config[1..3], &config[35..]), (41, &[0, 0x20][..], &[0, 4, 0, 1, 0, 1][..]));
-            }
-        }
-        assert!(super::pinned("example.org").is_empty());
-    }
-}
-
 pub struct Ohttp {
     signed: Arc<dyn Transport>,
     anonymous: Arc<dyn Transport>,
@@ -171,5 +154,22 @@ impl Transport for Ohttp {
         let ticket = std::str::from_utf8(&answer.body).map_err(|_| "ohttp: no ticket")?;
         let response = line.request(method, &api::ticket_path(ticket), &[], body)?;
         Ok((response, Vec::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_pinned_configs_decode_with_the_suite() {
+        for host in ["hub.justyo.app", "https://dev.justyo.app/"] {
+            let configs = super::pinned(host);
+            assert_eq!(configs.len(), 2);
+            for config in configs {
+                assert!(::ohttp::ClientRequest::from_encoded_config(&config).is_ok());
+                // Key id, X25519 (0x0020), its 32-byte key, one suite: HKDF-SHA256 (1), AES-128-GCM (1).
+                assert_eq!((config.len(), &config[1..3], &config[35..]), (41, &[0, 0x20][..], &[0, 4, 0, 1, 0, 1][..]));
+            }
+        }
+        assert!(super::pinned("example.org").is_empty());
     }
 }
