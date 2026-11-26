@@ -733,6 +733,59 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
     Ok(Client::username_free(&Http(transport), &username)?)
 }
 
+/// A link this device opened (spec 2.5): show `text` (as a QR code, or to paste), keep it for `link_wait`.
+#[derive(Debug, uniffi::Record)]
+pub struct YoLinkRequest {
+    pub id: String,
+    pub secret: Vec<u8>,
+    pub text: String,
+}
+
+/// A link read from another device's text: nothing sent until the owner confirms (`YoClient::link_approve`).
+#[derive(Debug, uniffi::Record)]
+pub struct YoLinkOffer {
+    pub id: String,
+    pub key: Vec<u8>,
+}
+
+/// What the old device handed over: register with it (`register_username_db` with `username`, `account_secret`
+/// and `legacy_storage_key`) as an added device.
+#[derive(Debug, uniffi::Record)]
+pub struct YoLinked {
+    pub username: String,
+    pub account_secret: Vec<u8>,
+    pub legacy_storage_key: Option<Vec<u8>>,
+}
+
+/// New device: opens a link at the hub with a one-time key (spec 2.5). `Refused` 404: the hub adds no devices.
+#[uniffi::export]
+pub fn link_start(transport: Arc<dyn HttpTransport>) -> Result<YoLinkRequest, YoError> {
+    let r = yo_core::link::start(&Http(transport))?;
+    Ok(YoLinkRequest { id: r.id, secret: r.secret.to_vec(), text: r.text })
+}
+
+/// New device: waits up to `wait_s` (≤ 60) for the bundle; `None` none yet, `Refused` 404 the link is over.
+#[uniffi::export]
+pub fn link_wait(
+    transport: Arc<dyn HttpTransport>,
+    request: YoLinkRequest,
+    wait_s: u64,
+) -> Result<Option<YoLinked>, YoError> {
+    let request = yo_core::link::Request { id: request.id, secret: key_of(request.secret)?, text: request.text };
+    Ok(yo_core::link::wait(&Http(transport), &request, wait_s)?.map(|l| YoLinked {
+        username: l.username,
+        account_secret: l.account_secret.to_vec(),
+        legacy_storage_key: l.legacy_storage_key.map(|k| k.to_vec()),
+    }))
+}
+
+/// Old device: reads a link's text (`yo-link:…`); the app asks the owner before `link_approve`.
+#[uniffi::export]
+pub fn link_offer(text: String) -> Result<YoLinkOffer, YoError> {
+    let o = yo_core::link::offer(&text)?;
+    Ok(YoLinkOffer { id: o.id, key: o.key.to_vec() })
+}
+
 /// A device attestation for `Register` (spec 4.2): the platform's payload (1 App Attest, 2 Play Integrity) over
 /// the unsigned challenge from `attest_open_challenge`.
 #[derive(uniffi::Record)]
@@ -1641,6 +1694,12 @@ impl YoClient {
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
     pub fn delete_account(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.delete_account())??)
+    }
+
+    /// Old device, after the owner's tap (spec 2.5): seals this account to the new device and leaves it at the link.
+    pub fn link_approve(&self, offer: YoLinkOffer) -> Result<(), YoError> {
+        let offer = yo_core::link::Offer { id: offer.id, key: key_of(offer.key)? };
+        Ok(self.with(|c| c.link_approve(&offer))??)
     }
 
     /// This account's devices as the hub lists them, for the owner to choose one to remove (multi-device).

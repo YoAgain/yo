@@ -15,6 +15,7 @@ pub mod error;
 pub mod groups;
 mod help;
 pub mod limiter;
+mod link;
 mod mail;
 pub mod ohttp;
 pub mod push;
@@ -186,6 +187,8 @@ pub struct Hub {
     closing: tokio::sync::watch::Sender<bool>,
     /// Each device's last push and the one held for the end of its window (spec 4.2, `mail::Pushes`).
     pushes: Mutex<mail::Pushes>,
+    /// Links open for a new device (spec 2.5), in memory only.
+    links: link::Links,
     /// Long polls waiting for mail, by device.
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
@@ -259,6 +262,7 @@ impl Hub {
             closing: tokio::sync::watch::channel(false).0,
             pushes: Mutex::default(),
             waiting: Mutex::default(),
+            links: link::Links::default(),
             fetching: Arc::default(),
             challenges: Mutex::default(),
             limiter: Limiter::default(),
@@ -324,6 +328,8 @@ impl Hub {
         let mut router = Router::new()
             .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
             .route(api::INBOX, get(mail::get_inbox))
+            .route(api::LINK, post(link::post_link))
+            .route("/v1/link/{id}", get(link::get_link).put(link::put_link))
             .route("/v1/blobs/{id}", put(blobs::put_blob).get(blobs::get_blob).delete(blobs::delete_blob))
             .merge(delivering)
             .merge(synchronous)
@@ -396,6 +402,7 @@ impl Hub {
         loop {
             every.tick().await;
             self.replay.forget_expired(now_ms());
+            self.links.forget_expired(self.clock_ms());
             if let Some(gateway) = &self.ohttp {
                 gateway.forget_expired(self.clock_ms());
             }

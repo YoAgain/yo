@@ -1521,3 +1521,42 @@ fn the_app_layer_registers_past_the_device_limit_in_place_of_a_chosen_device() {
     assert!(matches!(first.sync(0), Err(yo::YoError::Replaced)));
     assert_eq!(last.own_devices().unwrap().len(), 16);
 }
+
+/// Linking a device (spec 2.5): the new device opens a link and shows its text, the old one approves it, the new one
+/// takes the bundle once and registers as an added device of the same account.
+#[test]
+fn the_app_layer_links_a_new_device_by_its_text() {
+    let off = TestHub::start();
+    let refused = yo::link_start(Arc::new(App(Http::new(off.url()))));
+    assert!(matches!(refused, Err(yo::YoError::Refused { status: 404 })), "only on a hub that adds devices");
+
+    let config = yo_hub::config::Config { add_devices: true, ..yo_hub::config::Config::for_tests() };
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let app = || Arc::new(App(Http::new(hub.url())));
+    let name = username(random_u64() % 1_000_000_000);
+    let old = client(&hub, &name, "OLD", Disk::new());
+
+    let request = yo::link_start(app()).unwrap();
+    assert!(request.text.starts_with("yo-link:"));
+    let shown =
+        yo::YoLinkRequest { id: request.id.clone(), secret: request.secret.clone(), text: request.text.clone() };
+    assert!(yo::link_wait(app(), shown, 0).unwrap().is_none(), "nothing before the tap");
+    let offer = yo::link_offer(request.text.clone()).unwrap();
+    old.link_approve(offer).unwrap();
+    let again = yo::link_offer(request.text.clone()).unwrap();
+    assert!(matches!(old.link_approve(again), Err(yo::YoError::Refused { status: 409 })));
+    let shown =
+        yo::YoLinkRequest { id: request.id.clone(), secret: request.secret.clone(), text: request.text.clone() };
+    let linked = yo::link_wait(app(), shown, 5).unwrap().expect("the bundle");
+    assert!(matches!(yo::link_wait(app(), request, 0), Err(yo::YoError::Refused { status: 404 })), "taken once");
+    assert_eq!(linked.username, name);
+    assert_eq!(linked.account_secret, old.account_secret());
+    assert!(linked.legacy_storage_key.is_none(), "the storage key the account secret gives");
+
+    let disk = Disk::new();
+    let new =
+        register_on(app(), disk, vec![7; 32], linked.username, Some(linked.account_secret), None, None, 0, "".into())
+            .unwrap();
+    assert_eq!(new.user_id(), old.user_id());
+    assert_eq!(old.own_devices().unwrap().len(), 2, "added, not in place of the old one");
+}

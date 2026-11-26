@@ -41,6 +41,30 @@ pub const BLOBS: &str = "/v1/blobs";
 pub const ACCESS_KEY: &str = "/v1/access-key";
 /// `PUT`, signed, one byte: whether the account is a bot (1) or not (0), for everyone who looks it up.
 pub const BOT: &str = "/v1/bot";
+/// Linking a device (spec 2.5). `POST`, anonymous: a link id (16 random bytes, base64url, the body), one use, open
+/// `LINK_MS`. `PUT {LINK}/{id}`, signed: the sealed `LinkBundle` (`204`; `404` no such link open, `409` one there).
+/// `GET {LINK}/{id}?wait=S` (≤ `MAX_WAIT_S`), anonymous: the bundle once, deleted as it goes (`200`), `204` none yet,
+/// `404` no such link open. Only on a hub that adds devices.
+pub const LINK: &str = "/v1/link";
+/// How long a link stays open (spec 2.5): 10 minutes.
+pub const LINK_MS: u64 = 10 * 60 * 1000;
+/// The largest sealed bundle a link takes.
+pub const MAX_LINK_BUNDLE: usize = 1024;
+
+/// The path of link `id` (base64url).
+pub fn link_path(id: &str) -> String {
+    format!("{LINK}/{id}")
+}
+
+/// What the old device hands the new one (spec 2.5), sealed with HPKE to the new device's one-time key, the link
+/// id (its 16 bytes) as aad: the username, the account's secret and the storage key.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct LinkBundle {
+    pub username: VLBytes,
+    pub account_secret: [u8; 32],
+    pub storage_key: [u8; 32],
+}
+
 /// `GET`, signed: this account's devices (`OwnDevices`, multi-device). `DELETE {DEVICES}/{number}`, signed: removes
 /// one of them; its own requests answer `410` from then on (`404`: no such number, `400`: the signing device itself).
 pub const DEVICES: &str = "/v1/devices";

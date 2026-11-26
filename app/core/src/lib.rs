@@ -13,6 +13,7 @@ pub mod help;
 mod hub;
 pub mod identity;
 pub mod keychain;
+pub mod link;
 pub mod media;
 pub mod migrations;
 pub mod name_field;
@@ -695,7 +696,7 @@ fn note_handle(contact: &mut Contact, shown: String) {
 }
 
 /// The answer if the hub said `ok`; else why not (`410`: this device was replaced).
-fn expect(response: Response, ok: u16) -> Result<Response> {
+pub(crate) fn expect(response: Response, ok: u16) -> Result<Response> {
     if response.status == ok {
         return Ok(response);
     }
