@@ -31,6 +31,7 @@ impl Yo {
             ("YO_HUB_KEYS", yoip::b64(&yo_tests::hub_key())),
             ("YO_TRUST_ROOTS", yoip::b64(&yo_tests::trust_root())),
             ("YO_ZK_PARAMS", yoip::b64(&yo_tests::zk_params())),
+            ("YO_OHTTP_KEYS", yoip::b64(&yo_tests::ohttp_config())),
             ("YO_BIN", YO.to_owned()),
         ]
     }

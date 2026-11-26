@@ -34,6 +34,12 @@ pub struct Config {
     /// Roster lookups a day for messages from a replaced phone (`YO_RECOVERY_LOOKUPS`; else the core's 10): a bot the
     /// hub does not limit raises it, or messages from users with new phones wait for days.
     pub recovery_lookups: Option<u32>,
+    /// `--direct`: no Oblivious HTTP, every request straight to the hub (spec 4.1); the default wraps them.
+    pub direct: bool,
+    /// The hub's OHTTP key configs (`--ohttp-key`, `YO_OHTTP_KEYS`): else those the core pins for the hub.
+    pub ohttp_keys: Vec<Vec<u8>>,
+    /// `YO_SMALL_ENVELOPES=1`: seal to the small first bucket (spec 4.1), once receivers take it.
+    pub small_envelopes: bool,
 }
 
 fn key32(what: &str, text: &str) -> Result<[u8; 32], Failure> {
@@ -62,7 +68,13 @@ impl Config {
         let (mut hub_keys, mut trust_roots, mut zk) = (Vec::new(), Vec::new(), env("YO_ZK_PARAMS"));
         let (mut keys_given, mut roots_given) = (false, false);
         let mut i = 0;
+        let (mut direct, mut ohttp_keys) = (false, Vec::new());
+        let config = |text: &str| yoip::unb64(text.trim()).map_err(|_| Failure::usage("OHTTP key config: base64url"));
         while let Some(flag) = args.get(i).filter(|a| a.starts_with("--")) {
+            if flag == "--direct" {
+                (direct, i) = (true, i + 1);
+                continue;
+            }
             let value = args.get(i + 1).ok_or_else(|| Failure::usage(format!("{flag}: a value")))?.clone();
             match flag.as_str() {
                 "--state" => state = Some(value),
@@ -70,6 +82,7 @@ impl Config {
                 "--hub-key" => (keys_given, _) = (true, hub_keys.push(key32("--hub-key", &value)?)),
                 "--trust-root" => (roots_given, _) = (true, trust_roots.push(key32("--trust-root", &value)?)),
                 "--zk-params" => zk = Some(value),
+                "--ohttp-key" => ohttp_keys.push(config(&value)?),
                 _ => return Err(Failure::usage(format!("unknown flag {flag}"))),
             }
             i += 2;
@@ -85,10 +98,25 @@ impl Config {
             Some(p) => Some(yoip::unb64(p.trim()).map_err(|_| Failure::usage("--zk-params: base64url"))?),
             None => None,
         };
+        if ohttp_keys.is_empty() {
+            ohttp_keys = list("YO_OHTTP_KEYS").iter().map(|k| config(k)).collect::<Result<_, _>>()?;
+        }
+        let small_envelopes = env("YO_SMALL_ENVELOPES").is_some_and(|v| v.trim() == "1");
         let recovery_lookups = env("YO_RECOVERY_LOOKUPS").as_deref().map(lookups).transpose()?;
         let state = state.ok_or_else(|| Failure::usage("no state directory: --state DIR or YO_STATE"))?;
         let hub = hub.map(|h| h.trim_end_matches('/').to_owned());
-        Ok((Config { state: state.into(), hub, hub_keys, trust_roots, zk_params, recovery_lookups }, &args[i..]))
+        let config = Config {
+            state: state.into(),
+            hub,
+            hub_keys,
+            trust_roots,
+            zk_params,
+            recovery_lookups,
+            direct,
+            ohttp_keys,
+            small_envelopes,
+        };
+        Ok((config, &args[i..]))
     }
 
     pub fn control(&self) -> PathBuf {
@@ -97,20 +125,43 @@ impl Config {
 }
 
 /// Signed requests and anonymous ones (sealed deliveries, blob fetches) on separate clients: never one connection for
-/// both (spec 1).
+/// both (spec 1.1). Over OHTTP each line is an `Http` of its own (`yo_core::ohttp::Ohttp`).
 struct Http {
     client: reqwest::blocking::Client,
     anonymous: reqwest::blocking::Client,
     base: String,
 }
 
+/// One line of OHTTP: its own client, so its connections are its own.
+struct Line(Http);
+
+impl Transport for Line {
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        self.0.send(&self.0.client, false, method, path, headers, body)
+    }
+}
+
 impl Transport for Http {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
-        let url = format!("{}{}", self.base, path);
         // Only what names nobody goes anonymously; a registration or a backup's fetch names the account (spec 1).
         let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device"));
         let anonymous = !signed && yoip::net::api::anonymous(method, path);
         let client = if anonymous { &self.anonymous } else { &self.client };
+        self.send(client, signed, method, path, headers, body)
+    }
+}
+
+impl Http {
+    fn send(
+        &self,
+        client: &reqwest::blocking::Client,
+        signed: bool,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<Response, String> {
+        let url = format!("{}{}", self.base, path);
         let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
             request = request.header(name, value);
@@ -139,7 +190,48 @@ fn transport(config: &Config) -> Result<Arc<dyn Transport>, Failure> {
             .build()
             .map_err(|e| Failure::new(format!("http: {e}")))
     };
-    Ok(Arc::new(Http { client: client()?, anonymous: client()?, base }))
+    if config.direct {
+        return Ok(Arc::new(Http { client: client()?, anonymous: client()?, base }));
+    }
+    // Oblivious HTTP by default (spec 4.1), never falling back to direct requests.
+    let keys = match config.ohttp_keys.is_empty() {
+        true => yo_core::ohttp::pinned(&base),
+        false => config.ohttp_keys.clone(),
+    };
+    // None pinned for this hub: every request fails (never direct), until `--ohttp-key` or `--direct` is given.
+    let line = |http: Http| -> Arc<dyn Transport> { Arc::new(Line(http)) };
+    let (signed, anonymous) = (
+        line(Http { client: client()?, anonymous: client()?, base: base.clone() }),
+        line(Http { client: client()?, anonymous: client()?, base }),
+    );
+    Ok(Arc::new(Named(yo_core::ohttp::Ohttp::new(signed, anonymous, keys))))
+}
+
+/// Its build on a signed request, inside the wrapping, as `Http` does directly.
+struct Named(yo_core::ohttp::Ohttp);
+
+impl Transport for Named {
+    fn authenticated(&self) -> bool {
+        self.0.authenticated()
+    }
+
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        self.request_headers(method, path, headers, body).map(|(response, _)| response)
+    }
+
+    fn request_headers(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(Response, Vec<(String, String)>), String> {
+        let mut headers = headers.to_vec();
+        if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device")) {
+            headers.push((yoip::net::api::HEADER_APP.to_owned(), format!("yogpt/{BUILD}")));
+        }
+        self.0.request_headers(method, path, &headers, body)
+    }
 }
 
 /// Writes beside the file, then renames, then syncs the directory: a crash leaves the old one or the new one.
@@ -233,6 +325,7 @@ fn configure(client: &mut Client, config: &Config) -> Result<(), Failure> {
     if let Some(lookups) = config.recovery_lookups {
         client.set_recovery_lookups_per_day(lookups);
     }
+    client.set_small_envelopes(config.small_envelopes);
     if let Some(params) = &config.zk_params {
         client.set_zk_params(params).map_err(|e| Failure::new(format!("--zk-params: {e}")))?;
     }
@@ -349,6 +442,9 @@ mod tests {
             trust_roots: Vec::new(),
             zk_params: None,
             recovery_lookups: None,
+            direct: true,
+            ohttp_keys: Vec::new(),
+            small_envelopes: false,
         };
         let Err(error) = transport(&config).unwrap().request("GET", "/v1/blobs/SECRETID", &[], &[]) else {
             panic!("port 1 answered")

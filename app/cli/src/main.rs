@@ -1,7 +1,11 @@
 //! yo: a Yo account on the command line. Every command prints one JSON value; `yo listen` prints one JSON line per
 //! event. Bots drive it (README.md).
 //!
-//!   yo [--state DIR] [--hub URL] [--hub-key KEY]… [--trust-root KEY]… [--zk-params PARAMS] COMMAND …
+//!   yo [--state DIR] [--hub URL] [--hub-key KEY]… [--trust-root KEY]… [--zk-params PARAMS] [--ohttp-key CONFIG]…
+//!      [--direct] COMMAND …
+//!
+//! Every request goes wrapped (Oblivious HTTP, spec 4.1) to the hub's pinned OHTTP key; `--direct` sends them as
+//! they are.
 //!
 //! One process owns a state directory at a time. While `yo listen` runs, the other commands go to it over the
 //! directory's control socket and run there, on its client; otherwise they open the directory themselves.
@@ -30,7 +34,9 @@ pub const UNAUTHORIZED: i32 = 5;
 const BUSY_WAIT: Duration = Duration::from_secs(30);
 
 pub const HELP: &str =
-    "usage: yo [--state DIR] [--hub URL] [--hub-key KEY]... [--trust-root KEY]... [--zk-params P] COMMAND
+    "usage: yo [--state DIR] [--hub URL] [--hub-key KEY]... [--trust-root KEY]... [--zk-params P]
+          [--ohttp-key CONFIG]... [--direct] COMMAND
+  (requests go over Oblivious HTTP to the hub's pinned OHTTP key; --direct: straight to the hub)
   register NAME [--no-bot] [--force]  register the account (once; again finishes an interrupted one) as a bot,
                                     which everyone who looks it up is told, for good; --no-bot: not; --force only to replace this directory's device when its state is lost
   whoami | status                   who this is; status adds counts and whether a listener runs
@@ -60,7 +66,8 @@ pub const HELP: &str =
   connect SERVICE CODE              connect a service with another one (its connect link's code)
   decline SERVICE CODE              or not: whoever waits is told
   probe [--timeout-ms N]            measure the round trip to PING
-environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated),
+environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, YO_OHTTP_KEYS (lists comma separated),
+  YO_SMALL_ENVELOPES=1 (seal Yos to the small first bucket; only once receivers take it),
   YO_RECOVERY_LOOKUPS (roster lookups a day for messages from replaced phones; default 10, a bot raises it)";
 
 /// A command that did not work: its exit code and why, for stderr as JSON.
