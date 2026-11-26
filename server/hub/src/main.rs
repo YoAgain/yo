@@ -10,7 +10,7 @@
 //!   YO_PLAY_INTEGRITY_DECRYPT_KEY, YO_PLAY_INTEGRITY_VERIFY_KEY, YO_PLAY_PACKAGE (see README)
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE, YO_ASSET_LINKS_FILE
-//!   YO_RESERVED_FILE      deprecated: accepted but ignored; names and switch live in the database.
+//!   YO_RESERVED_FILE      deprecated: accepted but ignored; names live in the database.
 //!   YO_BLOB_DIR           photos and videos (spec 4.3), one file each; default `blobs` beside YO_DB. Not for the
 //!                         database's backup: blobs are fleeting.
 //!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)

@@ -99,8 +99,7 @@ pub(crate) enum Event {
     PushFolded,
     /// A push folded into a later one by the backlog pacing (a device with more than `push_backlog` waiting).
     PushPaced,
-    /// An app's crash report (each report's `count`), per minute as the other events: the operator's crashes per hour
-    /// (`diagnostic_days` keeps days only).
+    /// An app's crash report (each report's `count`), per minute as the other events.
     Crash,
     /// An app's error report (each report's `count`), counted like `Crash`.
     Error,
@@ -172,8 +171,7 @@ pub struct Hub {
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
     /// The bytes of the deliveries waiting for the writer (`mail::QUEUED_BYTES` at most).
     pub(crate) queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
-    /// Events since the last flush, a count per kind only (1): into `events` (and `yo-in`, `yo-in-bot` also into
-    /// `deliveries_hourly`) once a minute.
+    /// Events since the last flush, a count per kind only (1): flushed to the minute buffer and hourly summaries.
     events: [AtomicU64; Event::KINDS.len()],
     /// The blobs each bot account (`Config::bots`, in its order) uploaded since the last flush: `bot-media:LABEL`.
     bot_media: Vec<AtomicU64>,
@@ -366,7 +364,7 @@ impl Hub {
             self.forget_pushes(std::time::Instant::now());
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
             let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;
-            // The levels, once an hour at its first minute: counts only (`levels`), the operator's page.
+            // The levels, once an hour at its first minute: counts only, the operator's page.
             let hour = now_ms() / 3_600_000;
             if sampled != Some(hour) {
                 match self.blocking(|hub| hub.db.sample_levels(now_ms(), false)).await {
@@ -432,7 +430,7 @@ impl Hub {
         self.config.bots.iter().position(|(_, id)| id == user)
     }
 
-    /// The events counted since the last flush into `events` at `now`'s minute; deliveries also into their hour.
+    /// The events counted since the last flush into the live strip's minute and the hourly summaries.
     pub fn flush_events(&self, now: u64) -> rusqlite::Result<()> {
         let bots: Vec<_> = self.config.bots.iter().map(|(label, _)| format!("bot-media:{label}")).collect();
         let counts: Vec<(&str, u64)> = Event::KINDS
@@ -647,11 +645,7 @@ mod tests {
                 ("POST", "/v1/admin/reserved", "[{\"name\":\"Support\",\"x\":1}]", StatusCode::BAD_REQUEST),
                 ("POST", "/v1/admin/reserved", "[{\"note\":\"role\"}]", StatusCode::BAD_REQUEST),
                 ("POST", "/v1/admin/reserved", "[1]", StatusCode::BAD_REQUEST),
-                ("PUT", "/v1/admin/reserved", "{\"enabled\":false}", StatusCode::OK),
-                ("PUT", "/v1/admin/reserved", "{\"enabled\":1}", StatusCode::BAD_REQUEST),
-                ("PUT", "/v1/admin/reserved", "{\"enabled\":true,\"extra\":1}", StatusCode::BAD_REQUEST),
                 ("DELETE", "/v1/admin/reserved/Adm1n", "", StatusCode::NO_CONTENT),
-                ("PUT", "/v1/admin/reserved", "{\"enabled\":true}", StatusCode::OK),
             ] {
                 for token in ["", "wrong", "test-token"] {
                     let request = Request::builder()
@@ -685,59 +679,15 @@ mod tests {
                         };
                         assert_eq!(value["notes"], notes);
                     }
-                    if enabled && token == "test-token" && method == "PUT" && body == "{\"enabled\":false}" {
-                        assert!(!hub.db.username_taken(b"ADMIN").unwrap());
-                        assert_eq!(hub.db.reserved_state().unwrap()["names"].as_array().unwrap().len(), 2);
-                    }
                 }
             }
             if enabled {
                 assert_eq!(
                     hub.db.reserved_state().unwrap(),
-                    serde_json::json!({"enabled":true,"names":["Support"],"notes":{"Support":"role"}}),
+                    serde_json::json!({"names":["Support"],"notes":{"Support":"role"}}),
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn admin_todos_require_a_token_and_validate_text() {
-        use axum::{
-            body::{to_bytes, Body},
-            http::Request,
-        };
-        use tower::ServiceExt;
-        let path = std::env::temp_dir().join(format!("yo-todo-{}-{}.sqlite", std::process::id(), now_ms()));
-        let mut config = Config { db_path: path.to_string_lossy().into(), ..Config::for_tests() };
-        for enabled in [false, true] {
-            config.admin_token = enabled.then(|| "test-token".into());
-            let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
-            for (token, body, expected) in [
-                ("", b"fix".to_vec(), StatusCode::NOT_FOUND),
-                ("wrong", b"fix".to_vec(), StatusCode::NOT_FOUND),
-                ("test-token", vec![], StatusCode::BAD_REQUEST),
-                ("test-token", vec![255], StatusCode::BAD_REQUEST),
-                ("test-token", vec![b'a'; 4001], StatusCode::BAD_REQUEST),
-                ("test-token", "fix 🎨".as_bytes().to_vec(), StatusCode::CREATED),
-                ("test-token", vec![b'a'; 4000], StatusCode::CREATED),
-                ("test-token", b"no limit: admin only".to_vec(), StatusCode::CREATED),
-            ] {
-                let mut request =
-                    Request::post("/v1/admin/todos").header("yo-admin-token", token).body(Body::from(body)).unwrap();
-                request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))));
-                let response = hub.router().oneshot(request).await.unwrap();
-                assert_eq!(response.status(), if enabled { expected } else { StatusCode::NOT_FOUND });
-                if response.status() == StatusCode::CREATED {
-                    let body = to_bytes(response.into_body(), 1024).await.unwrap();
-                    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
-                    let conn = rusqlite::Connection::open(&path).unwrap();
-                    let kind: String =
-                        conn.query_row("SELECT text FROM todos WHERE id = ?1", [id], |r| r.get(0)).unwrap();
-                    assert!(!kind.is_empty());
-                }
-            }
-        }
-        let _ = std::fs::remove_file(path);
     }
 
     /// Behind Cloudflare the admin routes answer only the server itself (the admin page, on loopback without
@@ -755,7 +705,7 @@ mod tests {
             (Some(SocketAddr::from(([192, 0, 2, 1], 9))), false, StatusCode::NOT_FOUND),
             (None, false, StatusCode::NOT_FOUND),
         ] {
-            for path in ["/v1/admin/todos", "/v1/admin/live"] {
+            for path in ["/v1/admin/messages", "/v1/admin/live"] {
                 let mut request = Request::get(path).header("yo-admin-token", "test-token");
                 if through_tunnel {
                     request = request.header("cf-connecting-ip", "192.0.2.7");
@@ -963,6 +913,27 @@ mod tests {
         assert_eq!((payload["domain"].as_str(), payload["code"].as_str()), (Some("push"), Some("500")));
         assert_eq!(payload["place"].as_str(), Some("APNs"));
         assert!(!rows[0]["payload"].as_str().unwrap().contains("a1b2c3"), "no token");
+    }
+
+    #[test]
+    fn deliveries_include_bots_and_keep_every_hour() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        hub.count(Event::YoIn, 2);
+        hub.flush_events(60_000).unwrap();
+        hub.count(Event::YoInBot, 3);
+        hub.flush_events(120_000).unwrap();
+        hub.count(Event::YoIn, 1);
+        hub.flush_events(30 * DAY_MS).unwrap();
+        let rows: Vec<(i64, i64)> = hub
+            .db
+            .conn()
+            .prepare("SELECT hour, value FROM stats WHERE metric='deliveries' AND key='' ORDER BY hour")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, [(0, 5), (30 * 24, 1)]);
     }
 
     #[test]

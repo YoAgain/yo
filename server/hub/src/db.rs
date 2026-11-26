@@ -6,8 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 // The in-file tests use these through `super::*`.
 #[cfg(test)]
 use schema::{
-    migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, DIAGNOSTIC_DAYS,
-    LEGACY_FEEDBACK, SCHEMA,
+    migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, LEGACY_FEEDBACK, SCHEMA,
 };
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use yoip::net::api;
@@ -25,8 +24,6 @@ pub fn to_the_hour(ms: u64) -> u64 {
 }
 /// How long a crash or error group is kept after it was last seen, and an install's occurrence of one (spec 4).
 const DIAGNOSTICS_KEPT_DAYS: u64 = 90;
-/// Levels (`levels`) are kept by the hour this long, then one a day for good.
-const LEVELS_HOURLY_DAYS: u64 = 30;
 /// A blob not ready this long after it was stored belongs to no upload under way: its file never came into place.
 const NOT_READY_KEPT_MS: u64 = 3600 * 1000;
 
@@ -359,11 +356,7 @@ fn username_of(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<S
 
 /// Whether a skeleton is reserved, in a transaction.
 fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> {
-    tx.prepare_cached(
-        "SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)
-         AND (SELECT value FROM settings WHERE key='reserved_enabled') = 1",
-    )?
-    .exists([skeleton])
+    tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
 }
 
 /// The network's own errors (domain, code), which are not the app's: a lost, timed-out or refused connection, a
@@ -447,25 +440,24 @@ fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, 
         params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string(), count, expected],
     )?;
     conn.execute(
-        "INSERT INTO diagnostic_days(day,kind,count) VALUES (?1,?2,?3)
-        ON CONFLICT(day,kind) DO UPDATE SET count=count+excluded.count",
-        params![now / 86_400_000, kind, count],
+        "INSERT INTO stats(metric, hour, value) VALUES ('diagnostics:' || ?2, ?1, ?3)
+         ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
+        params![now / HOUR_MS, kind, count],
     )?;
-    conn.execute("DELETE FROM diagnostic_days WHERE day < ?1", [now.saturating_sub(14 * 86_400_000) / 86_400_000])?;
     let (id, done_builds): (i64, Option<String>) = conn.query_row(
         "SELECT id, CASE WHEN done = 1 THEN coalesce(done_builds, '') END FROM diagnostics WHERE signature=?1",
         [&signature],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    // The builds it came in, and per hour (kept 8 days): "still reported" on the operator's page.
+    // The builds it came in, and reports per hour: "still reported" on the operator's page.
     conn.execute(
         "INSERT INTO diagnostic_builds(diagnostic_id, app, count, last_seen) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(diagnostic_id, app) DO UPDATE SET count = count + excluded.count, last_seen = excluded.last_seen",
         params![id, field("app"), count, now],
     )?;
     conn.execute(
-        "INSERT INTO diagnostic_hours(diagnostic_id, hour, count) VALUES (?1, ?2, ?3)
-         ON CONFLICT(diagnostic_id, hour) DO UPDATE SET count = count + excluded.count",
+        "INSERT INTO stats(metric, key, hour, value) VALUES ('diag', CAST(?1 AS TEXT), ?2, ?3)
+         ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
         params![id, (now / 3_600_000) as i64, count],
     )?;
     // Done, and now reported by a newer build than any it was marked done in: open again. Expected ones stay counts.
@@ -561,11 +553,9 @@ impl Db {
 
     // ---- reserved names (spec 2.2) ----
 
-    /// Stored names and the independent enforcement switch for the admin API.
+    /// Stored names and their notes for the admin API.
     pub fn reserved_state(&self) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
-        let enabled: bool =
-            conn.query_row("SELECT value FROM settings WHERE key='reserved_enabled'", [], |r| r.get(0))?;
         let mut stmt = conn.prepare("SELECT spelling, note FROM reserved ORDER BY skeleton")?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
@@ -573,11 +563,7 @@ impl Db {
         let notes: serde_json::Map<_, _> =
             rows.iter().filter_map(|(name, note)| Some((name.clone(), note.clone()?.into()))).collect();
         let names: Vec<_> = rows.into_iter().map(|(name, _)| name).collect();
-        Ok(serde_json::json!({"enabled": enabled, "names": names, "notes": notes}))
-    }
-
-    pub fn set_reserved_enabled(&self, enabled: bool) -> rusqlite::Result<()> {
-        self.run("UPDATE settings SET value=?1 WHERE key='reserved_enabled'", [enabled])
+        Ok(serde_json::json!({"names": names, "notes": notes}))
     }
 
     pub fn remove_reserved(&self, name: &str) -> rusqlite::Result<()> {
@@ -827,7 +813,7 @@ impl Db {
         self.conn()
             .prepare_cached(
                 "SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2
-                 UNION ALL SELECT 1 FROM reserved WHERE skeleton = CAST(?2 AS TEXT) AND (SELECT value FROM settings WHERE key='reserved_enabled') = 1",
+                 UNION ALL SELECT 1 FROM reserved WHERE skeleton = CAST(?2 AS TEXT)",
             )?
             .exists(params![KIND_USERNAME, skeleton])
     }
@@ -1037,16 +1023,13 @@ impl Db {
         Ok(serde_json::json!({"messages": rows}))
     }
 
-    /// Deliveries taken in the hour of `now` (`n` more); hours older than 8 days go.
+    /// Deliveries taken in the hour of `now` (`n` more).
     pub fn count_deliveries(&self, now: u64, n: u64) -> rusqlite::Result<()> {
-        let hour = (now / 3_600_000) as i64;
-        let conn = self.conn();
-        conn.prepare_cached(
-            "INSERT INTO deliveries_hourly (hour, n) VALUES (?1, ?2) ON CONFLICT(hour) DO UPDATE SET n = n + ?2",
-        )?
-        .execute(params![hour, n as i64])?;
-        conn.prepare_cached("DELETE FROM deliveries_hourly WHERE hour < ?1")?.execute([hour - 8 * 24])?;
-        Ok(())
+        self.run(
+            "INSERT INTO stats(metric, hour, value) VALUES ('deliveries', ?1, ?2)
+             ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
+            params![now / HOUR_MS, n],
+        )
     }
 
     /// One signed request (3.3) a sender sent, counted in its hour; kept 25 hours, for the operator's Users page
@@ -1066,18 +1049,25 @@ impl Db {
     /// Events counted in the minute of `now`, `(kind, n)`: counts only, nothing of who or what (1).
     pub fn count_events(&self, now: u64, counts: &[(&str, u64)]) -> rusqlite::Result<()> {
         let minute = (now / 60_000) as i64;
-        let conn = self.conn();
-        let mut add = conn.prepare_cached(
-            "INSERT INTO events (kind, minute, n) VALUES (?1, ?2, ?3)
-             ON CONFLICT(kind, minute) DO UPDATE SET n = n + ?3",
-        )?;
-        for (kind, n) in counts {
-            add.execute(params![kind, minute, *n as i64])?;
-        }
-        Ok(())
+        self.write(|tx| {
+            let mut add = tx.prepare_cached(
+                "INSERT INTO events (kind, minute, n) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(kind, minute) DO UPDATE SET n = n + excluded.n",
+            )?;
+            let mut hourly = tx.prepare_cached(
+                "INSERT INTO stats(metric, hour, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
+            )?;
+            for (kind, n) in counts {
+                add.execute(params![kind, minute, n])?;
+                hourly.execute(params![kind, minute / 60, n])?;
+            }
+            tx.execute("DELETE FROM events WHERE minute < ?1", [minute - 120])?;
+            Ok(())
+        })
     }
 
-    /// The levels at `now` into its hour (`levels`), counts only, nothing of who or what (1): the hourly sample
+    /// The levels at `now` into its hour, counts only, nothing of who or what (1): the hourly sample
     /// keeps an hour's first (a restart within the hour takes none); `problems_only` the open problems alone, right
     /// after one is marked done, replacing the hour's.
     pub fn sample_levels(&self, now: u64, problems_only: bool) -> rusqlite::Result<()> {
@@ -1101,9 +1091,9 @@ impl Db {
         let hour = (now / 3_600_000) as i64;
         self.write(|tx| {
             let mut put = tx.prepare_cached(if problems_only {
-                "INSERT OR REPLACE INTO levels (kind, hour, value) VALUES (?1, ?2, ?3)"
+                "INSERT OR REPLACE INTO stats (metric, hour, value) VALUES (?1, ?2, ?3)"
             } else {
-                "INSERT OR IGNORE INTO levels (kind, hour, value) VALUES (?1, ?2, ?3)"
+                "INSERT OR IGNORE INTO stats (metric, hour, value) VALUES (?1, ?2, ?3)"
             })?;
             for (kind, sql) in PROBLEMS.iter().chain(others) {
                 let mut query = tx.prepare_cached(sql)?;
@@ -1187,7 +1177,8 @@ impl Db {
             "SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,
             (SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id=d.id), done_builds, done_at,
             (SELECT json_group_array(json_array(app, count, last_seen)) FROM diagnostic_builds WHERE diagnostic_id=d.id),
-            (SELECT json_group_object(hour, count) FROM diagnostic_hours WHERE diagnostic_id=d.id)
+            (SELECT json_group_object(hour, value) FROM stats WHERE metric = 'diag' AND key = CAST(d.id AS TEXT)
+             AND hour >= unixepoch() / 3600 - 8 * 24)
             FROM diagnostics d ORDER BY last_seen DESC",
         )?;
         let json =
@@ -1222,34 +1213,6 @@ impl Db {
     /// A support message done (`Some(at)`) or open again.
     pub fn message_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
         self.one_changed("UPDATE support_messages SET done_at=?1 WHERE id=?2", params![done, id])
-    }
-
-    /// The team's to-dos (`todos`, schema 7), oldest first.
-    pub fn todos(&self) -> rusqlite::Result<serde_json::Value> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id,text,created_at,done_at FROM todos ORDER BY created_at,id")?;
-        let rows: Vec<_> = stmt
-            .query_map([], |r| {
-                Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"text":r.get::<_,String>(1)?,
-                    "created_at":r.get::<_,i64>(2)?,"done_at":r.get::<_,Option<i64>>(3)?}))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(serde_json::json!(rows))
-    }
-
-    pub fn todo_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
-        self.one_changed("UPDATE todos SET done_at=?1 WHERE id=?2", params![done, id])
-    }
-
-    pub fn todo_delete(&self, id: i64) -> rusqlite::Result<bool> {
-        self.one_changed("DELETE FROM todos WHERE id=?1", [id])
-    }
-
-    /// An operator's to-do, with no account attached.
-    pub fn todo(&self, text: &str, now: u64) -> rusqlite::Result<i64> {
-        let conn = self.conn();
-        conn.execute("INSERT INTO todos (text,created_at) VALUES (?1,?2)", params![text, now])?;
-        Ok(conn.last_insert_rowid())
     }
 
     // ---- storage (spec 4.3) ----
@@ -1680,16 +1643,6 @@ impl Db {
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
         conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
         conn.execute("DELETE FROM diagnostic_installs WHERE day < ?1", [(kept / DAY_MS) as i64])?;
-        conn.execute(
-            "DELETE FROM diagnostic_hours WHERE hour < ?1",
-            [(now.saturating_sub(8 * DAY_MS) / 3_600_000) as i64],
-        )?;
-        // Levels older than 30 days: the day's last alone (the one at the next midnight, UTC; spec 1).
-        conn.execute(
-            "DELETE FROM levels WHERE hour < ?1 AND EXISTS (SELECT 1 FROM levels l WHERE l.kind = levels.kind
-             AND l.hour > levels.hour AND l.hour <= ((levels.hour - 1) / 24 + 1) * 24)",
-            [(now.saturating_sub(LEVELS_HOURLY_DAYS * DAY_MS) / 3_600_000) as i64],
-        )?;
         Ok(messages)
     }
 
@@ -1818,14 +1771,6 @@ mod tests {
         assert_eq!(kinds, ["feedback", "crash", "todo"]);
         let db = Db::open(":memory:").unwrap();
         db.diagnostic("crash", &legacy_crash("trace", "1"), None, 7).unwrap();
-        let id = db.todo("fix", 8).unwrap();
-        let row: (String, u64, Option<u64>) = db
-            .conn()
-            .query_row("SELECT text,created_at,done_at FROM todos WHERE id=?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
-            .unwrap();
-        assert_eq!(row, ("fix".into(), 8, None));
         with_support(&conn, 0).unwrap();
         with_support(&conn, 0).unwrap();
         conn.execute("INSERT INTO support_messages(user_id,from_team,text,created_at) VALUES(X'',0,'new',4)", [])
@@ -1844,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn schemas_3_and_4_reach_9_without_losing_support_or_diagnostics() {
+    fn schemas_3_and_4_reach_10_without_losing_support_or_diagnostics() {
         for version in [3, 4] {
             let path = std::env::temp_dir().join(format!("yo-support-{version}-{}.sqlite", std::process::id()));
             let _ = std::fs::remove_file(&path);
@@ -1854,7 +1799,7 @@ mod tests {
                 conn.execute_batch(LEGACY_FEEDBACK).unwrap();
                 conn.execute_batch(
                     "DROP TABLE support_messages;
-                    DROP TABLE diagnostic_seen; DROP TABLE diagnostics; DROP TABLE diagnostic_days;
+                    DROP TABLE diagnostic_seen; DROP TABLE diagnostics;
                     INSERT INTO feedback(id,user_id,text,app_version,created_at,auto,type) VALUES
                     (10,zeroblob(16),'Help with notifications 🎨','ios/123',1700000000000,0,'feedback'),
                     (11,zeroblob(16),'ios/123 · 26 · iPhone\nSIGSEGV\nYo +0x10','ios/123',1700000001000,1,'crash'),
@@ -1864,18 +1809,16 @@ mod tests {
                 )
                 .unwrap();
                 if version == 4 {
-                    conn.execute_batch(DIAGNOSTIC_DAYS).unwrap();
                     migrate_diagnostics(&mut conn).unwrap();
                     conn.execute_batch("UPDATE diagnostics SET done=1;
                         CREATE TABLE diagnostic_seen(uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id));
-                        INSERT INTO diagnostic_seen SELECT '550e8400-e29b-41d4-a716-446655440000',id FROM diagnostics;
-                        DROP TABLE diagnostic_days;").unwrap();
+                        INSERT INTO diagnostic_seen SELECT '550e8400-e29b-41d4-a716-446655440000',id FROM diagnostics;").unwrap();
                 }
             }
             for _ in 0..2 {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let conn = db.conn();
-                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
+                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
                 let message: (String, String, i64) = conn
                     .query_row("SELECT text,app_version,created_at FROM support_messages WHERE id=10", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -1973,13 +1916,6 @@ mod tests {
         assert_eq!(db.support_thread(&phone).unwrap().messages.len(), 1000);
         let threads = db.support_threads().unwrap();
         assert_eq!(threads[0]["install"], "07".repeat(16));
-        let id = db.todo("task", 7).unwrap();
-        assert!(db.todo_done(id, Some(8)).unwrap());
-        assert_eq!(db.todos().unwrap()[0]["done_at"], 8);
-        assert!(db.todo_done(id, None).unwrap());
-        assert!(!db.todo_done(id + 1, None).unwrap());
-        assert!(db.todo_delete(id).unwrap() && !db.todo_delete(id).unwrap());
-        assert_eq!(db.todos().unwrap(), serde_json::json!([]));
     }
 
     #[test]
@@ -2127,15 +2063,17 @@ mod tests {
         assert_eq!(report("ios/201", 8), (false, serde_json::Value::Null), "a newer build: open again");
         db.diagnostic_done(1, true, 9).unwrap();
         assert!(!report("cli/1", 10).0, "a platform it was not seen on");
-        let hours = db.diagnostics().unwrap()[0]["hours"].clone();
-        assert_eq!(hours, serde_json::json!({"0": 8}), "reports per hour");
+        assert_eq!(db.diagnostics().unwrap()[0]["hours"], serde_json::json!({}), "old hours stay out of the list");
+        let hour = crate::now_ms() / HOUR_MS;
+        report("ios/201", hour * HOUR_MS);
+        assert_eq!(db.diagnostics().unwrap()[0]["hours"], serde_json::json!({(hour.to_string()): 1}));
         // Expected: a count, never an open problem, whatever the build.
         let expected = serde_json::json!({"domain":"e", "code":"1", "place":"p", "app":"ios/1", "os":"26", "model":"x",
             "severity":"expected"});
-        db.diagnostic("error", &expected, None, 11).unwrap();
+        db.diagnostic("error", &expected, None, hour * HOUR_MS + 1).unwrap();
         let mut newer = expected.clone();
         newer["app"] = serde_json::json!("ios/999");
-        db.diagnostic("error", &newer, None, 12).unwrap();
+        db.diagnostic("error", &newer, None, hour * HOUR_MS + 2).unwrap();
         assert_eq!(db.diagnostics().unwrap()[0]["done"], true);
     }
 
@@ -2184,7 +2122,7 @@ mod tests {
     fn diagnostics_count_installs_and_go_after_90_days_unseen() {
         let db = Db::open(":memory:").unwrap();
         let crash = serde_json::json!({"exception":"1/0/11", "frames":"Yo +0x1", "termination":"", "app":"ios/1", "os":"26", "model":"iPhone"});
-        let day = 20_000 * DAY_MS;
+        let day = 20_000 * DAY_MS + HOUR_MS;
         // The hub's own: no install.
         db.diagnostic("crash", &crash, None, day).unwrap();
         for (install, at) in [([1; 16], day), ([1; 16], day + 1), ([2; 16], day + 2), ([1; 16], day + DAY_MS)] {
@@ -2195,6 +2133,17 @@ mod tests {
         let left = |table: &str| -> i64 {
             db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
         };
+        let counts = |metric: &str| -> Vec<(i64, i64)> {
+            db.conn()
+                .prepare("SELECT hour, value FROM stats WHERE metric=?1 ORDER BY hour")
+                .unwrap()
+                .query_map([metric], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let h = (day / HOUR_MS) as i64;
+        assert_eq!(counts("diag"), [(h, 4), (h + 24, 1)]);
         assert_eq!(left("diagnostic_installs"), 3, "one row per install and day");
         db.prune(day + 90 * DAY_MS, DAY_MS).unwrap();
         assert_eq!((left("diagnostics"), left("diagnostic_installs")), (1, 3), "seen 90 days ago: kept");
@@ -2202,6 +2151,69 @@ mod tests {
         assert_eq!((left("diagnostics"), left("diagnostic_installs")), (1, 1), "an install's day 90 days ago goes");
         db.prune(day + 92 * DAY_MS, DAY_MS).unwrap();
         assert_eq!((left("diagnostics"), left("diagnostic_installs")), (0, 0));
+        assert!(counts("diag").is_empty());
+        assert_eq!(counts("diagnostics:crash"), [(h, 4), (h + 24, 1)]);
+    }
+
+    #[test]
+    fn schema_9_moves_counts_once_and_keeps_recent_minutes() {
+        let path = std::env::temp_dir().join(format!("yo-stats-{}-{}.sqlite", std::process::id(), crate::now_ms()));
+        let minute = (crate::now_ms() / 60_000) as i64;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA user_version=9;
+                 CREATE TABLE levels(kind TEXT, hour INTEGER, value INTEGER);
+                 INSERT INTO levels VALUES ('active-24h', 2, 7);
+                 CREATE TABLE deliveries_hourly(hour INTEGER, n INTEGER);
+                 INSERT INTO deliveries_hourly VALUES (3, 12);
+                 CREATE TABLE diagnostic_hours(diagnostic_id INTEGER, hour INTEGER, count INTEGER);
+                 INSERT INTO diagnostic_hours VALUES (42, 4, 9);
+                 CREATE TABLE diagnostic_days(day INTEGER, kind TEXT, count INTEGER);
+                 INSERT INTO diagnostic_days VALUES (5, 'error', 11);
+                 CREATE TABLE settings(key TEXT PRIMARY KEY, value INTEGER);
+                 INSERT INTO settings VALUES ('reserved_enabled', 0);
+                 CREATE TABLE events(kind TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(kind, minute)) WITHOUT ROWID;
+                 INSERT INTO events VALUES ('deliveries', 180, 2), ('deliveries', 199, 3);",
+            )
+            .unwrap();
+            conn.execute_batch(LEGACY_FEEDBACK).unwrap();
+            conn.execute("INSERT INTO events VALUES ('yo-in', ?1, 4)", [minute]).unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::open(path.to_str().unwrap()).unwrap();
+            let conn = db.conn();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+            let rows: Vec<(String, String, i64, i64)> = conn
+                .prepare("SELECT metric, key, hour, value FROM stats ORDER BY metric, key, hour")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let row = |metric: &str, key: &str, hour, value| (metric.to_owned(), key.to_owned(), hour, value);
+            assert_eq!(
+                rows,
+                [
+                    row("active-24h", "", 2, 7),
+                    row("deliveries", "", 3, 17),
+                    row("diag", "42", 4, 9),
+                    row("diagnostics:error", "", 120, 11),
+                    row("yo-in", "", minute / 60, 4),
+                ]
+            );
+            assert_eq!(
+                conn.query_row("SELECT count(*), min(minute) FROM events", [], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })
+                .unwrap(),
+                (1, minute)
+            );
+            assert!(!conn.prepare("SELECT 1 FROM sqlite_master WHERE name IN
+                ('levels','deliveries_hourly','diagnostic_hours','diagnostic_days','settings','feedback','feedback_by_user')")
+                .unwrap().exists([]).unwrap());
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2230,7 +2242,7 @@ mod tests {
         for _ in 0..2 {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
-            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
             let threads: Vec<(Vec<u8>, i64)> = conn
                 .prepare("SELECT install, count(*) FROM support_messages GROUP BY install ORDER BY min(id)")
                 .unwrap()
@@ -2308,17 +2320,9 @@ mod tests {
     }
 
     #[test]
-    fn reservation_switch_preserves_names_and_controls_all_claims() {
+    fn a_reserved_name_cannot_be_claimed() {
         let db = Db::open(":memory:").unwrap();
-        assert_eq!(db.reserved_state().unwrap()["enabled"], true);
         reserve(&db, &["Admin", "Support"]);
-        db.set_reserved_enabled(false).unwrap();
-        assert_eq!(db.reserved_state().unwrap()["names"].as_array().unwrap().len(), 2);
-        assert!(!db.username_taken(b"ADMIN").unwrap());
-        user(register(&db, b"Admin", 1, 1, 0));
-        assert!(db.username_taken(b"ADMIN").unwrap(), "a holder still takes the name while off");
-        assert!(matches!(db.delete_account(&[1; 16], 0).unwrap(), Write::Done(())));
-        db.set_reserved_enabled(true).unwrap();
         assert!(db.username_taken(b"ADMIN").unwrap());
         assert!(matches!(register(&db, b"Admin", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
         db.remove_reserved("Adm1n").unwrap();
@@ -2327,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn events_are_counts_per_kind_and_minute_kept_for_good() {
+    fn events_keep_two_hours_of_minutes_and_every_hour() {
         let db = Db::open(":memory:").unwrap();
         let minute = 60_000u64;
         db.count_events(10 * minute + 5, &[("yo-in", 2), ("media-in", 1)]).unwrap();
@@ -2353,8 +2357,15 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(columns, ["kind", "minute", "n"], "no identifier of anyone or anything");
-        db.prune(1000 * DAY_MS, DAY_MS).unwrap();
-        assert_eq!(rows(&db).len(), 3, "kept for good: counts of no one");
+        db.count_events(131 * minute, &[]).unwrap();
+        assert_eq!(rows(&db), [row("yo-out", 11, 4)]);
+        assert_eq!(
+            db.conn()
+                .query_row("SELECT value FROM stats WHERE metric='yo-in' AND key='' AND hour=0", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
     }
 
     /// When a device or an install was last heard from is kept to the hour (spec 1), never to the millisecond; the
@@ -2382,7 +2393,7 @@ mod tests {
         let level = |kind: &str| -> i64 {
             db.conn()
                 .query_row(
-                    "SELECT value FROM levels WHERE kind = ?1 AND hour = ?2",
+                    "SELECT value FROM stats WHERE key = '' AND metric = ?1 AND hour = ?2",
                     params![kind, (now / hour) as i64],
                     |r| r.get(0),
                 )
@@ -2394,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn levels_are_counts_per_hour_then_per_day_for_good() {
+    fn levels_keep_every_hour_for_good() {
         let db = Db::open(":memory:").unwrap();
         let hour = 3_600_000u64;
         let now = 1000 * DAY + 5 * hour + 30_000;
@@ -2418,7 +2429,7 @@ mod tests {
         drop(conn);
         let rows = |db: &Db| -> Vec<(String, i64, i64)> {
             db.conn()
-                .prepare("SELECT kind, hour, value FROM levels ORDER BY kind, hour")
+                .prepare("SELECT metric, hour, value FROM stats WHERE key = '' ORDER BY metric, hour")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .unwrap()
@@ -2456,13 +2467,13 @@ mod tests {
         assert_eq!(rows(&db).len(), 14);
         let columns: Vec<String> = db
             .conn()
-            .prepare("SELECT name FROM pragma_table_info('levels')")
+            .prepare("SELECT name FROM pragma_table_info('stats')")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(columns, ["kind", "hour", "value"], "no identifier of anyone or anything");
+        assert_eq!(columns, ["metric", "key", "hour", "value"]);
         // A bot's device (the CLI, YoGPT) is no active account: bob on the CLI leaves no one seen within 48 hours.
         db.conn()
             .execute("UPDATE devices SET app = 'cli/1' WHERE last_seen_at = ?1", [to_the_hour(now - hour) as i64])
@@ -2470,13 +2481,15 @@ mod tests {
         db.sample_levels(now + hour, false).unwrap();
         let bots: i64 = db
             .conn()
-            .query_row("SELECT value FROM levels WHERE kind = 'active-48h' AND hour = ?1", [h + 1], |r| r.get(0))
+            .query_row("SELECT value FROM stats WHERE key = '' AND metric = 'active-48h' AND hour = ?1", [h + 1], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(bots, 0);
         // Devices per build seen within 48 hours, the apps' alone: bob on the CLI is no build, an iOS device is.
         let build = |db: &Db, hour: i64| -> Vec<(String, i64)> {
             db.conn()
-                .prepare("SELECT kind, value FROM levels WHERE kind LIKE 'build:%' AND hour = ?1 ORDER BY kind")
+                .prepare("SELECT metric, value FROM stats WHERE key = '' AND metric LIKE 'build:%' AND hour = ?1 ORDER BY metric")
                 .unwrap()
                 .query_map([hour], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
@@ -2509,7 +2522,11 @@ mod tests {
         db.sample_levels(now + 3 * hour, false).unwrap();
         let level = |kind: &str| -> i64 {
             db.conn()
-                .query_row("SELECT value FROM levels WHERE kind = ?1 AND hour = ?2", params![kind, h + 3], |r| r.get(0))
+                .query_row(
+                    "SELECT value FROM stats WHERE key = '' AND metric = ?1 AND hour = ?2",
+                    params![kind, h + 3],
+                    |r| r.get(0),
+                )
                 .unwrap()
         };
         assert_eq!(
@@ -2517,23 +2534,9 @@ mod tests {
             (2, 1, 1)
         );
         assert_eq!((level("phones-24h:android"), level("problem-installs-24h:android")), (0, 0));
-        // 30 days of hours, then the day's last (the one at the next midnight) alone, kept for good.
-        db.conn().execute("DELETE FROM levels", []).unwrap();
-        let day0 = 900 * 24i64;
-        for hour in day0 + 1..=day0 + 24 * 3 {
-            db.conn().execute("INSERT INTO levels VALUES ('queue-envelopes', ?1, ?1)", [hour]).unwrap();
-        }
-        db.prune(now, DAY).unwrap();
-        let kept: Vec<i64> = rows(&db).iter().map(|r| r.1).collect();
-        assert_eq!(kept, [day0 + 24, day0 + 48, day0 + 72]);
+        let hourly = rows(&db);
         db.prune(now + 1000 * DAY, DAY).unwrap();
-        assert_eq!(rows(&db).len(), 3, "kept for good: counts of no one");
-        let recent = (now / hour) as i64;
-        for hour in recent - 30..=recent {
-            db.conn().execute("INSERT INTO levels VALUES ('active-24h', ?1, 1)", [hour]).unwrap();
-        }
-        db.prune(now, DAY).unwrap();
-        assert_eq!(rows(&db).len(), 3 + 31, "the last 30 days by the hour");
+        assert_eq!(rows(&db), hourly);
     }
 
     #[test]
@@ -2578,33 +2581,6 @@ mod tests {
         assert_eq!(db.reserved_state().unwrap()["names"], serde_json::json!(["Admin", "Open"]));
         assert_eq!(db.reserved_state().unwrap()["notes"], serde_json::json!({"Admin": "role"}));
         assert!(db.username_taken(yoip::net::handle::skeleton("open").as_bytes()).unwrap());
-    }
-
-    #[test]
-    fn reservation_migration_keeps_the_old_state_once_and_persists_switch() {
-        for populated in [false, true] {
-            let path = std::env::temp_dir().join(format!("yo-reserved-{}-{populated}.sqlite", std::process::id()));
-            let path = path.to_str().unwrap();
-            let _ = std::fs::remove_file(path);
-            {
-                let db = Db::open(path).unwrap();
-                if populated {
-                    reserve(&db, &["Admin"]);
-                }
-                db.conn().execute_batch("DROP TABLE settings").unwrap();
-            }
-            {
-                let db = Db::open(path).unwrap();
-                assert_eq!(db.reserved_state().unwrap()["enabled"], populated);
-                db.set_reserved_enabled(!populated).unwrap();
-            }
-            {
-                let db = Db::open(path).unwrap();
-                assert_eq!(db.reserved_state().unwrap()["enabled"], !populated);
-                assert_eq!(db.reserved_state().unwrap()["names"].as_array().unwrap().len(), usize::from(populated));
-            }
-            std::fs::remove_file(path).unwrap();
-        }
     }
 
     #[test]
@@ -3295,7 +3271,7 @@ mod tests {
         for _ in 0..2 {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
-            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
             assert!(!conn
                 .prepare("SELECT 1 FROM sqlite_master WHERE name LIKE 'feedback%'")
                 .unwrap()

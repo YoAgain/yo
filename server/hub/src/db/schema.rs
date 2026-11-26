@@ -1,4 +1,4 @@
-//! The store's schema (`SCHEMA`, schema 9) and the way every older database a hub has written comes up to it.
+//! The store's schema (`SCHEMA`, schema 10) and the way every older database a hub has written comes up to it.
 //! A database of another schema is refused, never half migrated.
 
 use super::{diagnostic_signature, diagnostic_write, immediate, legacy_crash, newest_builds};
@@ -7,7 +7,6 @@ use yoip::KEY_LEN;
 
 /// Brings the database to this schema: each step does nothing where it was done before.
 pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
-    let existing = conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table'")?.exists([])?;
     check_version(conn)?;
     if user_version(conn)? == 1 {
         from_1(conn)?;
@@ -24,6 +23,9 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
                 UPDATE blobs SET gets_left = max(3, 3 * (fetches_left + fetching));",
             )
         })?;
+    }
+    if !has_column(conn, "reserved", "note")? {
+        conn.execute_batch("ALTER TABLE reserved ADD COLUMN note TEXT")?;
     }
     if !has_column(conn, "devices", "version")? {
         conn.execute_batch("ALTER TABLE devices ADD COLUMN version TEXT")?;
@@ -43,24 +45,22 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
             reason TEXT, level TEXT, at_ms INTEGER NOT NULL
         ) WITHOUT ROWID;",
     )?;
-    // Initialize once: fresh hubs enforce reservations; existing hubs retain their old effective state.
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO settings(key,value) VALUES ('reserved_enabled', ?1)",
-        [!existing || conn.prepare("SELECT 1 FROM reserved")?.exists([])?],
-    )?;
     // The feedback table of schemas 3 to 7 is there until schema 8 (`without_feedback`) moves its rows and drops it.
-    let legacy_max: i64 = if user_version(conn)? < SCHEMA_VERSION {
+    let legacy_max: i64 = if user_version(conn)? < 8 {
         conn.execute_batch(LEGACY_FEEDBACK)?;
         with_auto_feedback(conn)?;
         with_feedback_type(conn)?;
         conn.query_row("SELECT coalesce(max(id),0) FROM feedback", [], |r| r.get(0))?
     } else {
+        conn.execute_batch(DIAGNOSTICS)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, install BLOB NOT NULL,
+                from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL,
+                created_at INTEGER NOT NULL, read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);",
+        )?;
         0
     };
-    conn.execute_batch(DIAGNOSTIC_DAYS)?;
     conn.execute_batch(DIAGNOSTIC_BUILDS)?;
     migrate_diagnostics(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
@@ -68,12 +68,19 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "diagnostic_installs", "at")? {
         conn.execute_batch("ALTER TABLE diagnostic_installs ADD COLUMN at INTEGER")?;
     }
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS diagnostic_stats_deleted AFTER DELETE ON diagnostics BEGIN
+             DELETE FROM stats WHERE metric = 'diag' AND key = CAST(OLD.id AS TEXT);
+         END;",
+    )?;
     problems_without_builds(conn)?;
     with_support(conn, legacy_max)?;
     with_support_done(conn)?;
     with_todos(conn)?;
     without_feedback(conn)?;
     with_installs(conn)?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS support_by_install ON support_messages(install, created_at, id)")?;
+    with_stats(conn)?;
     skeletons_of_today(conn)
 }
 
@@ -100,7 +107,7 @@ fn skeletons_of_today(conn: &mut Connection) -> rusqlite::Result<()> {
 }
 
 /// The schema this hub writes; another is refused, never half migrated (1 and 2 are brought up: `from_1`, `from_2`).
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -205,33 +212,25 @@ CREATE TABLE IF NOT EXISTS request_hours (
     n INTEGER NOT NULL,
     PRIMARY KEY (user_id, hour)
 ) WITHOUT ROWID;
--- Deliveries the hub took, per hour: a count, nothing of who or to whom (6.6); kept 8 days, for the operator's page.
-CREATE TABLE IF NOT EXISTS deliveries_hourly (
-    hour INTEGER PRIMARY KEY,
-    n INTEGER NOT NULL
-);
+-- The hub's hourly summaries, counts only, nothing of who (spec 1/6.6).
+-- One row per metric, key and hour (hours since the epoch), kept for good, never pruned or folded.
+CREATE TABLE IF NOT EXISTS stats (
+    metric TEXT NOT NULL,
+    key TEXT NOT NULL DEFAULT '',
+    hour INTEGER NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (metric, key, hour)
+) WITHOUT ROWID;
 -- Events per minute (minutes since the epoch), a count of each kind and nothing else: no user, device, envelope,
 -- blob or group (6.6). `yo-in` a Yo accepted into an inbox, `yo-out` one a device fetched and acknowledged,
 -- `media-in` a blob uploaded (`media-in-bytes` its bytes), `media-out` a blob fetched, `group-create` a group made;
 -- `yo-in-bot`, `latency-*`, `push-ok`/`push-fail`, `push-folded`/`push-paced`, `http`/`http-4xx`/`http-429`/`http-5xx`, `account-gone` (spec 4.1).
--- Statistics of no one: kept for good, for the operator's page.
+-- The last 2 hours per minute for the live strip; the hours go to stats.
 CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     minute INTEGER NOT NULL,
     n INTEGER NOT NULL,
     PRIMARY KEY (kind, minute)
-) WITHOUT ROWID;
--- Levels sampled once an hour (hours since the epoch, at the hour's start; the open problems also right after one is
--- marked done), a count of each kind and nothing else: `open-errors`/`open-crashes` the reports of the error and
--- crash groups not done (their counts summed), `queue-envelopes` the envelopes waiting, `queue-media-bytes` the bytes
--- of the blobs waiting, `active-24h`/`active-48h`/`active-30d` the users seen in the last 24 hours / 48 hours / 30 days, `build:<app>` the
--- devices per app build seen in the last 24 hours (bots and the CLI left out), `phones-24h` the phones (iOS, Android) seen in the last 24 hours and `problem-installs-24h` the distinct phone installs with an error or crash report in them. Every hour for 30
--- days, then the day's last (taken at the next midnight, UTC) kept for good, for the operator's page.
-CREATE TABLE IF NOT EXISTS levels (
-    kind TEXT NOT NULL,
-    hour INTEGER NOT NULL,
-    value INTEGER NOT NULL,
-    PRIMARY KEY (kind, hour)
 ) WITHOUT ROWID;
 -- Each user's access key as a check, never the key (spec 3.3): a delivery that shows it is a contact's; else it
 -- is a request, signed by its sender (`requests_open` is kept, unused: the switch is the device's). Gone with the
@@ -327,13 +326,10 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 );
 CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
 
-// A problem's builds (its reports per build, the last when) and its reports per hour (kept 8 days), spec 4.
+// A problem's builds (its reports per build, the last when), spec 4.
 pub(super) const DIAGNOSTIC_BUILDS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_builds (
     diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, app TEXT NOT NULL,
-    count INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, app)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS diagnostic_hours (
-    diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, hour INTEGER NOT NULL,
-    count INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, hour)) WITHOUT ROWID;";
+    count INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, app)) WITHOUT ROWID;";
 
 // Which install sent a crash or error group on which day (days since the epoch, UTC), so the operator counts
 // installs, not reports (`at` the last report of that day, to the hour; none on rows from before it); none for the hub's own. Kept 90 days, and gone with its group (spec 4).
@@ -342,19 +338,14 @@ pub(super) const DIAGNOSTIC_INSTALLS: &str = "CREATE TABLE IF NOT EXISTS diagnos
     day INTEGER NOT NULL, at INTEGER, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS diagnostic_installs_by_day ON diagnostic_installs(day);";
 
-// Daily counts start with schema 5: none are made up from schema 4's first/last aggregates.
-pub(super) const DIAGNOSTIC_DAYS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_days (
-    day INTEGER NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL,
-    PRIMARY KEY(day,kind)) WITHOUT ROWID;";
-
 fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let version = user_version(conn)?;
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => Ok(()),
-        // A new database is made by the same steps as one of schema 3.
-        0 if tables == 0 => conn.execute_batch("PRAGMA user_version = 3"),
+        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => Ok(()),
+        // An empty database needs none of the legacy tables.
+        0 if tables == 0 => conn.pragma_update(None, "user_version", SCHEMA_VERSION),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
         ))),
@@ -517,6 +508,14 @@ fn problems_without_builds(conn: &mut Connection) -> rusqlite::Result<()> {
                  ON CONFLICT(diagnostic_id, install, day) DO UPDATE SET at = coalesce(max(at, excluded.at), at, excluded.at)",
                 params![into, id],
             )?;
+            if has_table(tx, "diagnostic_hours")? {
+                tx.execute(
+                    "INSERT INTO diagnostic_hours(diagnostic_id, hour, count)
+                         SELECT ?1, hour, count FROM diagnostic_hours WHERE diagnostic_id = ?2
+                     ON CONFLICT(diagnostic_id, hour) DO UPDATE SET count = count + excluded.count",
+                    params![into, id],
+                )?;
+            }
             tx.execute("UPDATE diagnostic_seen SET diagnostic_id = ?1 WHERE diagnostic_id = ?2", params![into, id])?;
             tx.execute("DELETE FROM diagnostics WHERE id = ?1", [id])?;
         }
@@ -642,6 +641,9 @@ pub(super) fn without_feedback(conn: &mut Connection) -> rusqlite::Result<()> {
 /// no phone holds such an id, so those threads are the operator's to read only.
 pub(super) fn with_installs(conn: &mut Connection) -> rusqlite::Result<()> {
     immediate(conn, |tx| {
+        if user_version(tx)? >= 9 {
+            return Ok(());
+        }
         for (table, column, index) in
             [("support_messages", "user_id", "support_by_user"), ("reports", "reporter_id", "")]
         {
@@ -659,12 +661,41 @@ pub(super) fn with_installs(conn: &mut Connection) -> rusqlite::Result<()> {
                 tx.execute_batch(&format!("DROP INDEX IF EXISTS {index};"))?;
             }
         }
-        if has_table(tx, "support_messages")? {
-            tx.execute_batch(
-                "CREATE INDEX IF NOT EXISTS support_by_install ON support_messages(install, created_at, id);",
-            )?;
-        }
         tx.execute_batch("PRAGMA user_version=9;")
+    })
+}
+
+/// Schema 10: keep every hour and leave only the live strip's minutes.
+fn with_stats(conn: &mut Connection) -> rusqlite::Result<()> {
+    immediate(conn, |tx| {
+        if user_version(tx)? >= 10 {
+            return Ok(());
+        }
+        for (table, rows) in [
+            ("levels", "SELECT kind, '', hour, value FROM levels"),
+            ("deliveries_hourly", "SELECT 'deliveries', '', hour, n FROM deliveries_hourly"),
+            ("diagnostic_hours", "SELECT 'diag', CAST(diagnostic_id AS TEXT), hour, count FROM diagnostic_hours"),
+            ("diagnostic_days", "SELECT 'diagnostics:' || kind, '', day * 24, count FROM diagnostic_days"),
+            ("events", "SELECT kind, '', minute / 60, sum(n) FROM events GROUP BY kind, minute / 60"),
+        ] {
+            if has_table(tx, table)? {
+                tx.execute_batch(&format!(
+                    "INSERT INTO stats(metric, key, hour, value) SELECT * FROM ({rows}) WHERE true
+                     ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value;"
+                ))?;
+            }
+        }
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS levels;
+             DROP TABLE IF EXISTS deliveries_hourly;
+             DROP TABLE IF EXISTS diagnostic_hours;
+             DROP TABLE IF EXISTS diagnostic_days;
+             DROP INDEX IF EXISTS feedback_by_user;
+             DROP TABLE IF EXISTS feedback;
+             DROP TABLE IF EXISTS settings;
+             DELETE FROM events WHERE minute < unixepoch() / 60 - 120;
+             PRAGMA user_version=10;",
+        )
     })
 }
 

@@ -1,4 +1,4 @@
-//! The operator's routes behind `Yo-Admin-Token` (README.md, Routes): support threads, the to-dos, diagnostics, reserved
+//! The operator's routes behind `Yo-Admin-Token` (README.md, Routes): support threads, diagnostics, reserved
 //! names, deleting a user, the live strip's stream of Yos. Missing, disabled and incorrect credentials all answer `404`;
 //! behind Cloudflare (`YO_TRUST_CLOUDFLARE`) so does every request but the server's own (`Hub::own_service`).
 
@@ -27,10 +27,8 @@ pub(crate) fn routes(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
         .route("/v1/admin/messages/{install}", get(get_thread).post(post_reply))
         .route("/v1/admin/messages/{install}/handled", post(post_handled))
         .route("/v1/admin/messages/done/{id}", post(post_message_done))
-        .route("/v1/admin/todos", get(get_todos).post(post_todo))
-        .route("/v1/admin/todos/{id}", post(post_todo_done).delete(delete_todo))
         .route("/v1/admin/diagnostics", get(get_diagnostics).put(put_diagnostics))
-        .route("/v1/admin/reserved", get(get_reserved).post(post_reserved).put(put_reserved))
+        .route("/v1/admin/reserved", get(get_reserved).post(post_reserved))
         .route("/v1/admin/reserved/{name}", delete(delete_reserved))
         .route_layer(axum::middleware::from_fn_with_state(hub.clone(), admin_only))
 }
@@ -78,7 +76,8 @@ fn json_body(body: &[u8]) -> Res<Value> {
 }
 
 async fn delete_user(State(hub): Hubs, Path(user): Path<String>) -> Res<StatusCode> {
-    let blobs = hub.db.admin_delete_user(&user_id(&user)?, now_ms())?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let user = user_id(&user)?;
+    let blobs = hub.db.admin_delete_user(&user, now_ms())?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     hub.count(crate::Event::AccountGone, 1);
     for blob in &blobs {
         hub.blobs.remove(blob);
@@ -86,7 +85,7 @@ async fn delete_user(State(hub): Hubs, Path(user): Path<String>) -> Res<StatusCo
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---- support threads and to-dos ----
+// ---- support threads ----
 
 async fn get_threads(State(hub): Hubs) -> Res<Json<Value>> {
     Ok(Json(hub.db.support_threads()?))
@@ -94,7 +93,8 @@ async fn get_threads(State(hub): Hubs) -> Res<Json<Value>> {
 
 /// One install's thread.
 async fn get_thread(State(hub): Hubs, Path(id): Path<String>) -> Res<Json<Value>> {
-    Ok(Json(hub.db.admin_support_thread(&install(&id)?)?))
+    let id = install(&id)?;
+    Ok(Json(hub.db.admin_support_thread(&id)?))
 }
 
 async fn post_reply(State(hub): Hubs, Path(id): Path<String>, body: Bytes) -> Res<StatusCode> {
@@ -115,7 +115,8 @@ async fn post_handled(State(hub): Hubs, Path(id): Path<String>, body: Bytes) -> 
     if through > i64::MAX as u64 {
         return Err(bad());
     }
-    hub.db.support_read(&install(&id)?, false, through, now_ms())?;
+    let id = install(&id)?;
+    hub.db.support_read(&id, false, through, now_ms())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -138,30 +139,6 @@ fn found(changed: bool) -> Res<StatusCode> {
 /// A support message done ("1") or open again ("0").
 async fn post_message_done(State(hub): Hubs, Path(id): Path<i64>, body: Bytes) -> Res<StatusCode> {
     found(hub.db.message_done(id, done_body(&body)?)?)
-}
-
-/// The team's to-dos (`todos`): `[{id, text, created_at, done_at}]`, oldest first.
-async fn get_todos(State(hub): Hubs) -> Res<Json<Value>> {
-    Ok(Json(hub.db.todos()?))
-}
-
-/// A to-do done ("1") or open again ("0").
-async fn post_todo_done(State(hub): Hubs, Path(id): Path<i64>, body: Bytes) -> Res<StatusCode> {
-    found(hub.db.todo_done(id, done_body(&body)?)?)
-}
-
-async fn delete_todo(State(hub): Hubs, Path(id): Path<i64>) -> Res<StatusCode> {
-    found(hub.db.todo_delete(id)?)
-}
-
-/// A to-do, plain UTF-8 text: `201 {"id"}`.
-async fn post_todo(State(hub): Hubs, body: Bytes) -> Res<(StatusCode, Json<Value>)> {
-    if body.is_empty() || body.len() > 4000 {
-        return Err(bad());
-    }
-    let text = std::str::from_utf8(&body).map_err(|_| bad())?;
-    let id = hub.db.todo(text, now_ms())?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }
 
 // ---- the live strip ----
@@ -211,14 +188,14 @@ async fn put_diagnostics(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {
     let id = change["id"].as_i64().filter(|id| *id > 0).ok_or_else(bad)?;
     let done = change["done"].as_bool().ok_or_else(bad)?;
     hub.db.diagnostic_done(id, done, now_ms())?;
-    // The open problems right after the change, for the operator's history (`levels`).
+    // The open problems right after the change, for the operator's history.
     hub.db.sample_levels(now_ms(), true)?;
     get_diagnostics(State(hub)).await
 }
 
 // ---- reserved names (spec 2.2) ----
 
-/// The names, the switch, and the rules they are compared by.
+/// The names and the rules they are compared by.
 async fn get_reserved(State(hub): Hubs) -> Res<Json<Value>> {
     let mut state = hub.db.reserved_state()?;
     state["name_min"] = json!(hub.config.name_min);
@@ -266,15 +243,6 @@ async fn post_reserved(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {
 
 /// The longest reason kept with a reserved name, in characters.
 const RESERVED_NOTE_MAX: usize = 200;
-
-/// `{"enabled": bool}`: the switch.
-async fn put_reserved(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {
-    let switch = json_body(&body)?;
-    let fields = switch.as_object().filter(|fields| fields.len() == 1).ok_or_else(bad)?;
-    let enabled = fields.get("enabled").and_then(Value::as_bool).ok_or_else(bad)?;
-    hub.db.set_reserved_enabled(enabled)?;
-    get_reserved(State(hub)).await
-}
 
 async fn delete_reserved(State(hub): Hubs, Path(name): Path<String>) -> Res<StatusCode> {
     hub.db.remove_reserved(&name)?;
