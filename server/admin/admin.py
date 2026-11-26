@@ -7,6 +7,8 @@ import base64
 import gzip
 import hashlib
 import hmac
+import http.client
+import io
 import json
 import os
 import re
@@ -18,7 +20,7 @@ import urllib.request
 import urllib.error
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 LISTEN = (os.environ.get("ADMIN_LISTEN", "localhost"), int(os.environ.get("ADMIN_PORT", "8081")))
 USER = os.environ["ADMIN_USER"]
@@ -158,59 +160,64 @@ REQUEST_FILE = os.environ.get("ADMIN_REQUEST_FILE", "/run/yo-admin-request/want"
 
 
 class CollectorRequest:
-    """Coalesce concurrent page requests; wait for an atomically published snapshot."""
+    """Serve the current snapshot; after a change wait for the collector to publish again."""
     def __init__(self, request_file, users_file):
         self.request_file = request_file
         self.users_file = users_file
-        self.lock = threading.Lock()
-        self.last_at = None
-        self.request_ns = None
 
-    def request(self, force=False):
-        with self.lock:
-            now = time.monotonic()
-            if force or self.last_at is None or now - self.last_at >= 5:
-                with open(self.request_file, "ab"):
-                    os.utime(self.request_file, None)
-                self.request_ns = os.stat(self.request_file).st_mtime_ns
-                self.last_at = now
-            return self.request_ns
+    def want_dev(self):
+        marker = os.path.join(os.path.dirname(self.request_file), "want-dev")
+        with open(marker, "ab"):
+            os.utime(marker, None)
 
     def snapshot(self, timeout=3, after=None):
-        try:
-            requested = self.request(force=after is not None)
-        except OSError:
-            requested = None
+        requested = None
+        if after is not None:
+            try:
+                with open(self.request_file, "ab") as f:
+                    os.utime(f.fileno(), None)
+                    requested = os.fstat(f.fileno()).st_mtime_ns
+            except OSError:
+                pass
         deadline = time.monotonic() + timeout
         while True:
-            data = {}
-            fresh = False
             try:
-                # Read and stat the same inode even if the collector replaces the path.
-                with open(self.users_file) as f:
-                    data = json.load(f)
-                    fresh = requested is not None and os.fstat(f.fileno()).st_mtime_ns > requested
+                result, published = users_body(self.users_file)
+                fresh = after is None or (requested is not None and published > requested and result[2] >= after)
             except (OSError, ValueError):
-                pass
-            if after is not None and data.get("at", 0) < after:
-                fresh = False
-            if fresh or time.monotonic() >= deadline:
-                return {**data, "stale": not fresh}
-            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                result, fresh = EMPTY_USERS, False
+            if fresh or requested is None or time.monotonic() >= deadline:
+                return result, not fresh
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
 
 
 collector = CollectorRequest(REQUEST_FILE, USERS_FILE)
+_users_lock = threading.Lock()
+_users_key = _users_result = None
+EMPTY_USERS = (b'{"stale":true}', '"missing"', 0, gzip.compress(b'{"stale":true}', mtime=0))
 
 
-def users_body(snapshot: dict) -> tuple[bytes, str, int]:
-    """/users.json: its bytes, its ETag and its time. The ETag leaves out the collector's clock ("at", "updates.at",
-    new on every run) so it changes only with the data; the page takes the time from the Yo-At header on a 304."""
-    at = snapshot.get("at", 0) if isinstance(snapshot.get("at"), int) else 0
-    body = json.dumps(snapshot, separators=(",", ":")).encode()
-    upd = snapshot.get("updates")
-    same = {**snapshot, "at": 0, "updates": {**upd, "at": 0} if isinstance(upd, dict) else upd}
-    tag = '"' + hashlib.sha256(json.dumps(same, separators=(",", ":"), sort_keys=True).encode()).hexdigest()[:32] + '"'
-    return body, tag, at
+def users_body(path):
+    """Read, enrich and compress the snapshot once for every atomic publication."""
+    global _users_key, _users_result
+    with _users_lock, open(path, "rb") as f:
+        stamp = os.fstat(f.fileno())
+        key = (stamp.st_ino, stamp.st_mtime_ns)
+        if key != _users_key:
+            snapshot = json.load(f)
+            if not isinstance(snapshot, dict):
+                raise ValueError("Invalid collector snapshot")
+            snapshot = version_days(snapshot)
+            at = snapshot.get("at", 0)
+            body = json.dumps(snapshot, separators=(",", ":")).encode()
+            tag = snapshot.get("tag")
+            if not tag:  # older collector: leave its two clocks out of the ETag
+                upd = snapshot.get("updates")
+                same = {**snapshot, "at": 0, "updates": {**upd, "at": 0} if isinstance(upd, dict) else upd}
+                tag = hashlib.sha256(json.dumps(same, separators=(",", ":"), sort_keys=True).encode()).hexdigest()[:32]
+            _users_result = (body, '"' + tag + '"', at, gzip.compress(body, 6, mtime=0))
+            _users_key = key
+        return _users_result, stamp.st_mtime_ns
 
 
 def gzip_ok(accept: str) -> bool:
@@ -221,19 +228,7 @@ def gzip_ok(accept: str) -> bool:
     return False
 
 
-_gzip = {"key": None, "body": b""}
-_gzip_lock = threading.Lock()
-
-
-def users_gzip(body: bytes) -> bytes:
-    """The body gzipped, the last one kept: the 2.8 MB list is compressed once per collector run, not per request."""
-    key = hashlib.sha256(body).digest()
-    with _gzip_lock:
-        if _gzip["key"] != key:
-            _gzip.update(key=key, body=gzip.compress(body, 6, mtime=0))
-        return _gzip["body"]
-
-# Which feedback is done; To-Dos use the hubs' real feedback ids.
+# Which feedback is done.
 DONE_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/feedback-done.json"
 _done_lock = threading.Lock()
 
@@ -255,7 +250,7 @@ def done_set(key: str, done: bool) -> None:
         os.replace(tmp, DONE_FILE)
 
 
-# The active users, queue and open problems over time come from the hub's own `levels` (users.py), not from here.
+# The active users, queue and open problems over time come from the hub's hourly stats (users.py), not from here.
 
 
 # App versions per UTC day for the Versions row: the collector's "versions_day" (of the devices seen today: current,
@@ -279,6 +274,8 @@ def version_days(snapshot: dict, now_ms=None) -> dict:
             history = {}
         changed = False
         for hub in ("live", "dev"):
+            if hub == "dev" and snapshot.get("dev_at", snapshot.get("at")) != snapshot.get("at"):
+                continue
             days = history.get(hub) if isinstance(history.get(hub), dict) else {}
             day = (snapshot.get(hub) or {}).get("versions_day") if isinstance(snapshot.get(hub), dict) else None
             if isinstance(day, dict) and str(snapshot.get("at", 0) // 86400000) == today:
@@ -336,25 +333,48 @@ def version_days(snapshot: dict, now_ms=None) -> dict:
     return out
 
 
+_hub_clients = threading.local()
+
+
+def hub_call(request):
+    """One connection per hub on this thread. Discard a broken socket before using the hub again."""
+    url = urlsplit(request.full_url)
+    base = request.full_url.rpartition("/v1/admin/")[0]
+    if not hasattr(_hub_clients, "connections"):
+        _hub_clients.connections = {}
+    clients = _hub_clients.connections
+    for attempt in range(2):
+        if base not in clients:
+            cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+            clients[base] = cls(url.hostname, url.port, timeout=5)
+        conn = clients[base]
+        body = io.BytesIO(request.data) if request.data is not None else None
+        headers = dict(request.header_items())
+        if body is not None:
+            headers["Content-Length"] = str(len(request.data))
+        try:
+            conn.request(request.get_method(), request.selector, body, headers)
+            response = conn.getresponse()
+            payload = response.read()
+        except (OSError, http.client.HTTPException) as error:
+            clients.pop(base).close()
+            # A lost answer to a POST may already have added a reply.
+            if attempt or (request.get_method() == "POST" and body is not None and body.tell()):
+                raise OSError(str(error)) from error
+            continue
+        if response.status >= 400:
+            raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, None)
+        return payload
+
+
 def support_request(hub, suffix="", body=None, method=None):
     if not ADMIN_TOKEN:
         raise ValueError("YO_ADMIN_TOKEN is not configured")
     request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/" + suffix,
         data=None if body is None else body.encode("utf-8"), method=method,
         headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "text/plain; charset=utf-8"})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        payload = response.read()
-        return json.loads(payload) if payload else {}
-
-
-def todo_add(hub: str, text: str) -> dict:
-    if not ADMIN_TOKEN:
-        raise ValueError("YO_ADMIN_TOKEN is not configured")
-    request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/todos",
-                                     data=text.encode("utf-8"), method="POST",
-                                     headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "text/plain; charset=utf-8"})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.load(response)
+    payload = hub_call(request)
+    return json.loads(payload) if payload else {}
 
 
 # The pictures YoGPT can send (NNN.jpg) and their README.md table (| NNN.jpg | idea |), read only.
@@ -433,16 +453,15 @@ def reserved_request(hub, method="GET", data=None, name=None):
     request = urllib.request.Request(url, method=method,
         data=None if data is None else json.dumps(data).encode(),
         headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.load(response) if method != "DELETE" else {}
+    payload = hub_call(request)
+    return json.loads(payload) if method != "DELETE" else {}
 
 
 def diagnostics_request(hub, data):
     request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/diagnostics",
         method="PUT", data=json.dumps(data).encode(),
         headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.load(response)
+    return json.loads(hub_call(request))
 
 
 # The header's live strip (GET /live?hub=): the hub's stream of Yos (Server-Sent Events, one tiny event per Yo, counts
@@ -469,10 +488,6 @@ def live_relay(source, write) -> None:
     """Every line from the hub to the page at once, until either side goes."""
     for line in iter(source.readline, b""):
         write(LIVE_PING if line.startswith(b":") else line)
-
-
-def reserved_names() -> dict:
-    return {hub: section("reserved " + hub, lambda hub=hub: reserved_request(hub)) for hub in ("live", "dev")}
 
 
 def section(name: str, fn):
@@ -645,7 +660,6 @@ def stats_now() -> dict:
         "tunnel": section("tunnel", lambda: unit(os.environ.get("ADMIN_TUNNEL_UNIT", "cloudflared.service"))),
         "yogpt": section("yogpt", lambda: unit(os.environ.get("YOGPT_UNIT", "yo-yogpt.service"))),
         "failed_units": section("failed_units", failed_unit_count),
-        "reserved": section("reserved", reserved_names),
     }
 
 
@@ -670,6 +684,7 @@ def page(name: str) -> bytes:
 
 
 class Admin(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     server_version = "yo-admin"
     sys_version = ""
 
@@ -677,11 +692,16 @@ class Admin(BaseHTTPRequestHandler):
         print(f"{self.command} {self.path.split('?')[0]} {args[1] if len(args) > 1 else ''}", flush=True)
 
     def send(self, status: int, body: bytes = b"", ctype: str = "text/html; charset=utf-8", extra=None):
+        # A rejected POST may still have an unread request body on this connection.
+        if self.command == "POST" and (status >= 400 or self.path == "/logout"):
+            self.close_connection = True
         self.send_response(status)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         for k, v in {**HEADERS, **(extra or {})}.items():
             self.send_header(k, v)
         self.send_header("Content-Type", ctype)
-        if status != 304:
+        if status not in (204, 304):
             self.send_header("Content-Length", str(len(body)))
         try:
             self.end_headers()
@@ -706,7 +726,7 @@ class Admin(BaseHTTPRequestHandler):
         if path in FILES:
             return self.send(200, page(path[1:]), FILES[path])
         logged_in = session_valid(self.headers.get("Cookie"), who)
-        if path == "/":
+        if path in ("/", "/support", "/users", "/diagnostics", "/reserved", "/db") or re.fullmatch(r"/detail/[a-z0-9-]+", path):
             # Signed in: the session starts again from now (sliding), so an admin in use never logs itself out.
             return self.send(200, page("dashboard.html" if logged_in else "login.html"), extra={"Set-Cookie": session_cookie(who)} if logged_in else None)
         if path == "/stats.json":
@@ -776,13 +796,23 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            body, tag, at = users_body(version_days(collector.snapshot()))
+            query = parse_qs(self.path.partition("?")[2])
+            try:
+                after = int(query["after"][0]) if "after" in query else None
+            except ValueError:
+                return self.send(400, b"Bad snapshot time", "text/plain")
+            if query.get("hub") == ["dev"]:
+                try:
+                    collector.want_dev()
+                except OSError:
+                    return self.send(503, b"Collector unavailable", "text/plain")
+            (body, tag, at, compressed), stale = collector.snapshot(after=after)
             # Revalidated every 10 s by the page: 304 while nothing changed (its If-None-Match, weak or strong).
-            extra = {"Cache-Control": "no-cache, private", "ETag": tag, "Vary": "Accept-Encoding", "Yo-At": str(at)}
+            extra = {"Cache-Control": "no-cache, private", "ETag": tag, "Vary": "Accept-Encoding", "Yo-At": str(at), "Yo-Stale": str(int(stale))}
             if tag in [t.strip().removeprefix("W/") for t in self.headers.get("If-None-Match", "").split(",")]:
                 return self.send(304, b"", "application/json", extra)
             if gzip_ok(self.headers.get("Accept-Encoding", "")):
-                return self.send(200, users_gzip(body), "application/json", {**extra, "Content-Encoding": "gzip"})
+                return self.send(200, compressed, "application/json", {**extra, "Content-Encoding": "gzip"})
             return self.send(200, body, "application/json", extra)
         self.send(404, b"Not found", "text/plain")
 
@@ -807,17 +837,17 @@ class Admin(BaseHTTPRequestHandler):
             try:
                 data = json.loads(self.rfile.read(length))
                 hub, action = data["hub"], data["action"]
-                if hub not in ("live", "dev") or action not in ("add", "remove", "switch"):
+                if hub not in ("live", "dev") or action not in ("add", "remove"):
                     raise ValueError()
-                result = reserved_request(hub, {"add": "POST", "remove": "DELETE", "switch": "PUT"}[action],
-                    data.get("names") if action == "add" else {"enabled": data["enabled"]} if action == "switch" else None,
+                result = reserved_request(hub, {"add": "POST", "remove": "DELETE"}[action],
+                    data.get("names") if action == "add" else None,
                     data["name"] if action == "remove" else None)
             except (ValueError, KeyError, TypeError):
                 return self.send(400, b"Bad request", "text/plain")
             except OSError:
                 return self.send(502, b"Hub unavailable or refused change", "text/plain")
             return self.send(200, json.dumps(result).encode(), "application/json")
-        if path in ("/support", "/todos/done", "/todos/delete", "/support/done"):
+        if path in ("/support", "/support/done"):
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")
             try:
@@ -828,15 +858,10 @@ class Admin(BaseHTTPRequestHandler):
                 hub = data["hub"]
                 if hub not in ("live", "dev"):
                     raise ValueError()
-                method = None
-                if path == "/todos/delete":
-                    if type(data["id"]) is not int:
-                        raise ValueError()
-                    suffix, body, method = "todos/" + str(data["id"]), None, "DELETE"
-                elif path in ("/todos/done", "/support/done"):
+                if path == "/support/done":
                     if type(data["id"]) is not int or type(data["done"]) is not bool:
                         raise ValueError()
-                    suffix, body = ("messages/done/" if path == "/support/done" else "todos/") + str(data["id"]), "1" if data["done"] else "0"
+                    suffix, body = "messages/done/" + str(data["id"]), "1" if data["done"] else "0"
                 else:
                     install, action = data["install"], data["action"]
                     if not isinstance(install, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", install):
@@ -853,29 +878,12 @@ class Admin(BaseHTTPRequestHandler):
                         body = str(data["through"])
                     else:
                         raise ValueError()
-                result = support_request(hub, suffix, body, method) if method else support_request(hub, suffix, body)
+                result = support_request(hub, suffix, body)
             except (ValueError, KeyError, TypeError):
                 return self.send(400, b"Bad request", "text/plain")
             except OSError:
                 return self.send(502, b"Hub unavailable or refused change", "text/plain")
             return self.send(200, json.dumps(result).encode(), "application/json")
-        if path == "/todos":
-            if not session_valid(self.headers.get("Cookie"), who):
-                return self.send(401, b"", "text/plain")
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 65536:
-                return self.send(413, b"Too large", "text/plain")
-            form = parse_qs(self.rfile.read(length).decode(errors="replace"))
-            hub, text = form.get("hub", [""])[0], form.get("text", [""])[0].strip()
-            if hub not in ("live", "dev") or not text or len(text.encode("utf-8")) > 4000:
-                return self.send(400, b"Bad request", "text/plain")
-            try:
-                todo = todo_add(hub, text)
-            except urllib.error.HTTPError as error:
-                return self.send(error.code if error.code == 429 else 502, b"Hub refused To-Do", "text/plain")
-            except (OSError, ValueError):
-                return self.send(502, b"Hub unavailable or not configured", "text/plain")
-            return self.send(201, json.dumps(todo).encode(), "application/json")
         if path == "/diagnostics/done":
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")
@@ -886,7 +894,7 @@ class Admin(BaseHTTPRequestHandler):
                 data = json.loads(self.rfile.read(length))
                 if data["hub"] not in ("live", "dev") or type(data["id"]) is not int or data["id"] <= 0 or type(data["done"]) is not bool:
                     raise ValueError()
-                # The hub records the open counts right after the change itself (its `levels`).
+                # The hub records the open counts right after the change itself (its hourly stats).
                 diagnostics_request(data["hub"], {"id": data["id"], "done": data["done"]})
             except (ValueError, KeyError, TypeError):
                 return self.send(400, b"", "text/plain")

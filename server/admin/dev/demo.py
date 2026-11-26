@@ -6,7 +6,7 @@
 Builds two fake hub databases (live ~120 users, dev a few) with the hub's schema in a temporary directory, writes
 users.json from them with the real collector (users.hub), and serves the real admin.py on 127.0.0.1 only, with:
 - no Cloudflare Access and no login (only with --demo or YO_ADMIN_DEMO=1, and only on a loopback address);
-- the hub's admin API (support threads, replies, to-dos, diagnostics, reserved names) answered from the fake
+- the hub's admin API (support threads, replies, diagnostics, reserved names) answered from the fake
   databases, so every button works; nothing ever reaches a real hub (outgoing HTTP is blocked in this process);
 - made-up server numbers (CPU, memory, disk, network, systemd units, updates) instead of this machine's;
 - a "Demo" badge in the header.
@@ -54,7 +54,7 @@ CREATE TABLE reports (reporter BLOB NOT NULL, reported_id BLOB NOT NULL, reason 
     created_at INTEGER NOT NULL, PRIMARY KEY (reporter, reported_id)) WITHOUT ROWID;
 CREATE TABLE attestation (user_id BLOB PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('attested','failed')),
     platform TEXT NOT NULL CHECK(platform IN ('ios','android')), reason TEXT, level TEXT, at_ms INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE deliveries_hourly (hour INTEGER PRIMARY KEY, n INTEGER NOT NULL);
+CREATE TABLE stats (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY(metric,key,hour)) WITHOUT ROWID;
 CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY, current BLOB NOT NULL, requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
 CREATE TABLE storage (user_id BLOB PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE blobs (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, size INTEGER NOT NULL, fetches_left INTEGER NOT NULL,
@@ -65,21 +65,17 @@ CREATE TABLE zk_groups (id BLOB PRIMARY KEY, params BLOB NOT NULL, revision INTE
     updated_at INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE blob_quota (user_id BLOB NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL, bytes INTEGER NOT NULL,
     PRIMARY KEY (user_id, day)) WITHOUT ROWID;
-CREATE TABLE settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE diagnostics (id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('crash','error')),
     signature TEXT NOT NULL UNIQUE, count INTEGER NOT NULL DEFAULT 1, first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL, app TEXT NOT NULL, os TEXT NOT NULL, model TEXT NOT NULL, payload TEXT NOT NULL,
     done INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE diagnostic_days (day INTEGER NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(day,kind)) WITHOUT ROWID;
 CREATE TABLE diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE diagnostic_installs (diagnostic_id INTEGER NOT NULL, install BLOB NOT NULL, day INTEGER NOT NULL,
     PRIMARY KEY (diagnostic_id, install, day)) WITHOUT ROWID;
 CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, install BLOB NOT NULL,
     from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL, created_at INTEGER NOT NULL,
     read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
-CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER);
 CREATE TABLE events (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID;
-CREATE TABLE levels (kind TEXT NOT NULL, hour INTEGER NOT NULL, value INTEGER NOT NULL, PRIMARY KEY (kind, hour)) WITHOUT ROWID;
 """
 
 # ---- names --------------------------------------------------------------------------------------------------------
@@ -149,19 +145,6 @@ SUPPORT = [
     [("u", "Videos longer than 10s don't send?")],
     [("u", "Yo"), ("t", "Yo 😄")],
     [("u", "Could you add a widget? Want to Yo my partner from the home screen.")],
-]
-TODOS = [
-    ("Answer the App Store review note about account deletion", None),
-    ("Check APNs certificate expiry (renew before December)", None),
-    ("Yo sound plays twice in foreground: reproduce on iOS 26.1", None),
-    ("Write the FAQ entry: secured names and moving to a new phone", None),
-    ("Rate limit for group invites: look at the numbers from Monday", None),
-    ("Translate onboarding into Japanese", None),
-    ("Open Graph preview for justyo.co links", None),
-    ("Ask the photo-crash user for the build number", "photo"),
-    ("Back up hub DB before the schema 7 migration", "done"),
-    ("Remove the old feedback endpoint", "done"),
-    ("Update reserved names list with team members", "done"),
 ]
 CRASHES = [
     ("crash", {"exception": "EXC_BAD_ACCESS (SIGSEGV)", "details": "KERN_INVALID_ADDRESS at 0x0000000000000010",
@@ -287,7 +270,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         n = int(rng.gauss(base * boost, base * 0.2))
         if h == hour0:
             n = n * (int(now % HOUR) // 60_000) // 60
-        db.execute("INSERT INTO deliveries_hourly VALUES (?,?)", (h, max(0, n)))
+        db.execute("INSERT INTO stats VALUES ('deliveries','',?,?)", (h, max(0, n)))
     # Photos and videos today, per uploader.
     media_hours = {}
     for h in range(midnight // HOUR, hour0 + 1):
@@ -321,9 +304,6 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             read = t + rng.randint(5, 120) * 60_000 if team and j < len(lines) - 1 or (team and rng.random() < 0.5) else None
             db.execute("INSERT INTO support_messages (install,from_team,text,created_at,read_at,app_version,done_at) VALUES (?,?,?,?,?,?,?)",
                        (uid, int(team), text, t, read if read and read < now else None, newest if not team else "", done))
-    for k, (text, flag) in enumerate(TODOS if live else TODOS[:2]):
-        at = now - (k + 1) * rng.randint(3 * HOUR, 20 * HOUR)
-        db.execute("INSERT INTO todos (text,created_at,done_at) VALUES (?,?,?)", (text, at, at + 5 * HOUR if flag == "done" else None))
     # The hub's event counts (per kind and minute, nothing of who): 20 days, busier in the afternoon, few at night.
     for m in range((now // 60_000) - 20 * 1440, now // 60_000 + 1, 7):
         busy = 0.15 + 0.85 * max(0.0, 1 - abs((m // 60) % 24 - 15) / 9)
@@ -389,15 +369,16 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                        (cur.lastrowid, rng.choice(installs), rng.randint(first // DAY, last // DAY)))
     for d in range(now // DAY - 13, now // DAY + 1):
         crashes = rng.randint(0, 4 if live else 1)
-        db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "crash", crashes))
+        db.execute("INSERT INTO stats VALUES ('diagnostics:crash','',?,?)", (d * 24, crashes))
         # The same crashes as the hub's "crash" events, at a minute of their day (not after now): per hour on the page.
         for _ in range(crashes):
             m = rng.randint(d * 1440, min((d + 1) * 1440, now // 60_000 + 1) - 1)
             db.execute("INSERT INTO events VALUES (?,?,1) ON CONFLICT(kind, minute) DO UPDATE SET n=n+1", ("crash", m))
-        db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "error", rng.randint(2, 30 if live else 3)))
+        db.execute("INSERT INTO stats VALUES ('diagnostics:error','',?,?)", (d * 24, rng.randint(2, 30 if live else 3)))
     db.execute("INSERT INTO diagnostic_seen VALUES (?,1)", ("550e8400-e29b-41d4-a716-446655440000",))
+    db.execute("INSERT INTO stats SELECT kind, '', minute / 60, sum(n) FROM events GROUP BY kind, minute / 60")
+    db.execute("DELETE FROM events WHERE minute <= ?", (now // 60_000 - 120,))
     # Reserved names.
-    db.execute("INSERT INTO settings VALUES ('reserved_enabled', 1)")
     for name, note in RESERVED if live else RESERVED[:4]:
         db.execute("INSERT INTO reserved VALUES (?,?,?,?)", (skeleton(name), name, note, now - 25 * DAY))
     db.commit()
@@ -440,32 +421,22 @@ class FakeHubs:
                            (now, bytes.fromhex(parts[1]), int(body)))
             elif parts[0] == "messages":  # messages/done/<id>
                 db.execute("UPDATE support_messages SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))
-            elif parts[0] == "todos" and method == "DELETE":  # DELETE todos/<id>
-                db.execute("DELETE FROM todos WHERE id=?", (int(parts[-1]),))
-            elif parts[0] == "todos":  # todos/<id>
-                db.execute("UPDATE todos SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))
             else:
                 raise ValueError(suffix)
         self.on_change()
         return {}
 
-    def todo(self, hub, text):
-        with self.lock, self.db(hub) as db:
-            cur = db.execute("INSERT INTO todos (text,created_at) VALUES (?,?)", (text, int(time.time() * 1000)))
-        self.on_change()
-        return {"id": cur.lastrowid}
-
     def reserved(self, hub, method="GET", data=None, name=None):
         with self.lock, self.db(hub) as db:
             if method == "POST":
                 for n in data:
-                    db.execute("INSERT OR IGNORE INTO reserved VALUES (?,?,NULL,?)", (skeleton(n.strip()), n.strip(), int(time.time() * 1000)))
-            elif method == "PUT":
-                db.execute("UPDATE settings SET value=? WHERE key='reserved_enabled'", (int(bool(data["enabled"])),))
+                    spelling = (n if isinstance(n, str) else n["name"]).strip()
+                    note = None if isinstance(n, str) else n.get("note")
+                    db.execute("INSERT INTO reserved VALUES (?,?,?,?) ON CONFLICT(skeleton) DO UPDATE SET note=excluded.note",
+                               (skeleton(spelling), spelling, note, int(time.time() * 1000)))
             elif method == "DELETE":
                 db.execute("DELETE FROM reserved WHERE skeleton=?", (skeleton(name),))
-            out = {"enabled": bool(db.execute("SELECT value FROM settings WHERE key='reserved_enabled'").fetchone()[0]),
-                   "names": [r[0] for r in db.execute("SELECT spelling FROM reserved ORDER BY skeleton")],
+            out = {"names": [r[0] for r in db.execute("SELECT spelling FROM reserved ORDER BY skeleton")],
                    "name_min": 3, "name_max": 32, "name_comparison": "skeleton",
                    "name_form": "NFC Latin letters, digits, underscore or emoji; no _ first, at least one letter or emoji"}
         if method != "GET":
@@ -485,7 +456,7 @@ class FakeServer:
     def __init__(self, rng):
         self.rng, self.cpu, self.rx, self.tx, self.boot = rng, 9.0, 41_822_331_904, 12_904_118_272, time.time() - 6 * 86400 - 5 * 3600
 
-    def stats(self, reserved):
+    def stats(self):
         r = self.rng
         self.cpu = min(95, max(2, self.cpu + r.gauss(0, 4)))
         rx_s, tx_s = abs(r.gauss(180_000, 90_000)), abs(r.gauss(95_000, 50_000))
@@ -505,7 +476,6 @@ class FakeServer:
             "tunnel": unit(self.boot, 38 << 20, 1),
             "failed_units": 0,
             "yogpt": unit(time.time() - 26 * 3600, 112 << 20),
-            "reserved": reserved,
             # The last hour, a point a minute, as admin.remember keeps it.
             "history": self.history(),
             # The last 24 hours, a point a quarter of an hour, as admin.remember_day keeps it.
@@ -668,9 +638,9 @@ def main():
     import migrate_levels  # noqa: E402
     for hub_name, path in paths.items():
         with sqlite3.connect(path) as db:
-            db.executemany("INSERT OR IGNORE INTO levels VALUES (?, ?, ?)", migrate_levels.rows(hub_name, state, now))
+            db.executemany("INSERT OR IGNORE INTO stats(metric,hour,value) VALUES (?, ?, ?)", migrate_levels.rows(hub_name, state, now))
             # Active accounts (seen within 48 hours), sampled hourly for the last five days: the line starts when data does.
-            db.executemany("INSERT OR IGNORE INTO levels VALUES ('active-48h', ?, ?)",
+            db.executemany("INSERT OR IGNORE INTO stats(metric,hour,value) VALUES ('active-48h', ?, ?)",
                            [(h, int(args.users * (0.5 + 0.1 * math.sin(h / 9)) + (h - now // HOUR))) for h in range(now // HOUR - 119, now // HOUR + 1)])
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
@@ -684,7 +654,7 @@ def main():
         "ADMIN_LISTEN": args.host, "ADMIN_PORT": str(args.port), "YO_ADMIN_TOKEN": "",
         "YO_HUB_URL": "http://demo.invalid", "YO_HUB_DEV_URL": "http://demo.invalid",
         "STATE_DIRECTORY": state, "ADMIN_USERS_FILE": os.path.join(state, "users.json"),
-        "ADMIN_REQUEST_FILE": os.path.join(state, "want"), 
+        "ADMIN_REQUEST_FILE": os.path.join(state, "want"),
         "YOGPT_REPLIES": os.path.join(state, "replies"), "YO_HUB_DB": paths["live"], "YO_HUB_DEV_DB": paths["dev"],
         "YO_HUB_ENV_FILE": os.path.join(state, "hub.env"), "YO_HUB_DEV_ENV_FILE": os.path.join(state, "hub-dev.env"),
         "YOGPT_STATS_PATTERN": os.path.join(state, "yogpt", "{}", "stats.json"),
@@ -710,30 +680,26 @@ def main():
             t = int(time.time() * 1000)
             if tick:
                 with sqlite3.connect(paths["live"]) as db:
-                    db.execute("INSERT INTO deliveries_hourly VALUES (?,?) ON CONFLICT(hour) DO UPDATE SET n=n+?",
-                               (t // HOUR, rng.randint(0, 6), rng.randint(0, 6)))
+                    db.execute("INSERT INTO stats VALUES ('deliveries','',?,?) ON CONFLICT(metric,key,hour) DO UPDATE SET value=value+excluded.value",
+                               (t // HOUR, rng.randint(0, 6)))
                     db.execute("UPDATE devices SET last_seen_at=? WHERE id IN (SELECT id FROM devices ORDER BY random() LIMIT ?)",
                                (t, rng.randint(0, 2)))
                     # Yos arriving now, for the header's live strip.
                     for kind, n in (("yo-in", rng.randint(0, 9)), ("media-in", rng.randint(0, 2)), ("yo-in-bot", rng.randint(0, 3))):
                         if n:
+                            db.execute("INSERT INTO stats VALUES (?, '', ?, ?) ON CONFLICT(metric,key,hour) DO UPDATE SET value=value+excluded.value",
+                                       (kind, t // HOUR, n))
                             db.execute("INSERT INTO events VALUES (?,?,?) ON CONFLICT(kind, minute) DO UPDATE SET n=n+?",
                                        (kind, t // 60_000, n, n))
-            out = {"at": t, "updates": server.updates()}
-            for name, path in paths.items():
-                out[name] = collector_module.hub(name, path)
-            collector_module.finish(out)
-            tmp = env["ADMIN_USERS_FILE"] + ".new"
-            with open(tmp, "w") as f:
-                json.dump(out, f, separators=(",", ":"))
-            os.replace(tmp, env["ADMIN_USERS_FILE"])
+                    db.execute("DELETE FROM events WHERE minute <= ?", (t // 60_000 - 120,))
+            out = collector_module.collect(lambda previous: server.updates())
             live_out = out["live"]
             write("status-last.json", {"at": int(time.time()) - 17 * 60, "users": live_out["total"], "since": live_out["total"] - (args.users - 14),
                                        "up": 4, "total": 4, "load": 0.42, "crashes": live_out["diagnostics_open"], "sent": True})
 
     def ticker():
         while True:
-            time.sleep(10)
+            time.sleep(30)
             try:
                 collect(tick=True)
             except Exception as e:  # noqa: BLE001
@@ -744,10 +710,9 @@ def main():
 
     hubs = FakeHubs(paths, collect)
     admin.support_request = hubs.support
-    admin.todo_add = hubs.todo
     admin.reserved_request = hubs.reserved
     admin.diagnostics_request = hubs.diagnostics
-    admin.stats = lambda: server.stats(admin.reserved_names())
+    admin.stats = server.stats
     admin.live_stream = lambda hub: FakeLive(rng, 3 if hub == "live" else 40)
     # No Access and no login: everyone who reaches 127.0.0.1 is "demo". POSTs only from this page's own origin.
     origins = {f"http://{args.host}:{args.port}", f"http://localhost:{args.port}", f"http://127.0.0.1:{args.port}"}
@@ -759,9 +724,12 @@ def main():
     origins |= set(filter(None, os.environ.get("YO_DEMO_ORIGINS", "").split()))  # e.g. a tailscale serve URL
     admin.Admin.same_origin = lambda self: self.headers.get("Origin") in origins | {None}
 
-    def snapshot(timeout=3):
-        with open(env["ADMIN_USERS_FILE"]) as f:
-            return {**json.load(f), "stale": False}
+    read_snapshot = admin.collector.snapshot
+
+    def snapshot(timeout=3, after=None):
+        if after is not None:
+            collect()
+        return read_snapshot()
     admin.collector.snapshot = snapshot
     page = admin.page
 

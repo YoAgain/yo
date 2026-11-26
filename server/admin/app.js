@@ -173,14 +173,17 @@ if (document.body.classList.contains("login")) {
   };
 
   // ---- the hub shown: live (default) or dev, remembered in this browser; key 0 switches ----------------------------
-  let which = "live", last = null, lastDone = new Set(), reservedData = null;
+  let which = "live", last = null, lastDone = new Set();
   try { if (localStorage.getItem("hub") === "dev") which = "dev"; } catch {}
   const switchHub = () => {
     which = which === "live" ? "dev" : "live";
     try { localStorage.setItem("hub", which); } catch {}
+    devAsked = false;
     showHub();
     liveConnect();
     if (last) render();
+    refresh();
+    if (location.pathname === "/support") supportRefresh();
   };
   // The logo is the switch: "Yo" for live, "Dev" for dev.
   function showHub() {
@@ -234,8 +237,10 @@ if (document.body.classList.contains("login")) {
     state("t-cli", y?.ok === false ? "bad" : y?.ok ? "ok" : null);
     svcInfo.cli = { parts: [["YoGPT", y]] };
   }
+  let statsBusy = false;
   async function tick() {
-    if (document.visibilityState !== "visible") return;
+    if (document.hidden || statsBusy) return;
+    statsBusy = true;
     let s;
     try {
       const r = await fetch("/stats.json", { cache: "no-store" });
@@ -243,9 +248,10 @@ if (document.body.classList.contains("login")) {
       s = await r.json();
       $("stale").hidden = true;
     } catch { $("stale").hidden = false; return; }
+    finally { statsBusy = false; }
     set("host", s.host || "");
+    const firstSample = !srvNow;
     srvNow = s;
-    reservedData = s.reserved;
     serverPercent("cpu", s.cpu?.percent);
     const m = s.memory, d = s.disk;
     serverPercent("mem", m?.total ? 100 * (m.total - m.available) / m.total : null);
@@ -283,8 +289,8 @@ if (document.body.classList.contains("login")) {
       const people = last?.live?.yogpt_contacts;
       if (s.yogpt?.state === "active" && people != null) svcInfo.yogpt.rows.push(["Knows", `${num(people)} people`]);
     });
-    if (last) part(drawTables);
     redrawDetail(["server", "svc"]);
+    if (firstSample && pinned?.dataset.detail) landing();
   }
 
   // Updates: a dot in the row (green: all fine, no package updates); a click opens its detail.
@@ -588,7 +594,10 @@ if (document.body.classList.contains("login")) {
       if (preview?.node === node && preview.source === "focus") { cancelPreview(); leave?.(-1); }
     });
   };
-  const unpin = () => {
+  const unpin = (restore = true) => {
+    if (restore && pinned?.dataset.detail && location.pathname.startsWith("/detail/")) {
+      history.replaceState(null, "", history.state?.from || "/");
+    }
     pinned = null;
     clearMark?.(-1);
     clearMark = null;
@@ -627,6 +636,7 @@ if (document.body.classList.contains("login")) {
       cancelPreview();
       tipBox.classList.add("pin");
       if (show(event) === false) { unpin(); return; }
+      if (node.dataset.detail) navigate("/detail/" + node.dataset.detail, { from: location.pathname + location.search });
       pinned = node;
       clearMark = mark;
     });
@@ -1090,13 +1100,20 @@ if (document.body.classList.contains("login")) {
 
   // ---- support chat (the Database widget, support_messages): the people who wrote on the left, "Open" or
   // "Answered"; the chosen one's conversation on the right, under one line of facts. Each message of theirs is ticked
-  // handled by hand; a reply ticks the ones it answers. The to-dos are a table of their own (todos).
+  // handled by hand; a reply ticks the ones it answers.
   let supportInstall = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
   let supportWant = null, listDrawn = "", supportMessages = [], userFilter = "open";
-  const supportGet = async (install) => {
-    const r = await fetch(`/support.json?${new URLSearchParams({ hub: which, ...(install ? { install } : {}) })}`, { cache: "no-store" });
-    if (!r.ok) throw new Error("Could not load messages.");
-    return r.json();
+  const supportRequests = new Map();
+  const supportGet = (install) => {
+    const url = `/support.json?${new URLSearchParams({ hub: which, ...(install ? { install } : {}) })}`;
+    if (!supportRequests.has(url)) {
+      const response = fetch(url, { cache: "no-store" }).then(r => {
+        if (!r.ok) throw new Error("Could not load messages.");
+        return r.json();
+      }).finally(() => supportRequests.delete(url));
+      supportRequests.set(url, response);
+    }
+    return supportRequests.get(url);
   };
   const reportsBy = (install) => (last?.[which]?.reports || []).filter((r) => String(r.reporter).toLowerCase() === install);
   const drawList = () => {
@@ -1131,6 +1148,7 @@ if (document.body.classList.contains("login")) {
       await Promise.all(ids.map((id) => postJSON("/support/done", { hub, id, done })));
       if (which === hub && supportInstall === user) await supportOpen(user);
       await supportRefresh();
+      await refresh((last?.at || 0) + 1);
     } catch (e) { set("support-error", e.message); }
   };
   const drawThread = (messages) => {
@@ -1265,6 +1283,7 @@ if (document.body.classList.contains("login")) {
       if (which !== hub || supportInstall !== user) return;
       $("support-text").value = ""; growComposer();
       await supportRefresh();
+      await refresh((last?.at || 0) + 1);
       await supportOpen(user);
       part(drawPerson);
     } catch (e) { set("support-error", e.message); }
@@ -1275,38 +1294,6 @@ if (document.body.classList.contains("login")) {
   $("support-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); supportSend(); }
   });
-  setInterval(() => {
-    if (document.visibilityState !== "visible") return;
-    supportRefresh();
-    if (supportInstall && supportHub === which) supportOpen(supportInstall);
-  }, 4000);
-
-  // ---- the team's to-dos (the Database widget, todos): add one, tick it done, delete it -------------------------------
-  const todoChange = async (path, data) => {
-    try { await postJSON(path, { hub: which, ...data }); await refresh(); } catch (e) { alert(e.message); }
-  };
-  let showDone = false;
-  try { showDone = localStorage.getItem("todos-show-done") === "1"; } catch {}
-  const todoBar = () => {
-    const form = el("form", "add todoadd"), input = el("input");
-    input.placeholder = "A new to-do (Enter)"; input.maxLength = 4000; input.setAttribute("aria-label", "New to-do");
-    const add = el("button", "pill", "Add"); add.type = "submit";
-    form.append(input, add);
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
-      add.disabled = true;
-      try {
-        const r = await fetch("/todos", { method: "POST", body: new URLSearchParams({ hub: which, text }) });
-        if (!r.ok) throw new Error("Could not add the to-do.");
-        input.value = "";
-        await refresh();
-      } catch (x) { alert(x.message); } finally { add.disabled = false; }
-    });
-    return form;
-  };
-
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
   let allSort = { key: "created", dir: -1 };  // newest sign-ups first
   const allValue = (u, key, releases) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? -(releases.get(u.app)?.ageH ?? Infinity)
@@ -1397,21 +1384,19 @@ if (document.body.classList.contains("login")) {
   const reportDone = async (r, done) => {
     await fetch("/feedback/done", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: `hub=${which}&id=r${r.id}&done=${done ? 1 : 0}` });
-    await refresh();
+    await refresh((last?.at || 0) + 1);
   };
   const reasonTag = (reason) => tag(reason, reason === "abuse" ? "bad" : reason === "spam" ? "warn" : "muted");
 
-  // ---- database: every table, grouped by topic; reserved names with their switch --------------------------------
+  // ---- database: every table, grouped by topic; reserved names --------------------------------
   // Table groups as the README's endpoint groups ("What the hub knows per endpoint group"), in this order, each table
   // in its listed order; a name ending in "*" takes every table it starts. Each with a line icon (drawn like the
-  // Overview's). The rest (Litestream's bookkeeping, settings) under Internal.
+  // Overview's). The rest (Litestream's bookkeeping) under Internal.
   const TABLE_GROUPS = [
-    ["Account", "user", ["users", "devices", "handles", "gone", "reserved", "account_keys", "contact_keys", "prekeys", "profile_commitments", "storage"]],
+    ["Account", "user", ["users", "devices", "handles", "gone", "reserved", "account_keys", "contact_keys", "prekeys", "profile_commitments", "storage", "zk_groups", "zk_groups_gone", "backups", "attestation"]],
     ["Messages", "mail", ["messages", "blobs", "blob_quota"]],
-    ["Groups", "group", ["zk_groups"]],
-    ["Backup", "disk", ["backups"]],
-    ["Support, Problems and Reports", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_days", "diagnostic_seen", "diagnostic_installs", "todos"]],
-    ["Stats", "chart", ["deliveries_hourly*", "events", "request_hours"]],
+    ["Support, Problems and Reports", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_seen", "diagnostic_installs"]],
+    ["Stats", "chart", ["stats", "events", "request_hours"]],
   ];
   Object.assign(ICONS, {
     user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
@@ -1441,10 +1426,9 @@ if (document.body.classList.contains("login")) {
     ["v-support", "Support", "chat", "The support chat: who wrote, open or answered, and the conversation"],
     ["v-errors", "Problems", "warn", "App problems grouped by cause, open first, with Done and Reopen"],
     ["v-reports", "Reports", "flag", "Reported users: how many reports, from how many installs, why; the raw table is under Database"],
-    ["v-todos", "To-dos", "check", "The team's to-dos: add, tick, delete"],
     ["v-services", "Services", "yogpt", "The bots: their traffic, and who they will Yo later (server/services/)"],
   ];
-  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-todos": "todos", "v-services": "services_yos" };
+  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-services": "services_yos" };
   // What each table is for, from the hub's schema (server/hub/src/db.rs); "(?)" marks a guess.
   const TABLE_INFO = {
     users: "Accounts: id, account key, sign-up time",
@@ -1463,14 +1447,11 @@ if (document.body.classList.contains("login")) {
     storage: "Each user's sealed storage, versioned writes",
     backups: "Each user's backup record; it secures the name",
     support_messages: "Support chat messages, by random install id (no account)",
-    todos: "The team's to-dos",
     diagnostics: "App problems, one row per signature",
     diagnostic_seen: "Report ids already counted, never counted twice",
-    diagnostic_days: "App problems per day, last 14 days",
     diagnostic_installs: "Which install sent a group on which day, kept 90 days",
     reports: "Users reported by installs (random id, no account), latest per pair",
-    settings: "Hub switches, such as name reservation on/off",
-    deliveries_hourly: "Deliveries per hour, a count only, 8 days",
+    stats: "The hub's hourly summaries, kept for good: counts only",
     request_hours: "Signed requests (to strangers) per sender and hour, kept 25 hours",
     services_yos: "The services' own database: a row per Yo of a bot, its time and its reminder",
     _litestream_lock: "Litestream replication bookkeeping (?)",
@@ -1495,17 +1476,10 @@ if (document.body.classList.contains("login")) {
   const changeReserved = async (data) => {
     const r = await fetch("/reserved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hub: which, ...data }) });
     if (!r.ok) throw new Error(`Could not save (${r.status}).`);
-    await tick(); await refresh();
+    await refresh((last?.at || 0) + 1);
   };
   const reservedBar = () => {
-    const data = reservedData?.[which], wrap = el("div", "reserved-bar");
-    const sw = el("button", `switch${data?.enabled ? " on" : ""}`);
-    sw.type = "button"; sw.disabled = !data;
-    sw.setAttribute("role", "switch"); sw.setAttribute("aria-checked", String(!!data?.enabled));
-    sw.append(el("i"));
-    const label = el("span", "state", data ? (data.enabled ? "Reservation ON: these names cannot be claimed" : "Reservation OFF: anyone may claim these names") : "Reservation state unavailable");
-    const err = el("small", "error");
-    sw.addEventListener("click", async () => { sw.disabled = true; try { await changeReserved({ action: "switch", enabled: !data.enabled }); } catch (e) { err.textContent = e.message; sw.disabled = false; } });
+    const wrap = el("div", "reserved-bar"), err = el("small", "error");
     const form = el("form", "add");
     const input = el("input"); input.placeholder = "Add names (comma separated)"; input.setAttribute("aria-label", "Names to reserve");
     const reason = el("input"); reason.placeholder = "Reason"; reason.maxLength = 200; reason.setAttribute("aria-label", "Reason for reserving them");
@@ -1518,8 +1492,7 @@ if (document.body.classList.contains("login")) {
       if (!names.length) return;
       try { await changeReserved({ action: "add", names }); input.value = ""; reason.value = ""; } catch (x) { err.textContent = x.message; }
     });
-    wrap.classList.toggle("off", !!data && !data.enabled);
-    wrap.append(sw, label, form, err);
+    wrap.append(form, err);
     return wrap;
   };
   const diagnosticBuild = (d, payload) => {
@@ -1610,7 +1583,7 @@ if (document.body.classList.contains("login")) {
           for (const d of g.rows.filter(d => !!d.done !== g.open))
             await postJSON("/diagnostics/done", { hub, id: d.id, done: g.open });
         } catch (error) { item.append(el("span", "error", error.message)); }
-        finally { await refresh(); button.disabled = false; }
+        finally { await refresh((last?.at || 0) + 1); button.disabled = false; }
       });
       item.append(title, stats, button, placeLine);
       // Done and still coming in: from builds it was marked done in (a newer build opens it again, spec 4.2).
@@ -1674,7 +1647,7 @@ if (document.body.classList.contains("login")) {
         button.disabled = true;
         try { for (const r of g.rows.filter((r) => lastDone.has(reportKey(r)) === g.open)) await reportDone(r, g.open); }
         catch (error) { item.append(el("span", "error", error.message)); }
-        finally { await refresh(); button.disabled = false; }
+        finally { await refresh((last?.at || 0) + 1); button.disabled = false; }
       });
       item.append(title, stats, button, details);
       (g.open ? list : doneList).append(item);
@@ -1725,7 +1698,7 @@ if (document.body.classList.contains("login")) {
     const stillCauses = causeCount(stillProblemGroups(last?.[which]).filter(d => !openGroups.some(o => diagCause(o) === diagCause(d))));
     const openSupport = openSupportCount(last?.[which]), openReports = openReportCount(last?.[which]);
     const occurrences = openGroups.reduce((n, d) => n + (d.count || 0), 0);
-    const drawn = JSON.stringify([which, tableOpen, tableOpen === "v-services" && [whoShown, last?.[which]?.services], openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
+    const drawn = JSON.stringify([which, tableOpen, tableOpen === "v-services" && [whoShown, last?.[which]?.services], openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]),
       (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
@@ -1736,15 +1709,12 @@ if (document.body.classList.contains("login")) {
     if (!tableOpen || (list.length && !list.some((t) => t.name === real(tableOpen)))) tableOpen = "people";
     const side = el("nav", "tside"), pane = el("div", "tpane");
     const count = (name) => list.find((x) => x.name === name)?.count || 0;
-    // The views count what is open, not their table's rows: unanswered conversations, open error groups, to-dos left.
-    const rowsOf = (name) => list.find((x) => x.name === name);
-    const open = (name, column) => { const t = rowsOf(name); if (!t) return 0; const i = t.columns.indexOf(column);
-      return i < 0 ? t.count : t.rows.filter((r) => !r[i]).length; };
+    // The views count what is open, not their table's rows: unanswered conversations, open error groups.
     const viewCount = (key) => key === "v-support" ? openSupport
       : key === "v-reports" ? openReports
       : key === "v-errors" ? (stillCauses ? `${num(openCauses)} · ${num(stillCauses)} still` : openCauses)
       : key === "v-services" ? (last?.[which]?.services?.bots.length || 0)
-      : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
+      : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
       const b = el("button", `main view${tableOpen === key ? " on" : ""}`), name = el("span", null, label);
       b.type = "button";
@@ -1755,7 +1725,7 @@ if (document.body.classList.contains("login")) {
       name.prepend(icon(ico));
       const n = viewCount(key);
       b.append(name, el("small", null, typeof n === "string" ? n : num(n)));
-      b.addEventListener("click", () => { unpin(); tableOpen = key; drawTables(); });
+      b.addEventListener("click", () => { unpin(); showTable(key, false); });
       side.append(b);
     }
     // The hub's database, then the services' own (another SQLite).
@@ -1764,7 +1734,7 @@ if (document.body.classList.contains("login")) {
         const b = el("button", `sub raw${t.name === tableOpen ? " on" : ""}`);
         b.type = "button"; b.title = TABLE_INFO[t.name] || t.name;
         b.append(el("span", null, t.name), el("small", null, num(t.count)));
-        b.addEventListener("click", () => { tableOpen = t.name; drawTables(); });
+        b.addEventListener("click", () => { showTable(t.name, false); });
         side.append(b);
       }
     };
@@ -1781,7 +1751,7 @@ if (document.body.classList.contains("login")) {
     requestAnimationFrame(() => { const on = side.querySelector(".on"); if (on && side.scrollWidth > side.clientWidth) side.scrollLeft = on.offsetLeft - side.offsetLeft - 12; });
     const t = list.find((x) => x.name === real(tableOpen));
     // Views: Support is the support chat (people on the left, the conversation and a reply box on the right; moved here,
-    // never rebuilt), Users the enriched sortable users table; Errors and To-dos their tables with their tools.
+    // never rebuilt), Users the enriched sortable users table; Errors its table with its tools.
     const chat = tableOpen === "v-support", usersView = tableOpen === "people";
     const view = chat ? "chat" : usersView ? "users" : "list";
     // Support and Users keep their pane (only the side list is new) while it holds them; a pane drawn before the data
@@ -1795,7 +1765,6 @@ if (document.body.classList.contains("login")) {
       if (chat) pane.append($("people"));
       if (usersView) pane.append($("all-users"));
       if (t.name === "reserved") pane.append(reservedBar());
-      if (tableOpen === "v-todos") pane.append(todoBar());
       if (tableOpen === "v-errors") pane.append(diagnosticList(last?.[which]?.diagnostics || [], box));
       else if (tableOpen === "v-reports") pane.append(reportList(last?.[which], box));
       else if (tableOpen === "v-services") pane.append(serviceList(last?.[which]));
@@ -1803,38 +1772,11 @@ if (document.body.classList.contains("login")) {
       const wrap = el("div", "scroll grid"), table = el("table", "list data");
       table.dataset.name = t.name;
       const hr = table.createTHead().insertRow();
-      if (tableOpen === "v-todos") hr.append(el("th", "tick-col"));
       for (const c of t.columns) hr.append(el("th", null, c));
       if (t.name === "reserved") hr.append(el("th"));
       const body = table.createTBody();
-      const todo = tableOpen === "v-todos", col = (n) => t.columns.indexOf(n);
-      let rows = t.rows;
-      if (todo) {
-        hr.append(el("th"));
-        const doneAt = col("done_at");
-        const openRows = rows.filter((row) => row[doneAt] == null);
-        const label = el("label", "todo-filter"), checkbox = el("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = showDone;
-        label.append(checkbox, `Show done (${num(rows.length - openRows.length)})`);
-        checkbox.addEventListener("change", () => {
-          showDone = checkbox.checked;
-          try { localStorage.setItem("todos-show-done", showDone ? "1" : "0"); } catch {}
-          tablesDrawn = "";
-          part(drawTables);
-        });
-        pane.append(label);
-        if (!showDone) rows = openRows;
-      }
-      for (const row of rows) {
+      for (const row of t.rows) {
         const tr = body.insertRow();
-        // A to-do: its tick first (done or open again), a delete at the end.
-        if (todo) {
-          const id = row[col("id")], done = row[col("done_at")] != null;
-          if (done) tr.className = "done";
-          tr.append(Object.assign(document.createElement("td"), { className: "tick-col" }));
-          tr.lastChild.append(tickButton(done, "To-do done", (d) => todoChange("/todos/done", { id, done: d })));
-        }
         row.forEach((v, i) => {
           // A reserved name's reason: edited in place, saved on Enter or leaving the field.
           if (t.name === "reserved" && t.columns[i] === "note") {
@@ -1855,11 +1797,6 @@ if (document.body.classList.contains("login")) {
           else cell(tr, v == null ? "–" : String(v), "mono", v != null && String(v).length > 40 ? String(v) : "");
           tr.lastChild.dataset.col = t.columns[i];
         });
-        if (todo) {
-          const x = el("button", "ghost-x", "Delete"); x.type = "button";
-          x.addEventListener("click", () => { if (confirm("Delete this to-do?")) todoChange("/todos/delete", { id: row[col("id")] }); });
-          cell(tr, x);
-        }
         if (t.name === "reserved") {
           const name = row[t.columns.indexOf("spelling")] ?? row[0];
           const x = el("button", "ghost-x", "Remove"); x.type = "button";
@@ -1867,7 +1804,7 @@ if (document.body.classList.contains("login")) {
           cell(tr, x);
         }
       }
-      if (!rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : todo ? 2 : 0);
+      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : 0);
       wrap.append(table);
       pane.append(wrap);
       }
@@ -2055,12 +1992,11 @@ if (document.body.classList.contains("login")) {
     };
   };
   // The watchdog: a stream silent too long (neither Yo nor ping) is cut and opened again.
-  setInterval(() => {
-    if (document.visibilityState !== "visible") return;
+  const liveWatchdog = () => {
     if (liveSource && Date.now() - liveHeard > LIVE_DEAD) { liveDown(); liveConnect(); }
     else if (!liveSource && !liveRetry) liveConnect();
     liveState();
-  }, 5000);
+  };
   // Back on the page (another tab, back from the cache, the network again): a fresh stream; the bars come from
   // refresh. Wall-clock times: a laptop's sleep counts as silence.
   const liveWake = () => {
@@ -2079,7 +2015,6 @@ if (document.body.classList.contains("login")) {
     part(() => drawLive(h));
     findNewest(h);
     part(() => overview(h));
-    supportRefresh();
     part(drawPerson);
     part(() => drawAllUsers(h));
     part(drawTables);
@@ -2087,23 +2022,41 @@ if (document.body.classList.contains("login")) {
   };
   // The list (MBs on the live hub) comes again only when it changed: asked with its ETag, a 304 keeps the one shown
   // and only moves the collector's time on (Yo-At).
-  let peopleBusy = false, usersTag = null;
-  async function refresh() {
-    if (document.visibilityState !== "visible" || peopleBusy) return;
-    peopleBusy = true;
+  let peopleRequest = null, usersTag = null, devAsked = false;
+  async function refresh(after) {
+    if (document.hidden) return;
+    if (peopleRequest) {
+      if (after === undefined) return;
+      await peopleRequest;
+      return refresh(after);
+    }
+    const hub = which;
+    peopleRequest = readUsers(hub, after);
+    try { await peopleRequest; } finally { peopleRequest = null; }
+    if (hub !== which) return refresh();
+    if (hub === "dev" && !devAsked && after === undefined && last && Date.now() - (last.dev_at || 0) >= 30000) {
+      devAsked = true;
+      return refresh((last.at || 0) + 1);
+    }
+  }
+  async function readUsers(hub, after) {
     const status = $("collection-status");
     if (!last) status.textContent = "Loading fresh data…";
     try {
-      const r = await fetch("/users.json", { cache: "no-store", headers: last && usersTag ? { "If-None-Match": usersTag } : {} });
+      const query = new URLSearchParams();
+      if (hub === "dev") query.set("hub", hub);
+      if (after !== undefined) query.set("after", after);
+      const r = await fetch("/users.json" + (query.size ? "?" + query : ""), { cache: "no-store", headers: last && usersTag ? { "If-None-Match": usersTag } : {} });
       let changed = r.status !== 304;
       if (!changed) {
         const at = Number(r.headers.get("Yo-At"));
-        if (at && !last.stale) { last.at = at; if (last.updates) last.updates.at = at / 1000; }
+        if (at) { last.at = at; if (last.updates) last.updates.at = at / 1000; }
       } else {
         if (!r.ok) throw new Error("collector unavailable");
         last = await r.json();
         usersTag = r.headers.get("ETag");
       }
+      last.stale = r.headers.get("Yo-Stale") === "1";
       updates(last.updates);
       const doneResponse = await fetch("/done.json", { cache: "no-store" });
       const done = new Set(doneResponse.ok ? await doneResponse.json() : []);
@@ -2113,16 +2066,26 @@ if (document.body.classList.contains("login")) {
       status.textContent = last.stale ? "Stale data · waiting for the collector" : "";
     } catch {
       status.textContent = last ? "Stale data · refresh failed" : "Waiting for fresh data…";
-    } finally { peopleBusy = false; }
+    }
   }
 
   // ---- one page of widgets; the Database widget is always open. Rows of Attention and Usage jump there: Feedback to
   // the support chat, Errors to diagnostics, Reports to reports, Sign-ups (and the Users card's title) to the users
   // table. Services is one row in Server, opened in place (on its own while something is down). Keys: 1 top, 2 chat, 3 diagnostics, 4 users, 5 database, 0 the hub.
-  const showTable = (name) => { tableOpen = { users: "people", support_messages: "v-support", diagnostics: "v-errors", reports: "v-reports", todos: "v-todos", services_yos: "v-services" }[name] || name; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
-  // The support chat shown, scrolled to only when it is out of sight (a click inside it never moves the page).
+  const viewPaths = { people: "/users", "v-support": "/support", "v-errors": "/diagnostics", reserved: "/reserved" };
+  const tablePath = key => viewPaths[key] || "/db?" + new URLSearchParams({ table: key });
+  const navigate = (path, state = null) => {
+    if (location.pathname + location.search !== path) history.pushState(state, "", path);
+  };
+  const showTable = (key, scroll = true, path = tablePath(key)) => {
+    navigate(path);
+    const entering = tableOpen !== "v-support" && key === "v-support";
+    tableOpen = key; tablesDrawn = ""; part(drawTables);
+    if (entering && !document.hidden) supportRefresh();
+    if (scroll) $("t-db").scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const toInbox = () => {
-    if (tableOpen !== "v-support") { tableOpen = "v-support"; tablesDrawn = ""; part(drawTables); }
+    showTable("v-support", false);
     const r = $("people").getBoundingClientRect();
     if (r.bottom < 120 || r.top > innerHeight - 120) $("t-db").scrollIntoView({ behavior: "smooth", block: "start" });
   };
@@ -2137,7 +2100,7 @@ if (document.body.classList.contains("login")) {
   $("t-db").addEventListener("click", (e) => { if (e.target.closest(".tpane .pii")) toggleBlur(); });
   // ---- the detail: a click on a row, a service or a chart opens up to four cards about it between the widgets and the
   // Database, in the range above (the server's own last 24 hours); the same click again, × or Escape closes it.
-  // Closed by default; the address remembers it (#detail-speed).
+  // Closed by default; the address remembers it (/detail/speed).
   const short = (v) => { const a = Math.abs(v); return a >= 1e9 ? `${(v / 1e9).toFixed(1)}G` : a >= 1e6 ? `${(v / 1e6).toFixed(a >= 1e7 ? 0 : 1)}M` : a >= 1e4 ? `${Math.round(v / 1e3)}k` : a >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : `${Math.round(v)}`; };
   // Every chart in the detail is three parts: the title with its value, the chart (its first and last slot as the only
   // axis), and one quiet line under it: the legend or a short note. A click on a slot names it in that line instead;
@@ -3016,7 +2979,7 @@ if (document.body.classList.contains("login")) {
             note: "Occurrences of open problems, including crashes." };
           return { ico: "warn", label: "Problems", title: { cap: 1, head: "Problems", rows: [{ label: "Open causes", value: num(openCount) }, { label: "Done, still reported in 24 h", value: num(stillCount) }, { label: "Occurrences", value: num(reports) }, { label: "Phones affected in range", value: problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–" }, { label: "1  Occurrence", value: "from a phone" }, { label: "2  Fingerprint", value: "kind · code · line" }, { label: "3  Group", value: "same fingerprint, count goes up" }, { label: "4  Problem", value: "the cause: its groups together" }], note: "Ticked stays closed for the builds it was ticked in; a newer build reporting it opens it again." }, value: num(openCount), cls: openCount ? "warn" : "", values: p.er, top: p.cr, recorded: p.recorded, scls: "warm",
             tip: (i) => problemTip(p, i) }; })(),
-        { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("support_messages"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
+        { ico: "chat", label: "Support", value: num(supportCount), cls: supportCount ? "warn" : "", title: summary("Support", supportCount, weekly ? fb.reduce((a, b) => a + b, 0) : kinds.Support), values: fb, go: () => showTable("v-support"), goTitle: "Open the support chat", tip: (i) => ({ head: names[i], rows: [{ color: "var(--ok)", label: "Support", value: num(fb[i]) }] }) },
         { ico: "flag", label: "Reports", value: num(openReports), cls: openReports ? "warn" : "", title: summary("Reports", openReports, weekly ? rp.reduce((a, b) => a + b, 0) : kinds.Reports), values: rp, scls: "warm",
           tip: (i) => ({ head: names[i], rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         ...(() => {
@@ -3071,8 +3034,19 @@ if (document.body.classList.contains("login")) {
   for (const host of detailHosts) host.addEventListener("pointerleave", () => {
     if (detailPending) { detailPending = false; drawDetail(); }
   });
-  const openDetail = (key) => {
-    const target = { yc: "t-yc", uc: "t-uc", vr: "grp-vr", pr: "grp-pr", ps: "uc-rows", dl: "delivery-rows" }[TOPIC(key)];
+  const closeDetail = () => {
+    if (history.state?.from) history.back();
+    else { history.replaceState(null, "", "/"); landing(); }
+  };
+  const openDetail = (key, fromPage = true) => {
+    const path = "/detail/" + (SLUG[key] || key);
+    if (fromPage && location.pathname === path) return closeDetail();
+    if (fromPage) {
+      if (location.pathname.startsWith("/detail/")) history.replaceState(history.state, "", path);
+      else navigate(path, { from: location.pathname + location.search });
+    }
+    const target = { yc: "t-yc", uc: "t-uc", md: "t-yc", gr: "t-uc", sc: "t-uc", pl: "t-uc", vr: "grp-vr",
+      pr: "grp-pr", ps: "uc-rows", dl: "delivery-rows", server: "detail", svc: "detail", upd: "detail" }[TOPIC(key)];
     if (target) $(target).scrollIntoView({ behavior: "smooth", block: "start" });
   };
   serverHints();
@@ -3083,17 +3057,37 @@ if (document.body.classList.contains("login")) {
     n.addEventListener("keydown", (e) => { if (e.target === n && n.tagName !== "BUTTON" && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openDetail(n.dataset.card); } });
   }
   // Links, old ones too: #support/#feedback at the chat, #crashes/#diagnostics at diagnostics, #reserved, #users.
-  const TABLES = { book: "services_yos", users: "users", todos: "todos", inbox: "support_messages", support: "support_messages", feedback: "support_messages", crashes: "diagnostics", diagnostics: "diagnostics", reports: "reports", db: null, reserved: "reserved" };
+  const legacy = { book: "v-services", users: "people", inbox: "v-support", support: "v-support", feedback: "v-support",
+    crashes: "v-errors", diagnostics: "v-errors", reports: "v-reports", reserved: "reserved" };
   const landing = () => {
-    const h = location.hash.slice(1), d = h.startsWith("detail-") && Object.keys(SLUG).find((k) => SLUG[k] === h.slice(7));
-    if (d) openDetail(d); else if (h in TABLES) showTable(TABLES[h] || tableOpen);
+    unpin(false);
+    const hash = location.hash.slice(1);
+    if (hash) {
+      const path = /^detail-[a-z0-9-]+$/.test(hash) ? "/detail/" + hash.slice(7)
+        : Object.hasOwn(legacy, hash) ? tablePath(legacy[hash]) : hash === "db" ? "/db" : "/";
+      history.replaceState(null, "", path);
+    }
+    const path = location.pathname;
+    if (path.startsWith("/detail/")) {
+      const slug = path.slice(8);
+      const dial = [...document.querySelectorAll("[data-detail]")].find(n => n.dataset.detail === slug);
+      if (dial) dial.click();
+      else openDetail(Object.keys(SLUG).find(k => SLUG[k] === slug) || slug, false);
+    } else if (path === "/") {
+      tableOpen = "people"; part(drawTables);
+      if (window.scrollY) window.scrollTo(0, 0);
+    } else {
+      const key = Object.keys(viewPaths).find(k => viewPaths[k] === path) || new URLSearchParams(location.search).get("table") || "people";
+      showTable(key, true, path + location.search);
+    }
   };
-  window.addEventListener("hashchange", landing);
+  window.addEventListener("popstate", landing);
   const typing = (t) => t instanceof Element && (t.isContentEditable || t.closest("textarea, select, [contenteditable]")
     || (t.closest("input") && !["checkbox", "radio", "button", "submit"].includes(t.closest("input").type)));
   // Keys: 0 switches the hub; 1, 2, 3, 4 the range (1 day, 7 days, 30 days, since the start).
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+    if (e.key === "Escape" && location.pathname.startsWith("/detail/")) { closeDetail(); return; }
     const n = /^Digit[0-4]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-4]$/.test(e.key) ? Number(e.key) : null;
     if (n == null) return;
     e.preventDefault();
@@ -3103,8 +3097,18 @@ if (document.body.classList.contains("login")) {
   landing();
   drawRange();
   tick();
-  setInterval(tick, 3000);
   refresh();
-  setInterval(refresh, 10000);
+  let beat = 0;
+  setInterval(() => {
+    if (document.hidden) return;
+    beat++;
+    if (beat % 3 === 0) tick();
+    if (beat % 10 === 0) refresh();
+    if (beat % 5 === 0) liveWatchdog();
+    if (beat % 15 === 0 && location.pathname === "/support" && tableOpen === "v-support") {
+      supportRefresh();
+      if (supportInstall && supportHub === which) supportOpen(supportInstall);
+    }
+  }, 1000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { tick(); refresh(); } });
 }

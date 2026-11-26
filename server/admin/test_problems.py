@@ -19,6 +19,7 @@ class ProblemTests(unittest.TestCase):
         INSERT INTO diagnostic_builds VALUES (1, 'ios/2', 3, 2), (1, 'ios/1', 2, 1);
         INSERT INTO diagnostic_hours VALUES (1, {h}, 4), (1, {h - 3}, 1), (1, {h - 30}, 9);
         """)
+        users.prepare_stats(db)
         row = users.diagnostics(db)[0]
         self.assertEqual(row["builds"], [["ios/1", 2, 1], ["ios/2", 3, 2]])
         self.assertEqual(sum(row["hours_24h"]), 5)
@@ -28,6 +29,7 @@ class ProblemTests(unittest.TestCase):
         db = sqlite3.connect(":memory:")
         db.execute("CREATE TABLE diagnostics (id INTEGER PRIMARY KEY, kind TEXT, count INTEGER, last_seen INTEGER, payload TEXT)")
         db.execute("INSERT INTO diagnostics VALUES (1, 'error', 1, 1, '{}')")
+        users.prepare_stats(db)
         row = users.diagnostics(db)[0]
         self.assertEqual((row["builds"], sum(row["hours_24h"])), ([], 0))
 

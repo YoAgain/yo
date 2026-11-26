@@ -1,4 +1,4 @@
-"""Run: python3 -m unittest discover -s admin -p 'test_*.py'. Attention: diagnostics, reports, support and to-dos."""
+"""Run: python3 -m unittest discover -s admin -p 'test_*.py'. Attention: diagnostics, reports and support."""
 import importlib.util
 import io
 import os
@@ -41,7 +41,7 @@ class HelpTests(unittest.TestCase):
         with patch.dict(os.environ, {"ADMIN_USER":"test", "ADMIN_PASSWORD_HASH":"unused", "ADMIN_SESSION_KEY":"00",
                 "ACCESS_TEAM":"invalid", "ACCESS_AUD":"test", "YO_ADMIN_TOKEN":"test-token"}):
             admin = load("admin")
-        with patch.object(admin.urllib.request, "urlopen", return_value=io.BytesIO(b'[]')) as send:
+        with patch.object(admin, "hub_call", return_value=b'[]') as send:
             admin.diagnostics_request("dev", {"id":7, "done":True})
             request = send.call_args.args[0]
             self.assertTrue(request.full_url.endswith("/v1/admin/diagnostics"))
@@ -88,6 +88,7 @@ class HelpTests(unittest.TestCase):
                 db.execute("INSERT INTO diagnostics VALUES(6,'error',1,1,2,?,'26','iPhone','{\"domain\":\"NSURLErrorDomain\",\"code\":\"-1001\"}',0)", (f"ios/{stamp}",))
                 db.execute("INSERT INTO diagnostic_installs VALUES(6,?,?)", (c, today))
                 # Phones on builds under 24 h (latest level), and of them those with a report.
+                users.prepare_stats(db)
                 self.assertEqual(users.current_build_installs(db, now), [2, 1, 2, 1, 0, 0])
 
     def test_reports_by_install_without_a_name(self):
@@ -149,57 +150,12 @@ class HelpTests(unittest.TestCase):
                     ("crash", "f", now - 9000, now - 8000, "ios/1", json.dumps({"exception": "x", "termination": "y"}), 1)])
             self.assertEqual(users.hub("live", path)["problems_open"]["hours"][-1], 2)
 
-    def test_migration_resumes_and_remaps_done(self):
-        import json
-        migration = load("migrate_todos")
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
-            (state / "todos.json").write_text(json.dumps([
-                {"id": "t1", "hub": "live", "text": "already moved"},
-                {"id": "t2", "hub": "dev", "text": "next"}]))
-            (state / "todos-migrated.json").write_text('{"live:t1": "live:11"}')
-            (state / "feedback-done.json").write_text('["live:t1", "dev:t2", "live:7"]')
-            with patch.dict(os.environ, {"STATE_DIRECTORY": directory, "YO_ADMIN_TOKEN": "test"}), \
-                    patch.object(migration.urllib.request, "urlopen", return_value=io.BytesIO(b'{"id": 22}')) as send:
-                migration.main()
-            self.assertEqual(send.call_count, 1)
-            self.assertEqual(json.loads((state / "feedback-done.json").read_text()), ["dev:22", "live:11", "live:7"])
-            self.assertFalse((state / "todos.json").exists())
-            self.assertTrue((state / "todos.json.migrated").exists())
-
-    def test_todo_uses_selected_hub_and_utf8(self):
-        with patch.dict(os.environ, {"ADMIN_USER": "test", "ADMIN_PASSWORD_HASH": "unused",
-                "ADMIN_SESSION_KEY": "00", "ACCESS_TEAM": "invalid", "ACCESS_AUD": "test",
-                "YO_ADMIN_TOKEN": "test-token", "YO_HUB_DEV_URL": "http://localhost:19090"}):
-            admin = load("admin")
-        with patch.object(admin.urllib.request, "urlopen", return_value=io.BytesIO(b'{"id": 42}')) as send:
-            self.assertEqual(admin.todo_add("dev", "fix 🎨"), {"id": 42})
-            request = send.call_args.args[0]
-            self.assertEqual(request.full_url, "http://localhost:19090/v1/admin/todos")
-            self.assertEqual(request.data, "fix 🎨".encode())
-            self.assertEqual(request.get_header("Yo-admin-token"), "test-token")
-
-    def test_team_todos_snapshot(self):
-        users = load("users")
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "hub.sqlite")
-            with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE support_messages(id INTEGER PRIMARY KEY,text TEXT,created_at INTEGER,done_at INTEGER,user_id BLOB)")
-                db.execute("INSERT INTO support_messages VALUES(3,'task',4,NULL,X''),(4,'done',5,6,X''),(5,'user',6,NULL,X'01')")
-            rows = users.hub("dev", path)["todos"]
-            self.assertEqual(rows, [{"id":3,"text":"task","at":4,"done_at":None},{"id":4,"text":"done","at":5,"done_at":6}])
-            # From the hub's schema 7 on: their own table.
-            with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE todos(id INTEGER PRIMARY KEY,text TEXT,created_at INTEGER,done_at INTEGER)")
-                db.execute("INSERT INTO todos VALUES(7,'own',8,NULL)")
-            self.assertEqual(users.hub("dev", path)["todos"], [{"id":7,"text":"own","at":8,"done_at":None}])
-
     def test_support_proxy_plain_text_and_no_content(self):
         with patch.dict(os.environ, {"ADMIN_USER":"test", "ADMIN_PASSWORD_HASH":"unused",
                 "ADMIN_SESSION_KEY":"00", "ACCESS_TEAM":"invalid", "ACCESS_AUD":"test",
                 "YO_ADMIN_TOKEN":"test-token", "YO_HUB_DEV_URL":"http://localhost:19090"}):
             admin = load("admin")
-        with patch.object(admin.urllib.request,"urlopen",return_value=io.BytesIO(b"")) as send:
+        with patch.object(admin,"hub_call",return_value=b"") as send:
             self.assertEqual(admin.support_request("dev","messages/" + "a"*32,"reply 🎨"),{})
             request = send.call_args.args[0]
             self.assertEqual(request.full_url,"http://localhost:19090/v1/admin/messages/" + "a"*32)
@@ -243,10 +199,9 @@ class ReservedTests(unittest.TestCase):
                 ("GET", None, None, ""),
                 ("POST", ["Admin", "Support"], None, ""),
                 ("POST", ["Admin", {"name": "Open", "note": "App command: yo://open"}], None, ""),
-                ("PUT", {"enabled": False}, None, ""),
                 ("DELETE", None, "Ädm1n/a", "/%C3%84dm1n%2Fa")]:
-            with self.subTest(method=method), patch.object(self.admin.urllib.request, "urlopen",
-                    return_value=io.BytesIO(b'{"enabled": false, "names": []}')) as send:
+            with self.subTest(method=method), patch.object(self.admin, "hub_call",
+                    return_value=b'{"names": []}') as send:
                 self.admin.reserved_request("dev", method, data, name)
                 request = send.call_args.args[0]
                 self.assertEqual(request.full_url, "http://localhost:19090/v1/admin/reserved" + suffix)
@@ -293,12 +248,12 @@ class ReservedTests(unittest.TestCase):
                 proxy.assert_called_with("dev","messages/"+"a"*32+"/handled","5")
                 self.assertEqual(call("POST","/support/done",{"hub":"dev","id":3,"done":False}),200)
                 proxy.assert_called_with("dev","messages/done/3","0")
-                self.assertEqual(call("GET","/support.json?hub=dev&install=team"),400)  # the to-dos are no thread any more
-                self.assertEqual(call("POST","/todos/done",{"hub":"dev","id":3,"done":True}),200)
-                proxy.assert_called_with("dev","todos/3","1")
-                self.assertEqual(call("POST","/todos/delete",{"hub":"dev","id":3}),200)
-                proxy.assert_called_with("dev","todos/3",None,"DELETE")
-                self.assertEqual(call("POST","/todos/delete",{"hub":"dev","id":"3"}),400)
+                self.assertEqual(call("GET","/support.json?hub=dev&install=team"),400)
+                for path in ("/support", "/users", "/diagnostics", "/reserved", "/db", "/detail/accounts"):
+                    self.assertEqual(call("GET", path), 200)
+                for path in ("/todos", "/detail/Upper", "/detail/a/b"):
+                    self.assertEqual(call("GET", path), 404)
+                self.assertEqual(call("POST", "/todos", {}), 404)
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 
@@ -331,8 +286,9 @@ class ReservedTests(unittest.TestCase):
                 logged_in.return_value = True
                 self.assertEqual(post({**data, "hub": "other"}), 400)
                 request.assert_not_called()
-                self.assertEqual(post(data), 200)
-                request.assert_called_once_with("dev", "PUT", {"enabled": False}, None)
+                self.assertEqual(post(data), 400)
+                self.assertEqual(post({"hub": "dev", "action": "add", "names": ["Test"]}), 200)
+                request.assert_called_once_with("dev", "POST", ["Test"], None)
             finally:
                 server.shutdown()
                 server.server_close()

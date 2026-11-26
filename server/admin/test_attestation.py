@@ -47,7 +47,7 @@ class AttestationTest(unittest.TestCase):
     def test_attested_level_once_sampled(self):
         db = sqlite3.connect(":memory:")
         self.addCleanup(db.close)
-        db.execute("CREATE TABLE levels(kind TEXT, hour INTEGER, value INTEGER)")
+        db.execute("CREATE TABLE stats(metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER)")
         self.assertEqual(levels(db, 3 * DAY_MS)["attested_levels"], {})
-        db.execute("INSERT INTO levels VALUES('attested', 70, 5)")
+        db.execute("INSERT INTO stats VALUES('attested', '', 70, 5)")
         self.assertEqual(levels(db, 3 * DAY_MS)["attested_levels"], {"70": 5})

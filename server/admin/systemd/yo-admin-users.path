@@ -8,3 +8,4 @@ Unit=yo-admin-users.service
 
 [Install]
 WantedBy=multi-user.target
+Also=yo-admin-users.timer

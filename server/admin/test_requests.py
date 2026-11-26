@@ -27,46 +27,54 @@ class RequestTests(unittest.TestCase):
 
     def publish(self, timestamp):
         temp = self.output.with_suffix('.tmp')
-        temp.write_text(json.dumps({"live": {"total": 7}}))
+        temp.write_text(json.dumps({"at": 2, "live": {"total": 7}}))
         os.utime(temp, ns=(timestamp, timestamp))
         temp.replace(self.output)
 
-    def test_coalesces_concurrent_requests_and_retriggers_after_five_seconds(self):
-        with patch.object(self.admin.time, 'monotonic', return_value=10):
-            threads = [threading.Thread(target=self.collector.request) for _ in range(8)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            first = self.want.stat().st_mtime_ns
-            os.utime(self.want, ns=(1, 1))
-            self.assertEqual(self.collector.request(), first)
-            self.assertEqual(self.want.stat().st_mtime_ns, 1)
-        with patch.object(self.admin.time, 'monotonic', return_value=15):
-            self.assertGreater(self.collector.request(), 1)
+    def test_plain_read_and_cache(self):
+        self.publish(1)
+        with patch.object(self.admin.gzip, "compress", wraps=self.admin.gzip.compress) as compress:
+            first, stale = self.collector.snapshot()
+            self.assertFalse(stale)
+            self.assertFalse(self.want.exists())
+            self.assertIs(self.collector.snapshot()[0], first)
+            compress.assert_called_once()
+            self.publish(1)  # the inode changed, even with the same timestamp
+            self.assertIsNot(self.collector.snapshot()[0], first)
+        self.collector.want_dev()
+        self.assertTrue(self.want.with_name("want-dev").exists())
+        self.assertFalse(self.want.exists())
 
     def test_waits_for_atomic_publication(self):
-        requested = self.collector.request()
-        self.publish(requested - 1)
-        timer = threading.Timer(.05, self.publish, args=(requested + 1,))
-        timer.start()
-        self.addCleanup(timer.join)
-        result = self.collector.snapshot(timeout=.5)
-        self.assertFalse(result['stale'])
-        self.assertEqual(result['live']['total'], 7)
+        self.publish(1)
+        def publish():
+            while not self.want.exists():
+                if stop.wait(.005):
+                    return
+            self.publish(self.want.stat().st_mtime_ns + 1)
+        stop = threading.Event()
+        worker = threading.Thread(target=publish)
+        worker.start()
+        try:
+            result, stale = self.collector.snapshot(timeout=1, after=2)
+        finally:
+            stop.set()
+            worker.join()
+        self.assertFalse(stale)
+        self.assertEqual(json.loads(result[0])["live"]["total"], 7)
 
-    def test_timeout_returns_old_data_even_at_equal_mtime(self):
-        requested = self.collector.request()
-        self.publish(requested)
-        self.assertEqual(self.collector.snapshot(timeout=.01),
-                         {'live': {'total': 7}, 'stale': True})
+    def test_timeout_returns_old_data(self):
+        self.publish(1)
+        result, stale = self.collector.snapshot(timeout=.01, after=3)
+        self.assertTrue(stale)
+        self.assertEqual(result[2], 2)
 
     def test_missing_and_invalid_snapshot(self):
-        self.assertEqual(self.collector.snapshot(timeout=0), {'stale': True})
+        self.assertTrue(self.collector.snapshot()[1])
         self.output.write_text('{')
-        self.assertEqual(self.collector.snapshot(timeout=0), {'stale': True})
+        self.assertTrue(self.collector.snapshot()[1])
 
     def test_unwritable_request_falls_back_to_stale(self):
         self.publish(1)
         self.collector.request_file = self.want / 'missing' / 'want'
-        self.assertTrue(self.collector.snapshot(timeout=0)['stale'])
+        self.assertTrue(self.collector.snapshot(after=2)[1])

@@ -1,0 +1,11 @@
+[Unit]
+Description=Yo admin page: collect every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=yo-admin-users.service
+
+[Install]
+WantedBy=timers.target

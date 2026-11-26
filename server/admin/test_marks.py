@@ -21,9 +21,9 @@ class MarksTests(unittest.TestCase):
     def test_histories_come_from_the_hubs_levels(self):
         users, hour, day = load("users"), 3600000, 20400
         db = sqlite3.connect(":memory:")
-        db.execute("CREATE TABLE levels (kind TEXT, hour INTEGER, value INTEGER, PRIMARY KEY (kind, hour))")
+        db.execute("CREATE TABLE stats (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY (metric,key,hour))")
         h0 = day * 24  # midnight starting `day`: the levels at the end of day - 1
-        db.executemany("INSERT INTO levels VALUES (?, ?, ?)", [
+        db.executemany("INSERT INTO stats(metric,hour,value) VALUES (?, ?, ?)", [
             ("active-24h", h0 - 24, 4), ("active-24h", h0, 5), ("active-24h", h0 + 3, 9),
             ("queue-envelopes", h0, 2), ("queue-media-bytes", h0, 70), ("queue-envelopes", h0 + 3, 1),
             ("open-errors", h0, 8), ("open-crashes", h0, 2), ("open-errors", h0 + 3, 3),
