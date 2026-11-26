@@ -15,13 +15,15 @@ struct FriendEntity: AppEntity {
   /// A user id, a name before the first Yo, or "group:" and the group's id.
   let id: String
   let name: String
+  /// A bot: "/" before its name, as its bar shows it.
+  let bot: Bool
 
-  var title: String { ShareBridge.Friend.title(name, to: id) }
+  var title: String { ShareBridge.Friend.title(name, to: id, bot: bot) }
 
   var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(title)") }
 
   init(_ friend: ShareBridge.Friend) {
-    (id, name) = (friend.to, friend.name)
+    (id, name, bot) = (friend.to, friend.name, friend.bot == true)
   }
 }
 
@@ -138,7 +140,7 @@ enum IntentYo {
     // The name as the list shows it now: a control keeps the friend as it was picked.
     let shown = list.friends.first { $0.to == friend.id }
       ?? list.friends.first { $0.name.caseInsensitiveCompare(friend.name) == .orderedSame }
-    let name = shown?.name ?? friend.name
+    let name = shown?.title ?? friend.title
     let outcome = await YoSend.dispatch(
       to: friend.id, owner: list.owner, shown: (name: name, color: shown?.color, back: false), timing: timing,
       wait: wait)
@@ -154,7 +156,7 @@ enum IntentYo {
       throw YoIntentError.noYoYet
     }
     let bar = ShareBridge.readList()?.friends.first { $0.to == last.to }
-    let name = bar?.name ?? last.name
+    let name = bar?.title ?? last.name
     let outcome = await YoSend.dispatch(
       to: last.to, owner: last.owner, shown: (name: name, color: bar?.color, back: true), timing: timing, wait: wait)
     if let outcome { return .result(dialog: "No Yo back to \(name). \(outcome.why)") }
