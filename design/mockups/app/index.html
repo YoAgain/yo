@@ -355,8 +355,8 @@ S.settings = p => { const a = hub.account; return `<div class="grab"></div><div 
     <div style="display:flex;align-items:center;gap:14px;width:100%"><span class="avatar" style="background:${avatarColor(a.name)}">${esc(a.name[0].toUpperCase())}</span>${a.passkey ? '' : '<span class="badge">1</span>'}<span style="flex:1"></span><span class="qrbtn" data-a="go" data-s="code">${svg('qr', 20, '#9b59b6')}</span>${chev}</div>
     <div class="yo" style="font-size:26px;color:#000">${esc(a.name)}</div></div></div>
   <div class="card"><div class="r" data-a="go" data-s="appearance">${tile('paint', '#9b59b6')}<span class="t">Appearance</span>${chev}</div></div>
-  <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">Help &amp; About</span>${chev}</div>
-    <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Send Feedback</span>${chev}</div></div></div>`; };
+  <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">About</span>${chev}</div>
+    <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Feedback</span>${chev}</div></div></div>`; };
 
 S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Appearance</div><div class="sbody">
   <div class="card"><div class="icons">${[['Yo','#9b59b6','Yo'],['Yo!','#f5f0f7','Yo'],['Just Yo','#9b59b6',''],['2014','#8e44ad',''],['2015','#a569bd','']].map(([n, c, t]) =>
@@ -381,7 +381,7 @@ S.blocked = p => `<div class="grab"></div><div class="shead">${backbtn()}Blocked
 S.contacts = p => `<div class="shead">${xbtn()}Contacts</div><div class="sbody">
   <div class="card">${p.friends.filter(f => f.kind !== 'group').map(f => `<div class="r plain" data-a="toast" data-t="${esc(f.name)}: compare code"><span class="avatar" style="width:24px;height:24px;font-size:12px;background:${ROWS[f.color % ROWS.length]}">${esc(f.name[0].toUpperCase())}</span><span class="t">${esc(f.name)}</span></div>`).join('')}</div></div>`;
 
-S.help = p => `<div class="shead">${xbtn()}Help &amp; About</div><div class="sbody">
+S.help = p => `<div class="shead">${xbtn()}About</div><div class="sbody">
   <div class="card" style="background:var(--amethyst);height:340px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:34px"><span class="yo" style="color:#fff;font-size:22px">Tap to Send Yo</span></div>
   <div class="card"><div class="r" data-a="toast" data-t="Status">${tile('pulse', '#34c759')}<span class="t">Status</span><span class="v">Online <span style="color:var(--green)">●</span></span>${chev}</div>
     <div class="r" data-a="toast" data-t="About & Licenses">${tile('info', '#8e8e93')}<span class="t">About &amp; Licenses</span><span class="v">1.0.0</span>${chev}</div></div></div>`;
