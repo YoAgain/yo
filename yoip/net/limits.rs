@@ -50,10 +50,11 @@ pub const MAX_APP_VERSION_LEN: usize = 64;
 /// Oblivious HTTP (spec 4.1): the sizes a whole wrapped body can have, both directions; the TLS proxy sees only the
 /// bucket. One table, so it is easy to change. Measured before (#8, 26.11.): a one-device Yo is about 1.2 KB
 /// directly (its envelope 1 KiB, headers 150), with `envelope::SMALL` it fits the smallest; lookups, certificates,
-/// inbox fetches of a few Yos and group calls fit 4 KiB; registrations and prekey uploads (about 55 KB) 64 KiB;
+/// inbox fetches of a few Yos and group calls fit 4 KiB; a first message with a prekey (its 4 KiB envelope and
+/// headers) 8 KiB; registrations and prekey uploads (about 55 KB) 64 KiB;
 /// the largest delivery (`MAX_DELIVERY_BODY`) 1 MiB; a full inbox fetch (100 envelopes of 64 KiB) 16 MiB.
-pub const OHTTP_BUCKETS: [usize; 8] =
-    [1024, 4096, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
+pub const OHTTP_BUCKETS: [usize; 9] =
+    [1024, 4096, 8 * 1024, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
 /// The largest wrapped request the hub reads: the bucket that holds the largest delivery.
 pub const MAX_OHTTP_REQUEST: usize = 1024 * 1024;
 /// The largest wrapped answer: the largest bucket.
