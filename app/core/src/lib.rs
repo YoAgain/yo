@@ -17,6 +17,7 @@ pub mod media;
 pub mod migrations;
 pub mod name_field;
 pub mod net;
+pub mod ohttp;
 mod outbox;
 mod prekeys;
 mod probe;
@@ -564,6 +565,8 @@ pub struct Client {
     envelopes_unsaved: std::cell::Cell<bool>,
     /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
     media_keys_forgotten: bool,
+    /// Envelopes may use `envelope::SMALL` (`set_small_envelopes`).
+    small_envelopes: bool,
     /// A guest: the events it receives stay for the app; how many it has returned already.
     guest_events: Option<usize>,
     /// Inbox ids saved and handed out, not yet acknowledged at the hub. Lost with the process, they come again.
@@ -1013,6 +1016,7 @@ impl Client {
             held_until: Held::default(),
             envelopes_unsaved: std::cell::Cell::new(false),
             media_keys_forgotten: false,
+            small_envelopes: false,
             guest_events: None,
             unacked: Vec::new(),
             names_asked: BTreeSet::new(),
@@ -1120,8 +1124,9 @@ impl Client {
     }
 
     /// A fresh nonce for an answer that hands out keys, when keys are pinned (spec 4.1).
+    /// Over OHTTP to a pinned key the answer is the hub's and fresh already: none asked for.
     fn hub_nonce(&self) -> Option<[u8; hubsig::NONCE_LEN]> {
-        self.hub_key_pinned().then(identity::random::<{ hubsig::NONCE_LEN }>)
+        (self.hub_key_pinned() && !self.transport.authenticated()).then(identity::random::<{ hubsig::NONCE_LEN }>)
     }
 
     /// Reloads rows read in a single database snapshot.

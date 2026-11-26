@@ -91,6 +91,12 @@ impl Client {
         Ok(Upload { transport: self.transport.clone(), path, headers })
     }
 
+    /// Seal envelopes to `envelope::SMALL_BUCKETS` (spec 4.1): over OHTTP a one-device Yo then fits the smallest
+    /// bucket. Only once receivers accept the small bucket: those before it drop such envelopes.
+    pub fn set_small_envelopes(&mut self, small: bool) {
+        self.small_envelopes = small;
+    }
+
     /// Drops the keys of received media before any event is kept, for a client that never opens them (YoGPT).
     pub fn forget_media_keys(&mut self) {
         self.media_keys_forgotten = true;

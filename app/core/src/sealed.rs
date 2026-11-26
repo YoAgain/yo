@@ -59,6 +59,7 @@ pub fn seal(
     own: &IdentityKeyPair,
     recipient: &IdentityKey,
     payload: &[u8],
+    small: bool,
 ) -> Result<Vec<u8>> {
     let store = Between { own: *own, them: *recipient };
     // libsignal names an address; the store answers the one identity for any.
@@ -76,7 +77,8 @@ pub fn seal(
         .map_err(signal::signal)?;
         signal::now(sealed_sender_encrypt_from_usmc(&address, &usmc, &store, &mut rand::rng())).map_err(signal::signal)
     };
-    sealed::seal(payload.len(), make, Error::Protocol("too large"))
+    let sizes: &[usize] = if small { &envelope::SMALL_BUCKETS } else { &envelope::BUCKETS };
+    sealed::seal(sizes, payload.len(), make, Error::Protocol("too large"))
 }
 
 /// An opened envelope: the payload and who the certificate names (`None`: identified, the session says who).
@@ -163,6 +165,7 @@ pub mod testing {
             &crate::identity::account_pair(account_secret)?,
             &signal::identity_of(recipient)?,
             payload,
+            false,
         )
     }
 }
@@ -195,7 +198,7 @@ mod tests {
         .unwrap();
         for (len, bucket) in [(1, 1024), (500, 1024), (2000, 4096), (60_000, 65536)] {
             let payload = vec![9; len];
-            let sealed = seal(&certificate, &me, them.identity_key(), &payload).unwrap();
+            let sealed = seal(&certificate, &me, them.identity_key(), &payload, false).unwrap();
             assert_eq!(sealed.len(), bucket, "{len}");
             let opened = open(&them, &sealed, &[root.public_key], 10_000).unwrap();
             assert_eq!(opened.payload, payload);
@@ -206,6 +209,6 @@ mod tests {
             assert!(open(&them, &sealed, &[], 1).is_err(), "no root pinned");
         }
         // What the largest bucket cannot hold sealed is refused, not sent another way.
-        assert!(seal(&certificate, &me, them.identity_key(), &vec![9; 65_400]).is_err());
+        assert!(seal(&certificate, &me, them.identity_key(), &vec![9; 65_400], false).is_err());
     }
 }

@@ -264,6 +264,11 @@ pub fn trust_root() -> [u8; 32] {
 }
 
 /// The test hubs' zkgroup public params (spec 3.4), as an app pins them.
+/// The test hubs' OHTTP key config (`Config::for_tests`), as apps pin it.
+pub fn ohttp_config() -> Vec<u8> {
+    yo_hub::ohttp::key_config(yo_hub::config::TEST_OHTTP_KEY_ID, &yo_hub::config::TEST_OHTTP_KEY).unwrap()
+}
+
 pub fn zk_params() -> Vec<u8> {
     yo_hub::groups::Zk::from_bytes(&yo_hub::groups::test_params()).expect("params").public().to_vec()
 }

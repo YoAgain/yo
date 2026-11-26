@@ -25,6 +25,12 @@ pub trait Transport: Send + Sync {
     ) -> Result<(Response, Vec<(String, String)>), String> {
         self.request(method, path, headers, body).map(|response| (response, Vec::new()))
     }
+
+    /// Whether every answer is the hub's and fresh by itself: Oblivious HTTP to a pinned key (`ohttp::Ohttp`, spec
+    /// 4.1). Answers handing out keys are then taken without the hub's signature (`Yo-Nonce`).
+    fn authenticated(&self) -> bool {
+        false
+    }
 }
 
 /// How a transport's failure starts when TLS refused the hub's certificate for its dates (`Transport`).

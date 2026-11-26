@@ -97,7 +97,7 @@ fn sixteen_devices_get_a_payload_each_and_every_device_can_answer() {
         .iter()
         .chain(&ordinary)
         .map(|p| {
-            let envelope = sealed::seal(&cert, &own, &signal::identity_of(&key).unwrap(), &p.payload).unwrap();
+            let envelope = sealed::seal(&cert, &own, &signal::identity_of(&key).unwrap(), &p.payload, false).unwrap();
             // A Yo per device: a small envelope each (a first message carries the PQXDH prekey material).
             assert!(envelope.len() <= yoip::protocol::envelope::BUCKETS[1]);
             api::CopyFor { device: p.device, envelope: envelope.into() }

@@ -52,7 +52,7 @@ impl Client {
             (*signature).try_into().expect("an XEdDSA signature is 64 bytes")
         };
         let mut headers = crate::signature_headers(sign, "GET", &path, time, &yoip::sha256(&[]));
-        let nonce = (!hub_keys.is_empty()).then(crate::identity::random::<{ hubsig::NONCE_LEN }>);
+        let nonce = (!hub_keys.is_empty() && !transport.authenticated()).then(crate::identity::random::<{ hubsig::NONCE_LEN }>);
         if let Some(nonce) = &nonce {
             headers.push((hubsig::NONCE_HEADER.to_owned(), yoip::b64(nonce)));
         }

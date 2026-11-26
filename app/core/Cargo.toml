@@ -24,6 +24,10 @@ libsignal-protocol = { workspace = true }
 zkgroup = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }
+# Oblivious HTTP (spec 4.1): the client side, pure Rust (no NSS), and Binary HTTP.
+ohttp = { version = "=0.8.0", default-features = false, features = ["client", "rust-hpke"] }
+bhttp = "=0.8.0"
+httpdate = "=1.0.3"
 
 # The state shared by an app and its extensions (statedb.rs). The iPhone links its own SQLite (libsqlite3 of the
 # SDK: Apple's file protection, no C compiler for the core); elsewhere SQLite is built in.
