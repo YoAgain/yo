@@ -1416,3 +1416,57 @@ fn the_app_layer_holds_yos_past_a_requests_bucket_until_the_yes() {
     a.send_yo(c.user_id()).unwrap();
     assert_eq!(a.waiting(), 0, "a contact's Yo goes at once");
 }
+
+/// HTTP with the answer's headers, as the apps' transports pass them.
+struct Headed(String);
+
+impl HttpTransport for Headed {
+    fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
+        let mut request =
+            reqwest::blocking::Client::new().request(method.parse().unwrap(), format!("{}{path}", self.0)).body(body);
+        for h in headers {
+            request = request.header(h.name, h.value);
+        }
+        let response = request.send().unwrap();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(n, v)| yo::Header { name: n.to_string(), value: v.to_str().unwrap_or("").into() })
+            .collect();
+        HttpResult {
+            status: response.status().as_u16(),
+            headers,
+            body: response.bytes().unwrap().to_vec(),
+            error: None,
+        }
+    }
+}
+
+/// Spec 2.2, 4.2: the name field with `YO_NAME_ATTEST` on: attested 4+ (the challenge named), else 12+; a stale
+/// check drops; Sign Up while checking waits for the answer.
+#[test]
+fn the_name_field_takes_the_hubs_minimum_by_attestation() {
+    use yo::{YoNameField, YoNamePhase, YoSignUp};
+    let mut config = yo_hub::config::Config::for_tests();
+    config.name_attest = true;
+    config.attest = true;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let field = YoNameField::new(Arc::new(Headed(hub.url())));
+    assert!(field.start_device_check().is_some(), "an unsigned challenge");
+    field.device_done(1, Some(vec![1]));
+    let seq = field.typed("Abcde".into()).unwrap();
+    let state = field.check(seq);
+    assert_eq!((state.phase, state.min), (YoNamePhase::Ok, Some(4)));
+    assert!(field.attestation().is_some() && field.device_ms().is_some());
+
+    let field = YoNameField::new(Arc::new(Headed(hub.url())));
+    field.device_done(0, None);
+    let stale = field.typed("Abcd".into()).unwrap();
+    let seq = field.typed("Abcde".into()).unwrap();
+    assert_eq!(field.check(stale).phase, YoNamePhase::Checking, "an older text: dropped");
+    assert_eq!(field.sign_up(), YoSignUp::Wait);
+    let state = field.check(seq);
+    assert_eq!((state.phase, state.min, state.decided), (YoNamePhase::TooShort, Some(12), Some(YoSignUp::Shake)));
+    assert_eq!(field.typed("An na".into()), None);
+    assert_eq!(field.state().bad, vec![" ".to_string()]);
+}

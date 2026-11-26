@@ -15,6 +15,7 @@ pub mod identity;
 pub mod keychain;
 pub mod media;
 pub mod migrations;
+pub mod name_field;
 pub mod net;
 mod outbox;
 mod prekeys;
@@ -723,7 +724,7 @@ fn shown(content: &Content) -> bool {
 }
 
 /// A device attestation for `Register` (spec 4.2): the platform's payload over an unsigned challenge.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attested {
     pub platform: u8,
     pub payload: Vec<u8>,

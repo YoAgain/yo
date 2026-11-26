@@ -708,24 +708,6 @@ pub struct YoAttest {
     pub challenge: Vec<u8>,
 }
 
-/// Where the device check of a new name stands, for the name field: `Checking` while the challenge and the
-/// platform attestation run; then `Attested` (the hub's shorter minimum, 4) or `NotVerifiable` (12).
-#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum YoDeviceCheck {
-    Checking,
-    Attested,
-    NotVerifiable,
-}
-
-/// The device check once the attestation is done: `payload` is the platform's result, `None` when it had none.
-#[uniffi::export]
-pub fn device_check_of(payload: Option<Vec<u8>>) -> YoDeviceCheck {
-    match payload.is_some_and(|p| !p.is_empty()) {
-        true => YoDeviceCheck::Attested,
-        false => YoDeviceCheck::NotVerifiable,
-    }
-}
-
 /// A name check: `status` 204 free, 409 taken, 400 no username or too short, 429 asked too often; `name_min` the
 /// hub's minimum for this caller (`Yo-Name-Min`), `None` from a hub before it.
 #[derive(uniffi::Record)]
@@ -749,6 +731,174 @@ pub fn username_check(
 ) -> Result<YoNameCheck, YoError> {
     let check = Client::username_check(&Http(transport), &username, challenge.as_deref())?;
     Ok(YoNameCheck { status: check.status, name_min: check.name_min })
+}
+
+/// What the sign-up name field shows (`yo_core::name_field`).
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum YoNamePhase {
+    Empty,
+    Checking,
+    Ok,
+    TooShort,
+    Taken,
+    Invalid,
+    Offline,
+}
+
+/// What a tap on Sign Up does: go, wait for the answer (button spinner), or shake.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum YoSignUp {
+    Go,
+    Wait,
+    Shake,
+}
+
+/// The name field for the UI: spinner only while `Checking` (hint empty); `min` the hub's minimum ("Minimum N
+/// characters"); `bad` the forbidden characters typed ("No spaces", "No @"); `decided` a pending Sign Up's answer.
+#[derive(uniffi::Record)]
+pub struct YoNameState {
+    pub phase: YoNamePhase,
+    pub min: Option<u32>,
+    pub bad: Vec<String>,
+    pub signup_pending: bool,
+    pub decided: Option<YoSignUp>,
+}
+
+fn sign_up_of(s: yo_core::name_field::SignUp) -> YoSignUp {
+    use yo_core::name_field::SignUp;
+    match s {
+        SignUp::Go => YoSignUp::Go,
+        SignUp::Wait => YoSignUp::Wait,
+        SignUp::Shake => YoSignUp::Shake,
+    }
+}
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The sign-up name field: one per welcome screen, made when it shows so the device check is usually back
+/// before the name is typed. Blocking calls (`start_device_check`, `check`) go off the main thread.
+#[derive(uniffi::Object)]
+pub struct YoNameField {
+    transport: Arc<dyn HttpTransport>,
+    field: Mutex<yo_core::name_field::NameField>,
+    changed: std::sync::Condvar,
+    challenge: Mutex<Option<Vec<u8>>>,
+}
+
+#[uniffi::export]
+impl YoNameField {
+    #[uniffi::constructor]
+    pub fn new(transport: Arc<dyn HttpTransport>) -> Arc<Self> {
+        Arc::new(YoNameField {
+            transport,
+            field: Mutex::new(yo_core::name_field::NameField::new(wall_ms())),
+            changed: std::sync::Condvar::new(),
+            challenge: Mutex::new(None),
+        })
+    }
+
+    /// Fetches the unsigned challenge for the platform to attest over (App Attest, Play Integrity); `None`
+    /// (off at the hub, no answer): the device is not verifiable, nothing to attest.
+    pub fn start_device_check(&self) -> Option<Vec<u8>> {
+        let challenge = Client::attest_open_challenge(&Http(self.transport.clone())).ok().flatten();
+        match &challenge {
+            Some(c) => *self.challenge.lock().unwrap_or_else(PoisonError::into_inner) = Some(c.clone()),
+            None => self.device_done(0, None),
+        }
+        challenge
+    }
+
+    /// The platform's attestation over the challenge (1 App Attest, 2 Play Integrity); `None` for any failure.
+    pub fn device_done(&self, platform: u8, payload: Option<Vec<u8>>) {
+        let challenge = self.challenge.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let attested = match (payload, challenge) {
+            (Some(payload), Some(challenge)) => Some(yo_core::Attested { platform, payload, challenge }),
+            _ => None,
+        };
+        self.lock().device_done(attested, wall_ms());
+        self.changed.notify_all();
+    }
+
+    /// The text changed: the check number to run with `check` (after the app's typing pause), or `None` when
+    /// the state is already known (empty, forbidden characters).
+    pub fn typed(&self, text: String) -> Option<u64> {
+        let mut field = self.lock();
+        field.typed(&text);
+        let seq = (field.view().phase == yo_core::name_field::Phase::Checking).then(|| field.seq());
+        self.changed.notify_all();
+        seq
+    }
+
+    /// Runs check `seq` at the hub, waiting for the device check (at most `DEVICE_TIMEOUT_MS`); a newer text
+    /// drops it. Returns the state after.
+    pub fn check(&self, seq: u64) -> YoNameState {
+        let mut field = self.lock();
+        let query = loop {
+            if field.seq() != seq {
+                return Self::state_of(&field, None);
+            }
+            if let Some(q) = field.tick(wall_ms()).or_else(|| field.due_query()) {
+                break q;
+            }
+            if field.view().phase != yo_core::name_field::Phase::Checking {
+                return Self::state_of(&field, None);
+            }
+            field = self
+                .changed
+                .wait_timeout(field, std::time::Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        };
+        drop(field);
+        let answer = Client::username_check(&Http(self.transport.clone()), &query.text, query.challenge.as_deref())
+            .map(|c| (c.status, c.name_min))
+            .map_err(drop);
+        let mut field = self.lock();
+        let decided = field.answered(query.seq, answer).map(sign_up_of);
+        Self::state_of(&field, decided)
+    }
+
+    /// Sign Up tapped: `Wait` while checking, then `check`'s `decided` says.
+    pub fn sign_up(&self) -> YoSignUp {
+        sign_up_of(self.lock().sign_up())
+    }
+
+    pub fn state(&self) -> YoNameState {
+        Self::state_of(&self.lock(), None)
+    }
+
+    /// The attestation for `register_username_db`, if the device attested.
+    pub fn attestation(&self) -> Option<YoAttest> {
+        self.lock().attestation().map(|a| YoAttest { platform: a.platform, payload: a.payload, challenge: a.challenge })
+    }
+
+    /// How long the device check took (ms), once done.
+    pub fn device_ms(&self) -> Option<u64> {
+        self.lock().device_ms
+    }
+}
+
+impl YoNameField {
+    fn lock(&self) -> MutexGuard<'_, yo_core::name_field::NameField> {
+        self.field.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn state_of(field: &yo_core::name_field::NameField, decided: Option<YoSignUp>) -> YoNameState {
+        use yo_core::name_field::Phase;
+        let view = field.view();
+        let phase = match view.phase {
+            Phase::Empty => YoNamePhase::Empty,
+            Phase::Checking => YoNamePhase::Checking,
+            Phase::Ok => YoNamePhase::Ok,
+            Phase::TooShort => YoNamePhase::TooShort,
+            Phase::Taken => YoNamePhase::Taken,
+            Phase::Invalid => YoNamePhase::Invalid,
+            Phase::Offline => YoNamePhase::Offline,
+        };
+        YoNameState { phase, min: view.min, bad: view.bad, signup_pending: view.signup_pending, decided }
+    }
 }
 
 /// A new install id (128 random bits, 32 hex digits) for help: the support thread, reports, crash and error reports
