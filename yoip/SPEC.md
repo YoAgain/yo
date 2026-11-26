@@ -138,7 +138,8 @@ A signed-in device adds a new one by camera; no secret is ever shown, and nothin
 1. The new device makes a one-time X25519 key `E` and calls `POST /v1/link` (anonymous). The hub answers a link id: ≥ 128 random bits, one use, 10 minutes. The device shows `yo-link:<link id>.<E public>` as a QR code.
 2. The old device scans it. It MUST ask once ("This device gets access to your account") before it seals `LinkBundle { username, 🔐 account key, 🔑 storage key }` with HPKE to `E` (aad = link id) and stores it with `PUT /v1/link/{id}`. A scanned code MUST NOT link without that tap.
 3. The new device waits with `GET /v1/link/{id}` (≤ 60 s), opens the bundle, registers with the current `🔐 account key` as an added device (§4.2) and loads the storage (§4.3).
-4. The hub sees only link id, time and ciphertext. It MUST delete the bundle on fetch or expiry, MUST NOT log link ids and limits `/v1/link` per IP.
+   `LinkBundle { username; opaque account_secret[32]; opaque storage_key[32]; }`, HPKE as OHTTP (§4.1) with info "yo link bundle", sealed = enc ‖ ciphertext, ≤ 1 KiB. `PUT` is signed by the old device; `GET` answers `200` once, `204` when the wait ends, `404` expired or taken.
+4. The hub sees only link id, time and ciphertext. It keeps links in memory only (≤ 10 000 open, else `503`). It MUST delete the bundle on fetch or expiry, MUST NOT log link ids and limits `/v1/link` per IP.
 
 Without an old device, recovery (§2.4) remains. A device without a camera path (CLI) shows the `yo-link:` text to paste.
 
@@ -198,7 +199,7 @@ sequenceDiagram
   R->>H: POST /inbox/ack
 ```
 ```
-Plain { optional<UserId> to; opaque content<V>; }          // to: absent (sent copies to own devices, phase 2)
+Plain { optional<UserId> to; opaque content<V>; }          // to: the recipient, on a sent transcript to own devices
 ForDevice { opaque device_key[32]; uint8 kind; opaque message<V>; }   // kind 0 Signal, 1 PreKey, 2 Plaintext
 Payload { opaque account_key[32], device_key[32]; uint8 device_id; uint64 sent_at; ForDevice copies<V>; }
 Device { opaque key[32]; uint8 id; }
@@ -228,7 +229,9 @@ sequenceDiagram
   H-->>C: 409 Devices
   Note over C: new session
 ```
-Clients SHOULD fetch the list after registration (a new account after one day) and daily, and MUST fetch it on `409` and on content from an unknown sibling. Contacts' devices also raise `DeviceAdded`. Clients SHOULD fetch bundles only for pending deliveries and MUST put self and usable sessions in `except`.
+Clients SHOULD fetch the list after registration (a new account after one day) and daily, and MUST fetch it on `409` and on content from an unknown sibling. Only own devices raise `DeviceAdded`.
+
+**Sent transcripts.** A 1:1 message also goes, with `to` set to the recipient, to the sender's own devices that are not held. The receiving device shows it as sent and marks a known contact accepted; it MUST NOT create a contact for an unknown `to`. Groups have no transcripts. Clients SHOULD fetch bundles only for pending deliveries and MUST put self and usable sessions in `except`.
 
 - **Outbox.** Clients MUST persist the advanced ratchet before posting. They SHOULD queue offline and encrypt at dispatch, SHOULD retry on network errors, `429`, `426`, `5xx` and `507`, and MUST drop on `400`, request `403`, `404` or `413`. A `404` marks the contact gone (`NotOnYo`).
 - **Inbox.** Clients MUST persist before acknowledging; delivery is at least once. They SHOULD ack full batches of 100 before the next fetch and run acks, receipts, errors, `🔐 prekeys`, outbox and storage after the inbox read (`after_sync`). Parked envelopes MUST be retried in order; above 256 the oldest MAY be dropped.
@@ -369,6 +372,7 @@ The hub is reached only over HTTPS (plain HTTP redirects, HSTS 6 months).
 - **Padding.** Both directions MUST be padded with Binary HTTP zero padding to fixed buckets of the whole wrapped body: 1, 4, 8, 16, 64, 256 KiB, 1, 4, 16 MiB (`net/limits.rs`). A one-device Yo in a 736 B envelope fits the 1 KiB bucket.
 - **Tickets.** Media does not go through OHTTP. Inside OHTTP the client asks for a ticket for one blob and one direction by sending the blob `PUT` (with `Yo-Blob-Length`, length and digest bound by the signed request) or `GET` (with the blob capability) with `Yo-Ticket: 1`; the answer body is the ticket, base64url; it is ≥ 128 random bits, works once and expires after 5 minutes. The transfer is `PUT` or `GET /v1/blobs/t/{ticket}`, direct, `Cache-Control: no-store`; the hub checks length and digest before keeping an upload. Logs MUST NOT keep tickets.
 - **Connections.** The separate connections of §1.1 hold for OHTTP too: anonymous and signed requests use separate connection pools to the proxy that never coalesce, so connection reuse links nothing. IP, size and timing can still be correlated (§5.1).
+- **App.** The outer `Yo-App` applies inside unless the inner request carries its own.
 - **Limits.** Before unwrapping, the hub MUST limit `/v1/ohttp` per IP (§4.1 limits) and by body size, taking the IP only from the proxy.
 - **Rotation.** The hub holds the key in use; the spare stays offline until a rotation. A new key gets a new key id; the old one stays accepted for the config's cache lifetime. A compromised key is dropped at once. Retired private keys MUST be erased everywhere, backups included.
 - **Migration.** Direct routes stay for older apps until at least 80 % of devices active over 30 days use OHTTP (§5.2); then only discovery, support, admin, `/v1/ohttp` and ticket transfers remain direct, and former direct YoIP routes answer `426` so older apps show their update notice. With them go signed answers and the `🔐 hub key`.
@@ -429,6 +433,11 @@ Pinned clients MUST send `Yo-Nonce` and reject unverified answers (`Protocol`). 
 | `PUT /blobs/{id}?fetches=n` | signed by body hash | ciphertext | `201` | §4.3 |
 | `GET /blobs/{id}` | none | – | ciphertext, consumes no fetch | §4.3 |
 | `DELETE /blobs/{id}` | none | – | `204`, consumes one fetch | §4.3 |
+| `GET /devices` | signed | – | `OwnDevices { OwnDevice { number, created_at, last_seen_at, app } devices<V> }` | §4.2 |
+| `DELETE /devices/{n}` | signed | – | `204`; own device `400`; unknown `404`; the removed device gets `410` | §4.2 |
+| `POST /link` | – | – | link id (text), 10 min | §2.5 |
+| `PUT /link/{id}` | signed | sealed `LinkBundle` | `204`; `404`; `409` already there | §2.5 |
+| `GET /link/{id}?wait=s` | – | – | `200` bundle once; `204`; `404` | §2.5 |
 | `PUT /bot` | signed | 1 (one byte, shown in lookups) | `204`; 0 on a bot `409`; other body `400` | §2.1 |
 | `GET /certificate` | signed | – | libsignal `SenderCertificate` | §4.1 |
 | `GET /group-auth` | signed | – | `GroupAuthCredential` | §3.4 |
@@ -508,7 +517,7 @@ sequenceDiagram
   A->>H: GET /certificate
   Note over A: answer lost: look up own 🔐 account key, resend unchanged
 ```
-- Current `🔐 account key`: the hub re-registers under the current name and replaces the previous device. A test hub with `YO_ADD_DEVICES=1` keeps it and MUST return `409 device_limit` at 16.
+- Current `🔐 account key`: the hub re-registers under the current name and replaces the previous device. A hub with `YO_ADD_DEVICES=1` keeps it and MUST return `409` with body "device_limit" ‖ `OwnDevices` at 16; `RegisterReplacing { username; optional<Attest> attest; NewDevice device; uint8 replace }` first retires device `replace` (it then gets `410`).
 - Another key: the hub creates a user if the name is free; a taken name or a replay MUST get `409` and replace nobody.
 - Signed and last-resort `🔐 prekeys` are REQUIRED. The hub rejects (`400`) a registration id outside 1–16383 or a non-canonical Curve25519 `🔐 auth key`.
 - Clients MUST persist registration before sending and MUST NOT generate a new key on resend. Account deletion MUST remove everything at once.
