@@ -6,7 +6,7 @@ Status: draft. Code beside this file: `net/` holds what client and hub exchange 
 |---|---|
 | **[1. Overview](#1-overview)** | [1.1 Goals](#11-goals) · [1.2 Threat model](#12-threat-model) · [1.3 Definitions](#13-definitions) |
 | **[2. Identity](#2-identity)** | [2.1 Account and devices](#21-account-and-devices) · [2.2 Username](#22-username) · [2.3 Verification](#23-verification) · [2.4 Recovery](#24-recovery) |
-| **[3. Session](#3-session)** | [3.1 Sessions](#31-sessions) · [3.2 Messages](#32-messages) · [3.3 Contacts](#33-contacts) · [3.4 Groups](#34-groups) |
+| **[3. Session](#3-session)** | [3.1 Sessions](#31-sessions) · [3.2 Messages](#32-messages) · [3.3 Contacts](#33-contacts) · [3.4 Groups](#34-groups) · [3.5 Services](#35-services) |
 | **[4. Net](#4-net)** | [4.1 Transport](#41-transport) · [4.2 Accounts](#42-accounts) · [4.3 Storage](#43-storage) |
 | **[5. Considerations](#5-considerations)** | [5.1 Known limits](#51-known-limits) · [5.2 Planned](#52-planned) · [5.3 References](#53-references) |
 ## 1. Overview
@@ -336,6 +336,16 @@ sequenceDiagram
 - Senders MUST seal with `Yo-Group-Send` (endorsed `GroupSendFullToken`, base64url); invitees and members without a `🔑 profile key` get a request (§3.3). Group sends create no direct chat. One blob serves all current members (§4.3).
 - `GroupAnswer` returns endorsements for keyed entries in order, valid 25–49 h (zkgroup `default_expiration`). Clients SHOULD refresh with < 1 h left and MUST refresh after `403`.
 - Receivers SHOULD hold ≤ 64 Yos for an unknown group or newer revision and fetch after the inbox read. They MUST accept a nonmember tag at most one revision ahead, MUST drop nonmember Yos and MUST skip undecryptable entries. `403` or `404` marks the group left. Clients SHOULD track ≤ 256 groups per device.
+### 3.5 Services
+Services are bots whose Yo account lives on our server. They are **not end-to-end** with the service: the executor holds the account and decrypts what you send it. A script decides the answer; it gets no keys, no network and not who you are.
+```
+Yo        phone ◄─encrypted─► hub ◄─► executor ◄─► script
+Bridge    other service ──► api.justyo.app/NAME/… ──► entrance ──► executor ──► script
+```
+- The executor MUST keep per Yo only service, direction and time. It MAY keep the user id only while a reminder waits or for a connected user; a finished reminder's user stays readable 7 days, then only the count remains.
+- Content MUST NOT be stored; the script answers and its input is discarded.
+- Bridges: a connection stores only hashes of the call secret and the id the other side knows; connect requests expire after 600 s, OAuth codes after 300 s. For a connected user the executor keeps the last 50 items for the other side to fetch.
+- Each service declares its names, triggers and allowed calls in its manifest (`yo-services`); anything else is refused.
 ## 4. Net
 ### 4.1 Transport
 The hub is reached only over HTTPS (plain HTTP redirects, HSTS 6 months). Contact deliveries use unsigned, padded, sealed envelopes. The hub sees inbox and size. Without a valid 24 h `🎟️ sender certificate`, send once identified and fetch one.
