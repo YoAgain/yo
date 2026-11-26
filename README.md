@@ -1,96 +1,60 @@
 <p align="center">
-  <img src="docs/yo-app-banner.png" alt="Yo app icon: It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
+  <img src="dev/readme-banner.png" alt="Yo. It's that simple." width="200">
 </p>
 
 <p align="center">The 2014 one-tap app is back.<br>
 Tap a name to send an encrypted Yo, photo or video.</p>
 
-<p align="center">
-<a href="app/ios/README.md"><b>iOS</b></a> SwiftUI · <b>Android</b> Compose · <a href="app/cli"><b>CLI</b></a> Rust
-</p>
+<p align="center"><a href="https://justyo.co">Web</a> · <a href="https://testflight.apple.com/join/V3wa1DeX">TestFlight</a> · <a href="https://play.google.com/apps/testing/app.justyo.android">Play Store</a></p>
 
-<p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX"><b>iPhone beta</b></a> · <a href="https://groups.google.com/g/yo-android-testers"><b>Android beta</b></a></p>
+## Under the hood
+
+Yo is based on Signal encryption, see the [spec](yoip/SPEC.md).<br>
+All apps share one [Rust core](app/core). Services are defined in [yo-services](https://github.com/YoAgain/yo-services).
 
 <details>
-<summary><h2>Core</h2></summary>
+<summary><b>App</b></summary>
 
-One Rust core runs the whole client. The apps only draw and pass HTTP and storage through.
+#### Core
 
-- [core/client](core/client): identities, sessions, groups, media, recovery, outbox
-- [core/wire](core/wire): protocol formats
-- [core/bindings](core/bindings): Swift and Kotlin through UniFFI
-- [Telemetry](core/README.md#telemetry): every crash, error and support field the apps send, and what the hub counts
+- **One core** for iOS, Android and CLI: account, sessions, groups, local database.
+- **Apps add** UI, push and the keystore.
+- **New phone:** friends, groups and settings come back via encrypted Account Sync; messages don't.
+- **Crash reports:** on by default, off in Settings › Status; random install id, no content.
+- **Migrations:** old CLI, database and Keychain formats are converted once.
 
-The apps on top:
-
-- [app/ios](app/ios): Swift, the iPhone app and its extensions
-- [app/android](app/android): Kotlin, the Android app
-- [app/cli](app/cli): Rust, the CLI
-
-### iOS and Android
-
-The same job on each platform, so both apps behave alike.
-
-| Job | iOS | Android |
+| | iOS | Android |
 |---|---|---|
-| Account key | iCloud Keychain | Google Backup |
+| Account key | iCloud Keychain | Google Block Store |
 | Device keys | Keychain | Keystore |
 | Push | APNs | FCM |
-| UI | SwiftUI | Material 3 |
+| UI | SwiftUI | Compose, Material 3 |
 
-What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
+<a id="ios"></a>
+#### iOS
 
-| Endpoint group | Endpoints | Authentication |
-|---|---|---|
-| Messages | `inbox`, `blobs` | anonymous (blob upload: account) |
-| Groups | `groups` | account + member proof (names no member) |
-| Public | `username`, keys | anonymous |
-| Backup | `backup/{id}` | anonymous, with its long secret id |
-| Account | `register`, `lookup`, `push`, `storage`, `backup` … | account (signed by its device key) |
-| Support and crashes | `help/messages`, `help/read`, `help/report`, `help/crash`, `help/error` | random install id |
+- SwiftUI, iOS 26; share sheet, stickers, widgets, Apple Watch.
+- Built on Linux with [xtool](https://github.com/xtool-org/xtool), no Mac: `app/ios/dev/core.sh`, then `app/ios/dev/push.sh`.
 
-### Account Sync (end-to-end encrypted)
+<a id="android"></a>
+#### Android
 
-What a new phone gets back besides the account, sealed and padded ([spec 6.9](spec/v1.md#69-storage)).
-Not synced: sessions, messages, media, list order.
+- Kotlin, Jetpack Compose; flavors `play` (FCM, Google backup) and `floss` (F-Droid).
+- `app/android/dev/bootstrap.sh`, then `./gradlew assemblePlayDebug`.
 
-| Group | Fields | Example |
-|---|---|---|
-| Friend | name, colour, blocked, removed, profile key | `"n": "lina"`, `"c": 3`, `"b": false` |
-| Group | master key, joined, left | `"k": "Xmvf…"`, `"a": true` |
-| You | own profile key | `"pk": "Hm4L…"` |
-| App settings | app icon, left-handed | `"icon": "amethyst"`, `"left_handed": true` |
-| Copy | version (older copies are ignored) | `"version": 42` |
+<a id="cli"></a>
+#### CLI
+
+- `yo`: a Yo account on the command line, JSON out; bots use `yo listen`.
+- `cargo build --release -p yo-cli`, then `yo register NAME`, `yo send lina`.
 
 </details>
 
 <details>
-<summary><h2>Hub</h2></summary>
+<summary><b>YoIP Protocol</b></summary>
 
-The relay between phones. It holds encrypted Yos until the recipient fetches them and cannot read them.
-
-Two programs on one server, each deployed on its own:
-
-| | | URL |
-|---|---|---|
-| [hub](hub) | Passes Yos on, holds no keys of users | `hub.justyo.app` |
-| [admin](admin) | The dashboard | not public |
-
-| | Yos/s | |
-|---|---:|---|
-| Hub alone | 10,431 | 1 CPU core · p50 2.1 ms · p99 130 ms |
-| Yo to Yo | — | real phone, Wi-Fi, round trip to a bot and back · p50 71 ms · p90 89 ms |
-| Send, one client core | 50 | p50 290 ms · p99 708 ms |
-| Lost | 0 | |
-
-Routes: [hub README](hub/README.md). Durability: [SECURITY.md](hub/SECURITY.md#durability). Load runs: [tests](tests/README.md#load).
-
-</details>
-
-<details>
-<summary><h2>Encryption</h2></summary>
-
-Only you and your friends can read a Yo. The hub passes it on sealed and sees only the recipient.
+<a id="encryption"></a>
+#### Encryption
 
 ```text
 Phone A ──Yo──► Hub ──push──► Phone B
@@ -98,123 +62,96 @@ Signal          sealed        fetches and
 protocol        envelope      decrypts
 ```
 
-- Signal protocol through libsignal: PQXDH, Double Ratchet, sealed sender
-- Sign up with a name only, no phone number or email
-- Account protected by iCloud Keychain, a passkey or a 64-character recovery key
-- Groups up to 20 with zkgroup; photos and videos are view-once
+- libsignal: PQXDH, Double Ratchet, sealed sender.
+- Groups up to 20 with zkgroup; photos and videos view-once.
+- Sign-up with a name only.
 
-Limits and details: [YoIP spec](spec/v1.md), [threat model](hub/SECURITY.md).
+#### Keys
 
-### Keys
-
-Where each key lives on iOS, with made-up examples. iCloud: the synced Keychain item. Device: this phone's keychain.
-DB: the local database, sealed per column.
-
-| Key | Where | Example | Purpose |
-|---|---|---|---|
-| Account key | iCloud, DB | `1cd32765…32a9d1c8` (64 chars) | identity, the account |
-| User id | iCloud, DB | `9e4b02bb46c6cf346d6a046281bf768e` | fixed id at the hub |
-| Name | iCloud, DB | `Christopher` | to be found |
-| Recovery key | iCloud, device | `598t 08e1 … s9ym 3qgy` (64 chars) | backup without iCloud |
-| Backup status | iCloud | `{"byPasskey":true,"byCode":true,"version":3}` | same security after a restore |
-| Ed25519 seed | iCloud | `d00b86d2…9034eaaa` (64 chars) | converted to today's key once |
-| State key | device | `485ff0f2…76683972` (64 chars) | opens the local DB |
-| Device key | DB | `e064d0db…8d30f026` (64 chars) | this device, encryption |
-| Auth key | DB | `2cea6bee…c4bec8f3` (64 chars) | signs hub requests |
-| Prekey | DB | `id 17 → 052a51fc…8ae42e84` (66 chars) | first message while offline |
-| Profile key | DB | `1e820bbd…b4a8ea00` (64 chars) | sealed sender for contacts |
-| Group key | DB | `5e6bdf11…0d242738` (64 chars) | read and change a group |
-| Storage key | derived | `e55cab9c…d47e1e5d` (64 chars) | contacts at the hub |
-| Session | DB | ratchet state, about 1–2 KB | a new key per message |
-| Backup key K | RAM | never stored | encrypts the backup |
-| Passkey | Apple Passwords | "Yo – Christopher" | backup by Face ID |
+- **Account key:** the identity; iCloud Keychain or Google Block Store; restore with passkey or recovery key.
+- **Device keys:** local database, sealed by the keystore.
+- Code: `yoip/net` (client ↔ hub) and `yoip/protocol` (end to end).
+- Details: [spec §2](yoip/SPEC.md#2-identity), [§2.4](yoip/SPEC.md#24-recovery), [SECURITY.md](SECURITY.md).
 
 </details>
 
 <details>
-<summary><h2>Services</h2></summary>
+<summary><b>Services</b></summary>
 
-Bots such as PING and YoGPT, and bridges to other services such as IFTTT. Each is a folder with a TOML and one script in
-[yo-services](https://github.com/YoAgain/yo-services); everything else is here and the same for all.
+<a id="services"></a>
 
-Services run separately from the hub: to the hub each is an account like any other, and it never sees their keys or scripts.
-
-| | | URL |
-|---|---|---|
-| [yo-services](https://github.com/YoAgain/yo-services) | The services: a TOML, a script, a logo. No keys, no network | |
-| [executor](services) | One per service: holds its Yo account, runs its script | not public |
-| [entrance](services/src/entrance.rs) | HTTP for the bridges, and the list of services. No account, no database | `api.justyo.app` |
-| website | The catalog, and the page that connects a bridge | `justyo.co/services` |
+- Bots (PING, YoGPT) and bridges (IFTTT), one folder each in [yo-services](https://github.com/YoAgain/yo-services).
+- The [executor](server/services) runs a service with its own Yo account; the [entrance](server/services/src/entrance.rs) at `api.justyo.app` handles the catalog, OAuth and bridge requests.
+- **Not end-to-end** with the service: it decrypts what you send it.
 
 ```text
-Yo         phone ◄─encrypted─► hub ◄─► executor ◄─► script
-Bridge     IFTTT ──► api.justyo.app/ifttt/… ──► entrance ──► executor ──► script
-Catalog    yo-services ──► api.justyo.app/services ──► justyo.co/services
-Connect    IFTTT ──► api.justyo.app/ifttt/connect ──► justyo.co/services/ifttt ──► Allow in Yo ──► executor
+Yo        phone ◄─encrypted─► hub ◄─► executor ◄─► script
+Bridge    IFTTT ──► api.justyo.app/ifttt/… ──► entrance ──► executor ──► script
 ```
-
-| `api.justyo.app` | | For |
-|---|---|---|
-| `GET /` | leads to `justyo.co/services` | people |
-| `GET /services` | the list of services, JSON | apps, website |
-| `GET /services/NAME.png` | the logo of a service | apps, website |
-| `GET /NAME/connect` | starts connecting (OAuth 2), leads to `justyo.co/services/NAME` | the partner |
-| `POST /NAME/allowed` | waits for Allow in the app, then says where to go back | that page |
-| `POST /NAME/token` | the code for a token (OAuth 2) | the partner |
-| `/NAME/…` | everything else goes to the script of the service | the partner |
-
-In progress: only `/` and `/services` are live.
-
-Limits and details: [services README](services/README.md), [SECURITY.md](services/SECURITY.md).
 
 </details>
 
 <details>
-<summary><h2>Development</h2></summary>
+<summary><b>Server</b></summary>
+
+<a id="routes"></a>
+#### Hub
+
+- One Rust server on SQLite, behind a Cloudflare Tunnel; cannot read Yos.
+- Routes, auth and limits: [spec §4](yoip/SPEC.md#4-net). Code: `server/hub`.
+
+#### Admin
+
+- Read-only operator page in plain Python, behind Cloudflare Access.
+- Demo with made-up data: `python3 server/admin/dev/demo.py --demo`.
+
+</details>
+
+<details>
+<summary><b>Development</b></summary>
 
 <!-- loc -->
 ![Lines of code: per day, by part and by app](dev/loc-chart.png)
 <!-- /loc -->
 
-- [app](app)
-  - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
-  - [android](app/android): the Android app
-  - [cli](app/cli): the CLI, `yo`
-- [core](core)
-  - [client](core/client): state, sessions, groups, media, recovery, outbox
-  - [wire](core/wire): protocol formats
-  - [product](core/product): the apps' rules and texts (en, de)
-  - [bindings](core/bindings): Swift and Kotlin through UniFFI
-- [hub](hub): the Rust server, with its [routes](hub/README.md) and [threat model](hub/SECURITY.md)
-- [admin](admin): the admin page
-- [services](services): the executor and the entrance
-- [spec](spec): the YoIP protocol, [v1.md](spec/v1.md)
-- [tests](tests): integration, chaos and load tests, with [fixtures](tests/fixtures)
-- [fuzz](fuzz): fuzz targets
-- [dev](dev): Docker builds, this chart
-- [update-deps.sh](update-deps.sh): every dependency to its newest release, tested, one commit
+#### Layout
 
-Workflows ([.github/workflows](.github/workflows)):
-
-- **iOS**: push → internal TestFlight · RC release (`v1.0.0-RC`) → public TestFlight · stable release → App Store (by hand for now)
-- **Android**: push → build · RC release → test build · stable release → Play Store (by hand for now)
-- **CLI**: push → binary artifact · release → binary attached to the release
-- **Release**: `dev/release.sh 1.0.0-RC37 notes.md` (notes.md: a headline and a few user-facing bullets), or the button Actions → Release: bumps [version.properties](app/android/version.properties) in a signed commit on main and publishes `v1.0.0-RC37`, which runs the rows above; F-Droid picks up the tag by itself ([Android](app/android/README.md#releases-and-f-droid))
-- **Test**: every push → Rust tests, lint · **Fuzz**: push → 1 min, nightly → 15 min · **Dependencies**: monthly → pull request
-
-```sh
-dev/cargo test --workspace     # tests, with Docker
-dev/fuzz all 300               # fuzzing
+```text
+app/ios, app/android, app/cli       the apps
+app/core, app/core/{ui,bindings}    the core
+yoip/                               YoIP spec, net/ and protocol/
+server/{hub,admin,services}         the server
+tests/, tests/fuzz/                 tests and fuzz targets
+dev/                                scripts
 ```
 
-[Tests](tests/README.md) · [chaos tests](tests/CHAOS.md) · [spec](spec/v1.md) · [AGENTS.md](AGENTS.md). Pull requests welcome.
+#### Release
+
+- `dev/release.sh VERSION notes.md`: signed tag → TestFlight, Play testing, F-Droid, CLI binary.
+- Every push: Rust tests, lint, short fuzz run.
+
+#### Benchmark
+
+| | |
+|---|---|
+| Hub alone | **10,431 Yos/s** · 1 CPU core · p50 2.1 ms · p99 130 ms |
+| Yo to Yo | **p50 71 ms** · p90 89 ms · real phone, Wi-Fi, round trip to a bot |
+| Send, one client core | **50 Yos/s** · p50 290 ms · p99 708 ms |
+| Lost | **0** |
+
+<a id="tests"></a>
+#### Tests
+
+- **End-to-end:** every flow, route and restore against a real hub.
+- **Simulation:** seeded random runs; a failure names its seed.
+- **Fuzz:** wire formats, hub routes, receive path never panic.
+- **Chaos:** thousands of accounts through crashes; every message once, in order.
+- **Load:** throughput of one hub.
+
+`dev/cargo test --workspace` runs everything.
 
 </details>
 
-<details>
-<summary><h2>License</h2></summary>
+## License
 
-Code: [MIT](LICENSE.md). The built app links libsignal and is [AGPL-3.0](LICENSES/AGPL-3.0.txt); its source is the commit
-shown in Settings › Licenses. Name, logo and sound are not covered. [Third-party licenses](LICENSES).
-
-</details>
+[MIT](LICENSE.md). libsignal: [AGPL-3.0](app/core/LICENSE-AGPL.md), in the app under Settings › Licenses.

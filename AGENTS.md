@@ -10,4 +10,4 @@
 - SwiftUI only, iOS 26, Swift 6. Use the system's own parts wherever iOS has one (NavigationStack, toolbar, its
   Liquid Glass buttons, sheets, search, menus) and keep the Yo look (Flat UI rows, Montserrat Bold, Amethyst) to
   the content. Build your own control only where iOS has none.
-- Build on Linux with xtool, install with `app/ios/dev/push.sh` (no cable, no sudo); see `app/ios/README.md`.
+- Build on Linux with xtool, install with `app/ios/dev/push.sh` over Wi-Fi; see README.md, iOS.
