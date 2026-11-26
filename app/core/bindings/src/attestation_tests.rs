@@ -17,7 +17,12 @@ impl HttpTransport for Hub {
             }
             _ => panic!("unexpected method"),
         }
-        HttpResult { status: self.0, body: self.1.clone(), error: (self.0 == 0).then(|| "offline".into()), headers: Vec::new() }
+        HttpResult {
+            status: self.0,
+            body: self.1.clone(),
+            error: (self.0 == 0).then(|| "offline".into()),
+            headers: Vec::new(),
+        }
     }
 }
 

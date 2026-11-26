@@ -1454,19 +1454,19 @@ fn the_name_field_takes_the_hubs_minimum_by_attestation() {
     let field = YoNameField::new(Arc::new(Headed(hub.url())));
     assert!(field.start_device_check().is_some(), "an unsigned challenge");
     field.device_done(1, Some(vec![1]));
-    let seq = field.typed("Abcde".into()).unwrap();
+    let seq = field.typed("Abcde".into(), false).unwrap();
     let state = field.check(seq);
     assert_eq!((state.phase, state.min), (YoNamePhase::Ok, Some(4)));
     assert!(field.attestation().is_some() && field.device_ms().is_some());
 
     let field = YoNameField::new(Arc::new(Headed(hub.url())));
     field.device_done(0, None);
-    let stale = field.typed("Abcd".into()).unwrap();
-    let seq = field.typed("Abcde".into()).unwrap();
+    let stale = field.typed("Abcd".into(), false).unwrap();
+    let seq = field.typed("Abcde".into(), false).unwrap();
     assert_eq!(field.check(stale).phase, YoNamePhase::Checking, "an older text: dropped");
     assert_eq!(field.sign_up(), YoSignUp::Wait);
     let state = field.check(seq);
     assert_eq!((state.phase, state.min, state.decided), (YoNamePhase::TooShort, Some(12), Some(YoSignUp::Shake)));
-    assert_eq!(field.typed("An na".into()), None);
+    assert_eq!(field.typed("An na".into(), false), None);
     assert_eq!(field.state().bad, vec![" ".to_string()]);
 }

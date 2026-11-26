@@ -175,7 +175,9 @@ fn run(config: &Config, command: &[String]) -> i32 {
     loop {
         let opened = match name.as_str() {
             "register" => match command {
-                [_, username, flags @ ..] if flags.iter().all(|f| matches!(f.as_str(), "--force" | "--bot" | "--no-bot")) => {
+                [_, username, flags @ ..]
+                    if flags.iter().all(|f| matches!(f.as_str(), "--force" | "--bot" | "--no-bot")) =>
+                {
                     account::register(config, username, flags.iter().any(|f| f == "--force"))
                 }
                 _ => return print(Err(Failure::usage("register NAME [--no-bot] [--force]"))),

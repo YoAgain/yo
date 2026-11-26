@@ -3649,6 +3649,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "tls_codec",
+ "unicode-segmentation",
  "yoip",
  "zeroize",
  "zkgroup",
