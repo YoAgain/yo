@@ -299,6 +299,7 @@ pub fn event(event: &Event, refs: bool) -> Value {
         Event::GroupChanged { group } => json!({ "type": "group_changed", "group": group }),
         Event::DeviceAdded { user } => json!({ "type": "device_added", "user": user }),
         Event::ConnectionChanged { user } => json!({ "type": "connection_changed", "user": user }),
+        Event::Sent { user, sent_at_ms, .. } => json!({ "type": "sent", "user": user, "sent_at_ms": sent_at_ms }),
     }
 }
 

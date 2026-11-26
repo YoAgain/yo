@@ -29,6 +29,21 @@ impl Client {
         Ok(true)
     }
 
+    /// A copy of a 1:1 message just queued for `user`, for this account's other devices (Signal's sent transcript):
+    /// the same message, `to` naming whom it went to.
+    pub(super) fn queue_transcript(&mut self, user: &str, message: Vec<u8>) -> Result<()> {
+        let held = &self.state.siblings_held;
+        let audience: Vec<Key> = self.state.siblings.iter().map(|d| d.key).filter(|k| !held.contains(k)).collect();
+        if audience.is_empty() {
+            return Ok(());
+        }
+        let to = user_bytes(user)?;
+        let own = self.state.user_id.clone();
+        self.enqueue_with_urgency(&own, encode(&Plain { to: Some(to), content: message.into() }), true);
+        self.state.outbox.back_mut().expect("enqueued").audience = audience;
+        Ok(())
+    }
+
     /// Notes the newest message of a thread (user or group id), for what `mark_seen` names.
     pub(super) fn note_in(&mut self, thread: &str, sent_at_ms: u64) {
         let at = self.state.last_in.entry(thread.to_owned()).or_default();
@@ -94,8 +109,18 @@ impl Client {
     pub(super) fn receive_sibling(&mut self, device: Key, plain: Plain, message: Message) -> Result<()> {
         // It wrote here with its keys: it gets this device's syncs from now on.
         self.state.siblings_held.retain(|held| *held != device);
-        // A copy of what it sent to someone (Signal's sent transcript) is not taken yet.
-        if plain.to.is_some() {
+        // A copy of what it sent to someone (Signal's sent transcript): the thread shows it as sent from here, and
+        // writing accepted the contact. Only a 1:1 message of a contact this device knows (a new chat is not made
+        // from it: its keys come with the next lookup); a group's is not taken yet.
+        if let Some(to) = plain.to {
+            let user = hex(&to);
+            if message.group.is_none() && shown(&message.content) && user != self.state.user_id {
+                if let Some(contact) = self.state.contacts.get_mut(&user).filter(|c| !c.probe_service || c.chat) {
+                    contact.accepted = true;
+                    contact.chat = true;
+                    self.push_event(Event::Sent { user, sent_at_ms: message.sent_at_ms, content: message.content });
+                }
+            }
             return Ok(());
         }
         match message.content {

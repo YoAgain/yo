@@ -168,6 +168,49 @@ fn siblings_take_reads_and_skip_sent_copies_without_an_event_or_response() {
     assert!(b.state.events.is_empty() && b.state.outbox.is_empty());
 }
 
+/// A 1:1 message sent from one device goes to the account's other devices as a sent transcript: there the thread
+/// shows it as sent and the contact is accepted; one to someone unknown there, or none to a held device, makes nothing.
+#[test]
+fn a_sent_message_is_a_transcript_on_the_sibling() {
+    let mut a = phone(1, 1);
+    let mut b = phone(1, 2);
+    let user = a.user_id().to_owned();
+    let roster = [rostered(&a), rostered(&b)];
+    for phone in [&mut a, &mut b] {
+        phone.take_devices(&user, phone.my_account_key(), &roster, None).unwrap();
+    }
+    a.take_bundles(&user, b.my_account_key(), &[bundle(&mut b)]).unwrap();
+    let peer = hex(&[5; 16]);
+    for phone in [&mut a, &mut b] {
+        phone.take_devices(&peer, [6; 32], &[api::Device { key: [7; 32], id: 1 }], None).unwrap();
+    }
+    assert!(!b.state.contacts[&peer].accepted);
+    a.queue(std::slice::from_ref(&peer), None, Content::Yo).unwrap();
+    let copy = a.state.outbox.iter().find(|o| o.user == user).expect("a transcript").clone();
+    assert_eq!(copy.audience, [b.state.device_key]);
+    let plain: Plain = decode(&copy.plain).unwrap();
+    assert_eq!(plain.to, Some([5; 16]));
+    let sent_at_ms = Message::decode(plain.content.as_slice()).unwrap().sent_at_ms;
+    let (payloads, _) = a.encrypt_for(&user, &copy.plain, false, &[]).unwrap();
+    receive(&mut b, for_device(&payloads, 2)).unwrap();
+    assert_eq!(b.state.events, [Event::Sent { user: peer.clone(), sent_at_ms, content: Content::Yo }]);
+    assert!(b.state.contacts[&peer].accepted && b.state.contacts[&peer].chat);
+    assert!(b.state.outbox.is_empty(), "nothing goes back for it");
+
+    // Someone b does not know: nothing made of it.
+    let stranger = [8; 16];
+    let (payloads, _) = a.encrypt_for(&user, &plaintext(Some(stranger), Content::Yo), false, &[]).unwrap();
+    b.state.events.clear();
+    receive(&mut b, for_device(&payloads, 2)).unwrap();
+    assert!(b.state.events.is_empty() && !b.state.contacts.contains_key(&hex(&stranger)));
+
+    // A held sibling gets none.
+    a.state.outbox.clear();
+    a.state.siblings_held = vec![b.state.device_key];
+    a.queue(std::slice::from_ref(&peer), None, Content::Yo).unwrap();
+    assert!(a.state.outbox.iter().all(|o| o.user != user));
+}
+
 /// A device the hub lists for this account after this one joined (a new one, or one replaced and listed again)
 /// is told to the app and gets no sync until it has written here itself.
 #[test]

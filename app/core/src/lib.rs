@@ -160,6 +160,9 @@ pub enum Event {
     DeviceAdded { user: String },
     /// A service (user id) answered: `connections()` has it.
     ConnectionChanged { user: String },
+    /// Another device of this account sent `content` to `user` (Signal's sent transcript): the thread shows it as
+    /// sent ("Sent Yo!"), and the contact is accepted.
+    Sent { user: String, sent_at_ms: u64, content: Content },
 }
 
 /// What waits in the outbox for one recipient in one conversation (`Client::outbox_view`).

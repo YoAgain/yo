@@ -923,7 +923,11 @@ impl Client {
             self.in_joined_group(user) || self.state.contacts.get(user).is_some_and(|c| c.accepted && !c.blocked)
         });
         let key = self.state.profile_key.filter(|_| accepted).map(|key| (key, self.state.profile_key_gen.max(1)));
+        let transcript = group.is_none() && keep && users.len() == 1;
         let message = yoip::protocol::content::Message { sent_at_ms, group, content }.encode_with_key(key)?;
+        if transcript {
+            self.queue_transcript(&users[0], message.clone())?;
+        }
         for user in &users {
             self.enqueue(user, encode(&yoip::protocol::envelope::Plain { to: None, content: message.clone().into() }));
             if keep {

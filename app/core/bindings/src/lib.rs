@@ -471,6 +471,12 @@ pub enum YoEvent {
     ConnectionChanged {
         user: String,
     },
+    /// Another device of this account sent this to `user`: the thread shows it as sent ("Sent Yo!").
+    Sent {
+        user: String,
+        sent_at_ms: u64,
+        kind: MessageKind,
+    },
 }
 
 impl From<Event> for YoEvent {
@@ -486,6 +492,7 @@ impl From<Event> for YoEvent {
             Event::GroupChanged { group } => YoEvent::GroupChanged { group },
             Event::DeviceAdded { user } => YoEvent::DeviceAdded { user },
             Event::ConnectionChanged { user } => YoEvent::ConnectionChanged { user },
+            Event::Sent { user, sent_at_ms, content } => YoEvent::Sent { user, sent_at_ms, kind: content.into() },
         }
     }
 }
