@@ -9,8 +9,7 @@ use std::sync::Arc;
 use yoip::net::{api, limits};
 
 /// The OHTTP key configs apps pin, per hub (`yo-hub ohttp public`): the one in use first, then the spare.
-/// The private keys live in 1Password (Yo · Server secrets, "ohttp live", "ohttp dev" and their spares); the hub holds
-/// the one in use (key id 1), the spare (key id 2) stays offline until a rotation.
+/// The hub holds the private key in use (key id 1); the spare (key id 2) stays offline until a rotation.
 pub const PINNED: &[(&str, [&str; 2])] = &[
     (
         "hub.justyo.app",

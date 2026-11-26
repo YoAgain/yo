@@ -18,7 +18,7 @@ final class Passkeys: NSObject {
   private var pending: (controller: ASAuthorizationController, continuation: CheckedContinuation<ASAuthorization, Error>)?
 
   /// A new passkey; its credential id. Only checks PRF support: asking for an output here (`.inputValues`) makes
-  /// 1Password fail to save the passkey. The output comes from `ask` afterwards (spec 2.4).
+  /// some password managers fail to save the passkey. The output comes from `ask` afterwards (spec 2.4).
   func make(name: String, userID: Data) async throws -> Data {
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
     let request = provider.createCredentialRegistrationRequest(challenge: Self.random(32), name: name, userID: userID)
