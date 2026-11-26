@@ -86,7 +86,7 @@ struct Onboarding: View {
             .transition(.opacity)
         }
         VStack(spacing: 10) {
-          NameField(name: Binding(get: { name }, set: typed), phase: phase,
+          NameField(name: Binding(get: { name }, set: { (text: String) in typed(text) }), phase: phase,
             shakes: shakes, focusRequests: focusRequests, onSubmit: signUp)
           Text(hint)
             .font(.subheadline.weight(.semibold))
