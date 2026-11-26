@@ -231,7 +231,7 @@ sequenceDiagram
 ```
 Clients SHOULD fetch the list after registration (a new account after one day) and daily, and MUST fetch it on `409` and on content from an unknown sibling. Only own devices raise `DeviceAdded`.
 
-**Sent transcripts.** A 1:1 message also goes, with `to` set to the recipient, to the sender's own devices that are not held. The receiving device shows it as sent and marks a known contact accepted; it MUST NOT create a contact for an unknown `to`. Groups have no transcripts. Clients SHOULD fetch bundles only for pending deliveries and MUST put self and usable sessions in `except`.
+**Sent transcripts.** A 1:1 message also goes, with `to` set to the recipient, to every own device on the current signed list, except one the list dropped before (removed or replaced) that the hub lists again; a device listed after this one joined raises `DeviceAdded`. The receiving device shows it as sent and marks a known contact accepted; it MUST NOT create a contact for an unknown `to`. Groups have no transcripts. Clients SHOULD fetch bundles only for pending deliveries and MUST put self and usable sessions in `except`.
 
 - **Outbox.** Clients MUST persist the advanced ratchet before posting. They SHOULD queue offline and encrypt at dispatch, SHOULD retry on network errors, `429`, `426`, `5xx` and `507`, and MUST drop on `400`, request `403`, `404` or `413`. A `404` marks the contact gone (`NotOnYo`).
 - **Inbox.** Clients MUST persist before acknowledging; delivery is at least once. They SHOULD ack full batches of 100 before the next fetch and run acks, receipts, errors, `🔐 prekeys`, outbox and storage after the inbox read (`after_sync`). Parked envelopes MUST be retried in order; above 256 the oldest MAY be dropped.
