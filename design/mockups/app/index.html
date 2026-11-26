@@ -365,10 +365,10 @@ S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Appe
   <div class="foot">Left-Handed swaps the bars’ sides and moves Settings to the bottom right.</div></div>`;
 
 S.account = p => { const a = hub.account; return `<div class="grab"></div><div class="shead">${backbtn()}<span class="yo" style="font:600 17px var(--sys)">${esc(a.name)}</span>&nbsp;<span style="width:8px;height:8px;border-radius:4px;background:var(--green)"></span></div><div class="sbody">
-  <div class="card"><div class="r" data-a="go" data-s="contacts">${tile('people', '#34c759')}<span class="t">Contacts</span>${chev}</div>
-    <div class="r" data-a="go" data-s="blocked">${tile('hand', '#ff3b30')}<span class="t">Blocked</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="toDevices">${tile('phone', '#007aff')}<span class="t">Devices</span><span class="v">${a.devices.length}</span>${chev}</div>
     <div class="r" data-a="go" data-s="rkey">${tile('shield', '#9b59b6')}<span class="t">Account Security</span>${a.passkey ? '<span style="color:var(--green)">✓</span>' : '<span class="badge">1</span>'}${chev}</div></div>
+  <div class="card"><div class="r" data-a="go" data-s="contacts">${tile('people', '#34c759')}<span class="t">Contacts</span>${chev}</div>
+    <div class="r" data-a="go" data-s="blocked">${tile('hand', '#ff3b30')}<span class="t">Blocked</span>${chev}</div></div>
   <div class="card"><div class="r" data-a="askSignOut">${tile('out', '#8e8e93')}<span class="t">Sign Out</span></div></div>
   <div class="foot">Leaving Yo for good? <a data-a="askDelete">Delete Your Account</a></div></div>`; };
 
