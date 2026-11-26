@@ -787,7 +787,7 @@ function jump(h) {
   }
 }
 side();
-$('side').addEventListener('click', e => { const t = e.target.closest('[data-j]'); if (!t) return; e.preventDefault(); history.replaceState(null, '', '#' + t.dataset.j); jump(t.dataset.j); });
+$('side').addEventListener('click', e => { const t = e.target.closest('[data-j]'); if (!t) return; e.preventDefault(); jump(t.dataset.j); try { history.replaceState(null, '', '#' + t.dataset.j); } catch (_) {} });
 freshHub(); wire(Phone('A'));
 if (location.hash.length > 1) jump(location.hash.slice(1)); else { current = 'signup'; render(phones.A); }
 </script>
