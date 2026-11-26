@@ -21,7 +21,7 @@ Lookups expose the one social-graph edge (§5). The hub sees time, size and IP p
 | Data | Linked to | Stored |
 |---|---|---|
 | user id, `🔐 account key`, devices, username | account | until deleted |
-| last `Yo-App`, last seen (hour) | device | until replaced |
+| last `Yo-App`, last seen (hour), last via OHTTP (hour, written ≤ once a day) | device | until replaced |
 | attestation: verdict, platform, date, reason, Android level | account | until deleted |
 | envelope, receive time | inbox | until acked, ≤ 30 days |
 | blob: uploader, size, time, fetches left | account | until fetched, ≤ 30 days |
