@@ -1,0 +1,6 @@
+Forty-fifth release candidate — RC44 for iPhone too.
+
+• Sign-up: the name field checks as you type, with a quiet hint and no flicker
+• Bots show "/" before their name, like groups show "#", right after adding them
+• Fewer false problem reports on bad networks
+• iPhone: builds again for TestFlight
