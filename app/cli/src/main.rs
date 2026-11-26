@@ -1,7 +1,7 @@
 //! yo: a Yo account on the command line. On a terminal it speaks to a person (text, `yo tui`); piped or with
 //! `--json` every command prints one JSON value and `yo listen` one JSON line per event. Bots drive it (README.md).
 //!
-//!   yo [--state DIR] [--hub URL] [--hub-key KEY]… [--trust-root KEY]… [--zk-params PARAMS] [--ohttp-key CONFIG]…
+//!   yo [--profile NAME] [--state DIR] [--hub URL] [--hub-key KEY]… [--trust-root KEY]… [--zk-params PARAMS] [--ohttp-key CONFIG]…
 //!      [--direct] [--json] [--quiet] [--no-color] COMMAND …
 //!
 //! Every request goes wrapped (Oblivious HTTP, spec 4.1) to the hub's pinned OHTTP key; `--direct` sends them as
@@ -40,39 +40,121 @@ const BUSY_WAIT: Duration = Duration::from_secs(30);
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const HELP: &str = "yo: Yo on the command line
+pub const HELP: &str = "Send a Yo, keep friends and run bots from your terminal.
 
 USAGE
-  yo [FLAGS] COMMAND        yo NAME sends a Yo; bare yo on a terminal opens the TUI
+  yo <command> [flags]
+  yo NAME                 Send NAME a Yo
+  yo tui                  Open the interactive app (bare yo on a terminal too)
 
-CORE
-  yo NAME | yo send TO [--photo JPEG | --media -]
-                            a Yo to a friend, user id or group:ID (a friend named like a command: yo send NAME)
-  yo friends [add|remove NAME]           the friends and groups; add or remove one
-  yo groups [create NAME MEMBER...|rename ID NAME|add|remove ID MEMBER...|leave|accept ID]
-  yo requests [list|accept|decline|block NAME|on|off]
-                            Yos from strangers; off: what a stranger sends is dropped unseen
-  yo block|unblock NAME     yo whois NAME
-  yo listen [--manual-ack] [--drain-media]   one event per line, until stopped (other commands run in it)
-  yo sync [--wait S] | yo inbox              receive once     yo ack   acknowledge listen --manual-ack's
+CORE COMMANDS
+  send       A Yo to a friend, user id or group:ID (--photo JPEG, --media -)
+  friends    The friends and groups; friends add|remove NAME
+  groups     Groups: create NAME MEMBER…, rename, add, remove, leave, accept
+  requests   Yos from strangers: list, accept|decline|block NAME, on|off
+  block      Block someone (unblock NAME undoes it)
+  whois      Who a name is
+  listen     One JSON line per event until stopped (--manual-ack, --drain-media)
+  sync       Receive once (--wait S); inbox is the same, ack acknowledges
 
 ACCOUNT
-  yo signup NAME [--human]  a new account (name 12+ characters), marked as a bot unless --human (for good: a bot
-                            cannot become a person later); prints its recovery key once
-  yo signin --recovery-key  this directory signs in with a recovery key (asked, or on stdin)
-  yo signin --link          shows a yo-link (and its QR code) to scan or paste on a device that has the account
-  yo link [yo-link:...]     add another device to this account (asks first)
-  yo whoami | status        yo devices [list|remove N]   yo recovery [show|rotate]   yo bot on
+  signup     A new account: NAME of 12+ characters, a bot unless --human
+  signin     This directory signs in: --recovery-key or --link (QR code)
+  signout    Remove this device's local account files (signout [--yes])
+  link       Add another device to this account (asks first)
+  status     The account, its device, hub and listener (whoami too)
+  profiles   The accounts kept as profiles (--profile NAME)
+  devices    This account's devices; devices remove N
+  recovery   The recovery key: show, rotate
+  bot        bot on: marks the account as a bot, for good
+
 SERVICES
-  yo services [list|connect SERVICE CODE|decline SERVICE CODE|disconnect SERVICE]
+  services   list, connect SERVICE CODE, decline SERVICE CODE, disconnect SERVICE
+
 SYSTEM
-  yo tui   yo doctor   yo probe   yo completion bash|zsh|fish   yo version   yo help output|exit-codes|environment
+  tui         The interactive app
+  commands    Every command, one a line (JSON when piped)
+  doctor      Find state, pin and account problems
+  probe       Ask PING and time the answer
+  completion  Tab completion: completion bash|zsh|fish
+  version     Show the installed yo version
+
+HELP TOPICS
+  output       Output formats: text on a terminal, JSON when piped
+  exit-codes   Exit status reference
+  environment  Environment variable reference
 
 FLAGS
-  -j, --json   JSON out (also when piped, or YO_JSON=1)     -q, --quiet   no output on success
-  --no-color   (or NO_COLOR)    --state DIR (YO_STATE; default ~/.local/share/yo)
-  --hub URL    (YO_HUB; default https://hub.justyo.app)    --direct   no Oblivious HTTP
-  --hub-key K... --trust-root K... --zk-params P --ohttp-key C...  pins (known hubs: built in)";
+  -j, --json        JSON out (also when piped, or YO_JSON=1)
+  -q, --quiet       No output on success
+      --no-color    No colour (or NO_COLOR)
+      --profile NAME  Another account: ~/.local/share/yo/profiles/NAME (YO_PROFILE); yo profiles lists them
+      --state DIR   The account's directory (YO_STATE; default ~/.local/share/yo); wins over --profile
+      --hub URL     The hub (YO_HUB; default https://hub.justyo.app)
+      --direct      No Oblivious HTTP
+      --hub-key K…  --trust-root K…  --zk-params P  --ohttp-key C…  pins (known hubs: built in)
+  -h, --help        Show help
+
+EXAMPLES
+  $ yo anna
+  $ yo tui
+  $ yo friends add PING
+  $ yo listen --json | jq
+
+LEARN MORE
+  yo commands          List all available commands
+  yo help <topic>      Read a help topic
+  yo <command> --help  Help for any command";
+
+/// Help text styled as hey's on a terminal with colour: headings in the accent, examples in italics.
+fn styled(text: &str) -> String {
+    use std::io::IsTerminal;
+    if !mode().color || !std::io::stdout().is_terminal() {
+        return text.to_owned();
+    }
+    text.lines()
+        .map(|line| {
+            let heading = !line.is_empty() && !line.starts_with(' ') && line == line.to_uppercase();
+            if heading {
+                format!("\x1b[1;35m{line}\x1b[0m")
+            } else if let Some(example) = line.strip_prefix("  $ ") {
+                format!("  \x1b[2m$\x1b[0m \x1b[3m{example}\x1b[0m")
+            } else if let Some((cmd, rest)) = line.strip_prefix("  ").and_then(|l| l.split_once("  ")) {
+                format!("  \x1b[1m{cmd}\x1b[0m  {rest}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The help of one command: its line of the help, with the usage.
+fn command_help(name: &str) -> Option<String> {
+    let line =
+        HELP.lines().find(|l| l.strip_prefix("  ").is_some_and(|l| l.split_whitespace().next() == Some(name)))?;
+    let short = line.trim_start().trim_start_matches(name).trim();
+    Some(format!("{short}\n\nUSAGE\n  yo {name} …\n\nLEARN MORE\n  yo help             All commands\n  yo commands         Every command, one a line"))
+}
+
+/// `yo commands`: every command with what it does, from the help.
+fn commands_list() -> Vec<(String, String, String)> {
+    let mut group = String::new();
+    let mut out = Vec::new();
+    for line in HELP.lines() {
+        if !line.is_empty() && !line.starts_with(' ') && line == line.to_uppercase() {
+            group = line.trim_end_matches(" COMMANDS").to_lowercase();
+            continue;
+        }
+        if !matches!(group.as_str(), "core" | "account" | "services" | "system") {
+            continue;
+        }
+        if let Some((name, short)) = line.trim_start().split_once(' ') {
+            out.push((group.clone(), name.to_owned(), short.trim().to_owned()));
+        }
+    }
+    out
+}
 
 const HELP_OUTPUT: &str = "output: on a terminal text for a person; piped, with --json or YO_JSON=1 one JSON value per
 command on stdout (errors {\"error\",\"retryable\"} on stderr), and `yo listen` one JSON line per event:
@@ -82,7 +164,7 @@ friends: [{user,name,handles,blocked}]  send: {sent}  add: {user,username}  stat
 
 const HELP_EXIT: &str =
     "exit codes: 0 done · 1 failed (see retryable) · 2 usage · 3 this device is gone for good: stop ·
-4 not signed up · 5 the hub did not take this device's signature: try again later";
+4 not signed up · 5 the hub did not take this device's signature: try again later · 130 stopped (Ctrl-C)";
 
 const HELP_ENV: &str = "environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, YO_OHTTP_KEYS (lists
 comma separated), YO_JSON=1, NO_COLOR, YO_SMALL_ENVELOPES=1, YO_RECOVERY_LOOKUPS (default 10; a bot raises it)";
@@ -92,6 +174,8 @@ const VERBS: &[&str] = &[
     "register",
     "signup",
     "signin",
+    "signout",
+    "profiles",
     "link",
     "whoami",
     "status",
@@ -125,6 +209,7 @@ const VERBS: &[&str] = &[
     "completion",
     "version",
     "help",
+    "commands",
     "friends-view",
     "link-approve",
 ];
@@ -213,8 +298,10 @@ fn main() {
     let no_color = take(&["--no-color"]) || std::env::var_os("NO_COLOR").is_some();
     let tui = take(&["--tui"]);
     let _ = MODE.set(Mode { json, quiet, color: !no_color });
-    if take(&["--help"]) {
-        println!("{HELP}");
+    if take(&["--help"]) || take(&["-h"]) {
+        let word = args.iter().find(|a| !a.starts_with('-') && VERBS.contains(&a.as_str()));
+        let text = word.and_then(|w| command_help(w)).unwrap_or_else(|| HELP.to_owned());
+        println!("{}", styled(&text));
         std::process::exit(0);
     }
     // `yo tui --state DIR`: the flags after `tui` count as before it.
@@ -240,8 +327,8 @@ fn main() {
     if tui || command.first().is_some_and(|c| c == "tui") || (command.is_empty() && interactive) {
         std::process::exit(tui::run(&config, &globals));
     }
-    if command.is_empty() || matches!(command[0].as_str(), "-h" | "--help") {
-        println!("{HELP}");
+    if command.is_empty() {
+        println!("{}", styled(HELP));
         std::process::exit(if command.is_empty() { USAGE } else { 0 });
     }
     let code = match media_from_stdin(command) {
@@ -316,12 +403,59 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
         ["help", "output"] => return text(HELP_OUTPUT),
         ["help", "exit-codes"] => return text(HELP_EXIT),
         ["help", "environment"] => return text(HELP_ENV),
-        ["help", ..] => return text(HELP),
-        ["version"] => return print("version", Ok(json!({ "version": VERSION }))),
-        ["completion", shell] => return text(&human::completion(shell, VERBS)),
+        ["help", name] if command_help(name).is_some() => return text(&command_help(name).unwrap_or_default()),
+        ["help"] => return text(HELP),
+        ["help", topic, ..] => return print("", Err(Failure::usage(format!("no help topic {topic}: yo help")))),
+        ["commands"] if human => {
+            let list = commands_list();
+            let width = list.iter().map(|c| c.1.len()).max().unwrap_or(0);
+            let mut group = String::new();
+            for (g, name, short) in &list {
+                if *g != group {
+                    if !group.is_empty() {
+                        println!();
+                    }
+                    println!("{}", styled(&g.to_uppercase()));
+                    group = g.clone();
+                }
+                println!("  {}  {}", human::paint("1", &format!("{name:<width$}")), human::paint("2", short));
+            }
+            return 0;
+        }
+        ["commands"] => {
+            let list: Vec<Value> =
+                commands_list().into_iter().map(|(g, n, s)| json!({ "group": g, "name": n, "short": s })).collect();
+            return print("commands", Ok(json!(list)));
+        }
+        ["profiles"] => return print("profiles", Ok(profiles())),
+        ["version"] => {
+            return print(
+                "version",
+                Ok(json!({ "version": VERSION, "core_version": yo_core::VERSION, "protocol_version": yoip::VERSION })),
+            )
+        }
+        ["completion", shell @ ("bash" | "zsh" | "fish")] => return text(&human::completion(shell, VERBS)),
+        ["completion", ..] => return print("", Err(Failure::usage("completion bash|zsh|fish"))),
         ["doctor"] => return print("doctor", Ok(doctor(config))),
         ["register", rest @ ..] => return signup(config, rest, false),
         ["signup", rest @ ..] => return signup(config, rest, true),
+        ["signout"] | ["signout", "--yes"] => {
+            if args.len() == 1 {
+                if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                    return print("", Err(Failure::usage("yo signout --yes required when piped")));
+                }
+                eprintln!("{} [y/N]", account::SIGNOUT_PROMPT);
+                let mut answer = String::new();
+                if let Err(e) = std::io::stdin().read_line(&mut answer) {
+                    return print("", Err(Failure::new(e.to_string())));
+                }
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    return print("signout", Ok(json!({"signed_out": false})));
+                }
+            }
+            return print("signout", account::signout(config).map(|()| json!({"signed_out": true})));
+        }
+        ["signout", ..] => return print("", Err(Failure::usage("yo signout [--yes]"))),
         ["signin", "--recovery-key", key @ ..] => {
             let key = match key {
                 [key] => key.to_string(),
@@ -334,6 +468,9 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
         }
         ["signin", "--link"] => return print("signin", signin::link_cli(config)),
         ["signin", ..] => return print("", Err(Failure::usage("signin --recovery-key | --link"))),
+        ["recovery"] | ["recovery", "show"] if !account::has_account(config) => {
+            return print("", Err(Failure::not_registered()))
+        }
         ["recovery"] | ["recovery", "show"] => {
             let key = account::read_file(config, "recovery").map(|k| String::from_utf8_lossy(&k).into_owned());
             return print(
@@ -372,7 +509,7 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
 }
 
 fn text(text: &str) -> i32 {
-    println!("{text}");
+    println!("{}", styled(text));
     0
 }
 
@@ -382,6 +519,9 @@ fn listen_or_print(config: &Config, command: &[String]) -> i32 {
     loop {
         match account::open(config) {
             Ok(Open::Opened(opened)) => return listen::listen(config, *opened, &command[1..]),
+            Ok(Open::Busy) if UnixStream::connect(config.control()).is_ok() => {
+                return print("", Err(Failure::new("another yo listen runs on this state directory")));
+            }
             Ok(Open::Busy) if started.elapsed() > BUSY_WAIT => {
                 return print("", Err(Failure { retryable: true, ..Failure::new("the state directory is busy") }))
             }
@@ -393,7 +533,7 @@ fn listen_or_print(config: &Config, command: &[String]) -> i32 {
 
 /// A command on the account: here, or in the listener that has the directory.
 pub fn execute(config: &Config, command: &[String]) -> Result<Value, Failure> {
-    let name = command.first().ok_or_else(|| Failure::usage(HELP))?;
+    command.first().ok_or_else(|| Failure::usage(HELP))?;
     let started = Instant::now();
     loop {
         match account::open(config)? {
@@ -402,12 +542,11 @@ pub fn execute(config: &Config, command: &[String]) -> Result<Value, Failure> {
                 let context = commands::Context { client: &client, config, listening: false, emit: &|_| {} };
                 return commands::run(&context, command);
             }
-            Open::Busy if name != "sync" => {
+            Open::Busy => {
                 if let Some(outcome) = forward(config, command) {
                     return outcome;
                 }
             }
-            Open::Busy => {}
         }
         if started.elapsed() > BUSY_WAIT {
             return Err(Failure { retryable: true, ..Failure::new("the state directory is busy") });
@@ -424,9 +563,28 @@ fn signup(config: &Config, rest: &[&str], backup: bool) -> i32 {
     if !flags.iter().all(|f| matches!(*f, "--force" | "--bot" | "--human")) {
         return print("", Err(Failure::usage(usage)));
     }
+    // `register` (the bots' verb) leaves the least to the hub, which may allow a bot's shorter name.
+    if let Err(failure) = if backup { name_ok(username) } else { Ok(()) } {
+        return print("", Err(failure));
+    }
     let force = flags.contains(&"--force");
     let human = flags.contains(&"--human");
     print("signup", signup_run(config, username, human, force, backup))
+}
+
+/// A name the hub may take, checked here first: the form of spec 2.2, and 12 characters at the least (a client
+/// that is not an attested app gets no shorter name).
+pub fn name_ok(name: &str) -> Result<(), Failure> {
+    use yoip::net::handle;
+    if handle::check_username_form(name).is_err() {
+        return Err(Failure::usage(
+            "a name of letters, digits, _ and emoji, up to 16 characters, starting with a letter, digit or emoji",
+        ));
+    }
+    if handle::username_len(name) < 12 {
+        return Err(Failure::usage("a name of at least 12 characters (the CLI is not an attested app)"));
+    }
+    Ok(())
 }
 
 pub fn signup_run(config: &Config, username: &str, human: bool, force: bool, backup: bool) -> Result<Value, Failure> {
@@ -456,6 +614,22 @@ pub fn signup_run(config: &Config, username: &str, human: bool, force: bool, bac
     }
 }
 
+/// `yo profiles`: the default account's directory and each profile's (`--profile NAME`).
+fn profiles() -> Value {
+    let Some(base) = account::default_state() else { return json!([]) };
+    let mut list = vec![json!({ "profile": null, "state": base })];
+    let mut names: Vec<String> = std::fs::read_dir(format!("{base}/profiles"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    list.extend(names.into_iter().map(|n| json!({ "profile": n, "state": format!("{base}/profiles/{n}") })));
+    json!(list)
+}
+
 /// What may be wrong: the directory, the pins, the account, a listener.
 fn doctor(config: &Config) -> Value {
     let hub = config.hub.clone().unwrap_or_default();
@@ -473,7 +647,10 @@ fn doctor(config: &Config) -> Value {
             Ok(s) => check("account", true, s["username"].as_str().unwrap_or("?").to_owned()),
             Err(f) => check("account", false, f.error.clone()),
         },
-        check("listener", status.as_ref().is_ok_and(|s| s["listening"] == json!(true)), String::new()),
+        match status.as_ref().is_ok_and(|s| s["listening"] == json!(true)) {
+            true => check("listener", true, "running".into()),
+            false => check("listener", false, "not running: yo listen (or yo tui) receives".into()),
+        },
     ];
     json!({ "checks": checks })
 }

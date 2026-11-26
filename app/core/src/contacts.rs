@@ -79,6 +79,11 @@ impl Client {
         self.finish(result)
     }
 
+    /// Whether this user has a visible direct chat. Session records can exist without an inbound request.
+    pub fn has_direct_chat(&self, user: &str) -> bool {
+        self.state.contacts.get(user).is_some_and(|contact| contact.chat)
+    }
+
     pub fn contacts(&self) -> Vec<ContactInfo> {
         self.state
             .contacts
@@ -94,7 +99,7 @@ impl Client {
                 gone: c.gone,
                 outdated: c.outdated_at > 0,
                 accepted: c.accepted,
-                bot: self.state.bots.contains(user),
+                bot: self.known_bot(user),
             })
             .collect()
     }
@@ -155,6 +160,11 @@ impl Client {
         }
         self.take_handle(user, username.unwrap_or_else(|| handle.display()));
         self.persist()
+    }
+
+    /// The bot flag from the last lookup, including friends without a chat.
+    pub fn known_bot(&self, user: &str) -> bool {
+        self.state.bots.contains(user)
     }
 
     /// Takes in whether a user is a bot, as a lookup (`Whois::send`) said: "/" before its name from now on.

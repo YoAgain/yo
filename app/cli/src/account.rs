@@ -3,7 +3,7 @@
 
 use crate::Failure;
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +44,7 @@ pub struct Config {
 }
 
 /// `$XDG_DATA_HOME/yo`, else `~/.local/share/yo`.
-fn default_state() -> Option<String> {
+pub fn default_state() -> Option<String> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
     env("XDG_DATA_HOME").map(|d| format!("{d}/yo")).or_else(|| env("HOME").map(|h| format!("{h}/.local/share/yo")))
 }
@@ -54,6 +54,25 @@ fn key32(what: &str, text: &str) -> Result<[u8; 32], Failure> {
         .ok()
         .and_then(|k| k.try_into().ok())
         .ok_or_else(|| Failure::usage(format!("{what}: 32 bytes, base64url")))
+}
+
+/// `--profile NAME` (YO_PROFILE): an account of its own under the default directory, `profiles/NAME`.
+pub fn profile_state(name: &str) -> Result<String, Failure> {
+    let ok = !name.is_empty()
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !ok {
+        return Err(Failure::usage("--profile NAME: letters, digits, _ - ."));
+    }
+    let base = default_state().ok_or_else(|| Failure::usage("no home directory for --profile: --state DIR"))?;
+    Ok(format!("{base}/profiles/{name}"))
+}
+
+/// The profile a state directory is, if it is one (`…/profiles/NAME`).
+pub fn profile_of(state: &Path) -> Option<String> {
+    let parent = state.parent()?;
+    let name = state.file_name()?.to_string_lossy().into_owned();
+    (parent.file_name()? == "profiles").then_some(name)
 }
 
 /// `YO_RECOVERY_LOOKUPS`: a number of lookups a day.
@@ -72,6 +91,7 @@ impl Config {
                 .unwrap_or_default()
         };
         let (mut state, mut hub) = (env("YO_STATE"), env("YO_HUB"));
+        let mut profile = env("YO_PROFILE");
         let (mut hub_keys, mut trust_roots, mut zk) = (Vec::new(), Vec::new(), env("YO_ZK_PARAMS"));
         let (mut keys_given, mut roots_given) = (false, false);
         let mut i = 0;
@@ -85,6 +105,7 @@ impl Config {
             let value = args.get(i + 1).ok_or_else(|| Failure::usage(format!("{flag}: a value")))?.clone();
             match flag.as_str() {
                 "--state" => state = Some(value),
+                "--profile" => profile = Some(value),
                 "--hub" => hub = Some(value),
                 "--hub-key" => (keys_given, _) = (true, hub_keys.push(key32("--hub-key", &value)?)),
                 "--trust-root" => (roots_given, _) = (true, trust_roots.push(key32("--trust-root", &value)?)),
@@ -124,6 +145,12 @@ impl Config {
         }
         let small_envelopes = env("YO_SMALL_ENVELOPES").is_some_and(|v| v.trim() == "1");
         let recovery_lookups = env("YO_RECOVERY_LOOKUPS").as_deref().map(lookups).transpose()?;
+        // --state (YO_STATE) wins over --profile (YO_PROFILE).
+        let state = match (state, profile) {
+            (Some(state), _) => Some(state),
+            (None, Some(name)) => Some(profile_state(&name)?),
+            (None, None) => None,
+        };
         let state = state
             .or_else(default_state)
             .ok_or_else(|| Failure::usage("no state directory: --state DIR or YO_STATE"))?;
@@ -143,7 +170,45 @@ impl Config {
     }
 
     pub fn control(&self) -> PathBuf {
-        self.state.join("control.sock")
+        control_path(&self.state, std::env::var_os("XDG_RUNTIME_DIR").as_deref().map(Path::new))
+    }
+}
+
+/// Long state paths share a short socket name across processes.
+fn control_path(state: &Path, runtime: Option<&Path>) -> PathBuf {
+    let default = state.join("control.sock");
+    let Ok(state) = state.canonicalize() else { return default };
+    let canonical = state.join("control.sock");
+    if canonical.as_os_str().len() <= 100 {
+        return canonical;
+    }
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: POSIX geteuid has no arguments or preconditions.
+    let uid = unsafe { geteuid() };
+    let dir = match runtime.filter(|p| !p.as_os_str().is_empty()) {
+        Some(runtime) => runtime.join("yo"),
+        None => {
+            let Ok(meta) = state.metadata() else { return default };
+            std::env::temp_dir().join(format!("yo-{}", meta.uid()))
+        }
+    };
+    if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return default;
+        }
+    }
+    let private = dir.symlink_metadata().is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0);
+    if private {
+        let hash = state
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325u64, |hash, b| (hash ^ u64::from(*b)).wrapping_mul(0x100000001b3));
+        dir.join(format!("{hash:016x}.sock"))
+    } else {
+        default
     }
 }
 
@@ -303,15 +368,66 @@ type Locked = (std::fs::File, Option<[u8; 32]>, [u8; 32]);
 fn lock(config: &Config, make: bool) -> Result<Option<Locked>, Failure> {
     let dir = &config.state;
     let io = |e: std::io::Error| Failure::new(format!("{}: {e}", dir.display()));
-    std::fs::create_dir_all(dir).map_err(io)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
-    let lock = std::fs::File::create(dir.join("lock")).map_err(io)?;
-    if lock.try_lock().is_err() {
-        return Ok(None);
-    }
+    private_dir(dir).map_err(io)?;
+    let Some(lock) = directory_lock(dir)? else { return Ok(None) };
     let account = secret(&dir.join("account"), make)?;
     let Some(key) = secret(&dir.join("key"), make || account.is_some())? else { return Err(Failure::not_registered()) };
     Ok(Some((lock, account, key)))
+}
+
+fn directory_lock(dir: &Path) -> Result<Option<std::fs::File>, Failure> {
+    let path = dir.join("lock");
+    let io = |e| Failure::new(format!("{}: {e}", path.display()));
+    let lock =
+        std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(&path).map_err(io)?;
+    match lock.try_lock() {
+        // Signout can unlink the lock between open and try_lock.
+        Ok(()) if lock.metadata().map_err(io)?.nlink() > 0 => Ok(Some(lock)),
+        Ok(()) | Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(io(e)),
+    }
+}
+
+pub const SIGNOUT_PROMPT: &str = "Sign out on this device? Nothing stays here: the account's files in the state directory are deleted. Have your recovery key.";
+
+pub fn signout(config: &Config) -> Result<(), Failure> {
+    if !config.state.try_exists().map_err(|e| Failure::new(e.to_string()))? {
+        return Ok(());
+    }
+    let _lock = directory_lock(&config.state)?.ok_or_else(|| Failure::new("stop yo listen first"))?;
+    let remove = |path: &Path| match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Failure::new(format!("{}: {e}", path.display()))),
+    };
+    let socket = config.control();
+    if socket.symlink_metadata().is_ok_and(|m| m.file_type().is_socket()) {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return Err(Failure::new("stop yo listen first"));
+        }
+        remove(&socket)?;
+    }
+    for name in [
+        "state.sqlite-wal",
+        "state.sqlite-shm",
+        "state.sqlite-journal",
+        "state.sqlite",
+        "state",
+        "state.v2",
+        "state.old",
+        "removed.tmp",
+        "removed",
+        "recovery.tmp",
+        "recovery",
+        "key.tmp",
+        "key",
+        "account.tmp",
+        "account",
+        "lock",
+    ] {
+        remove(&config.state.join(name))?;
+    }
+    Ok(())
 }
 
 /// The database, with the state file of the build before it taken in.
@@ -393,8 +509,7 @@ pub fn put_account_secret(config: &Config, secret: &[u8; 32]) -> Result<(), Fail
     if has_account(config) {
         return Err(Failure::new("this directory has an account already: another --state DIR"));
     }
-    std::fs::create_dir_all(dir).map_err(io)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+    private_dir(dir).map_err(io)?;
     write_private(&dir.join("account"), secret).map_err(io)
 }
 
@@ -479,9 +594,58 @@ fn register_new(
     Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))
 }
 
+/// The state directory: made private (0700) when this makes it; one that exists keeps its mode (a directory made
+/// read-only stays so, and writing into it fails).
+fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signout_requires_the_lock_and_preserves_unknown_files() {
+        let mut config = Config::parse(&[]).unwrap().0;
+        config.state = std::env::temp_dir().join(format!("yo-signout-{}", yo_tests::random_u64()));
+        std::fs::create_dir(&config.state).unwrap();
+        let names = ["account", "key", "state.sqlite", "state.sqlite-wal", "recovery.tmp", "removed", "notes"];
+        for name in names {
+            std::fs::write(config.state.join(name), b"example").unwrap();
+        }
+        let lock = directory_lock(&config.state).unwrap().unwrap();
+        assert_eq!(signout(&config).unwrap_err().error, "stop yo listen first");
+        assert!(names.iter().all(|n| config.state.join(n).exists()));
+        drop(lock);
+        signout(&config).unwrap();
+        signout(&config).unwrap();
+        assert_eq!(std::fs::read_dir(&config.state).unwrap().count(), 1);
+        assert_eq!(std::fs::read(config.state.join("notes")).unwrap(), b"example");
+        std::fs::remove_dir_all(config.state).unwrap();
+    }
+
+    #[test]
+    fn long_state_uses_a_private_socket_directory() {
+        let root = std::env::temp_dir().join(format!("yo-path-{}", yo_tests::random_u64()));
+        let state = root.join("long".repeat(30));
+        std::fs::create_dir_all(&state).unwrap();
+        let dir = root.join("yo");
+        let socket = control_path(&state, Some(&root));
+        assert_eq!(socket.parent(), Some(dir.as_path()));
+        assert_eq!(socket.file_name().unwrap().len(), 21);
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&state, &alias).unwrap();
+        assert_eq!(socket, control_path(&alias, Some(&root)));
+        assert_eq!(dir.metadata().unwrap().mode() & 0o777, 0o700);
+        assert_eq!(socket, control_path(&state.join("../").join(state.file_name().unwrap()), Some(&root)));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
+        assert_eq!(control_path(&state, Some(&root)), state.join("control.sock"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn recovery_lookups_are_a_number() {

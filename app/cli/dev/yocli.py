@@ -53,6 +53,9 @@ def forwarded(args, stdin, timeout):
     state = os.environ.get("YO_STATE")
     if not state or (args and args[0] in ("register", "listen", "sync")):
         return None
+    path = os.path.join(os.path.realpath(state), "control.sock")
+    if len(os.fsencode(path)) > 100:
+        return None  # Let the CLI resolve and check the private runtime directory.
     command = list(args)
     if command[:1] == ["send"] and "--media" in command:
         at = command.index("--media") + 1
@@ -61,7 +64,7 @@ def forwarded(args, stdin, timeout):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(timeout)
-            conn.connect(os.path.join(state, "control.sock"))
+            conn.connect(path)
             conn.sendall((json.dumps(command) + "\n").encode())
             answer = conn.makefile("r", encoding="utf-8").readline()
     except OSError:

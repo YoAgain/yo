@@ -60,14 +60,20 @@ impl Listener<'_> {
         }
     }
 
+    fn contact_name(&self, user: &str) -> Option<String> {
+        self.client
+            .try_lock()
+            .ok()?
+            .contacts()
+            .into_iter()
+            .find(|c| c.user == user)
+            .and_then(|c| c.handles.first().cloned().or(c.name))
+    }
+
     /// An event for a person on a terminal: who by name (when the client is free to ask), none for the quiet ones.
     fn text(&self, value: &Value) -> Option<String> {
-        let name = |user: &str| -> String {
-            let found = self.client.try_lock().ok().and_then(|c| {
-                c.contacts().into_iter().find(|x| x.user == user).and_then(|x| x.handles.first().cloned().or(x.name))
-            });
-            found.unwrap_or_else(|| user.chars().take(8).collect()).to_uppercase()
-        };
+        let name =
+            |user: &str| self.contact_name(user).unwrap_or_else(|| user.chars().take(8).collect()).to_uppercase();
         let time = chrono_free_time();
         match value["type"].as_str()? {
             "ready" => Some(format!(
@@ -104,7 +110,11 @@ impl Listener<'_> {
                     let _ = drain.try_send(m.clone());
                 }
             }
-            self.line(&commands::event(event, self.drain.is_none()));
+            let mut value = commands::event(event, self.drain.is_none());
+            if let Event::GroupMessage { user, .. } = event {
+                value["from_name"] = json!(self.contact_name(user));
+            }
+            self.line(&value);
         }
     }
 

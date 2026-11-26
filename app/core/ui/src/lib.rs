@@ -4,8 +4,14 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod line;
 pub mod list;
+pub mod settings;
 pub mod status;
 pub mod zoom;
+
+/// Friend bar palette. The mobile apps still keep their own copies.
+pub const BAR_COLORS: [u32; 8] = [0x1abc9c, 0x2ecc71, 0x3498db, 0x34495e, 0x16a085, 0xf1c40f, 0x2980b9, 0x8e44ad];
+/// The No bar. The mobile apps still keep their own copies.
+pub const ALIZARIN: u32 = 0xe74c3c;
 
 pub const VIDEO_LIMIT_MS: u32 = 10_000;
 pub const VIDEO_LIMIT_BYTES: u32 = 9_000_000;

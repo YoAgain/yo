@@ -11,6 +11,7 @@ name = "yo"
 path = "src/main.rs"
 
 [dependencies]
+yo-ui = { path = "../core/ui" }
 yo-core = { path = "../core" }
 yoip = { path = "../../yoip" }
 reqwest = { workspace = true, features = ["blocking"] }

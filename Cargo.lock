@@ -5743,6 +5743,7 @@ dependencies = [
  "yo-core",
  "yo-hub",
  "yo-tests",
+ "yo-ui",
  "yoip",
 ]
 

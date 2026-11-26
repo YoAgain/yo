@@ -50,6 +50,25 @@ fn for_device(payloads: &[state::DevicePayload], device: u8) -> &[u8] {
 }
 
 #[test]
+fn a_stranger_only_has_a_chat_after_a_visible_yo() {
+    let mut client = phone(1, 1);
+    let user = hex(&[2; 16]);
+    client.state.contacts.insert(user.clone(), Contact::default());
+    let yo = Message { sent_at_ms: 1, group: None, content: Content::Yo };
+    client.state.requests_open = false;
+    client.received(&user, &[3; 32], b"first", yo.clone()).unwrap();
+    assert!(!client.has_direct_chat(&user));
+    assert!(client.state.events.is_empty());
+    client.state.requests_open = true;
+    client.received(&user, &[3; 32], b"second", yo.clone()).unwrap();
+    assert!(client.has_direct_chat(&user));
+    client.decline(&user).unwrap();
+    assert!(!client.has_direct_chat(&user));
+    client.received(&user, &[3; 32], b"third", yo).unwrap();
+    assert!(client.has_direct_chat(&user));
+}
+
+#[test]
 fn sixteen_devices_get_a_payload_each_and_every_device_can_answer() {
     use libsignal_protocol::{Aci, KeyPair, SenderCertificate, ServerCertificate};
     let mut sender = phone(33, 17);

@@ -1,6 +1,9 @@
 //! The Yo client core (yoip/SPEC.md): sessions, delivery and the outbox for iOS and Android; the platform supplies
 //! HTTP and opens the local database.
 
+/// Version of the client core.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 mod aead;
 pub mod backup;
 pub mod connect;
@@ -1202,6 +1205,11 @@ impl Client {
 
     pub fn username(&self) -> Option<&str> {
         self.state.username.as_deref()
+    }
+
+    /// This device's number in the account's device list.
+    pub fn device_number(&self) -> u8 {
+        self.state.device_number
     }
 
     pub fn device_id(&self) -> HubDeviceId {

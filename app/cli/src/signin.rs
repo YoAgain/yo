@@ -70,7 +70,13 @@ pub fn recovery(config: &Config, typed: &str) -> Result<Value, Failure> {
 fn registered(config: &Config, username: &str, legacy: Option<[u8; 32]>) -> Result<Value, Failure> {
     match account::register_with(config, username, false, legacy)? {
         account::Open::Opened(opened) => {
-            let client = std::sync::Mutex::new(opened.client);
+            let mut client = opened.client;
+            // The bot mark is the account's, for good: a device signed in again takes it from the hub's lookup.
+            let bot = client.whois_begin(username).and_then(|lookup| lookup.send()).is_ok_and(|(_, _, bot)| bot);
+            if bot && !client.is_bot() {
+                client.set_bot(true)?;
+            }
+            let client = std::sync::Mutex::new(client);
             let context = commands::Context { client: &client, config, listening: false, emit: &|_| {} };
             commands::whoami(&context, false)
         }
@@ -114,22 +120,46 @@ pub fn link_cli(config: &Config) -> Result<Value, Failure> {
     Err(Failure { retryable: true, ..Failure::new("no device answered the link in 10 minutes") })
 }
 
+pub fn compact_link(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
+// A link contains a 16-byte id and a 32-byte public key in unpadded base64url.
+// Leave the following line for the separate approval prompt.
+fn read_link(reader: &mut impl BufRead) -> std::io::Result<String> {
+    let mut text = String::new();
+    let prefix = "yo-link:";
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line)?;
+        text.push_str(&compact_link(&line));
+        if n == 0
+            || text.len() >= prefix.len() + 22 + 1 + 43
+            || !(prefix.starts_with(&text) || text.starts_with(prefix))
+        {
+            return Ok(text);
+        }
+    }
+}
+
 /// `yo link [TEXT]`: the new device's link read (from the argument or asked), and the owner asked once (spec 2.5:
 /// never without that yes). The text for `link-approve`.
 pub fn confirm_link(text: Option<&str>) -> Result<String, Failure> {
     let text = match text {
-        Some(text) => text.to_owned(),
+        Some(text) => compact_link(text),
         None => {
-            eprint!("Paste the yo-link: ");
-            let _ = std::io::stderr().flush();
-            let mut line = String::new();
-            std::io::stdin().lock().read_line(&mut line).map_err(|e| Failure::new(e.to_string()))?;
-            line.trim().to_owned()
+            if std::io::stdin().is_terminal() {
+                eprint!("Paste the yo-link: ");
+                let _ = std::io::stderr().flush();
+            }
+            read_link(&mut std::io::stdin().lock()).map_err(|e| Failure::new(e.to_string()))?
         }
     };
     yo_core::link::offer(&text).map_err(|_| Failure::usage("not a yo-link: text"))?;
-    eprint!("This device gets access to your account [y/N] ");
-    let _ = std::io::stderr().flush();
+    if std::io::stdin().is_terminal() {
+        eprint!("This device gets access to your account [y/N] ");
+        let _ = std::io::stderr().flush();
+    }
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer).map_err(|e| Failure::new(e.to_string()))?;
     match answer.trim() {
@@ -167,4 +197,20 @@ pub fn qr(text: &str) -> String {
     }
     out.pop();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_stdin_link_leaves_approval_on_its_own_line() {
+        let token = format!("yo-link:{}.{}", "A".repeat(22), "A".repeat(43));
+        let input = format!("  {}\n  {}\t{} \nyes\n", &token[..4], &token[4..31], &token[31..]);
+        let mut reader = input.as_bytes();
+        let text = read_link(&mut reader).unwrap();
+        assert_eq!(text, token);
+        assert!(yo_core::link::offer(&text).is_ok());
+        assert_eq!(reader, b"yes\n");
+    }
 }

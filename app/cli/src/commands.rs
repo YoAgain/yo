@@ -44,6 +44,10 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         ["status"] => whoami(context, true),
         ["friends"] => Ok(friends(&context.client())),
         ["contacts"] => Ok(contacts(&context.client())),
+        ["whois", name] if own(context, name) => {
+            let me = whoami(context, false)?;
+            Ok(json!({ "user": me["user"], "username": me["username"], "bot": me["bot"] }))
+        }
         ["whois", name] => {
             whois(context, name).map(|(user, username, bot)| json!({ "user": user, "username": username, "bot": bot }))
         }
@@ -115,7 +119,10 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             done(context, |c| c.answer_connection(user, kind, code))
         }
         ["bot", switch @ ("on" | "off")] => {
-            context.client().set_bot(*switch == "on")?;
+            context.client().set_bot(*switch == "on").map_err(|e| match e {
+                yo_core::Error::Refused(409) => Failure::new("a bot cannot become a person"),
+                other => other.into(),
+            })?;
             Ok(json!({ "bot": *switch == "on" }))
         }
         ["friends-view"] => Ok(view(&context.client())),
@@ -146,12 +153,13 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         }
         ["devices"] | ["devices", "list"] => {
             let mut client = context.client();
+            let this = client.device_number();
             let list: Vec<Value> = client
                 .own_devices()?
                 .into_iter()
                 .map(|d| {
                     json!({
-                        "number": d.number, "created_at": d.created_at, "last_seen_at": d.last_seen_at,
+                        "number": d.number, "this": d.number == this, "created_at": d.created_at, "last_seen_at": d.last_seen_at,
                         "app": String::from_utf8_lossy(d.app.as_slice()),
                     })
                 })
@@ -160,7 +168,10 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         }
         ["devices", "remove", number] => {
             let number: u8 = number.parse().map_err(|_| Failure::usage("devices remove NUMBER"))?;
-            context.client().remove_device(number)?;
+            context.client().remove_device(number).map_err(|e| match e {
+                yo_core::Error::Refused(404) => Failure::new(format!("no device {number}: yo devices")),
+                other => other.into(),
+            })?;
             Ok(json!({ "removed": number }))
         }
         ["recovery", "rotate"] => rotate_recovery(context),
@@ -195,6 +206,7 @@ pub fn whoami(context: &Context, status: bool) -> Outcome {
         "user": client.user_id(),
         "username": client.username(),
         "device": client.device_id(),
+        "device_id": yo_core::state::hex(&client.device_id()),
         "bot": client.is_bot(),
         "hub": context.config.hub,
     });
@@ -254,10 +266,16 @@ fn view(client: &Client) -> Value {
         .into_iter()
         .map(|f| {
             let contact = contacts.iter().find(|c| c.user == f.user);
+            let username = contact
+                .into_iter()
+                .flat_map(|c| &c.handles)
+                .chain(f.name.iter())
+                .find(|name| yoip::net::handle::check_username_form(name).is_ok());
             json!({
                 "kind": "friend", "target": f.user, "user": f.user,
+                "color": f.color, "username": username,
                 "name": shown(contact, f.name.as_deref(), &f.user),
-                "bot": contact.is_some_and(|c| c.bot), "blocked": f.blocked || contact.is_some_and(|c| c.blocked),
+                "bot": client.known_bot(&f.user), "blocked": f.blocked || contact.is_some_and(|c| c.blocked),
                 "gone": contact.is_some_and(|c| c.gone),
             })
         })
@@ -265,7 +283,7 @@ fn view(client: &Client) -> Value {
     list.extend(client.groups().into_iter().filter(|g| !g.left).map(|g| {
         json!({
             "kind": "group", "target": format!("{GROUP}{}", g.id), "name": g.name, "members": g.members.len(),
-            "accepted": g.accepted, "bot": false, "blocked": false, "gone": false,
+            "accepted": g.accepted, "color": null, "bot": false, "blocked": false, "gone": false,
         })
     }));
     json!(list)
@@ -286,12 +304,20 @@ fn removed(config: &crate::Config, user: &str, on: bool) {
     let _ = crate::account::write_file(config, "removed", users.join("\n").as_bytes());
 }
 
-/// Requests from strangers (spec 3.3): chats not said yes to.
+/// Requests from strangers (spec 3.3): chats not said yes to, from someone not on the friend list.
 fn requests(client: &Client, removed: &[String]) -> Value {
+    let friends: Vec<String> = client.friends().into_iter().map(|f| f.user).collect();
     let list: Vec<Value> = client
         .contacts()
         .into_iter()
-        .filter(|c| !c.accepted && !c.blocked && !c.gone && !removed.contains(&c.user))
+        .filter(|c| {
+            client.has_direct_chat(&c.user)
+                && !c.accepted
+                && !c.blocked
+                && !c.gone
+                && !removed.contains(&c.user)
+                && !friends.contains(&c.user)
+        })
         .map(|c| json!({ "user": c.user, "name": shown(Some(&c), None, &c.user), "bot": c.bot }))
         .collect();
     json!({ "requests_open": client.requests_open(), "requests": list })
@@ -353,9 +379,17 @@ fn groups(client: &Client) -> Value {
 }
 
 /// Who a name is: signed under the client, asked without it.
+/// Whether a name is this account's own.
+fn own(context: &Context, name: &str) -> bool {
+    let name = name.trim_start_matches('@');
+    context.client().username().is_some_and(|me| yoip::net::handle::same_name(me, name))
+}
+
 fn whois(context: &Context, name: &str) -> Result<(String, Option<String>, bool), Failure> {
     let lookup = context.client().whois_begin(name)?;
-    Ok(lookup.send()?)
+    let (user, username, bot) = lookup.send()?;
+    context.client().note_bot(&user, bot)?;
+    Ok((user, username, bot))
 }
 
 /// Members by user id: as they are, usernames looked up.
@@ -365,6 +399,9 @@ fn users(context: &Context, names: &[&str]) -> Result<Vec<String>, Failure> {
 
 fn add(context: &Context, name: &str) -> Outcome {
     let name = name.trim_start_matches('@');
+    if own(context, name) {
+        return Err(Failure::usage("that is this account's own name"));
+    }
     let (user, username, _) = whois(context, name)?;
     let mut client = context.client();
     client.whois_end(name, &user, username.clone())?;
@@ -566,6 +603,29 @@ fn upload(context: &Context, to: &str, plain: &[u8], width: u16, height: u16) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declining_the_only_chat_empties_requests() {
+        use yo_core::state::{Contact, State};
+        struct Offline;
+        impl yo_core::Transport for Offline {
+            fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> Result<yo_core::Response, String> {
+                panic!("local operations only")
+            }
+        }
+
+        let pending = "aa".repeat(16);
+        let mut state = State::default();
+        state.contacts.insert(pending.clone(), Contact { chat: true, ..Default::default() });
+        state.contacts.insert("bb".repeat(16), Contact::default());
+        let (mut client, _) =
+            Client::from_snapshot(std::sync::Arc::new(Offline), state, Default::default(), false).unwrap();
+        let list = requests(&client, &[]);
+        assert_eq!(list["requests"].as_array().unwrap().len(), 1);
+        assert_eq!(list["requests"][0]["user"], pending);
+        client.decline(&pending).unwrap();
+        assert_eq!(requests(&client, &[])["requests"], json!([]));
+    }
 
     #[test]
     fn a_media_reference_carries_the_photo_or_video_whole() {
