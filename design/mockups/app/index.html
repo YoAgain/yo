@@ -159,7 +159,7 @@
     <p><button id="reset">Reset everything</button></p>
     <p><b>Sign-up:</b> taken <code>anna</code> <code>peter</code> <code>chris</code>; reserved <code>apple</code> <code>admin</code>. After Sign Up the app lands on the list.</p>
     <p><b>Linking (§2.5):</b> turn on “Second device”. Right: Got Yo? Sign In › Link from Another Device shows a QR. Left: Settings › Account › Devices › Link a Device › scan. One confirming tap. At 16 devices the new one picks one to replace.</p>
-    <p><b>Settings (proposal):</b> Devices moved into Account; App Icon and Left-Handed grouped under Appearance; Sign Out in Account.</p>
+    <p><b>Settings (proposal):</b> Devices moved into Account; App Icon and Left-Handed grouped under Look; Sign Out in Account.</p>
   </div>
 </div>
 
@@ -358,7 +358,7 @@ S.settings = p => { const a = hub.account; return `<div class="grab"></div><div 
   <div class="card"><div class="r" data-a="go" data-s="help">${tile('help', '#9b59b6')}<span class="t">About</span>${chev}</div>
     <div class="r" data-a="toast" data-t="Send Feedback opens the support chat">${tile('mail', '#007aff')}<span class="t">Feedback</span>${chev}</div></div></div>`; };
 
-S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Appearance</div><div class="sbody">
+S.appearance = p => `<div class="grab"></div><div class="shead">${backbtn()}Look</div><div class="sbody">
   <div class="card"><div class="icons">${[['Yo','#9b59b6','Yo'],['Yo!','#f5f0f7','Yo'],['Just Yo','#9b59b6',''],['2014','#8e44ad',''],['2015','#a569bd','']].map(([n, c, t]) =>
     `<div class="${p.icon === n ? 'sel' : ''}" data-a="icon" data-n="${n}"><div class="ic" style="background:${c};color:${c === '#f5f0f7' ? '#9b59b6' : '#fff'}">${t}</div>${n}</div>`).join('')}</div></div>
   <div class="card"><div class="r" data-a="toggleLeft">${tile('hand', '#007aff')}<span class="t">Left-Handed</span><span class="sw ${p.left ? 'on' : ''}"></span></div></div>
