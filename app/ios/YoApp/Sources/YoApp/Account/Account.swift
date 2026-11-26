@@ -467,7 +467,8 @@ final class AccountStore {
     _ username: String, secret: Data?, legacySeed: Data? = nil, legacyStorageKey: Data? = nil,
     replacing: Account? = nil, attest: YoAttest? = nil
   ) async throws -> (client: YoClient, secret: Data) {
-    guard !registering, account == replacing else { throw Diagnostics.failure(AccountError.busy) }
+    // A second tap while signing in: the person is told to wait.
+    guard !registering, account == replacing else { throw Diagnostics.expected(AccountError.busy) }
     registering = true
     defer { registering = false }
     await deleting?.value  // the signed-out state goes first

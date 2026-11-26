@@ -10,8 +10,10 @@ import YoCore
 /// The one place that decides which network failures and hub answers are expected, never reported as problems: the
 /// phone offline or timing out, a request cancelled, the phone's clock, the update the hub asks for (426), a limit,
 /// the device replaced, a signed request's first 401 (the core signs again and retries), and answers the core takes as
-/// protocol outcomes. A problem, reported: a 401 left after that retry, the hub failing (5xx), a broken TLS handshake
-/// (-1200), a storage failure, a message that does not decrypt.
+/// protocol outcomes, the proxy in front of the hub with the hub away (502, 504: a deploy's restart), a TLS handshake or
+/// answer broken on the way (-1200 without a refused certificate, -1017, a socket's POSIX error: a captive portal, a bad
+/// network). A problem, reported: a 401 left after that retry, the hub failing (500, 503), a certificate refused, a
+/// storage failure, a message that does not decrypt.
 /// Android mirrors it (CrashReports.noise).
 enum Noise {
   static func status(_ status: UInt16, method: String, route: String, signed: Bool) -> Bool {
@@ -19,6 +21,8 @@ enum Noise {
     // A 410: this device was replaced, which the app shows. 426: the app asks for the update. A limit, or no room
     // now (inbox, blobs or disk): try later.
     if [410, 426, 429, 507].contains(status) { return true }
+    // The proxy in front of the hub while the hub restarts (a deploy) or answers late: the core tries again.
+    if status == 502 || status == 504 { return true }
     switch method {
     case "GET":
       // A username checked while typed, no storage yet, or no backup behind the chosen passkey or key.
@@ -44,20 +48,26 @@ enum Noise {
     }
   }
 
-  // A "bad URL" for the fixed hub address can come from a proxy or VPN. A broken TLS handshake is reported: the
-  // certificate or the proxy in front of the hub.
+  // A "bad URL" for the fixed hub address can come from a proxy or VPN. An answer that does not parse (-1017) is a
+  // captive portal's or a cut connection's.
   private static let offline: Set<Int> = [
     NSURLErrorBadURL, NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
     NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet,
-    NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed,
+    NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed, NSURLErrorCannotParseResponse,
   ]
 
-  static func urlError(domain: String, code: Int, badDates: Bool) -> Bool {
-    domain == NSURLErrorDomain && (code == NSURLErrorCancelled || offline.contains(code) || badDates)
+  /// `refused`: the hub's certificate failed its trust evaluation. Without that, a TLS failure (-1200) is the
+  /// network's (a handshake cut on a bad network, seen dozens of times on one phone), not the certificate's.
+  static func urlError(domain: String, code: Int, badDates: Bool, refused: Bool = false) -> Bool {
+    // A socket's own failure under the request (a connection reset, 80 as the network changed).
+    if domain == NSPOSIXErrorDomain { return true }
+    guard domain == NSURLErrorDomain else { return false }
+    if code == NSURLErrorSecureConnectionFailed { return badDates || !refused }
+    return code == NSURLErrorCancelled || offline.contains(code) || badDates
   }
 
   static func fallback(_ code: String) -> Bool {
-    ["network", "hubStatus/426", "hubStatus/429"].contains(code)
+    ["network", "hubStatus/426", "hubStatus/429", "hubStatus/502", "hubStatus/504"].contains(code)
   }
 }
 
@@ -74,6 +84,14 @@ enum Diagnostics {
   // The transport handles HTTP and network diagnostics before the core retries. Keychain records at creation.
   static func recordUnreported(_ error: Error, file: String = #fileID, line: Int = #line, place: String = #function) {
     if error is Keychain.Failure { return }
+    // A task cancelled (a recording or picture given up, a view gone): nothing failed.
+    if error is CancellationError { return }
+    // Spotlight's index unavailable or its daemon away (locked phone, low storage): updated again at the next change.
+    if (error as NSError).domain == "CSIndexErrorDomain" {
+      CountedErrors.record(domain: "CSIndexErrorDomain", place: "\(file):\(line) \(place)",
+        code: String((error as NSError).code), expected: true)
+      return
+    }
     if let yo = error as? YoError {
       switch yo {
       // The 401 left after the core signed again and retried: a problem (Android reports it the same way).

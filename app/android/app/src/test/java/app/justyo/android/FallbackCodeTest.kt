@@ -14,9 +14,9 @@ class FallbackCodeTest {
         assertEquals("other/IllegalStateException", YoWork.fallbackCode(IllegalStateException("private text")))
     }
     @Test fun skipsOnlyTheExpected() {
-        for (code in listOf("network","hubStatus/426","hubStatus/429"))
+        for (code in listOf("network","hubStatus/426","hubStatus/429","hubStatus/502","hubStatus/504","pushSyncFailed"))
             assertTrue(code, CrashReports.noise(code))
-        for (code in listOf("hubStatus/500","hubStatus/502","hubStatus/503","hubStatus/401","protocol","save"))
+        for (code in listOf("hubStatus/500","hubStatus/503","hubStatus/401","protocol","save"))
             assertFalse(code, CrashReports.noise(code))
     }
 }

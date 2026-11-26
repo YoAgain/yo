@@ -52,10 +52,13 @@ func eventually(_ check: () -> Bool) {
 }
 // Expected: the update asked for, a limit. Problems: a refused signature, the hub failing, a broken TLS handshake.
 precondition(Noise.status(426, method: "GET", route: "/v1/inbox", signed: true) && Noise.status(429, method: "GET", route: "/v1/inbox", signed: true))
-precondition(!Noise.status(502, method: "GET", route: "/v1/inbox", signed: true))
+precondition(Noise.status(502, method: "GET", route: "/v1/inbox", signed: true) && Noise.status(504, method: "PUT", route: "/v1/blobs/x", signed: true))
+precondition(!Noise.status(503, method: "GET", route: "/v1/inbox", signed: true))
 precondition(Noise.status(401, method: "GET", route: "/v1/inbox", signed: true))
 precondition(!Noise.status(401, method: "GET", route: "/v1/inbox", signed: false))
-precondition(!Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed, badDates: false))
+precondition(Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed, badDates: false))
+precondition(!Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorSecureConnectionFailed, badDates: false, refused: true))
+precondition(Noise.urlError(domain: NSPOSIXErrorDomain, code: 80, badDates: false) && Noise.urlError(domain: NSURLErrorDomain, code: NSURLErrorCannotParseResponse, badDates: false))
 precondition(Noise.status(404, method: "POST", route: "/v1/lookup", signed: true))
 precondition(!Noise.status(404, method: "GET", route: "/v1/support", signed: true))
 precondition(!Noise.status(500, method: "GET", route: "/v1/inbox", signed: true))

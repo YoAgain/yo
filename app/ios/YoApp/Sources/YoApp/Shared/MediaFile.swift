@@ -123,7 +123,7 @@ struct MediaFile: Sendable {
         try? FileManager.default.removeItem(at: out)
       }
     } catch {
-      Diagnostics.record(error)
+      Diagnostics.recordUnreported(error)  // a recording given up (cancelled) is not reported
       return nil
     }
     guard let data = Diagnostics.attempt({ try Data(contentsOf: out) }), !data.isEmpty, data.count <= largestVideo else {

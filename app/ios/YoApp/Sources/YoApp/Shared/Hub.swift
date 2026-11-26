@@ -142,6 +142,16 @@ final class HubTransport: HttpTransport {
   static var unsupported: Bool { tooOld.load(ordering: .relaxed) }
   /// TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`, "Check Your
   /// Phone's Date & Time").
+  /// The TLS failure carries the hub's certificate and it fails its trust evaluation (another certificate in the way:
+  /// a proxy or a wrong one). Without a trust the handshake broke before one came: the network's.
+  static func certificateRefused(_ error: NSError) -> Bool {
+    guard error.domain == NSURLErrorDomain,
+      let value = error.userInfo[NSURLErrorFailingURLPeerTrustErrorKey],
+      CFGetTypeID(value as CFTypeRef) == SecTrustGetTypeID()
+    else { return false }
+    return !SecTrustEvaluateWithError(value as! SecTrust, nil)
+  }
+
   static func badDates(_ error: NSError) -> Bool {
     guard error.domain == NSURLErrorDomain else { return false }
     if error.code == NSURLErrorServerCertificateHasBadDate || error.code == NSURLErrorServerCertificateNotYetValid {
@@ -334,7 +344,8 @@ final class HubTransport: HttpTransport {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
       let dates = (error as NSError?).map(HubTransport.badDates) ?? false
       if let error = error as NSError?, let diagnosticPlace,
-        !Noise.urlError(domain: error.domain, code: error.code, badDates: dates) {
+        !Noise.urlError(domain: error.domain, code: error.code, badDates: dates,
+          refused: HubTransport.certificateRefused(error)) {
         Diagnostics.record(error, place: diagnosticPlace)
       }
       if tooLarge {

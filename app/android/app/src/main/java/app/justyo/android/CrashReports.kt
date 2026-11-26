@@ -139,10 +139,12 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
     companion object {
         private var installed=false
         /** The one place deciding which push fallbacks are expected, never reported (as iOS's Noise): the phone
-         * offline, the update the hub asks for (426), a limit (429). The notification still shows, its count is
-         * discarded. A problem, reported: the hub failing (5xx), a storage failure, one that does not decrypt. */
+         * offline, the update the hub asks for (426), a limit (429), the proxy with the hub away (502, 504). The notification still shows, its count is
+         * discarded. A problem, reported: the hub failing (500, 503), a storage failure, one that does not decrypt. */
         internal fun noise(code: String): Boolean = when (code) {
-            "network", "hubStatus/426", "hubStatus/429" -> true
+            "network", "hubStatus/426", "hubStatus/429", "hubStatus/502", "hubStatus/504" -> true
+            // Builds before 22 Nov counted every failure as this one code; such a count left on the phone says nothing.
+            "pushSyncFailed" -> true
             else -> false
         }
     }
