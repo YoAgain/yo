@@ -80,6 +80,8 @@ The hub binds the user id to the `🔐 account key` and its certified `🪪 devi
 DeviceCertificate { opaque account_key[32]; opaque signature[64]; }   // account signs "yo device v1" || device key
 ```
 The hub checks the certificate at registration and keeps the `🔐 account key` until deletion. Senders pin the `🔐 account key` on first contact and send only to devices listed by the hub (§3.2, §5). A key change drops old sessions (`IdentityChanged`, §2.3). In v1 the key never changes.
+
+**Bots.** An account MAY declare itself a bot with `PUT /bot` (1), right after registration. The mark belongs to the account like its `🔐 account key`: the hub MUST refuse to clear it (`409`) and serves it in signed lookups (`LookupBot`, §4.1). Apps SHOULD ask with lookup flag 4 and show a bot symbol. The mark is the account's own claim; the hub vouches only that it never changed.
 ### 2.2 Username
 The account's only public name is set for life at sign-up (§5.2). Names with the same skeleton collide.
 ```
@@ -401,7 +403,7 @@ Pinned clients MUST send `Yo-Nonce` and reject unverified answers (`Protocol`). 
 | `PUT /blobs/{id}?fetches=n` | signed by body hash | ciphertext | `201` | §4.3 |
 | `GET /blobs/{id}` | none | – | ciphertext, consumes no fetch | §4.3 |
 | `DELETE /blobs/{id}` | none | – | `204`, consumes one fetch | §4.3 |
-| `PUT /bot` | signed | 0 or 1 (one byte, shown in lookups) | `204`; other body `400` | §4.1 |
+| `PUT /bot` | signed | 1 (one byte, shown in lookups) | `204`; 0 on a bot `409`; other body `400` | §2.1 |
 | `GET /certificate` | signed | – | libsignal `SenderCertificate` | §4.1 |
 | `GET /group-auth` | signed | – | `GroupAuthCredential` | §3.4 |
 | `POST /group-credential` | none (signed accepted) | `ProfileCredentialRequest` | `ExpiringProfileKeyCredentialResponse`; `404`, `403` | §3.4 |
