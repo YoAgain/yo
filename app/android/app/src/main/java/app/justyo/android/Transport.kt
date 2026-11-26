@@ -28,7 +28,7 @@ class HubTransport(
         .followRedirects(false).followSslRedirects(false).build()
     override fun request(method: String, path: String, headers: List<Header>, body: ByteArray): HttpResult {
         val attestation = path == "/v1/attest" || path == "/v1/attest/challenge"
-        if (stopped.get()) return HttpResult(426u, byteArrayOf(), null)
+        if (stopped.get()) return HttpResult(426u, byteArrayOf(), null, emptyList())
         return try {
             require(path.startsWith("/") && !path.startsWith("//"))
             val request = Request.Builder().url(Hub.url + path).header("Yo-App", YO_APP_WIRE)
@@ -56,14 +56,14 @@ class HubTransport(
                     }
                     output.toByteArray()
                 }
-                HttpResult(response.code.toUShort(), bytes, null)
+                HttpResult(response.code.toUShort(), bytes, null, response.headers.map { (name, value) -> Header(name, value) })
             }
         } catch (e: Exception) {
             // TLS refused the hub's certificate for its dates: the phone's clock is off (the core's `clock:`), not the
             // connection: it must not say "Offline".
             val dates = refusedForDates(e)
             if (!attestation) { if (dates) clockOff() else reached(false) }
-            HttpResult(0u, byteArrayOf(), if (dates) "clock: $unreachable" else unreachable)
+            HttpResult(0u, byteArrayOf(), if (dates) "clock: $unreachable" else unreachable, emptyList())
         }
     }
     /** Connections from before a suspension or on another network: dropped, so the next request opens a fresh one at

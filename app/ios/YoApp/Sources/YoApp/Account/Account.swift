@@ -465,7 +465,7 @@ final class AccountStore {
   /// time: a second registration would replace the first. `replacing`: the account shown during migration.
   private func register(
     _ username: String, secret: Data?, legacySeed: Data? = nil, legacyStorageKey: Data? = nil,
-    replacing: Account? = nil
+    replacing: Account? = nil, attest: YoAttest? = nil
   ) async throws -> (client: YoClient, secret: Data) {
     guard !registering, account == replacing else { throw Diagnostics.failure(AccountError.busy) }
     registering = true
@@ -479,7 +479,7 @@ final class AccountStore {
           let client = try YoClient.registerUsernameDb(
             transport: transport, db: db, stateKey: key, lock: lock, username: username, accountSecret: secret,
             legacySeed: legacySeed, legacyStorageKey: legacyStorageKey, name: nil, pushPlatform: push.platform,
-            pushToken: push.token)
+            pushToken: push.token, attest: attest)
           Hub.pin(client)
           return client
         }
@@ -505,11 +505,11 @@ final class AccountStore {
   }
 
   /// The key is kept until the hub answered (`NewAccountKey`), so retrying after a lost answer keeps the name.
-  func register(_ username: String) async throws {
+  func register(_ username: String, attest: YoAttest? = nil) async throws {
     let client: YoClient
     let secret: Data
     do {
-      (client, secret) = try await register(username, secret: NewAccountKey.secret(for: username))
+      (client, secret) = try await register(username, secret: NewAccountKey.secret(for: username), attest: attest)
     } catch is Keychain.Failure {
       throw AccountError.keychain
     } catch AccountError.taken {

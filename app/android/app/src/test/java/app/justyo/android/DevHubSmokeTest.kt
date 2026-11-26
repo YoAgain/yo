@@ -19,7 +19,7 @@ class DevHubSmokeTest {
         val db = StateDb.openFresh(path.path, key, diagnostics)
         var account: YoClient? = null
         try {
-            val made = YoClient.registerUsernameDb(transport, db, key, null, name, null, null, null, null, 0u, "")
+            val made = YoClient.registerUsernameDb(transport, db, key, null, name, null, null, null, null, 0u, "", null)
             account = made
             assertEquals(name, made.username())
             val recovery = newRecoveryKey()

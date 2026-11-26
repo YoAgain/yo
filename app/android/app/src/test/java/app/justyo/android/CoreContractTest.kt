@@ -17,7 +17,7 @@ class CoreContractTest {
         val transport = object : HttpTransport {
             override fun request(method: String, path: String, headers: List<Header>, body: ByteArray): HttpResult {
                 assertTrue(path.startsWith("/v1/"))
-                return HttpResult(429u, byteArrayOf(), null)
+                return HttpResult(429u, byteArrayOf(), null, emptyList())
             }
         }
         try { usernameFree(transport, "ExampleName"); fail("Expected 429") }

@@ -201,10 +201,10 @@ final class HubTransport: HttpTransport {
   }
 
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
-    guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil) }
+    guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil, headers: []) }
     guard let url = URL(string: path, relativeTo: base) else {
       Diagnostics.record(NSError(domain: "HubTransport", code: -1000))
-      return HttpResult(status: 0, body: Data(), error: "bad path")
+      return HttpResult(status: 0, body: Data(), error: "bad path", headers: [])
     }
     var request = URLRequest(url: url, timeoutInterval: timeout)
     request.httpMethod = method
@@ -237,11 +237,16 @@ final class HubTransport: HttpTransport {
     let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
     task.delegate = Limited(diagnosticPlace: diagnosticUpload || attestation ? nil : codePlace) { data, response, error in
+      let http = response as? HTTPURLResponse
+      let headers = http?.allHeaderFields.compactMap { key, value -> Header? in
+        guard let name = key as? String else { return nil }
+        return Header(name: name, value: String(describing: value))
+      } ?? []
       answer.result =
         if let error {
-          HttpResult(status: 0, body: Data(), error: error)
+          HttpResult(status: 0, body: Data(), error: error, headers: [])
         } else {
-          HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data, error: nil)
+          HttpResult(status: UInt16(http?.statusCode ?? 0), body: data, error: nil, headers: headers)
         }
       DataUsage.record(sent: Int(task.countOfBytesSent), received: Int(task.countOfBytesReceived))
       if !attestation, answer.result.status == 426 {
@@ -257,7 +262,7 @@ final class HubTransport: HttpTransport {
     } catch {
       task.cancel()
       if longPoll { Self.polls.withLock { $0.removeAll { $0 === task } } }
-      return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
+      return HttpResult(status: 0, body: Data(), error: "shared storage time ended", headers: [])
     }
     done.wait()
     let took = started.duration(to: .now).components
@@ -265,7 +270,7 @@ final class HubTransport: HttpTransport {
     if longPoll { Self.polls.withLock { $0.removeAll { $0 === task } } }
     if access?.expired == true {
       // Not reported: the caller tries again in its next turn.
-      return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
+      return HttpResult(status: 0, body: Data(), error: "shared storage time ended", headers: [])
     }
     if attestation { return answer.result }
     let status = answer.result.status
@@ -285,7 +290,7 @@ final class HubTransport: HttpTransport {
 
   /// Written once before the semaphore is signalled.
   private final class Answer: @unchecked Sendable {
-    var result = HttpResult(status: 0, body: Data(), error: "no answer")
+    var result = HttpResult(status: 0, body: Data(), error: "no answer", headers: [])
   }
 
   /// A 10 MiB blob with tag and padding is the largest answer (spec 4.1, 4.3).

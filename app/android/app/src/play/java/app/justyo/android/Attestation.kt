@@ -9,12 +9,28 @@ import com.google.firebase.FirebaseOptions
 import java.lang.ref.WeakReference
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import uniffi.yo.YoNameField
 import uniffi.yo.YoClient
 
 internal object Attestation {
     /** Once per client, not per process: a second account made in the same run is attested too. */
     private val started = AtomicReference<WeakReference<YoClient>?>(null)
     private fun now() = System.currentTimeMillis().toULong()
+
+    fun forSignUp(context: Context, field: YoNameField) {
+        val challenge = field.startDeviceCheck() ?: return
+        val token = try {
+            val project = FirebaseOptions.fromResource(context)?.gcmSenderId?.toLongOrNull()
+                ?: return field.deviceDone(0u, null)
+            val hash = java.security.MessageDigest.getInstance("SHA-256").digest(challenge)
+            val nonce = Base64.encodeToString(hash, Base64.URL_SAFE or Base64.NO_WRAP)
+            val request = IntegrityTokenRequest.builder().setNonce(nonce).setCloudProjectNumber(project).build()
+            Tasks.await(IntegrityManagerFactory.create(context).requestIntegrityToken(request), 10, TimeUnit.SECONDS).token()
+        } catch (_: Exception) {
+            return field.deviceDone(0u, null)
+        }
+        field.deviceDone(2u, token.toByteArray(Charsets.UTF_8))
+    }
 
     fun check(context: Context, client: YoClient) {
         if (started.getAndSet(WeakReference(client))?.get() === client) return

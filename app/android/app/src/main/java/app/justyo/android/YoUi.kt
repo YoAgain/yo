@@ -98,7 +98,10 @@ import uniffi.yo.productProblemText
 import uniffi.yo.ProductText
 import uniffi.yo.productInvitedYou
 import uniffi.yo.usernameCanonical
-import uniffi.yo.usernameFree
+import uniffi.yo.YoNameField
+import uniffi.yo.YoNamePhase
+import uniffi.yo.YoSignUp
+import uniffi.yo.YoException
 import uniffi.yo.usernameValid
 
 @Composable fun YoRoot(model: YoViewModel) {
@@ -196,66 +199,82 @@ import uniffi.yo.usernameValid
     }
 }
 @Composable private fun Onboarding(model: YoViewModel,s: AppState) {
-    val uiResources=androidx.compose.ui.platform.LocalResources.current
-
     var step by rememberSaveable { mutableIntStateOf(0) }
     var name by rememberSaveable { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
-    val availability = remember { mutableStateMapOf<String, Boolean>() }
-    val free = availability[name]
-    val valid = remember(name) { usernameValid(name) }
-    // How short a name may be only the hub knows (spec 2.2): its 400 marks a name too short.
-    val hubShortNames = remember { mutableStateMapOf<String, Boolean>() }
-    val rejectedAsShort = hubShortNames[name] == true
-    var tooShort by remember { mutableStateOf(false) }
+    val repo = model.repository
+    val field = remember(repo) { YoNameField(repo.transport) }
+    var sequence by remember(field) { mutableStateOf(name.takeIf { it.isNotEmpty() }?.let { field.typed(it) }) }
+    var state by remember(field) { mutableStateOf(field.state()) }
+    var registrationRefusal by remember { mutableStateOf<YoNamePhase?>(null) }
+    var submitting by remember { mutableStateOf(false) }
+    val phase = registrationRefusal ?: state.phase
+    val busy = s.busy || submitting || state.signupPending
     val nameFocus = remember { FocusRequester() }
     val shake = remember { androidx.compose.animation.core.Animatable(0f) }
-    var hint by remember { mutableStateOf<String?>(null) }
-    val context=LocalContext.current
-    val scope=rememberCoroutineScope()
+    val context = LocalContext.current
+    val view = LocalView.current
+    val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    val repo = model.repository
-    val canRegister = !s.busy && free != false
-    val register: () -> Unit = {
-        if (canRegister && !valid) {
-            nameFocus.requestFocus()
-            tooShort = name.isNotEmpty()
-            scope.launch {
-                for (position in listOf(-12f, 10f, -7f, 4f, 0f)) {
-                    shake.animateTo(position, androidx.compose.animation.core.tween(70))
+    fun finish(decision: YoSignUp) {
+        when (decision) {
+            YoSignUp.WAIT -> state = state.copy(signupPending = true)
+            YoSignUp.SHAKE -> {
+                if (name.isEmpty()) nameFocus.requestFocus()
+                view.performHapticFeedback(HapticFeedbackConstants.REJECT)
+                scope.launch {
+                    for (position in listOf(-12f, 10f, -7f, 4f, 0f)) {
+                        shake.animateTo(position, androidx.compose.animation.core.tween(70))
+                    }
                 }
             }
-        } else if (canRegister) {
-            focusManager.clearFocus()
-            val submitted = name
-            repo.clearError()
-            repo.command { register(submitted) }
-        }
-    }
-    LaunchedEffect(name, rejectedAsShort) {
-        tooShort = false
-        if (rejectedAsShort) {
-            delay(1500)
-            tooShort = true
-        }
-    }
-    LaunchedEffect(name) {
-        hint=null
-        if(!valid || free!=null) return@LaunchedEffect
-        delay(500)
-        try {
-            val result=withContext(Dispatchers.IO) { usernameFree(model.repository.transport,name) }
-            ensureActive(); availability[name]=result
-        }
-        catch (e: CancellationException) { throw e }
-        catch (failure: Exception) {
-            if (failure is uniffi.yo.YoException.Refused && failure.status.toInt() == 400) {
-                hubShortNames[name] = true
-            } else {
-                hint = copy(ProductText.LONGER_NAME_OFFLINE)
+            YoSignUp.GO -> {
+                submitting = true
+                focusManager.clearFocus()
+                val submitted = name
+                repo.clearError()
+                repo.command {
+                    try {
+                        register(submitted, field.attestation())
+                    } catch (e: YoException.Refused) {
+                        val refusal = when (e.status.toInt()) {
+                            400 -> YoNamePhase.TOO_SHORT
+                            409 -> YoNamePhase.TAKEN
+                            else -> throw e
+                        }
+                        withContext(Dispatchers.Main.immediate) {
+                            registrationRefusal = refusal
+                            view.performHapticFeedback(HapticFeedbackConstants.REJECT)
+                        }
+                    } finally {
+                        withContext(Dispatchers.Main.immediate) { submitting = false }
+                    }
+                }
             }
         }
+    }
+    val register: () -> Unit = {
+        if (!s.busy && !submitting && !state.signupPending) finish(if (registrationRefusal == null) field.signUp() else YoSignUp.SHAKE)
+    }
+    LaunchedEffect(field) { withContext(Dispatchers.IO) { Attestation.forSignUp(context, field) } }
+    LaunchedEffect(field, sequence) {
+        val seq = sequence ?: return@LaunchedEffect
+        val checked = name
+        delay(300)
+        if (seq != sequence || name != checked) return@LaunchedEffect
+        val result = withContext(Dispatchers.IO) { field.check(seq) }
+        if (sequence == seq && name == checked) {
+            state = result
+            result.decided?.let { finish(it) }
+        }
+    }
+    val hint = when (phase) {
+        YoNamePhase.OK, YoNamePhase.TOO_SHORT, YoNamePhase.TAKEN -> state.min?.let { "Minimum $it characters" }.orEmpty()
+        YoNamePhase.INVALID -> state.bad.joinToString(" · ") { if (it == " ") "No spaces" else "No $it" }
+            .ifEmpty { stringResource(R.string.valid_name) }
+        YoNamePhase.OFFLINE -> stringResource(R.string.ui_yo_can_t_reach_its_server_check_your_connection_and_try_again)
+        YoNamePhase.EMPTY, YoNamePhase.CHECKING -> ""
     }
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         // The carousel in the room above the form, shrunk into it with the keyboard up and held still meanwhile (iOS
@@ -273,34 +292,35 @@ import uniffi.yo.usernameValid
         }
         Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             s.pendingInvite?.let { Text(productInvitedYou(it, Words), Modifier.padding(bottom = 16.dp), style = TextStyle(fontFamily = YoFont, fontSize = 17.sp, color = Color.White.copy(alpha = 0.85f))) }
-            Box(Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.Center) {
-                if (free == false) {
-                    Row(
-                        Modifier.clickable { focusManager.clearFocus(); repo.clearError(); step = 2 },
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(copy(ProductText.NAME_TAKEN) + "\u00A0", color = Color.White.copy(alpha = 0.8f),
-                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Text(copy(ProductText.SIGN_IN), color = Color.White,
-                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)
-                    }
-                } else if (tooShort) {
-                    Text(copy(ProductText.LONGER_NAME), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            val (nameValue, onName) = nameField(name, signUp = true) { value ->
+                if (value == name || submitting || state.signupPending) return@nameField
+                name = value
+                registrationRefusal = null
+                repo.clearError()
+                sequence = field.typed(value)
+                state = field.state()
+            }
+            NameEntry(nameValue, onName, phase, !busy,
+                Modifier.offset { IntOffset(shake.value.dp.roundToPx(), 0) }.focusRequester(nameFocus), register)
+            Text(hint, Modifier.padding(top = 8.dp).heightIn(min = 22.dp), color = Color.White.copy(alpha = 0.75f),
+                fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+            if (phase == YoNamePhase.TAKEN) {
+                Row(
+                    Modifier.clickable { focusManager.clearFocus(); repo.clearError(); step = 2 },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(copy(ProductText.NAME_TAKEN) + "\u00A0", color = Color.White.copy(alpha = 0.8f),
+                        fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(copy(ProductText.SIGN_IN), color = Color.White,
+                        fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            val (nameValue, onName) = nameField(name) { name = it; repo.clearError() }
-            NameEntry(nameValue, onName,
-                if (tooShort) false else free, Modifier.offset { IntOffset(shake.value.dp.roundToPx(), 0) }.focusRequester(nameFocus), register)
             Spacer(Modifier.height(10.dp))
-            OnboardingButton(
-                if (s.busy) stringResource(R.string.ui_creating) else copy(ProductText.SIGN_UP),
-                canRegister, register,
-            )
-            OnboardingNote(s.error.takeIf { step == 0 } ?: hint)
+            OnboardingButton(copy(ProductText.SIGN_UP), busy, register)
+            OnboardingNote(s.error.takeIf { step == 0 })
             TextButton(
                 onClick = { focusManager.clearFocus(); repo.clearError(); step = 2 },
-                modifier = Modifier.padding(top = 14.dp),
+                enabled = !busy, modifier = Modifier.padding(top = 14.dp),
                 contentPadding = PaddingValues(0.dp),
             ) {
                 val question = copy(ProductText.GOT_YO)
@@ -1254,9 +1274,9 @@ fun shareInvite(context: Context, name: String) {
 }
 
 @Composable
-private fun OnboardingButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun OnboardingButton(label: String, busy: Boolean, onClick: () -> Unit) {
     Button(
-        onClick = onClick, enabled = enabled, shape = CircleShape,
+        onClick = onClick, enabled = !busy, shape = CircleShape,
         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = Color.White, contentColor = Color.Black,
@@ -1264,7 +1284,8 @@ private fun OnboardingButton(label: String, enabled: Boolean, onClick: () -> Uni
             disabledContentColor = Color.Black.copy(alpha = 0.6f),
         ),
     ) {
-        Text(label, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+        else Text(label, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -1281,20 +1302,28 @@ private fun OnboardingNote(message: String?) {
 }
 
 /** A name field's text. A Japanese keyboard hands the field kana and full-width letters while a word is written ("i"
- *  arrives as "い"): cleaning every change emptied the field. Left alone while composing; once committed, read as Latin
- *  and cleaned (as iOS's Username.clean). */
+ *  arrives as "い"). On sign-up keep forbidden characters so the core can explain them. */
 @Composable
-private fun nameField(name: String, onChange: (String) -> Unit): Pair<TextFieldValue, (TextFieldValue) -> Unit> {
+private fun nameField(name: String, signUp: Boolean = false, onChange: (String) -> Unit): Pair<TextFieldValue, (TextFieldValue) -> Unit> {
     var field by remember { mutableStateOf(TextFieldValue(name, TextRange(name.length))) }
     val shown = if (field.composition == null && field.text != name) TextFieldValue(name, TextRange(name.length)) else field
     return shown to { value ->
-        if (value.composition != null) field = value
+        if (!signUp && value.composition != null) field = value
         else {
-            val clean = usernameCanonical(latinName(value.text))
-            field = TextFieldValue(clean, TextRange(clean.length))
-            if (clean != name) onChange(clean)
+            val latin = latinName(value.text)
+            val clean = if (signUp) signUpName(latin) else usernameCanonical(latin)
+            field = if (signUp && clean == value.text) value else TextFieldValue(clean, TextRange(clean.length))
+            if (signUp || clean != name) onChange(clean)
         }
     }
+}
+
+private fun signUpName(latin: String): String {
+    val text = java.text.Normalizer.normalize(latin, java.text.Normalizer.Form.NFC)
+    val characters = android.icu.text.BreakIterator.getCharacterInstance()
+    characters.setText(text)
+    val end = characters.next(16)
+    return if (end == android.icu.text.BreakIterator.DONE) text else text.substring(0, end)
 }
 
 /** Kana and full-width letters as the Latin a romaji keyboard typed; anything else unchanged. */
@@ -1306,7 +1335,8 @@ internal fun latinName(typed: String): String {
 }
 
 @Composable
-private fun NameEntry(value: TextFieldValue, onChange: (TextFieldValue) -> Unit, available: Boolean?, modifier: Modifier, onSubmit: () -> Unit) {
+private fun NameEntry(value: TextFieldValue, onChange: (TextFieldValue) -> Unit, phase: YoNamePhase, enabled: Boolean, modifier: Modifier, onSubmit: () -> Unit) {
+    val available = phase == YoNamePhase.OK
     val name = value.text
     val placeholder = copy(ProductText.USERNAME)
     val measure = rememberTextMeasurer()
@@ -1317,7 +1347,7 @@ private fun NameEntry(value: TextFieldValue, onChange: (TextFieldValue) -> Unit,
         val room = with(density) { (maxWidth - 88.dp).coerceAtLeast(0.dp).toPx() }
         val size = (28 * room / naturalWidth).coerceIn(8f, 28f).sp
         BasicTextField(
-            value = value, onValueChange = onChange, singleLine = true,
+            value = value, onValueChange = onChange, singleLine = true, readOnly = !enabled,
             modifier = modifier.fillMaxWidth().semantics { contentDescription = placeholder },
             textStyle = style.copy(fontSize = size), cursorBrush = SolidColor(Color.White),
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Done),
@@ -1334,7 +1364,10 @@ private fun NameEntry(value: TextFieldValue, onChange: (TextFieldValue) -> Unit,
                             style = style.copy(color = Color.White.copy(alpha = 0.45f)), maxLines = 1)
                         field()
                     }
-                    if (available != null) Box(
+                    if (phase == YoNamePhase.CHECKING) {
+                        CircularProgressIndicator(Modifier.align(Alignment.CenterEnd).padding(end = 14.dp).size(22.dp),
+                            color = Color.White, strokeWidth = 2.dp)
+                    } else if (phase != YoNamePhase.EMPTY) Box(
                         Modifier.align(Alignment.CenterEnd).padding(end = 14.dp).size(24.dp)
                             .background(if (available) Color(0xFF34C759) else Color(0xFFFF3B30), CircleShape),
                         contentAlignment = Alignment.Center,

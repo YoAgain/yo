@@ -39,5 +39,27 @@ enum Attestation {
     }
   }
 
+  static func forSignUp(_ field: YoNameField) async {
+    await Task.detached(priority: .userInitiated) {
+      guard let challenge = field.startDeviceCheck() else { return }
+      let service = DCAppAttestService.shared
+      guard service.isSupported else { return field.deviceDone(platform: 0, payload: nil) }
+      do {
+        let key = try await service.generateKey()
+        let query: [String: Any] = [
+          kSecClass as String: kSecClassGenericPassword,
+          kSecAttrService as String: "app.justyo.app-attest",
+          kSecAttrAccount as String: "key",
+        ]
+        guard Keychain.put(query, Data(key.utf8), accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly) == errSecSuccess
+        else { return field.deviceDone(platform: 0, payload: nil) }
+        let object = try await service.attestKey(key, clientDataHash: Data(SHA256.hash(data: challenge)))
+        field.deviceDone(platform: 1, payload: object)
+      } catch {
+        field.deviceDone(platform: 0, payload: nil)
+      }
+    }.value
+  }
+
   private static func now() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
 }

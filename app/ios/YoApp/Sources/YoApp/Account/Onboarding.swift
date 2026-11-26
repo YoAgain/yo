@@ -22,14 +22,12 @@ struct Onboarding: View {
   @State private var problem: String?
   /// The silent look for an iCloud Keychain account happens once, not each time the welcome comes back.
   @State private var looked = false
-  @State private var tooShort = false
-  /// Names the hub refused as too short (its `YO_NAME_MIN`), by skeleton.
-  @State private var short: Set<String> = []
+  @State private var nameField: YoNameField?
+  @State private var nameState: YoNameState?
+  @State private var sequence: UInt64?
+  @State private var registrationRefusal: YoNamePhase?
   @State private var shakes = 0
   @State private var focusRequests = 0
-  /// The name once typing paused on it: only then its taken or free mark.
-  @State private var settled = ""
-  @State private var checked: [String: Bool] = [:]
   @State private var signingIn: Data?
   @State private var signingInCard = false
   /// Which of the card's other ways is signing in now: its spinner.
@@ -87,57 +85,26 @@ struct Onboarding: View {
             .padding(.bottom, 16)
             .transition(.opacity)
         }
-        // Taken or free shows once typing paused (500 ms), never for a name passed on the way ("Peter5").
-        let free = name == settled ? checked[Username.skeleton(name)] : nil
-        let taken = !name.isEmpty && free == false
-        ZStack {
-          Text(ProductText.longerName.english)
-            .font(.subheadline.weight(.semibold))
-            .opacity(tooShort ? 1 : 0)
-            .accessibilityHidden(!tooShort)
-          Button {
-            go(.logIn)
-          } label: {
-            (Text(ProductText.nameTaken.english + " ").foregroundStyle(.white.opacity(0.8))
-              + Text(ProductText.signIn.english).foregroundStyle(.white).underline())
-              .font(.subheadline.weight(.semibold))
-          }
-          .buttonStyle(.plain)
-          .opacity(taken ? 1 : 0)
-          .disabled(!taken)
-          .accessibilityHidden(!taken)
-          .accessibilityLabel(ProductText.nameTakenLabel.english)
-        }
-        .frame(minHeight: 22)
-        .padding(.bottom, 8)
-        .animation(.snappy(duration: 0.2), value: taken)
-        .animation(.snappy(duration: 0.2), value: tooShort)
-        .onChange(of: name) { tooShort = false }
-        .task(id: name) { await check(name) }
-        .task(id: name) {
-          guard (try? await Task.sleep(for: .milliseconds(500))) != nil else { return }
-          settled = name
-        }
-        .task(id: name) {
-          // Too short shows only once typing paused, never on the first letter.
-          guard (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
-          if short.contains(Username.skeleton(name)) { tooShort = true }
-        }
         VStack(spacing: 10) {
-          NameField(name: $name, mark: name.isEmpty ? nil : Username.problem(name) == nil && free == true ? .available
-            : taken || tooShort ? .taken : nil,
-            shakes: shakes, focusRequests: focusRequests, onSubmit: { Task { await register() } })
-          // Always tappable: with no name yet it shakes the field and brings the keyboard up.
-          PrimaryButton(ProductText.signUp.english, busy: busy) {
-            if name.isEmpty {
-              shakes += 1
-              focusRequests += 1
-              UINotificationFeedbackGenerator().notificationOccurred(.warning)
-            } else {
-              Task { await register() }
+          NameField(name: Binding(get: { name }, set: typed), phase: phase,
+            shakes: shakes, focusRequests: focusRequests, onSubmit: signUp)
+          Text(hint)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.75))
+            .multilineTextAlignment(.center)
+            .frame(minHeight: 22)
+          if phase == .taken {
+            Button {
+              go(.logIn)
+            } label: {
+              (Text(ProductText.nameTaken.english + " ").foregroundStyle(.white.opacity(0.8))
+                + Text(ProductText.signIn.english).foregroundStyle(.white).underline())
+                .font(.subheadline.weight(.semibold))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(ProductText.nameTakenLabel.english)
           }
-          .disabled(taken || busy)
+          PrimaryButton(ProductText.signUp.english, busy: busy || pending, action: signUp)
         }
 
         Note(problem)
@@ -165,7 +132,22 @@ struct Onboarding: View {
       .padding(.horizontal, 28)
     }
     .padding(.bottom, 16)
-    .disabled(busy)
+    .disabled(busy || pending)
+    .task {
+      guard nameField == nil else { return }
+      let field = YoNameField(transport: Hub.transport)
+      nameField = field
+      await Attestation.forSignUp(field)
+    }
+    .task(id: sequence) {
+      guard let seq = sequence, let field = nameField else { return }
+      let checked = name
+      guard (try? await Task.sleep(for: .milliseconds(300))) != nil, sequence == seq, name == checked else { return }
+      let result = await Task.detached { field.check(seq: seq) }.value
+      guard !Task.isCancelled, sequence == seq, name == checked else { return }
+      nameState = result
+      if let decision = result.decided { finish(decision) }
+    }
     .task {
       guard !looked else { return }
       looked = true
@@ -205,21 +187,49 @@ struct Onboarding: View {
 
   // MARK: Doing
 
-  /// Asks the hub whether a name is free once typing paused (one question per pause, not per letter).
-  private func check(_ typed: String) async {
-    let skeleton = Username.skeleton(typed)
-    guard Username.problem(typed) == nil, checked[skeleton] == nil,
-      (try? await Task.sleep(for: .milliseconds(500))) != nil
-    else { return }
-    let transport = Hub.transport
-    do {
-      let free = try await Hub.run({ try usernameFree(transport: transport, username: typed) })
-      // Taken by this phone's own lost try (its key is kept): Continue takes it (`NewAccountKey`).
-      checked[skeleton] = free || NewAccountKey.has(typed)
-    } catch YoError.Refused(status: 400) {
-      // The minimum length is the hub's switch (spec 2.2); shown after the 1.5 s pause.
-      short.insert(skeleton)
-    } catch {}
+  private var phase: YoNamePhase { registrationRefusal ?? nameState?.phase ?? .empty }
+  private var pending: Bool { nameState?.signupPending == true }
+
+  private var hint: String {
+    switch phase {
+    case .ok, .tooShort, .taken: nameState?.min.map { "Minimum \($0) characters" } ?? ""
+    case .invalid:
+      if let bad = nameState?.bad, !bad.isEmpty {
+        bad.map { $0 == " " ? "No spaces" : "No \($0)" }.joined(separator: " · ")
+      } else {
+        Username.problem(name) ?? "Choose another name."
+      }
+    case .offline: "Yo can’t reach its server. Check your connection and try again."
+    case .empty, .checking: ""
+    }
+  }
+
+  private func typed(_ text: String) {
+    let value = String(Username.latin(text).precomposedStringWithCanonicalMapping.prefix(16))
+    guard value != name, !pending, !busy, let nameField else { return }
+    name = value
+    registrationRefusal = nil
+    problem = nil
+    sequence = nameField.typed(text: value)
+    nameState = nameField.state()
+  }
+
+  private func signUp() {
+    guard !busy, !pending, let nameField else { return }
+    finish(registrationRefusal == nil ? nameField.signUp() : .shake)
+  }
+
+  private func finish(_ decision: YoSignUp) {
+    switch decision {
+    case .go:
+      busy = true
+      Task { await register() }
+    case .wait: nameState?.signupPending = true
+    case .shake:
+      shakes += 1
+      if name.isEmpty { focusRequests += 1 }
+      UINotificationFeedbackGenerator().notificationOccurred(name.isEmpty ? .warning : .error)
+    }
   }
 
   private func go(_ next: Step) {
@@ -252,28 +262,17 @@ struct Onboarding: View {
   }
 
   private func register() async {
-    guard !busy else { return }
-    guard !name.isEmpty, !short.contains(Username.skeleton(name)) else {
-      tooShort = true
-      shakes += 1
-      UINotificationFeedbackGenerator().notificationOccurred(.error)
-      return
-    }
-    guard Username.problem(name) == nil else { return }
-    busy = true
     defer { busy = false }
     problem = nil
-    let asked = name  // the field may change while the hub answers
     do {
-      try await accounts.register(asked)
+      try await accounts.register(name, attest: nameField?.attestation())
     } catch AccountError.taken {
-      checked[Username.skeleton(asked)] = false
+      registrationRefusal = .taken
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch AccountError.hub(.Refused(status: 400)) {
       // The hub's refusal of the name (its least length, spec 2.2) reads as too short. `register` throws the
       // hub's errors wrapped in AccountError: a bare YoError never comes here.
-      short.insert(Username.skeleton(asked))
-      tooShort = true
+      registrationRefusal = .tooShort
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch {
       // Its own words: too many tries (429), the keychain, no server, the phone's clock; else one plain line.
@@ -421,8 +420,7 @@ struct Note: View {
 
 private struct NameField: View {
   @Binding var name: String
-  var mark: Mark?
-  enum Mark { case available, taken }
+  let phase: YoNamePhase
   var shakes = 0
   /// Counted up to bring the keyboard up from outside (Sign Up tapped with no name yet).
   var focusRequests = 0
@@ -454,23 +452,19 @@ private struct NameField: View {
       .padding(.horizontal, 44)  // room for the checkmark
       .background(.white.opacity(0.16), in: .capsule)
       .overlay(alignment: .trailing) {
-        if let mark {
-          Image(systemName: mark == .available ? "checkmark.circle.fill" : "xmark.circle.fill")
+        if phase == .checking {
+          ProgressView().controlSize(.small).tint(.white).padding(.trailing, 14)
+        } else if phase != .empty {
+          Image(systemName: phase == .ok ? "checkmark.circle.fill" : "xmark.circle.fill")
             .font(.system(size: 24))
-            .foregroundStyle(.white, mark == .available ? .green : .red)
+            .foregroundStyle(.white, phase == .ok ? .green : .red)
             .padding(.trailing, 14)
             .transition(.scale.combined(with: .opacity))
-            .id(mark)
-            .accessibilityLabel(mark == .available ? "Available" : "Not available")
+            .accessibilityLabel(phase == .ok ? "Available" : "Not available")
         }
       }
-      .animation(.snappy(duration: 0.2), value: mark)
       .keyframeAnimator(initialValue: 0.0, trigger: shakes) { field, x in field.offset(x: x) } keyframes: { _ in
         for x in [-12.0, 10, -7, 4, 0] { SpringKeyframe(x, duration: 0.07) }
-      }
-      .onChange(of: name) { _, typed in
-        let clean = Username.clean(typed)
-        if clean != typed { name = clean }
       }
       .onSubmit(onSubmit)
       .onChange(of: focusRequests) { focused = true }

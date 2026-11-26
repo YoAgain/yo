@@ -387,15 +387,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             Problems.report(e) { command { client?.writeStorage() } }
         }
     }
-    suspend fun register(typed: String) = accountTurn.withLock {
+    suspend fun register(name: String, attest: YoAttest? = null) = accountTurn.withLock {
         check(client == null)
         mutable.update { it.copy(busy = true) }
         try {
-            val name = usernameCanonical(typed)
             require(usernameValid(name)) { context.getString(R.string.valid_name) }
             val pendingName = "registration-" + usernameSkeleton(name).toByteArray().sha256Hex()
             val secret = vault.secret(pendingName)
-            val c = registerCore(name, secret)
+            val c = registerCore(name, secret, attest)
             pin(c); client = c; sessionId++; vault.delete("left")
             mutable.update { it.copy(username = c.username() ?: name, friends = emptyList(), broken = false) }
             persist(); vault.delete(pendingName)
@@ -438,9 +437,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     /** The hub's keys this build pins (spec 4.1): a backup's fetch takes only the hub's signed answer. */
     private fun hubKeys(): List<ByteArray> = Hub.hubKeys.map(::decodeUrl)
 
-    private fun registerCore(name: String, account: ByteArray): YoClient {
+    private fun registerCore(name: String, account: ByteArray, attest: YoAttest? = null): YoClient {
         val key = vault.secret("state-key")
-        return YoClient.registerUsernameDb(transport, file.database(key), key, null, name, account, null, null, null, 0u, "")
+        return YoClient.registerUsernameDb(transport, file.database(key), key, null, name, account, null, null, null, 0u, "", attest)
     }
 
     private suspend fun restoreBackup(opened: YoOpenedBackup, typedCode: String?) {
@@ -465,7 +464,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         check(client == null)
         val key = vault.secret("state-key")
         val c = YoClient.registerUsernameDb(transport, file.database(key), key, null, item.username, item.accountKey,
-            item.legacySeed, storageKey, null, 0u, "")
+            item.legacySeed, storageKey, null, 0u, "", null)
         pin(c); client = c; sessionId++
         val same = item.userId.isEmpty() || c.userId().hexBytes().contentEquals(item.userId)
         val code = item.recoveryKey.takeIf { same }
