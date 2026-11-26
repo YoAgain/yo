@@ -277,3 +277,25 @@ fn unacknowledged_events_come_again_until_acked() {
     assert_ne!(message(&mut out), first, "acknowledged: not again");
     let _ = std::fs::remove_dir_all(&yo.state);
 }
+
+/// v1's words (`signup --human`, `friends add|remove`, `yo NAME`) on the same JSON; `register` stays for bots.
+#[test]
+fn signup_friends_remove_and_yo_name() {
+    let hub = TestHub::start();
+    let yo = Yo::new(&hub);
+    let name = format!("Cliperson{}", random_u64() % 1_000_000);
+    let me = yo.ok(&["signup", &name, "--human"]);
+    assert_eq!((me["username"].as_str(), me["bot"].as_bool()), (Some(name.as_str()), Some(false)), "{me}");
+    assert_eq!(yo.run(&["signup", &name, "--no-bot"]).0, 2, "only --human");
+
+    let mut alice = someone(&hub);
+    let alice_name = alice.username().unwrap().to_owned();
+    assert_eq!(yo.ok(&["friends", "add", &alice_name])["user"], alice.user_id());
+    assert_eq!(yo.ok(&["friends", "list"])[0]["user"], alice.user_id());
+    assert_eq!(yo.ok(&[&alice_name]), serde_json::json!({ "sent": true }));
+    assert_eq!(yos_until_quiet(&mut alice, Duration::from_millis(500)), [me["user"].as_str().unwrap()]);
+    assert_eq!(yo.ok(&["friends", "remove", &alice_name])["removed"], true);
+    assert_eq!(yo.ok(&["friends"]), serde_json::json!([]));
+    assert_eq!(yo.run(&["friends", "remove", &alice_name]).0, 1, "no such friend");
+    assert_eq!(yo.ok(&["requests", "list"])["requests"], serde_json::json!([]));
+}

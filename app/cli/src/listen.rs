@@ -48,9 +48,45 @@ impl Listener<'_> {
 
     /// One line, flushed; the reader gone ends the listener.
     fn line(&self, value: &Value) {
+        if !crate::mode().json {
+            let Some(text) = self.text(value) else { return };
+            let mut out = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = writeln!(out, "{text}").and_then(|()| out.flush());
+            return;
+        }
         let mut out = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if writeln!(out, "{value}").and_then(|()| out.flush()).is_err() {
             std::process::exit(FAILED);
+        }
+    }
+
+    /// An event for a person on a terminal: who by name (when the client is free to ask), none for the quiet ones.
+    fn text(&self, value: &Value) -> Option<String> {
+        let name = |user: &str| -> String {
+            let found = self.client.try_lock().ok().and_then(|c| {
+                c.contacts().into_iter().find(|x| x.user == user).and_then(|x| x.handles.first().cloned().or(x.name))
+            });
+            found.unwrap_or_else(|| user.chars().take(8).collect()).to_uppercase()
+        };
+        let time = chrono_free_time();
+        match value["type"].as_str()? {
+            "ready" => Some(format!(
+                "Listening as {} (Ctrl-C stops)",
+                value["username"].as_str().unwrap_or("?").to_uppercase()
+            )),
+            "message" => {
+                let what = match value["content"].as_str() {
+                    Some("photo") => "Yo + photo",
+                    Some("video") => "Yo + video",
+                    _ => "Yo",
+                };
+                let from = name(value["from"].as_str().unwrap_or(""));
+                let group = value["group"].as_str().map(|g| format!(" in group:{g}")).unwrap_or_default();
+                Some(format!("{time}  {what} from {from}{group}"))
+            }
+            "new_chat" => Some(format!("{time}  new chat: {}", name(value["user"].as_str().unwrap_or("")))),
+            "probe" | "connect" | "decline" | "disconnect" => Some(format!("{time}  {value}")),
+            _ => None,
         }
     }
 
@@ -134,7 +170,7 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
         match arg.as_str() {
             "--drain-media" => drain_media = true,
             "--manual-ack" => manual_ack = true,
-            _ => return crate::print(Err(Failure::usage("listen [--drain-media] [--manual-ack]"))),
+            _ => return crate::print("", Err(Failure::usage("listen [--drain-media] [--manual-ack]"))),
         }
     }
     let Opened { mut client, _lock } = opened;
@@ -147,7 +183,7 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
     let _ = std::fs::remove_file(&path); // a dead listener's: this process has the directory now
     let socket = match UnixListener::bind(&path) {
         Ok(socket) => socket,
-        Err(error) => return crate::print(Err(Failure::new(format!("{}: {error}", path.display())))),
+        Err(error) => return crate::print("", Err(Failure::new(format!("{}: {error}", path.display())))),
     };
     let (drain, to_drain) = sync_channel(MAX_DRAINING);
     let client = Mutex::new(client);
@@ -246,4 +282,19 @@ fn receive(listener: &Listener) -> ! {
             }
         }
     }
+}
+
+/// The local time of day, HH:MM, without a time zone library: UTC offset from `date`, once.
+fn chrono_free_time() -> String {
+    static OFFSET: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    let offset = *OFFSET.get_or_init(|| {
+        let out = std::process::Command::new("date").arg("+%z").output().ok();
+        let text = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
+        let sign = if text.starts_with('-') { -1 } else { 1 };
+        let digits: i64 = text.trim_start_matches(['+', '-']).parse().unwrap_or(0);
+        sign * ((digits / 100) * 3600 + (digits % 100) * 60)
+    });
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let day = (now + offset).rem_euclid(86400);
+    format!("{:02}:{:02}", day / 3600, (day % 3600) / 60)
 }

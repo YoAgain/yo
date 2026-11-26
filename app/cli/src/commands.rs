@@ -118,6 +118,57 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             context.client().set_bot(*switch == "on")?;
             Ok(json!({ "bot": *switch == "on" }))
         }
+        ["friends-view"] => Ok(view(&context.client())),
+        ["remove", name] => {
+            let user = friend_user(&context.client(), name).ok_or_else(|| Failure::new("no such friend"))?;
+            let mut client = context.client();
+            client.remove_friend(&user)?;
+            client.write_storage()?;
+            removed(context.config, &user, true);
+            Ok(json!({ "removed": true, "user": user }))
+        }
+        ["requests", "list"] => Ok(requests(&context.client(), &removed_users(context.config))),
+        ["requests", "accept", name] => {
+            let events = context.client().accept(name.trim_start_matches('@'))?;
+            (context.emit)(events);
+            Ok(json!({ "accepted": true }))
+        }
+        ["requests", "decline", name] => {
+            context.client().decline(name.trim_start_matches('@'))?;
+            Ok(json!({ "declined": true }))
+        }
+        [word @ ("block" | "unblock"), name] | ["requests", word @ "block", name] => {
+            let blocked = *word == "block";
+            let mut client = context.client();
+            client.set_blocked(name.trim_start_matches('@'), blocked)?;
+            let _ = client.write_storage();
+            Ok(json!({ "blocked": blocked }))
+        }
+        ["devices"] | ["devices", "list"] => {
+            let mut client = context.client();
+            let list: Vec<Value> = client
+                .own_devices()?
+                .into_iter()
+                .map(|d| {
+                    json!({
+                        "number": d.number, "created_at": d.created_at, "last_seen_at": d.last_seen_at,
+                        "app": String::from_utf8_lossy(d.app.as_slice()),
+                    })
+                })
+                .collect();
+            Ok(json!(list))
+        }
+        ["devices", "remove", number] => {
+            let number: u8 = number.parse().map_err(|_| Failure::usage("devices remove NUMBER"))?;
+            context.client().remove_device(number)?;
+            Ok(json!({ "removed": number }))
+        }
+        ["recovery", "rotate"] => rotate_recovery(context),
+        ["link-approve", text] => {
+            let offer = yo_core::link::offer(text).map_err(|_| Failure::usage("not a yo-link: text"))?;
+            context.client().link_approve(&offer)?;
+            Ok(json!({ "linked": true }))
+        }
         ["probe", rest @ ..] => {
             let timeout_ms = match rest {
                 [] => 10_000,
@@ -167,6 +218,106 @@ fn friends(client: &Client) -> Value {
         .map(|f| json!({ "user": f.user, "name": f.name, "handles": handles(&f.user), "blocked": f.blocked }))
         .collect();
     json!(list)
+}
+
+/// The friend for a name, handle or user id.
+fn friend_user(client: &Client, name: &str) -> Option<String> {
+    let name = name.trim_start_matches('@');
+    let contacts = client.contacts();
+    client.friends().into_iter().map(|f| f.user).find(|user| {
+        user == name
+            || contacts.iter().any(|c| {
+                c.user == *user
+                    && (c.handles.iter().any(|h| h.eq_ignore_ascii_case(name))
+                        || c.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+            })
+            || client
+                .friends()
+                .iter()
+                .any(|f| f.user == *user && f.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+    })
+}
+
+/// What a person sees of a contact: its handle, else its name, else a short id.
+fn shown(contact: Option<&yo_core::ContactInfo>, name: Option<&str>, user: &str) -> String {
+    contact
+        .and_then(|c| c.handles.first().cloned().or_else(|| c.name.clone()))
+        .or_else(|| name.map(str::to_owned))
+        .unwrap_or_else(|| user.chars().take(8).collect())
+}
+
+/// Friends and groups for a person (the TUI's bars, `yo friends` on a terminal): target, name, kind, flags.
+fn view(client: &Client) -> Value {
+    let contacts = client.contacts();
+    let mut list: Vec<Value> = client
+        .friends()
+        .into_iter()
+        .map(|f| {
+            let contact = contacts.iter().find(|c| c.user == f.user);
+            json!({
+                "kind": "friend", "target": f.user, "user": f.user,
+                "name": shown(contact, f.name.as_deref(), &f.user),
+                "bot": contact.is_some_and(|c| c.bot), "blocked": f.blocked || contact.is_some_and(|c| c.blocked),
+                "gone": contact.is_some_and(|c| c.gone),
+            })
+        })
+        .collect();
+    list.extend(client.groups().into_iter().filter(|g| !g.left).map(|g| {
+        json!({
+            "kind": "group", "target": format!("{GROUP}{}", g.id), "name": g.name, "members": g.members.len(),
+            "accepted": g.accepted, "bot": false, "blocked": false, "gone": false,
+        })
+    }));
+    json!(list)
+}
+
+/// Friends removed here (`removed`, one user id a line), as the app keeps them: no request row for them.
+fn removed_users(config: &crate::Config) -> Vec<String> {
+    let text = crate::account::read_file(config, "removed").unwrap_or_default();
+    String::from_utf8_lossy(&text).lines().map(str::to_owned).collect()
+}
+
+fn removed(config: &crate::Config, user: &str, on: bool) {
+    let mut users = removed_users(config);
+    users.retain(|u| u != user);
+    if on {
+        users.push(user.to_owned());
+    }
+    let _ = crate::account::write_file(config, "removed", users.join("\n").as_bytes());
+}
+
+/// Requests from strangers (spec 3.3): chats not said yes to.
+fn requests(client: &Client, removed: &[String]) -> Value {
+    let list: Vec<Value> = client
+        .contacts()
+        .into_iter()
+        .filter(|c| !c.accepted && !c.blocked && !c.gone && !removed.contains(&c.user))
+        .map(|c| json!({ "user": c.user, "name": shown(Some(&c), None, &c.user), "bot": c.bot }))
+        .collect();
+    json!({ "requests_open": client.requests_open(), "requests": list })
+}
+
+/// A new recovery key (spec 2.4): the backup made anew under it (the account's key in it, as the apps seal it), the
+/// key kept in the directory (`recovery`, 0600) for `yo recovery show`. The key before stops working.
+pub fn rotate_recovery(context: &Context) -> Outcome {
+    use base64::prelude::{Engine, BASE64_STANDARD};
+    let code = yo_core::backup::new_recovery_key();
+    let mut client = context.client();
+    let user_id = yo_core::state::unhex(client.user_id()).unwrap_or_default();
+    let sealed = json!({
+        "account": {
+            "username": client.username(), "userID": BASE64_STANDARD.encode(user_id),
+            "accountKey": BASE64_STANDARD.encode(client.account_secret()), "byPasskey": false, "byCode": true,
+            "codeAuth": true, "passkeyAuth": false, "backupVersion": 3,
+        },
+        "code": code.to_string(),
+    });
+    let k = yo_core::backup::new_k();
+    let record = yo_core::backup::make(&k, sealed.to_string().as_bytes(), &code, yo_core::backup::PasskeyDoor::None)?;
+    client.put_backup(&record)?;
+    drop(client);
+    crate::account::write_file(context.config, "recovery", code.to_string().as_bytes())?;
+    Ok(json!({ "recovery_key": code.to_string() }))
 }
 
 fn connections(client: &Client) -> Value {
@@ -219,6 +370,7 @@ fn add(context: &Context, name: &str) -> Outcome {
     client.whois_end(name, &user, username.clone())?;
     client.set_friend(&user, username.clone(), None)?;
     client.write_storage()?;
+    removed(context.config, &user, false);
     Ok(json!({ "user": user, "username": username }))
 }
 

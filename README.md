@@ -45,8 +45,9 @@ All apps share one [Rust core](app/core). Services are defined in [yo-services](
 <a id="cli"></a>
 #### CLI
 
-- `yo`: a Yo account on the command line, JSON out; bots use `yo listen`.
-- `cargo build --release -p yo-cli`, then `yo register NAME`, `yo send lina`.
+- `yo`: a Yo account on the command line. Text on a terminal, JSON when piped or with `--json`; bots use `yo listen`.
+- `cargo build --release -p yo-cli`, then `yo signup NAME` (a bot unless `--human`), `yo lina` sends a Yo,
+  `yo tui` (or bare `yo`) opens the friend list as Yo bars. `yo help` lists the rest.
 
 </details>
 

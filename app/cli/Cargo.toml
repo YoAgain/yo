@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "yo: a Yo account on the command line, JSON out."
+description = "yo: a Yo account on the command line, JSON when piped, text and a TUI on a terminal."
 
 [[bin]]
 name = "yo"
@@ -16,6 +16,9 @@ yoip = { path = "../../yoip" }
 reqwest = { workspace = true, features = ["blocking"] }
 getrandom = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
+ratatui = "=0.30.2"
+qrcode = { version = "=0.15.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 yo-core = { path = "../core", features = ["test-support"] }

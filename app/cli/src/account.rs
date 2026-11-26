@@ -22,6 +22,7 @@ const BUILD: &str = match option_env!("YO_BUILD") {
 /// Where the account lives and how its hub is reached: flags, else the environment (`YO_STATE`, `YO_HUB`,
 /// `YO_HUB_KEYS`, `YO_TRUST_ROOTS`, `YO_ZK_PARAMS`; lists comma separated). `YO_RECOVERY_LOOKUPS` only from the
 /// environment.
+#[derive(Clone)]
 pub struct Config {
     pub state: PathBuf,
     pub hub: Option<String>,
@@ -40,6 +41,12 @@ pub struct Config {
     pub ohttp_keys: Vec<Vec<u8>>,
     /// `YO_SMALL_ENVELOPES=1`: seal to the small first bucket (spec 4.1), once receivers take it.
     pub small_envelopes: bool,
+}
+
+/// `$XDG_DATA_HOME/yo`, else `~/.local/share/yo`.
+fn default_state() -> Option<String> {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    env("XDG_DATA_HOME").map(|d| format!("{d}/yo")).or_else(|| env("HOME").map(|h| format!("{h}/.local/share/yo")))
 }
 
 fn key32(what: &str, text: &str) -> Result<[u8; 32], Failure> {
@@ -87,12 +94,26 @@ impl Config {
             }
             i += 2;
         }
+        let hub = hub.unwrap_or_else(|| crate::pins::DEFAULT_HUB.to_owned());
+        let pins = crate::pins::for_hub(&hub);
         if !keys_given {
             hub_keys = list("YO_HUB_KEYS").iter().map(|k| key32("YO_HUB_KEYS", k)).collect::<Result<_, _>>()?;
         }
         if !roots_given {
             trust_roots =
                 list("YO_TRUST_ROOTS").iter().map(|k| key32("YO_TRUST_ROOTS", k)).collect::<Result<_, _>>()?;
+        }
+        // A known hub (live or dev) without pins given: those the apps pin.
+        if let Some(pins) = pins {
+            if hub_keys.is_empty() {
+                hub_keys = pins.hub_keys.iter().map(|k| key32("pin", k)).collect::<Result<_, _>>()?;
+            }
+            if trust_roots.is_empty() {
+                trust_roots = pins.trust_roots.iter().map(|k| key32("pin", k)).collect::<Result<_, _>>()?;
+            }
+            if zk.is_none() {
+                zk = Some(pins.zk_params.to_owned());
+            }
         }
         let zk_params = match zk {
             Some(p) => Some(yoip::unb64(p.trim()).map_err(|_| Failure::usage("--zk-params: base64url"))?),
@@ -103,8 +124,10 @@ impl Config {
         }
         let small_envelopes = env("YO_SMALL_ENVELOPES").is_some_and(|v| v.trim() == "1");
         let recovery_lookups = env("YO_RECOVERY_LOOKUPS").as_deref().map(lookups).transpose()?;
-        let state = state.ok_or_else(|| Failure::usage("no state directory: --state DIR or YO_STATE"))?;
-        let hub = hub.map(|h| h.trim_end_matches('/').to_owned());
+        let state = state
+            .or_else(default_state)
+            .ok_or_else(|| Failure::usage("no state directory: --state DIR or YO_STATE"))?;
+        let hub = Some(hub.trim_end_matches('/').to_owned());
         let config = Config {
             state: state.into(),
             hub,
@@ -182,7 +205,7 @@ impl Http {
     }
 }
 
-fn transport(config: &Config) -> Result<Arc<dyn Transport>, Failure> {
+pub(crate) fn transport(config: &Config) -> Result<Arc<dyn Transport>, Failure> {
     let base = config.hub.clone().ok_or_else(|| Failure::usage("no hub: --hub URL or YO_HUB"))?;
     let client = || {
         reqwest::blocking::Client::builder()
@@ -354,6 +377,38 @@ pub fn open(config: &Config) -> Result<Open, Failure> {
 /// A directory with a state it cannot open (no `key`, a wrong one, damaged) is refused without `force`: registering
 /// there replaces the account's device and loses its sessions.
 pub fn register(config: &Config, username: &str, force: bool) -> Result<Open, Failure> {
+    register_with(config, username, force, None)
+}
+
+/// Whether the directory holds an account secret already (registered, or under way).
+pub fn has_account(config: &Config) -> bool {
+    config.state.join("account").exists()
+}
+
+/// Puts an existing account's secret (from a backup or a linked device) into a directory that has none yet, before
+/// `register_with`: the same account, a new device.
+pub fn put_account_secret(config: &Config, secret: &[u8; 32]) -> Result<(), Failure> {
+    let dir = &config.state;
+    let io = |e: std::io::Error| Failure::new(format!("{}: {e}", dir.display()));
+    if has_account(config) {
+        return Err(Failure::new("this directory has an account already: another --state DIR"));
+    }
+    std::fs::create_dir_all(dir).map_err(io)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(io)?;
+    write_private(&dir.join("account"), secret).map_err(io)
+}
+
+/// A file of the directory, private (the recovery key).
+pub fn write_file(config: &Config, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+    write_private(&config.state.join(name), bytes).map_err(|e| Failure::new(format!("{name}: {e}")))
+}
+
+pub fn read_file(config: &Config, name: &str) -> Option<Vec<u8>> {
+    std::fs::read(config.state.join(name)).ok()
+}
+
+/// `register`, with the storage key of an account migrated from the old keys (a linked device's bundle names it).
+pub fn register_with(config: &Config, username: &str, force: bool, legacy: Option<[u8; 32]>) -> Result<Open, Failure> {
     let dir = &config.state;
     let has_state = ["state.sqlite", "state", "state.v2"].iter().any(|file| dir.join(file).exists());
     if has_state && !dir.join("key").exists() && !force {
@@ -378,7 +433,7 @@ pub fn register(config: &Config, username: &str, force: bool) -> Result<Open, Fa
     let db = match database(config, key) {
         Err(_) if path.exists() && !force => return Err(refused()),
         Err(_) if path.exists() => {
-            return register_new(config, lock, account, key, username, set_aside()?, transport);
+            return register_new(config, lock, account, key, username, set_aside()?, transport, legacy);
         }
         db => db?,
     };
@@ -386,7 +441,7 @@ pub fn register(config: &Config, username: &str, force: bool) -> Result<Open, Fa
         Err(Error::State) if path.exists() && !force => return Err(refused()),
         Err(Error::State) if path.exists() => {
             drop(db);
-            return register_new(config, lock, account, key, username, set_aside()?, transport);
+            return register_new(config, lock, account, key, username, set_aside()?, transport, legacy);
         }
         loaded => loaded?,
     };
@@ -402,10 +457,11 @@ pub fn register(config: &Config, username: &str, force: bool) -> Result<Open, Fa
             client.finish_registration()?;
             Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))
         }
-        _ => register_new(config, lock, account, key, username, db, transport),
+        _ => register_new(config, lock, account, key, username, db, transport, legacy),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_new(
     config: &Config,
     lock: std::fs::File,
@@ -414,10 +470,11 @@ fn register_new(
     username: &str,
     db: Arc<StateDb>,
     transport: Arc<dyn Transport>,
+    legacy: Option<[u8; 32]>,
 ) -> Result<Open, Failure> {
     let store = Arc::new(DbStore::new(db, None, None));
     let mut client =
-        Client::register_username_saved(transport, store, key, username, account, None, None, Push::none(), None)?;
+        Client::register_username_saved(transport, store, key, username, account, legacy, None, Push::none(), None)?;
     configure(&mut client, config)?;
     Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))
 }
