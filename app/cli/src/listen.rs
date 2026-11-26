@@ -77,7 +77,7 @@ impl Listener<'_> {
         let time = chrono_free_time();
         match value["type"].as_str()? {
             "ready" => Some(format!(
-                "Listening as {} (Ctrl-C stops)",
+                "Listening as {} · Ctrl-C to stop",
                 value["username"].as_str().unwrap_or("?").to_uppercase()
             )),
             "message" => {
@@ -90,7 +90,7 @@ impl Listener<'_> {
                 let group = value["group"].as_str().map(|g| format!(" in group:{g}")).unwrap_or_default();
                 Some(format!("{time}  {what} from {from}{group}"))
             }
-            "new_chat" => Some(format!("{time}  new chat: {}", name(value["user"].as_str().unwrap_or("")))),
+            "new_chat" => Some(format!("{time}  New chat: {}", name(value["user"].as_str().unwrap_or("")))),
             "probe" | "connect" | "decline" | "disconnect" => Some(format!("{time}  {value}")),
             _ => None,
         }
@@ -148,7 +148,7 @@ impl Listener<'_> {
                 let context = Context { client: self.client, config: self.config, listening: true, emit: &emit };
                 commands::run(&context, &command)
             }
-            _ => Err(Failure::usage("a command other than register and listen")),
+            _ => Err(Failure::usage("not here: register and listen run on their own")),
         };
         let answer = match outcome {
             Ok(out) => json!({ "code": 0, "out": out }),
@@ -180,7 +180,7 @@ pub fn listen(config: &Config, opened: Opened, args: &[String]) -> i32 {
         match arg.as_str() {
             "--drain-media" => drain_media = true,
             "--manual-ack" => manual_ack = true,
-            _ => return crate::print("", Err(Failure::usage("listen [--drain-media] [--manual-ack]"))),
+            _ => return crate::print("", Err(Failure::usage("usage: yo listen [--drain-media] [--manual-ack]"))),
         }
     }
     let Opened { mut client, _lock } = opened;
@@ -279,14 +279,14 @@ fn receive(listener: &Listener) -> ! {
                 listener.acknowledge(&events);
             }
             Err(error) if crate::gone(&error) => {
-                eprintln!("yo: this device is gone for good (replaced by another, or the name released)");
+                eprintln!("yo: this device was removed for good (replaced, or the name released)");
                 std::process::exit(GONE);
             }
             // A `401` (a clock off, a hub restarting) is waited out like the network: never final.
             Err(error) => {
                 // 1, 2, 4 … 60 seconds; back to 1 after a success.
                 let s = (1u64 << failures.min(6)).min(60);
-                eprintln!("yo: {}, again in {s} s", crate::reason(&error));
+                eprintln!("yo: {}, retrying in {s} s", crate::reason(&error));
                 std::thread::sleep(Duration::from_secs(s));
                 failures += 1;
             }

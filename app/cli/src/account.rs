@@ -64,7 +64,7 @@ pub fn profile_state(name: &str) -> Result<String, Failure> {
     if !ok {
         return Err(Failure::usage("--profile NAME: letters, digits, _ - ."));
     }
-    let base = default_state().ok_or_else(|| Failure::usage("no home directory for --profile: --state DIR"))?;
+    let base = default_state().ok_or_else(|| Failure::usage("no home folder for --profile: use --state DIR"))?;
     Ok(format!("{base}/profiles/{name}"))
 }
 
@@ -96,13 +96,13 @@ impl Config {
         let (mut keys_given, mut roots_given) = (false, false);
         let mut i = 0;
         let (mut direct, mut ohttp_keys) = (false, Vec::new());
-        let config = |text: &str| yoip::unb64(text.trim()).map_err(|_| Failure::usage("OHTTP key config: base64url"));
+        let config = |text: &str| yoip::unb64(text.trim()).map_err(|_| Failure::usage("--ohttp-key: base64url"));
         while let Some(flag) = args.get(i).filter(|a| a.starts_with("--")) {
             if flag == "--direct" {
                 (direct, i) = (true, i + 1);
                 continue;
             }
-            let value = args.get(i + 1).ok_or_else(|| Failure::usage(format!("{flag}: a value")))?.clone();
+            let value = args.get(i + 1).ok_or_else(|| Failure::usage(format!("{flag}: missing value")))?.clone();
             match flag.as_str() {
                 "--state" => state = Some(value),
                 "--profile" => profile = Some(value),
@@ -153,7 +153,7 @@ impl Config {
         };
         let state = state
             .or_else(default_state)
-            .ok_or_else(|| Failure::usage("no state directory: --state DIR or YO_STATE"))?;
+            .ok_or_else(|| Failure::usage("no account folder: use --state DIR or YO_STATE"))?;
         let hub = Some(hub.trim_end_matches('/').to_owned());
         let config = Config {
             state: state.into(),
@@ -271,7 +271,7 @@ impl Http {
 }
 
 pub(crate) fn transport(config: &Config) -> Result<Arc<dyn Transport>, Failure> {
-    let base = config.hub.clone().ok_or_else(|| Failure::usage("no hub: --hub URL or YO_HUB"))?;
+    let base = config.hub.clone().ok_or_else(|| Failure::usage("no hub: use --hub URL or YO_HUB"))?;
     let client = || {
         reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
@@ -388,7 +388,8 @@ fn directory_lock(dir: &Path) -> Result<Option<std::fs::File>, Failure> {
     }
 }
 
-pub const SIGNOUT_PROMPT: &str = "Sign out on this device? Nothing stays here: the account's files in the state directory are deleted. Have your recovery key.";
+pub const SIGNOUT_PROMPT: &str =
+    "Sign out on this device? Its account files are deleted; you need your Recovery Key to sign in again.";
 
 pub fn signout(config: &Config) -> Result<(), Failure> {
     if !config.state.try_exists().map_err(|e| Failure::new(e.to_string()))? {
@@ -507,7 +508,7 @@ pub fn put_account_secret(config: &Config, secret: &[u8; 32]) -> Result<(), Fail
     let dir = &config.state;
     let io = |e: std::io::Error| Failure::new(format!("{}: {e}", dir.display()));
     if has_account(config) {
-        return Err(Failure::new("this directory has an account already: another --state DIR"));
+        return Err(Failure::new("an account is here already: use --profile NAME or --state DIR"));
     }
     private_dir(dir).map_err(io)?;
     write_private(&dir.join("account"), secret).map_err(io)
@@ -528,20 +529,17 @@ pub fn register_with(config: &Config, username: &str, force: bool, legacy: Optio
     let has_state = ["state.sqlite", "state", "state.v2"].iter().any(|file| dir.join(file).exists());
     if has_state && !dir.join("key").exists() && !force {
         return Err(Failure::new(
-            "the directory has a state but no key: put its key back (registering replaces the device; --force)",
+            "account data here but no key: put the key back, or --force to start over (replaces this device)",
         ));
     }
     let Some((lock, account, key)) = lock(config, true)? else { return Ok(Open::Busy) };
     let path = config.state.join("state.sqlite");
-    let refused = || {
-        Failure::new(
-            "the state cannot be opened (a wrong key?): registering replaces the device; --force sets it aside",
-        )
-    };
+    let refused =
+        || Failure::new("can't open the account data (wrong key?): --force sets it aside and replaces this device");
     // With `--force`, a state it cannot open is set aside as `state.old`: the account secret registers anew.
     let set_aside = || -> Result<Arc<StateDb>, Failure> {
         std::fs::rename(&path, config.state.join("state.old")).map_err(|e| Failure::new(e.to_string()))?;
-        eprintln!("yo: the state could not be opened; set aside as state.old, registering again");
+        eprintln!("yo: can't open the account data; set aside as state.old, signing up again");
         database(config, key)
     };
     let transport = transport(config)?;
@@ -567,7 +565,7 @@ pub fn register_with(config: &Config, username: &str, force: bool, legacy: Optio
             configure(&mut client, config)?;
             if !client.is_registering() {
                 let name = client.username().unwrap_or("?").to_owned();
-                return Err(Failure::new(format!("already registered as {name}")));
+                return Err(Failure::new(format!("already signed up as {name}")));
             }
             client.finish_registration()?;
             Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))

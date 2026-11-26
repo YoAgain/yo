@@ -21,7 +21,7 @@ fn register_add_send_and_receive_once() {
     }
     let (code, error) = yo.run(&["register", "Other"]);
     assert_eq!(code, 1);
-    assert!(error["error"].as_str().unwrap().contains("already registered"), "{error}");
+    assert!(error["error"].as_str().unwrap().contains("already signed up"), "{error}");
     assert_eq!(yo.ok(&["whoami"])["user"], me["user"]);
 
     let mut alice = someone(&hub);

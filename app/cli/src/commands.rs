@@ -78,20 +78,21 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             done(context, |c| c.remove_from_group(id, &members))
         }
         ["sync", rest @ ..] if !context.listening => sync(context, rest),
-        ["sync", ..] => Err(Failure::new("a listener has the account: its output is the events")),
+        ["sync", ..] => Err(Failure::new("yo listen is running: read its events instead")),
         ["ack"] => {
             context.client().acknowledge_only(|_| true);
             Ok(json!({ "acked": true }))
         }
         ["echo-probe", user, token] => {
             let token = yoip::unb64(token).ok().and_then(|t| t.try_into().ok());
-            let token = token.ok_or_else(|| Failure::usage("echo-probe USER TOKEN: a token of 32 bytes"))?;
+            let token = token.ok_or_else(|| Failure::usage("usage: yo echo-probe USER TOKEN (32 bytes)"))?;
             done(context, |c| c.echo_probe(user, token))
         }
         [word @ ("connect" | "decline"), service, code] => {
             let code = yoip::unb64(code).ok().and_then(|c| c.try_into().ok());
-            let code =
-                code.ok_or_else(|| Failure::usage("connect|decline SERVICE CODE: the code of its connect link"))?;
+            let code = code.ok_or_else(|| {
+                Failure::usage("usage: yo services connect|decline SERVICE CODE (the code from its link)")
+            })?;
             done(context, |c| match *word {
                 "connect" => c.connect_service(service, code),
                 _ => c.decline_service(service, code),
@@ -112,15 +113,15 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
                 "connected" => CONNECTED,
                 "refused" => CONNECT_REFUSED,
                 "ended" => CONNECT_ENDED,
-                _ => return Err(Failure::usage("service-answer USER connected|refused|ended CODE")),
+                _ => return Err(Failure::usage("usage: yo services answer USER connected|refused|ended CODE")),
             };
             let code = yoip::unb64(code).ok().and_then(|c| c.try_into().ok());
-            let code = code.ok_or_else(|| Failure::usage("service-answer: a code of 32 bytes"))?;
+            let code = code.ok_or_else(|| Failure::usage("services answer: CODE must be 32 bytes"))?;
             done(context, |c| c.answer_connection(user, kind, code))
         }
         ["bot", switch @ ("on" | "off")] => {
             context.client().set_bot(*switch == "on").map_err(|e| match e {
-                yo_core::Error::Refused(409) => Failure::new("a bot cannot become a person"),
+                yo_core::Error::Refused(409) => Failure::new("a bot can't become a person"),
                 other => other.into(),
             })?;
             Ok(json!({ "bot": *switch == "on" }))
@@ -167,24 +168,24 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
             Ok(json!(list))
         }
         ["devices", "remove", number] => {
-            let number: u8 = number.parse().map_err(|_| Failure::usage("devices remove NUMBER"))?;
+            let number: u8 = number.parse().map_err(|_| Failure::usage("usage: yo devices remove N"))?;
             context.client().remove_device(number).map_err(|e| match e {
-                yo_core::Error::Refused(404) => Failure::new(format!("no device {number}: yo devices")),
+                yo_core::Error::Refused(404) => Failure::new(format!("no device {number}; see yo devices")),
                 other => other.into(),
             })?;
             Ok(json!({ "removed": number }))
         }
         ["recovery", "rotate"] => rotate_recovery(context),
         ["link-approve", text] => {
-            let offer = yo_core::link::offer(text).map_err(|_| Failure::usage("not a yo-link: text"))?;
+            let offer = yo_core::link::offer(text).map_err(|_| Failure::usage("not a Yo link"))?;
             context.client().link_approve(&offer)?;
             Ok(json!({ "linked": true }))
         }
         ["probe", rest @ ..] => {
             let timeout_ms = match rest {
                 [] => 10_000,
-                ["--timeout-ms", ms] => ms.parse().map_err(|_| Failure::usage("--timeout-ms: a number"))?,
-                _ => return Err(Failure::usage("probe [--timeout-ms N]")),
+                ["--timeout-ms", ms] => ms.parse().map_err(|_| Failure::usage("--timeout-ms: not a number"))?,
+                _ => return Err(Failure::usage("usage: yo probe [--timeout-ms N]")),
             };
             let ms = context.client().round_trip_probe("PING", timeout_ms)?;
             Ok(json!({ "ms": ms }))
@@ -400,7 +401,7 @@ fn users(context: &Context, names: &[&str]) -> Result<Vec<String>, Failure> {
 fn add(context: &Context, name: &str) -> Outcome {
     let name = name.trim_start_matches('@');
     if own(context, name) {
-        return Err(Failure::usage("that is this account's own name"));
+        return Err(Failure::usage("that's you"));
     }
     let (user, username, _) = whois(context, name)?;
     let mut client = context.client();
@@ -417,10 +418,13 @@ fn sync(context: &Context, args: &[&str]) -> Outcome {
     while let Some(arg) = args.next() {
         match *arg {
             "--wait" => {
-                wait = args.next().and_then(|s| s.parse().ok()).ok_or_else(|| Failure::usage("--wait: seconds"))?
+                wait = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| Failure::usage("--wait: seconds, e.g. --wait 30"))?
             }
             "--drain-media" => drain_media = true,
-            _ => return Err(Failure::usage("sync [--wait S] [--drain-media]")),
+            _ => return Err(Failure::usage("usage: yo sync [--wait S] [--drain-media]")),
         }
     }
     let mut client = context.client();
@@ -560,15 +564,15 @@ fn send(context: &Context, to: &str, args: &[&str]) -> Outcome {
         [] => Content::Yo,
         ["--photo", path] => {
             let (bytes, width, height) = jpeg::clean(&read(path, MAX_PHOTO)?)
-                .ok_or_else(|| Failure::new(format!("{path}: not a JPEG of at most 1600 px a side")))?;
+                .ok_or_else(|| Failure::new(format!("{path}: needs a JPEG, at most 1600 px a side")))?;
             Content::Photo(upload(context, to, &bytes, width, height)?)
         }
         ["--media", reference] => {
-            let content =
-                content_of_ref(reference).ok_or_else(|| Failure::usage("--media: a media.ref of an event"))?;
+            let content = content_of_ref(reference)
+                .ok_or_else(|| Failure::usage("--media: not a media reference from an event"))?;
             resend(context, to, content)?
         }
-        _ => return Err(Failure::usage("send TO [--photo JPEG | --media -]")),
+        _ => return Err(Failure::usage("usage: yo send TO [--photo JPEG | --media -]")),
     };
     let events = shared::send(context, &Target::parse(to), content)?;
     (context.emit)(events);
@@ -580,10 +584,10 @@ fn send(context: &Context, to: &str, args: &[&str]) -> Outcome {
 fn resend(context: &Context, to: &str, content: Content) -> Result<Content, Failure> {
     let (Content::Photo(m) | Content::Video { media: m, .. }) = &content else { unreachable!("media only") };
     if m.size as usize > yoip::net::limits::MAX_BLOB_LEN {
-        return Err(Failure::new("larger than a blob may be"));
+        return Err(Failure::new("too large to send"));
     }
     let transport = context.client().transport();
-    let plain = media::fetch_open(transport.as_ref(), m)?.ok_or_else(|| Failure::new("the blob is gone"))?;
+    let plain = media::fetch_open(transport.as_ref(), m)?.ok_or_else(|| Failure::new("the photo or video is gone"))?;
     let _ = media::ack(transport.as_ref(), &m.id);
     let fresh = upload(context, to, &plain, m.width, m.height)?;
     Ok(match content {

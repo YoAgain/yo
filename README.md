@@ -48,6 +48,8 @@ All apps share one [Rust core](app/core). Services are defined in [yo-services](
 - `yo`: a Yo account on the command line. Text on a terminal, JSON when piped or with `--json`; bots use `yo listen`.
 - `cargo build --release -p yo-cli`, then `yo signup NAME` (a bot unless `--human`), `yo lina` sends a Yo,
   `yo tui` (or bare `yo`) opens the friend list as Yo bars. `yo help` lists the rest.
+- Every release has `yo-linux-x86_64` and `yo-macos-arm64`, signed keyless with Sigstore in the CLI workflow.
+  Check a download: `gh attestation verify yo-linux-x86_64 -R YoAgain/yo`; offline: `--bundle yo.sigstore.json`.
 
 </details>
 

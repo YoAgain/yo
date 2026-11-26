@@ -49,18 +49,19 @@ pub fn recovery(config: &Config, typed: &str) -> Result<Value, Failure> {
     let compact: String = typed.to_lowercase().chars().filter(char::is_ascii_alphanumeric).collect();
     let code = yo_core::backup::parse_recovery_key(typed)
         .or_else(|| yo_core::backup::parse_recovery_key(&compact))
-        .ok_or_else(|| Failure::usage("that is not a recovery key (64 letters and digits)"))?;
+        .ok_or_else(|| Failure::usage("not a Recovery Key: 64 letters and digits"))?;
     let transport = account::transport(config)?;
     let door = yo_core::backup::Door::Code(&code);
     let opened = yo_core::Client::open_backup(transport.as_ref(), None, &door, &config.hub_keys)?
-        .ok_or_else(|| Failure::new("no account for this recovery key"))?;
+        .ok_or_else(|| Failure::new("no account for this Recovery Key"))?;
     let sealed: Value = serde_json::from_slice(&opened.plain).map_err(|_| Failure::new("the backup is damaged"))?;
-    let username = sealed["account"]["username"].as_str().ok_or_else(|| Failure::new("the backup names no account"))?;
+    let username =
+        sealed["account"]["username"].as_str().ok_or_else(|| Failure::new("the backup is damaged (no name)"))?;
     let secret: [u8; 32] = sealed["account"]["accountKey"]
         .as_str()
         .and_then(|k| BASE64_STANDARD.decode(k).ok())
         .and_then(|k| k.try_into().ok())
-        .ok_or_else(|| Failure::new("the backup holds no account key"))?;
+        .ok_or_else(|| Failure::new("the backup is damaged (no account key)"))?;
     account::put_account_secret(config, &secret)?;
     account::write_file(config, "recovery", code.to_string().as_bytes())?;
     registered(config, username, None)
@@ -80,14 +81,16 @@ fn registered(config: &Config, username: &str, legacy: Option<[u8; 32]>) -> Resu
             let context = commands::Context { client: &client, config, listening: false, emit: &|_| {} };
             commands::whoami(&context, false)
         }
-        account::Open::Busy => Err(Failure { retryable: true, ..Failure::new("the state directory is busy") }),
+        account::Open::Busy => {
+            Err(Failure { retryable: true, ..Failure::new("busy: another yo command has this account") })
+        }
     }
 }
 
 /// A link opened at the hub: its text to show, kept to wait on.
 pub fn link_start(config: &Config) -> Result<yo_core::link::Request, Failure> {
     if account::has_account(config) {
-        return Err(Failure::new("this directory has an account already: another --state DIR"));
+        return Err(Failure::new("an account is here already: use --profile NAME or --state DIR"));
     }
     Ok(yo_core::link::start(account::transport(config)?.as_ref())?)
 }
@@ -107,9 +110,9 @@ pub fn link_cli(config: &Config) -> Result<Value, Failure> {
         println!("{}", json!({ "link": request.text }));
     } else {
         eprintln!("{}", qr(&request.text));
-        eprintln!("Scan this with Yo on a device that has the account (Settings > Devices > Link), or paste:");
+        eprintln!("Scan with Yo on your other device (Settings › Link a New Device), or paste:");
         eprintln!("  {}", request.text);
-        eprintln!("Waiting up to 10 minutes...");
+        eprintln!("Waiting, up to 10 minutes…");
     }
     let started = Instant::now();
     while started.elapsed() < LINK_WAIT {
@@ -117,7 +120,7 @@ pub fn link_cli(config: &Config) -> Result<Value, Failure> {
             return Ok(done);
         }
     }
-    Err(Failure { retryable: true, ..Failure::new("no device answered the link in 10 minutes") })
+    Err(Failure { retryable: true, ..Failure::new("no answer from the other device in 10 minutes") })
 }
 
 pub fn compact_link(text: &str) -> String {
@@ -149,15 +152,15 @@ pub fn confirm_link(text: Option<&str>) -> Result<String, Failure> {
         Some(text) => compact_link(text),
         None => {
             if std::io::stdin().is_terminal() {
-                eprint!("Paste the yo-link: ");
+                eprint!("Paste the link: ");
                 let _ = std::io::stderr().flush();
             }
             read_link(&mut std::io::stdin().lock()).map_err(|e| Failure::new(e.to_string()))?
         }
     };
-    yo_core::link::offer(&text).map_err(|_| Failure::usage("not a yo-link: text"))?;
+    yo_core::link::offer(&text).map_err(|_| Failure::usage("not a Yo link"))?;
     if std::io::stdin().is_terminal() {
-        eprint!("This device gets access to your account [y/N] ");
+        eprint!("Give the new device access to your account? [y/N] ");
         let _ = std::io::stderr().flush();
     }
     let mut answer = String::new();

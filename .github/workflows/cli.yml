@@ -1,7 +1,9 @@
 name: CLI
 
 # The `yo` CLI (app/cli) for Linux x86_64 (like the server it runs on) and macOS arm64: every push → workflow
-# artifacts, a published release → `yo-linux-x86_64`, `yo-macos-arm64` and a `.sha256` for each attached to it.
+# artifacts, a published release → `yo-linux-x86_64`, `yo-macos-arm64` and a `.sha256` for each attached to it,
+# signed keyless (Sigstore through GitHub's OIDC token: build provenance, `yo.sigstore.json`), and a CLI section
+# in the release notes saying how to verify them.
 on:
   push:
     branches: ['**']  # not tags: a release runs once, by its release event
@@ -36,8 +38,11 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-cli-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      # YO_BUILD: the build's UTC minute, sent as the CLI's Yo-App (README.md, CLI).
+      # YO_BUILD: the build's UTC minute, sent as the CLI's Yo-App (README.md, CLI). YO_VERSION: `yo version`, the
+      # release tag; on a push app/cli/build.rs takes the last release from version.properties.
       - name: Build
+        env:
+          YO_VERSION: ${{ github.event.release.tag_name }}
         run: YO_BUILD=$(date -u +%Y%m%d%H%M) cargo build --release --locked -p yo-cli
       - name: Package
         run: |
@@ -55,14 +60,39 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write  # the Sigstore certificate, keyless
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: yo-*
           merge-multiple: true
           path: dist
-      - name: Attach to the release
+      - name: Sign (build provenance)
+        id: attest
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/yo-linux-x86_64
+            dist/yo-macos-arm64
+      - name: Attach to the release, CLI section in its notes
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE" dist/yo.sigstore.json
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
+          if ! grep -q '^## CLI' notes.md; then
+            cat >> notes.md <<'NOTES'
+
+          ## CLI
+          - `yo-linux-x86_64`, `yo-macos-arm64`: the `yo` command line, a `.sha256` each
+          - Signed with Sigstore (build provenance, `yo.sigstore.json`). Check a download:
+            `gh attestation verify yo-linux-x86_64 -R YoAgain/yo`
+          NOTES
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+          fi

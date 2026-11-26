@@ -38,61 +38,62 @@ pub const UNAUTHORIZED: i32 = 5;
 /// How long a command waits for a directory another command has (a listener answers at once).
 const BUSY_WAIT: Duration = Duration::from_secs(30);
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The release (build.rs: the tag, else version.properties), e.g. 1.0.0-RC47.
+pub const VERSION: &str = env!("YO_VERSION");
 
-pub const HELP: &str = "Send a Yo, keep friends and run bots from your terminal.
+pub const HELP: &str = "Yo from your terminal: send Yos, keep friends, run bots.
 
 USAGE
   yo <command> [flags]
   yo NAME                 Send NAME a Yo
-  yo tui                  Open the interactive app (bare yo on a terminal too)
+  yo tui                  Open the app (also bare yo on a terminal)
 
 CORE COMMANDS
-  send       A Yo to a friend, user id or group:ID (--photo JPEG, --media -)
-  friends    The friends and groups; friends add|remove NAME
+  send       Send a Yo to a friend, user ID or group:ID (--photo JPEG, --media -)
+  friends    Friends and groups; friends add|remove NAME
   groups     Groups: create NAME MEMBER…, rename, add, remove, leave, accept
-  requests   Yos from strangers: list, accept|decline|block NAME, on|off
-  block      Block someone (unblock NAME undoes it)
-  whois      Who a name is
-  listen     One JSON line per event until stopped (--manual-ack, --drain-media)
-  sync       Receive once (--wait S); inbox is the same, ack acknowledges
+  requests   Requests from Strangers: list, accept|decline|block NAME, on|off
+  block      Block someone; unblock NAME undoes it
+  whois      Look up a name
+  listen     Receive: one JSON line per event until stopped (--manual-ack, --drain-media)
+  sync       Receive once (--wait S); inbox does the same, ack confirms
 
 ACCOUNT
-  signup     A new account: NAME of 12+ characters, a bot unless --human
-  signin     This directory signs in: --recovery-key or --link (QR code)
-  signout    Remove this device's local account files (signout [--yes])
-  link       Add another device to this account (asks first)
-  status     The account, its device, hub and listener (whoami too)
-  profiles   The accounts kept as profiles (--profile NAME)
-  devices    This account's devices; devices remove N
-  recovery   The recovery key: show, rotate
-  bot        bot on: marks the account as a bot, for good
+  signup     New account: a NAME of 12+ characters; a bot unless --human
+  signin     Sign in: --recovery-key, or --link (QR code)
+  signout    Sign out: deletes this device's account files (--yes)
+  link       Link a new device to this account (asks first)
+  status     Account, device, hub and listener (also whoami)
+  profiles   Accounts kept as profiles (--profile NAME)
+  devices    Devices; devices remove N
+  recovery   Recovery Key: show, rotate
+  bot        bot on: mark the account as a bot, for good
 
 SERVICES
   services   list, connect SERVICE CODE, decline SERVICE CODE, disconnect SERVICE
 
 SYSTEM
-  tui         The interactive app
-  commands    Every command, one a line (JSON when piped)
-  doctor      Find state, pin and account problems
-  probe       Ask PING and time the answer
+  tui         Open the app
+  commands    All commands, one per line (JSON when piped)
+  doctor      Check the setup and the account
+  probe       Yo PING and time the answer
   completion  Tab completion: completion bash|zsh|fish
-  version     Show the installed yo version
+  version     Show the version
 
 HELP TOPICS
-  output       Output formats: text on a terminal, JSON when piped
-  exit-codes   Exit status reference
-  environment  Environment variable reference
+  output       Text on a terminal, JSON when piped
+  exit-codes   What each exit code means
+  environment  Environment variables
 
 FLAGS
-  -j, --json        JSON out (also when piped, or YO_JSON=1)
+  -j, --json        JSON output (also when piped, or YO_JSON=1)
   -q, --quiet       No output on success
-      --no-color    No colour (or NO_COLOR)
-      --profile NAME  Another account: ~/.local/share/yo/profiles/NAME (YO_PROFILE); yo profiles lists them
-      --state DIR   The account's directory (YO_STATE; default ~/.local/share/yo); wins over --profile
-      --hub URL     The hub (YO_HUB; default https://hub.justyo.app)
-      --direct      No Oblivious HTTP
-      --hub-key K…  --trust-root K…  --zk-params P  --ohttp-key C…  pins (known hubs: built in)
+      --no-color    No color (or NO_COLOR)
+      --profile NAME  Use another account: ~/.local/share/yo/profiles/NAME (YO_PROFILE)
+      --state DIR   Account folder (YO_STATE; default ~/.local/share/yo); overrides --profile
+      --hub URL     Hub (YO_HUB; default https://hub.justyo.app)
+      --direct      Skip Oblivious HTTP (debugging only)
+      --hub-key K…  --trust-root K…  --zk-params P  --ohttp-key C…  Keys to pin (built in for known hubs)
   -h, --help        Show help
 
 EXAMPLES
@@ -102,9 +103,9 @@ EXAMPLES
   $ yo listen --json | jq
 
 LEARN MORE
-  yo commands          List all available commands
-  yo help <topic>      Read a help topic
-  yo <command> --help  Help for any command";
+  yo commands          All commands
+  yo help <topic>      A help topic
+  yo <command> --help  Help for a command";
 
 /// Help text styled as hey's on a terminal with colour: headings in the accent, examples in italics.
 fn styled(text: &str) -> String {
@@ -134,7 +135,7 @@ fn command_help(name: &str) -> Option<String> {
     let line =
         HELP.lines().find(|l| l.strip_prefix("  ").is_some_and(|l| l.split_whitespace().next() == Some(name)))?;
     let short = line.trim_start().trim_start_matches(name).trim();
-    Some(format!("{short}\n\nUSAGE\n  yo {name} …\n\nLEARN MORE\n  yo help             All commands\n  yo commands         Every command, one a line"))
+    Some(format!("{short}\n\nUSAGE\n  yo {name} …\n\nLEARN MORE\n  yo help             All commands\n  yo commands         One command per line"))
 }
 
 /// `yo commands`: every command with what it does, from the help.
@@ -156,17 +157,17 @@ fn commands_list() -> Vec<(String, String, String)> {
     out
 }
 
-const HELP_OUTPUT: &str = "output: on a terminal text for a person; piped, with --json or YO_JSON=1 one JSON value per
-command on stdout (errors {\"error\",\"retryable\"} on stderr), and `yo listen` one JSON line per event:
+const HELP_OUTPUT: &str = "Output: text on a terminal. Piped, with --json or YO_JSON=1: one JSON value per command on
+stdout (errors as {\"error\",\"retryable\"} on stderr); yo listen prints one JSON line per event:
   {\"type\":\"ready\",\"user\",\"username\"}  {\"type\":\"message\",\"from\",\"group\",\"reply_to\",\"sent_at_ms\",\"content\":\"yo|photo|video\",\"media\"}
   {\"type\":\"new_chat|profile|identity_changed|group_changed|device_added|connection_changed|sent|probe|connect\",...}
 friends: [{user,name,handles,blocked}]  send: {sent}  add: {user,username}  status: {user,username,device,bot,hub,listening,...}";
 
 const HELP_EXIT: &str =
-    "exit codes: 0 done · 1 failed (see retryable) · 2 usage · 3 this device is gone for good: stop ·
-4 not signed up · 5 the hub did not take this device's signature: try again later · 130 stopped (Ctrl-C)";
+    "Exit codes: 0 done · 1 failed (see retryable) · 2 wrong usage · 3 device removed for good: stop ·
+4 no account · 5 hub refused the signature: try again later · 130 stopped (Ctrl-C)";
 
-const HELP_ENV: &str = "environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, YO_OHTTP_KEYS (lists
+const HELP_ENV: &str = "Environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS, YO_OHTTP_KEYS (lists
 comma separated), YO_JSON=1, NO_COLOR, YO_SMALL_ENVELOPES=1, YO_RECOVERY_LOOKUPS (default 10; a bot raises it)";
 
 /// The words that are commands: anything else as the first word is a friend to send a Yo to.
@@ -245,7 +246,7 @@ impl Failure {
     }
 
     pub fn not_registered() -> Failure {
-        Failure { code: NOT_REGISTERED, error: "not registered: yo signup NAME".into(), retryable: false }
+        Failure { code: NOT_REGISTERED, error: "no account here: yo signup NAME or yo signin".into(), retryable: false }
     }
 
     pub fn json(&self) -> Value {
@@ -345,14 +346,14 @@ fn media_from_stdin(command: &[String]) -> Result<Vec<String>, Failure> {
     let at = command.iter().position(|a| a == "--media").filter(|_| command.first().is_some_and(|c| c == "send"));
     if let Some(i) = at.map(|i| i + 1) {
         if command.get(i).map(String::as_str) != Some("-") {
-            return Err(Failure::usage("--media -: the media.ref on stdin, never as an argument"));
+            return Err(Failure::usage("--media -: pass the media reference on stdin, not as an argument"));
         }
         let mut line = String::new();
         std::io::stdin()
             .lock()
             .take(4096)
             .read_line(&mut line)
-            .map_err(|_| Failure::usage("--media -: no reference on stdin"))?;
+            .map_err(|_| Failure::usage("--media -: nothing on stdin"))?;
         command[i] = line.trim().to_owned();
     }
     Ok(command)
@@ -405,7 +406,7 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
         ["help", "environment"] => return text(HELP_ENV),
         ["help", name] if command_help(name).is_some() => return text(&command_help(name).unwrap_or_default()),
         ["help"] => return text(HELP),
-        ["help", topic, ..] => return print("", Err(Failure::usage(format!("no help topic {topic}: yo help")))),
+        ["help", topic, ..] => return print("", Err(Failure::usage(format!("no help topic {topic}; see yo help")))),
         ["commands"] if human => {
             let list = commands_list();
             let width = list.iter().map(|c| c.1.len()).max().unwrap_or(0);
@@ -435,14 +436,14 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
             )
         }
         ["completion", shell @ ("bash" | "zsh" | "fish")] => return text(&human::completion(shell, VERBS)),
-        ["completion", ..] => return print("", Err(Failure::usage("completion bash|zsh|fish"))),
+        ["completion", ..] => return print("", Err(Failure::usage("usage: yo completion bash|zsh|fish"))),
         ["doctor"] => return print("doctor", Ok(doctor(config))),
         ["register", rest @ ..] => return signup(config, rest, false),
         ["signup", rest @ ..] => return signup(config, rest, true),
         ["signout"] | ["signout", "--yes"] => {
             if args.len() == 1 {
                 if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                    return print("", Err(Failure::usage("yo signout --yes required when piped")));
+                    return print("", Err(Failure::usage("piped: use yo signout --yes")));
                 }
                 eprintln!("{} [y/N]", account::SIGNOUT_PROMPT);
                 let mut answer = String::new();
@@ -455,7 +456,7 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
             }
             return print("signout", account::signout(config).map(|()| json!({"signed_out": true})));
         }
-        ["signout", ..] => return print("", Err(Failure::usage("yo signout [--yes]"))),
+        ["signout", ..] => return print("", Err(Failure::usage("usage: yo signout [--yes]"))),
         ["signin", "--recovery-key", key @ ..] => {
             let key = match key {
                 [key] => key.to_string(),
@@ -467,7 +468,7 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
             return print("signin", signin::recovery(config, &key));
         }
         ["signin", "--link"] => return print("signin", signin::link_cli(config)),
-        ["signin", ..] => return print("", Err(Failure::usage("signin --recovery-key | --link"))),
+        ["signin", ..] => return print("", Err(Failure::usage("usage: yo signin --recovery-key | --link"))),
         ["recovery"] | ["recovery", "show"] if !account::has_account(config) => {
             return print("", Err(Failure::not_registered()))
         }
@@ -476,7 +477,7 @@ fn dispatch(config: &Config, command: &[String]) -> i32 {
             return print(
                 "recovery",
                 key.map(|k| json!({ "recovery_key": k }))
-                    .ok_or_else(|| Failure::new("no recovery key kept here: yo recovery rotate makes one")),
+                    .ok_or_else(|| Failure::new("no Recovery Key saved here: yo recovery rotate makes a new one")),
             );
         }
         ["link", text @ ..] => match signin::confirm_link(text.first().copied()) {
@@ -520,10 +521,13 @@ fn listen_or_print(config: &Config, command: &[String]) -> i32 {
         match account::open(config) {
             Ok(Open::Opened(opened)) => return listen::listen(config, *opened, &command[1..]),
             Ok(Open::Busy) if UnixStream::connect(config.control()).is_ok() => {
-                return print("", Err(Failure::new("another yo listen runs on this state directory")));
+                return print("", Err(Failure::new("yo listen is already running for this account")));
             }
             Ok(Open::Busy) if started.elapsed() > BUSY_WAIT => {
-                return print("", Err(Failure { retryable: true, ..Failure::new("the state directory is busy") }))
+                return print(
+                    "",
+                    Err(Failure { retryable: true, ..Failure::new("busy: another yo command has this account") }),
+                )
             }
             Ok(Open::Busy) => std::thread::sleep(Duration::from_millis(50)),
             Err(failure) => return print("", Err(failure)),
@@ -549,7 +553,7 @@ pub fn execute(config: &Config, command: &[String]) -> Result<Value, Failure> {
             }
         }
         if started.elapsed() > BUSY_WAIT {
-            return Err(Failure { retryable: true, ..Failure::new("the state directory is busy") });
+            return Err(Failure { retryable: true, ..Failure::new("busy: another yo command has this account") });
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -558,7 +562,7 @@ pub fn execute(config: &Config, command: &[String]) -> Result<Value, Failure> {
 /// `signup NAME [--human] [--force]` (and `register`, the bots' verb, which makes no backup): the account, marked
 /// as a bot unless `--human`; `signup` then makes its backup under a new recovery key, shown once.
 fn signup(config: &Config, rest: &[&str], backup: bool) -> i32 {
-    let usage = if backup { "signup NAME [--human]" } else { "register NAME [--human] [--force]" };
+    let usage = if backup { "usage: yo signup NAME [--human]" } else { "usage: yo register NAME [--human] [--force]" };
     let [username, flags @ ..] = rest else { return print("", Err(Failure::usage(usage))) };
     if !flags.iter().all(|f| matches!(*f, "--force" | "--bot" | "--human")) {
         return print("", Err(Failure::usage(usage)));
@@ -577,12 +581,10 @@ fn signup(config: &Config, rest: &[&str], backup: bool) -> i32 {
 pub fn name_ok(name: &str) -> Result<(), Failure> {
     use yoip::net::handle;
     if handle::check_username_form(name).is_err() {
-        return Err(Failure::usage(
-            "a name of letters, digits, _ and emoji, up to 16 characters, starting with a letter, digit or emoji",
-        ));
+        return Err(Failure::usage("name: letters, digits, _ and emoji, up to 16 characters, not starting with _"));
     }
     if handle::username_len(name) < 12 {
-        return Err(Failure::usage("a name of at least 12 characters (the CLI is not an attested app)"));
+        return Err(Failure::usage("name too short: the CLI needs 12+ characters"));
     }
     Ok(())
 }
@@ -607,7 +609,7 @@ pub fn signup_run(config: &Config, username: &str, human: bool, force: bool, bac
                 return Ok(out);
             }
             Open::Busy if started.elapsed() > BUSY_WAIT => {
-                return Err(Failure { retryable: true, ..Failure::new("the state directory is busy") })
+                return Err(Failure { retryable: true, ..Failure::new("busy: another yo command has this account") })
             }
             Open::Busy => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -639,7 +641,7 @@ fn doctor(config: &Config) -> Value {
     let checks = vec![
         check("state", config.state.is_dir(), config.state.display().to_string()),
         check("hub", !hub.is_empty(), hub.clone()),
-        check("ohttp", ohttp, if config.direct { "direct".into() } else { "Oblivious HTTP".into() }),
+        check("ohttp", ohttp, if config.direct { "off (--direct)".into() } else { "on".into() }),
         check("hub keys", !config.hub_keys.is_empty(), format!("{} pinned", config.hub_keys.len())),
         check("trust roots", !config.trust_roots.is_empty(), format!("{} pinned", config.trust_roots.len())),
         check("group params", config.zk_params.is_some(), String::new()),
@@ -649,7 +651,7 @@ fn doctor(config: &Config) -> Value {
         },
         match status.as_ref().is_ok_and(|s| s["listening"] == json!(true)) {
             true => check("listener", true, "running".into()),
-            false => check("listener", false, "not running: yo listen (or yo tui) receives".into()),
+            false => check("listener", false, "not running: start yo listen or yo tui".into()),
         },
     ];
     json!({ "checks": checks })

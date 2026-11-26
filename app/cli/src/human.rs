@@ -6,14 +6,10 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
-/// A bar's name as the app shows it: in capitals, `/BOT` after a bot, `#` before a group.
+/// A bar's name as the app shows it: in capitals, `/` before a bot, `#` before a group.
 pub fn bar_name(item: &Value) -> String {
     let name = s(&item["name"]).to_uppercase();
-    match (s(&item["kind"]), item["bot"].as_bool().unwrap_or(false)) {
-        ("group", _) => format!("#{name}"),
-        (_, true) => format!("{name} /BOT"),
-        _ => name,
-    }
+    yo_ui::line::bar_title(&name, s(&item["kind"]) == "group", item["bot"].as_bool().unwrap_or(false))
 }
 
 pub fn ago(ms: u64) -> String {
@@ -38,47 +34,44 @@ pub fn render(kind: &str, value: &Value) -> String {
             };
             out += &paint(
                 BOLD,
-                &format!("{}{}", s(&value["username"]).to_uppercase(), if value["bot"] == true { " /BOT" } else { "" }),
+                &yo_ui::line::bar_title(&s(&value["username"]).to_uppercase(), false, value["bot"] == true),
             );
             let mut rows = vec![
-                ("device", device(&value["device"])),
-                ("hub", s(&value["hub"]).trim_start_matches("https://").to_owned()),
+                ("Device", device(&value["device"])),
+                ("Hub", s(&value["hub"]).trim_start_matches("https://").to_owned()),
             ];
             if let Some(listening) = value["listening"].as_bool() {
-                rows.push(("listener", if listening { "running" } else { "not running (yo listen)" }.into()));
+                rows.push(("Listener", if listening { "running" } else { "stopped (yo listen starts it)" }.into()));
                 rows.push((
-                    "friends",
-                    format!("{} · groups {} · waiting to send {}", value["friends"], value["groups"], value["waiting"]),
+                    "Friends",
+                    format!("{} · Groups {} · Unsent {}", value["friends"], value["groups"], value["waiting"]),
                 ));
             }
             for (label, text) in rows {
                 out += &format!("\n  {}{text}", paint(DIM, &format!("{label:<10}")));
             }
             if kind == "signup" && value["bot"] == true {
-                out += &format!(
-                    "\n  {}",
-                    paint(DIM, "Marked as a bot (people see /BOT); a bot cannot become a person later.")
-                );
+                out += &format!("\n  {}", paint(DIM, "Bot account: people see / before the name. Can't be undone."));
             }
             if let Some(key) = value["recovery_key"].as_str() {
-                out += &format!("\n\n  {}\n", paint(BOLD, "Recovery key"));
+                out += &format!("\n\n  {}\n", paint(BOLD, "Recovery Key"));
                 for row in group(key).split('-').collect::<Vec<_>>().chunks(4) {
                     out += &format!("\n    {}", paint(ACCENT, &row.join("  ")));
                 }
                 out += &format!(
                     "\n\n  {}",
-                    paint(DIM, "Store it now; it is shown once (yo recovery show reads it from the state dir).")
+                    paint(DIM, "Save it now, e.g. in a password manager. yo recovery show shows it again.")
                 );
             }
             if let Some(error) = value["recovery_error"].as_str() {
-                out += &format!("\n  No recovery key yet ({error}): yo recovery rotate");
+                out += &format!("\n  No Recovery Key yet ({error}): yo recovery rotate");
             }
             out
         }
         "friends-view" => {
             let items = list(value);
             if items.is_empty() {
-                return format!("No friends yet: {}", paint(BOLD, "yo friends add NAME"));
+                return format!("No friends yet: {} (try PING)", paint(BOLD, "yo friends add NAME"));
             }
             table(
                 items
@@ -96,7 +89,7 @@ pub fn render(kind: &str, value: &Value) -> String {
                             what += " · blocked";
                         }
                         if i["gone"] == true {
-                            what += " · gone (yo friends remove)";
+                            what += " · account deleted (yo friends remove)";
                         }
                         vec![bar_name(i), what]
                     })
@@ -114,7 +107,7 @@ pub fn render(kind: &str, value: &Value) -> String {
         ),
         "requests" if value.get("requests").is_some() => {
             let mut out = format!(
-                "Requests from strangers: {}",
+                "Requests from Strangers: {}",
                 if value["requests_open"] == true {
                     paint(BOLD, "on")
                 } else {
@@ -129,19 +122,19 @@ pub fn render(kind: &str, value: &Value) -> String {
                 })
                 .collect();
             if rows.is_empty() {
-                out += &format!("\n  {}", paint(DIM, "no requests"));
+                out += &format!("\n  {}", paint(DIM, "None"));
             } else {
                 out += &format!("\n{}", table(rows));
             }
             out
         }
         "requests" if value.get("requests_open").is_some() => {
-            format!("Requests from strangers: {}", if value["requests_open"] == true { "on" } else { "off" })
+            format!("Requests from Strangers: {}", if value["requests_open"] == true { "on" } else { "off" })
         }
         "groups" if list(value).iter().all(|g| g["left"] == true) => {
             "No groups yet: yo groups create NAME MEMBER…".into()
         }
-        "connections" if list(value).is_empty() => "No services connected.".into(),
+        "connections" if list(value).is_empty() => "No services".into(),
         "groups" => list(value)
             .iter()
             .filter(|g| g["left"] != true)
@@ -161,11 +154,11 @@ pub fn render(kind: &str, value: &Value) -> String {
                 .iter()
                 .map(|d| {
                     let this =
-                        if d["this"] == true { "  ".to_owned() + &paint(ACCENT, "this device") } else { String::new() };
+                        if d["this"] == true { "  ".to_owned() + &paint(ACCENT, "This device") } else { String::new() };
                     vec![
                         d["number"].to_string(),
                         s(&d["app"]).to_owned(),
-                        format!("last seen {}", ago(d["last_seen_at"].as_u64().unwrap_or(0))) + &this,
+                        format!("Last seen {}", ago(d["last_seen_at"].as_u64().unwrap_or(0))) + &this,
                     ]
                 })
                 .collect(),
@@ -177,12 +170,11 @@ pub fn render(kind: &str, value: &Value) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        "recovery" => format!("Recovery key  {}", group(s(&value["recovery_key"]))),
+        "recovery" => format!("Recovery Key  {}", group(s(&value["recovery_key"]))),
         "whois" => format!(
-            "{} {}{}",
-            s(&value["username"]).to_uppercase(),
-            s(&value["user"]),
-            if value["bot"] == true { " /BOT" } else { "" }
+            "{}  {}",
+            yo_ui::line::bar_title(&s(&value["username"]).to_uppercase(), false, value["bot"] == true),
+            s(&value["user"])
         ),
         "add" => format!("Added {}", s(&value["username"]).to_uppercase()),
         "remove" => "Removed".into(),
@@ -206,10 +198,10 @@ pub fn render(kind: &str, value: &Value) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        k if k.starts_with("send ") => format!("Yo → {} ✓", k[5..].trim_start_matches('@').to_uppercase()),
+        k if k.starts_with("send ") => format!("Sent Yo! → {}", k[5..].trim_start_matches('@').to_uppercase()),
         _ => match value {
-            Value::Object(o) if o.len() == 1 && o.values().all(|v| v == &Value::Bool(true)) => "done".into(),
-            Value::Array(a) if a.is_empty() => "nothing".into(),
+            Value::Object(o) if o.len() == 1 && o.values().all(|v| v == &Value::Bool(true)) => "Done".into(),
+            Value::Array(a) if a.is_empty() => "Nothing".into(),
             other => serde_json::to_string_pretty(other).unwrap_or_default(),
         },
     }
@@ -275,6 +267,6 @@ pub fn completion(shell: &str, verbs: &[&str]) -> String {
         "bash" => format!("complete -W \"{words}\" yo"),
         "zsh" => format!("#compdef yo\n_arguments '1:command:({words})'"),
         "fish" => format!("complete -c yo -f -n __fish_use_subcommand -a \"{words}\""),
-        _ => "completion bash|zsh|fish".into(),
+        _ => "usage: yo completion bash|zsh|fish".into(),
     }
 }

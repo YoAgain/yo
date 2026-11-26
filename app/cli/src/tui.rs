@@ -96,11 +96,11 @@ const ADD_MENU: &[&str] = &["Add Friend", "New Group"];
 
 fn bar_menu(group: bool, blocked: bool) -> &'static [&'static str] {
     if group {
-        &["Rename", "Add members", "Remove members", "Leave group"]
+        &["Rename", "Add Members", "Remove Members", "Leave Group"]
     } else if blocked {
-        &["Remove friend", "Unblock"]
+        &["Remove Friend", "Unblock"]
     } else {
-        &["Remove friend", "Block"]
+        &["Remove Friend", "Block"]
     }
 }
 
@@ -452,7 +452,7 @@ impl App {
                             .into_iter()
                             .flatten()
                             .find(|g| g["id"] == id)
-                            .ok_or_else(|| Failure::new("Group no longer listed"))?;
+                            .ok_or_else(|| Failure::new("Group not found"))?;
                         Ok(json!([
                             group["name"],
                             format!("{} members", group["members"].as_array().map_or(0, Vec::len))
@@ -462,7 +462,7 @@ impl App {
                         Ok(json!([
                             format!("User ID  {}", user["user"].as_str().unwrap_or("—")),
                             format!("Username  {}", user["username"].as_str().unwrap_or("—")),
-                            format!("Bot  {}", user["bot"])
+                            format!("Bot  {}", if user["bot"] == true { "yes" } else { "no" })
                         ]))
                     }
                 })(),
@@ -553,7 +553,7 @@ impl App {
     }
 
     fn retry_listener(&mut self, reason: String) {
-        self.listener_status = format!("listener stopped: {reason}");
+        self.listener_status = format!("Stopped receiving: {reason}");
         self.retry_at = Some(Instant::now() + Duration::from_secs(self.retry_secs));
         self.retry_secs = (self.retry_secs * 2).min(60);
     }
@@ -598,7 +598,7 @@ impl App {
                 }
                 match child.wait() {
                     Ok(exit) if exit.code() == Some(crate::GONE) => {
-                        self.listener_status = "listener stopped: this device is gone".into();
+                        self.listener_status = "Stopped: this device was removed".into();
                     }
                     Ok(exit) => {
                         let reason = serde_json::from_str::<Value>(&last)
@@ -707,10 +707,10 @@ impl App {
                     (Job::Rotate, Ok(v)) => {
                         self.shown_key = v["recovery_key"].as_str().unwrap_or("").to_owned();
                         self.confirm_rotate = false;
-                        self.status = "New recovery key: the old one no longer works. Store this one.".into();
+                        self.status = "New Recovery Key. The old one no longer works.".into();
                     }
                     (Job::LinkApprove(_), Ok(_)) => {
-                        self.status = "Linked: the new device has the account".into();
+                        self.status = "Linked".into();
                         self.go(Screen::Settings);
                     }
                     (Job::Signup | Job::Recovery | Job::Link, Ok(me)) => {
@@ -723,7 +723,7 @@ impl App {
                             self.screen = Screen::ShowKey;
                         }
                     }
-                    (_, Err(f)) => self.status = format!("error: {}", f.error),
+                    (_, Err(f)) => self.status = format!("Error: {}", f.error),
                 }
             }
         }
@@ -880,7 +880,7 @@ impl App {
         let target = row.id.clone();
         let Some(item) = self.items.get(&target) else { return };
         match key {
-            'p' => self.prompt("Photo path", words(&["send", &target, "--photo"])),
+            'p' => self.prompt("Photo (JPEG file)", words(&["send", &target, "--photo"])),
             'i' => {
                 let name = item["username"].as_str().or(item["name"].as_str()).unwrap_or("").to_owned();
                 self.open_report("Details", &target);
@@ -943,13 +943,13 @@ impl App {
                 self.screen = Screen::Add;
             }
             "New Group" => self.prompt("New Group", words(&["groups", "create"])),
-            "Rename" => self.prompt("Rename group", words(&["groups", "rename", id])),
-            "Add members" => self.members(choice, words(&["groups", "add", id])),
-            "Remove members" => self.members(choice, words(&["groups", "remove", id])),
-            "Remove friend" | "Leave group" => {
+            "Rename" => self.prompt("Rename Group", words(&["groups", "rename", id])),
+            "Add Members" => self.members(choice, words(&["groups", "add", id])),
+            "Remove Members" => self.members(choice, words(&["groups", "remove", id])),
+            "Remove Friend" | "Leave Group" => {
                 let label = self.items.get(target).map(|v| upper(&v["name"])).unwrap_or_else(|| target.into());
                 let command =
-                    if choice == "Leave group" { words(&["groups", "leave", id]) } else { words(&["remove", target]) };
+                    if choice == "Leave Group" { words(&["groups", "leave", id]) } else { words(&["remove", target]) };
                 self.confirm(choice, format!("{choice}: {label}?"), command);
             }
             "Block" => self.job(Job::Change(words(&["block", target]))),
@@ -988,7 +988,7 @@ impl App {
                         "connect" | "decline" => {
                             let parts: Vec<_> = input.split_whitespace().collect();
                             if parts.len() != 2 {
-                                self.status = "Enter the service and code separated by a space".into();
+                                self.status = "Enter: SERVICE CODE".into();
                                 self.dialog = Some(dialog);
                                 return;
                             }
@@ -998,7 +998,7 @@ impl App {
                         _ => {
                             words.push(input);
                             if words[1] == "create" {
-                                self.members("New Group · members", std::mem::take(words));
+                                self.members("New Group · Members", std::mem::take(words));
                             } else {
                                 self.job(Job::Change(std::mem::take(words)));
                             }
@@ -1081,7 +1081,7 @@ impl App {
                     })
                     .collect();
                 if lines.is_empty() {
-                    lines.push(Line::from("No friends to choose"));
+                    lines.push(Line::from("No friends yet"));
                 }
                 (*title, lines)
             }
@@ -1112,7 +1112,7 @@ impl App {
             Some(SettingsRow::Device(d)) => {
                 let device = &self.devices[d];
                 if device["this"] == true {
-                    self.status = "This device: Sign Out takes it off the account".into();
+                    self.status = "This device: use Sign Out to remove it".into();
                 } else if let Some(number) = device["number"].as_u64() {
                     self.confirm_device = Some(number);
                 }
@@ -1130,9 +1130,13 @@ impl App {
             }
             "bot" => {
                 if self.me["bot"] == true {
-                    self.status = "Marked as a bot: people see / before the name. A bot cannot become a person.".into();
+                    self.status = "Bot account: people see / before the name. Can't be undone.".into();
                 } else {
-                    self.confirm("Bot Marker", "Mark this account as a bot, for good? People see / before its name; a bot can never become a person again.".into(), words(&["bot", "on"]));
+                    self.confirm(
+                        "Bot Marker",
+                        "Mark this account as a bot? People see / before its name. Can't be undone.".into(),
+                        words(&["bot", "on"]),
+                    );
                 }
             }
             "recovery_key" => {
@@ -1199,8 +1203,8 @@ impl App {
                 child.wait()
             });
         self.status = match done {
-            Ok(s) if s.success() => "Copied the recovery key".into(),
-            _ => format!("{} did not take it", tool[0]),
+            Ok(s) if s.success() => "Copied".into(),
+            _ => format!("Couldn't copy ({})", tool[0]),
         };
     }
 
@@ -1377,7 +1381,7 @@ impl App {
             }
             (Screen::LinkConfirm, _) => {
                 self.input.clear();
-                self.status = "not linked".into();
+                self.status = "Not linked".into();
                 self.screen = Screen::Settings;
             }
             (Screen::Settings, KeyCode::Char('q') | KeyCode::Esc) if self.show_code => self.show_code = false,
@@ -1406,7 +1410,7 @@ impl App {
                 self.input = signin::compact_link(&self.input);
                 match yo_core::link::offer(&self.input) {
                     Ok(_) => self.screen = Screen::LinkConfirm,
-                    Err(_) => self.status = "not a yo-link: text".into(),
+                    Err(_) => self.status = "Not a Yo link".into(),
                 }
             }
             _ => {}
@@ -1459,7 +1463,7 @@ impl App {
             height: area.height.saturating_sub(2 + foot),
         };
         if area.width < 20 || body.height < 3 {
-            f.render_widget(Paragraph::new("enlarge the window"), area);
+            f.render_widget(Paragraph::new("Make the window bigger"), area);
             return;
         }
         let buf = f.buffer_mut();
@@ -1472,7 +1476,7 @@ impl App {
         } else if let Some(banner) = &self.snapshot.banner {
             banner.clone()
         } else if self.busy {
-            "working…".to_owned()
+            "Working…".to_owned()
         } else {
             self.status.clone()
         };
@@ -1482,7 +1486,7 @@ impl App {
             buf.set_line(area.x + 2, foot_y + 1 + i as u16, &line, area.width.saturating_sub(4));
         }
         match self.screen {
-            Screen::Loading => self.card(f, body, "Yo", vec![Line::from("opening…").style(self.dim())]),
+            Screen::Loading => self.card(f, body, "Yo", vec![Line::from("Opening…").style(self.dim())]),
             Screen::Main | Screen::Add => self.draw_bars(f, body),
             Screen::Signout => {
                 let lines = wrap_card(crate::account::SIGNOUT_PROMPT, body.width);
@@ -1496,19 +1500,19 @@ impl App {
             Screen::RecoveryInput => self.card(
                 f,
                 body,
-                "Sign in with a recovery key",
+                "Sign In with Recovery Key",
                 vec![
                     Line::from(""),
-                    self.field("Recovery key", &"•".repeat(self.input.chars().count())),
+                    self.field("Recovery Key", &"•".repeat(self.input.chars().count())),
                     Line::from(""),
-                    Line::from("64 letters and digits; dashes and spaces are fine.").style(self.dim()),
+                    Line::from("64 letters and digits. Dashes and spaces are fine.").style(self.dim()),
                     Line::from("Paste works.").style(self.dim()),
                 ],
             ),
             Screen::LinkWait => {
                 let mut lines: Vec<Line> = Vec::new();
                 if self.link_text.is_empty() {
-                    lines.push(Line::from("opening a link…").style(self.dim()));
+                    lines.push(Line::from("Getting a link…").style(self.dim()));
                 } else {
                     let width = usize::from(body.width.min(72) - 2);
                     let token = &self.link_text;
@@ -1523,9 +1527,9 @@ impl App {
                         lines.push(Line::from(std::str::from_utf8(chunk).expect("ASCII link")).style(self.accent()));
                     }
                     if fits {
-                        lines.push(Line::from("Scan or paste on your other device.").style(self.dim()));
+                        lines.push(Line::from("Scan or paste this on your other device.").style(self.dim()));
                     } else {
-                        let hint = "enlarge the window for the QR code";
+                        let hint = "Make the window bigger for the QR code";
                         let mut row = String::new();
                         for word in hint.split_whitespace() {
                             if row.len() + 1 + word.len() > width {
@@ -1538,12 +1542,12 @@ impl App {
                         }
                         lines.push(Line::from(row).style(self.dim()));
                         if lines.len() + 2 > usize::from(body.height) {
-                            f.render_widget(Paragraph::new("enlarge the window"), body);
+                            f.render_widget(Paragraph::new("Make the window bigger"), body);
                             return;
                         }
                     }
                 }
-                self.card(f, body, "Sign in with a link", lines)
+                self.card(f, body, "Sign In with Another Device", lines)
             }
             Screen::ShowKey => {
                 let me = bar_title(&upper(&self.me["username"]), false, self.me["bot"] == true);
@@ -1554,37 +1558,37 @@ impl App {
                 }
                 let key = self.key_lines(body.width.min(72) - 2);
                 if key.len() + 2 > usize::from(body.height) {
-                    f.render_widget(Paragraph::new("enlarge the window"), body);
+                    f.render_widget(Paragraph::new("Make the window bigger"), body);
                     return;
                 }
                 lines.extend(key);
                 if lines.len() + 2 == usize::from(body.height) {
-                    self.card(f, body, "Your recovery key", lines);
+                    self.card(f, body, "Recovery Key", lines);
                     return;
                 }
                 lines.extend([
                     Line::from(""),
-                    Line::from("Store it now, in a password manager:"),
-                    Line::from("it brings the account back on a new device."),
-                    Line::from("yo recovery show reads it from the state directory.").style(self.dim()),
+                    Line::from("Save it now, e.g. in a password manager."),
+                    Line::from("You need it to sign in on a new device."),
+                    Line::from("yo recovery show shows it again.").style(self.dim()),
                 ]);
-                self.card(f, body, "Your recovery key", lines)
+                self.card(f, body, "Recovery Key", lines)
             }
             Screen::Recovery => self.draw_recovery(f, body),
             Screen::LinkInput => {
                 let lines = vec![
-                    self.field("yo-link", &self.input),
+                    self.field("Link", &self.input),
                     Line::from(""),
-                    Line::from("Paste the text the new device shows (yo signin --link).").style(self.dim()),
+                    Line::from("Paste the link the new device shows (yo signin --link).").style(self.dim()),
                 ];
-                self.section(f, body, "Link a new device", lines)
+                self.section(f, body, "Link a New Device", lines)
             }
             Screen::LinkConfirm => self.section(
                 f,
                 body,
-                "Link a new device",
+                "Link a New Device",
                 vec![Line::from(vec![
-                    Span::raw("This device gets access to your account  "),
+                    Span::raw("Give the new device access to your account?  "),
                     Span::styled("y", self.fg(KEY).add_modifier(Modifier::BOLD)),
                     Span::styled(" link • ", self.dim()),
                     Span::styled("any key", self.fg(KEY).add_modifier(Modifier::BOLD)),
@@ -1644,7 +1648,7 @@ impl App {
         }
         let mut keys: Vec<(&str, &str)> = match self.screen {
             Screen::Loading => vec![("q", "quit")],
-            Screen::Welcome => vec![("1", "sign up"), ("2", "recovery key"), ("3", "link"), ("q", "quit")],
+            Screen::Welcome => vec![("1", "sign up"), ("2", "recovery key"), ("3", "another device"), ("q", "quit")],
             Screen::Signup => vec![("type", "a name"), ("tab", "person/bot"), ("enter", "sign up"), ("esc", "back")],
             Screen::RecoveryInput => vec![("paste", "the key"), ("enter", "sign in"), ("esc", "back")],
             Screen::LinkWait => vec![("esc", "cancel")],
@@ -1682,7 +1686,7 @@ impl App {
                 vec![("mouse", "select to copy"), ("v", "hide"), ("R", "new key"), ("esc", "back")]
             }
             Screen::Recovery => vec![("v", "show"), ("R", "new key"), ("esc", "back")],
-            Screen::LinkInput => vec![("paste", "the yo-link"), ("enter", "link"), ("esc", "back")],
+            Screen::LinkInput => vec![("paste", "the link"), ("enter", "link"), ("esc", "back")],
             Screen::LinkConfirm => vec![("y", "link"), ("any key", "cancel")],
         };
         if self.screen == Screen::Main
@@ -1768,14 +1772,14 @@ impl App {
             ])
         };
         let mut lines = vec![
-            Line::from("No account in this state directory yet.").style(self.dim()),
+            Line::from("No account here yet.").style(self.dim()),
             Line::from(""),
-            option("1", "Sign up: a new account"),
-            option("2", "Sign in with a recovery key"),
-            option("3", "Sign in with a link from another device"),
+            option("1", "Sign Up"),
+            option("2", "Sign In with Recovery Key"),
+            option("3", "Sign In with Another Device"),
             Line::from(""),
-            Line::from(format!("state  {}", short_path(&self.config.state, 40))).style(self.dim()),
-            Line::from(format!("hub    {}", self.config.hub.as_deref().unwrap_or("").trim_start_matches("https://")))
+            Line::from(format!("Folder {}", short_path(&self.config.state, 40))).style(self.dim()),
+            Line::from(format!("Hub    {}", self.config.hub.as_deref().unwrap_or("").trim_start_matches("https://")))
                 .style(self.dim()),
         ];
         if body.height < 12 {
@@ -1800,7 +1804,7 @@ impl App {
         if !self.human {
             lines.push(Line::from("Bots can't become people later.").style(self.dim()));
         }
-        let inner = render_card(f, body, "Sign up", lines, self.dim());
+        let inner = render_card(f, body, "Sign Up", lines, self.dim());
         if inner.height > 3 {
             self.hits.borrow_mut().push((Rect { y: inner.y + 3, height: 1, ..inner }, Hit::Toggle));
         }
@@ -1808,24 +1812,24 @@ impl App {
 
     fn draw_recovery(&self, f: &mut Frame, body: Rect) {
         let mut lines = if self.shown_key.is_empty() {
-            vec![Line::from("No recovery key kept in this directory.").style(self.dim())]
+            vec![Line::from("No Recovery Key saved here.").style(self.dim())]
         } else {
             self.key_lines(body.width)
         };
         lines.push(Line::from(""));
         lines.push(if self.confirm_rotate {
             Line::from(vec![
-                Span::raw("A new key replaces the account's backup: the old key and any passkey stop working.  "),
+                Span::raw("A new key replaces the old one; the old key and any passkey stop working.  "),
                 Span::styled("y", self.fg(KEY).add_modifier(Modifier::BOLD)),
-                Span::styled(" go on", self.dim()),
+                Span::styled(" continue", self.dim()),
             ])
         } else {
             Line::from(vec![
                 Span::styled("R", self.fg(KEY).add_modifier(Modifier::BOLD)),
-                Span::styled("  a new recovery key", self.dim()),
+                Span::styled("  new key", self.dim()),
             ])
         });
-        self.section(f, body, "Security · Recovery key", lines)
+        self.section(f, body, "Recovery Key", lines)
     }
 
     /// One bar per friend in the app's colours, with room for the marks and count before the name. The bar under the cursor brighter and edged; the add bar last, the field while typing.
@@ -1890,7 +1894,7 @@ impl App {
             y += height;
         }
         if self.snapshot.rows.is_empty() && y + 2 <= area.y + area.height {
-            let hint = Line::from("No friends yet: a adds one (try PING).").style(self.dim());
+            let hint = Line::from("No friends yet. Press a to add one (try PING).").style(self.dim());
             f.render_widget(Paragraph::new(hint).alignment(Alignment::Center), Rect { y: y + 1, height: 1, ..area });
         }
     }
@@ -1921,7 +1925,7 @@ impl App {
         if label_width > usize::from(rect.width)
             && (matches!(text, BarText::Split(..)) || label.starts_with("Sending ") || label.starts_with("Sent "))
         {
-            Paragraph::new("enlarge the window").style(style).render(rect, buf);
+            Paragraph::new("Make the window bigger").style(style).render(rect, buf);
             return;
         }
         let pad = 3.min(usize::from(rect.width).saturating_sub(label_width) / 2) as u16;
@@ -1964,7 +1968,7 @@ impl App {
                 format!("Terms    {}", settings::TERMS_URL),
                 format!("Privacy  {}", settings::PRIVACY_URL),
                 String::new(),
-                "Licenses: MIT (yo); its libraries under their own, see the repository".into(),
+                "Licenses: MIT; libraries under their own (see the repository)".into(),
             ],
             "feedback" => vec![format!("Feedback: {FEEDBACK}")],
             _ => vec![],
@@ -1975,7 +1979,7 @@ impl App {
     fn draw_blocked(&self, f: &mut Frame, area: Rect) {
         heading(f.buffer_mut(), area, "Blocked", self.dim());
         if self.blocked.is_empty() {
-            f.render_widget(Paragraph::new("No blocked contacts"), Rect { y: area.y + 1, height: 1, ..area });
+            f.render_widget(Paragraph::new("No Blocked Contacts"), Rect { y: area.y + 1, height: 1, ..area });
         }
         let first = (self.selected + 1).saturating_sub(usize::from(area.height - 1));
         for ((i, contact), y) in self.blocked.iter().enumerate().skip(first).zip(area.y + 1..area.bottom()) {
@@ -2115,7 +2119,7 @@ impl App {
                 "about" => (item.title.into(), format!("{} ›", crate::VERSION)),
                 "status" => {
                     let (dot, word, color) = if !self.listener_status.is_empty() {
-                        ("●", "listener stopped", Color::Red)
+                        ("●", "stopped", Color::Red)
                     } else if self.snapshot.banner.is_some() {
                         ("●", "offline", Color::Yellow)
                     } else {
@@ -2154,8 +2158,8 @@ impl App {
             "link_device" => vec![
                 pad(""),
                 pad("On the new device: yo signin --link"),
-                pad("(or Yo → Sign In → with another device)."),
-                pad("Enter here, then paste the yo-link it shows."),
+                pad("(or in the app: Sign In with Another Device)."),
+                pad("Then press enter here and paste the link it shows."),
                 pad(""),
             ],
             _ => Vec::new(),
@@ -2183,7 +2187,7 @@ impl App {
             key("click", "select a request"),
             Line::from(""),
             head("Settings"),
-            key("s", "open settings and devices"),
+            key("s", "Settings"),
             key("enter", "open a row or toggle requests"),
             key("?", "this help"),
             key("esc q", "back, quit"),
@@ -2195,11 +2199,11 @@ impl App {
 fn diagnostics(config: &Config) -> Value {
     let mut lines = match crate::execute(config, &words(&["status"])) {
         Ok(s) => vec![
-            if s["listening"] == true { "Listener running" } else { "Listener stopped" }.into(),
+            if s["listening"] == true { "Receiving" } else { "Not receiving" }.into(),
             format!("Hub  {}", s["hub"].as_str().unwrap_or("—")),
             format!("{} contacts · {} friends · {} groups", s["contacts"], s["friends"], s["groups"]),
-            format!("{} waiting · {} dropped", s["waiting"], s["dropped"]),
-            format!("Bot · {}", if s["bot"] == true { "yes (for good)" } else { "no" }),
+            format!("{} unsent · {} dropped", s["waiting"], s["dropped"]),
+            format!("Bot  {}", if s["bot"] == true { "yes" } else { "no" }),
         ],
         Err(f) => vec![format!("Status: {}", f.error)],
     };
@@ -2437,7 +2441,7 @@ fn link(config: &Config, tx: &Sender<Msg>, cancel: &AtomicBool) -> Result<Value,
             return Ok(done);
         }
     }
-    Err(Failure::new("no device answered the link"))
+    Err(Failure::new("No answer from the other device"))
 }
 
 /// The key in capitals, in groups of four.
@@ -2468,7 +2472,7 @@ mod tests {
             assert!(text.contains(&app.link_text), "{rows:?}");
             assert_eq!(text.contains('█'), qr);
             if !qr {
-                assert!(text.contains("enlarge the window"));
+                assert!(text.contains("Make the window bigger"));
             }
             assert!(rows.iter().any(|row| row.contains('╰') && row.contains('╯')));
         }
@@ -2485,7 +2489,7 @@ mod tests {
             assert_eq!(inside.matches("ABCD").count(), 16, "{rows:?}");
             assert!(rows.iter().any(|r| r.contains('╰') && r.contains('╯')));
         }
-        assert!(screen(&app, 22, 5).join("").contains("enlarge the window"));
+        assert!(screen(&app, 22, 5).join("").contains("Make the window bigger"));
     }
 
     #[test]
