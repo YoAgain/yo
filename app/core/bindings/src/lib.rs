@@ -163,6 +163,8 @@ pub struct HttpResult {
 #[uniffi::export(with_foreign)]
 pub trait HttpTransport: Send + Sync {
     fn request(&self, method: String, path: String, headers: Vec<Header>, body: Vec<u8>) -> HttpResult;
+    /// The status of the hub's answer to a request that went wrapped (`use_hub`): the app sees only `200` outside.
+    fn opened(&self, method: String, path: String, status: u16);
 }
 
 /// The turn for writing the shared `StateDb` between an app and its extensions, implemented by the app (iOS: a
@@ -282,6 +284,104 @@ impl Shared {
 /// The turn for a step that writes from the start (opening, registering), before its store is known.
 fn first_turn(lock: &Option<Arc<dyn StateLock>>) -> Result<Option<Turn<'_>>, YoError> {
     lock.as_deref().map(|lock| Turn::take(lock, None)).transpose()
+}
+
+/// The hub the app talks to (`use_hub`): over Oblivious HTTP to its pinned key (spec 4.1) unless direct.
+static HUB: Mutex<Option<(String, bool)>> = Mutex::new(None);
+
+/// Sets the hub's address. Every later request to a hub with a pinned OHTTP key (`yo_core::ohttp::PINNED`) goes
+/// wrapped to `/v1/ohttp`, never falling back to direct requests; `direct` (debug builds only) sends them as before.
+/// Before it is called, or for a hub without a pinned key, requests go direct.
+#[uniffi::export]
+pub fn use_hub(url: String, direct: bool) {
+    *HUB.lock().unwrap_or_else(PoisonError::into_inner) = Some((url, direct));
+}
+
+/// The app's transport as the core's: wrapped in Oblivious HTTP for a pinned hub (`use_hub`), else direct.
+fn wire(transport: Arc<dyn HttpTransport>) -> Arc<dyn yo_core::Transport> {
+    let hub = HUB.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let keys = match hub {
+        Some((url, false)) => yo_core::ohttp::pinned(&url),
+        _ => Vec::new(),
+    };
+    if keys.is_empty() {
+        return Arc::new(Http(transport));
+    }
+    let line = |anonymous| -> Arc<dyn yo_core::Transport> { Arc::new(Line { app: transport.clone(), anonymous }) };
+    Arc::new(Wrapped { app: transport.clone(), ohttp: yo_core::ohttp::Ohttp::new(line(false), line(true), keys) })
+}
+
+/// On a wrapped request (`POST /v1/ohttp`) only, for the app and never sent: which connection it takes
+/// (`signed`/`anonymous`, spec 1.1) and the request inside (`METHOD /path`), for the app's own timeouts and marks.
+pub const HEADER_LINE: &str = "yo-ohttp-line";
+pub const HEADER_INNER: &str = "yo-ohttp-inner";
+const OHTTP_PATH: &str = "/v1/ohttp";
+
+std::thread_local! {
+    /// The request `Wrapped` is sending on this thread, for its line's hint.
+    static INNER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+struct Wrapped {
+    app: Arc<dyn HttpTransport>,
+    ohttp: yo_core::ohttp::Ohttp,
+}
+
+impl yo_core::Transport for Wrapped {
+    fn authenticated(&self) -> bool {
+        yo_core::Transport::authenticated(&self.ohttp)
+    }
+
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<yo_core::Response, String> {
+        self.request_headers(method, path, headers, body).map(|(response, _)| response)
+    }
+
+    fn request_headers(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<(yo_core::Response, Vec<(String, String)>), String> {
+        INNER.with(|inner| *inner.borrow_mut() = format!("{method} {path}"));
+        let answer = yo_core::Transport::request_headers(&self.ohttp, method, path, headers, body);
+        INNER.with(|inner| inner.borrow_mut().clear());
+        // The hub's own answer, for the app as a direct one (426: this build is too old).
+        if let Ok((response, _)) = &answer {
+            self.app.opened(method.to_owned(), path.to_owned(), response.status);
+        }
+        answer
+    }
+}
+
+/// One line of Oblivious HTTP over the app's transport, its connection named for the app (`HEADER_LINE`).
+struct Line {
+    app: Arc<dyn HttpTransport>,
+    anonymous: bool,
+}
+
+impl yo_core::Transport for Line {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<yo_core::Response, String> {
+        let mut headers = headers.to_vec();
+        if path == OHTTP_PATH {
+            let line = if self.anonymous { "anonymous" } else { "signed" };
+            headers.push((HEADER_LINE.to_owned(), line.to_owned()));
+            headers.push((HEADER_INNER.to_owned(), INNER.with(|inner| inner.borrow().clone())));
+        }
+        yo_core::Transport::request(&Http(self.app.clone()), method, path, &headers, body)
+    }
 }
 
 struct Http(Arc<dyn HttpTransport>);
@@ -716,7 +816,7 @@ pub fn open_backup(
             Door::Code(&code)
         }
     };
-    let opened = Client::open_backup(&Http(transport), user_id.as_deref(), &door, &hub_keys)?;
+    let opened = Client::open_backup(&*wire(transport), user_id.as_deref(), &door, &hub_keys)?;
     Ok(opened.map(|o| YoOpenedBackup { k: o.k.to_vec(), sealed: o.plain, record: o.record.into() }))
 }
 
@@ -730,7 +830,7 @@ pub fn anonymous_request(method: String, path: String) -> bool {
 /// asked too often.
 #[uniffi::export]
 pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Result<bool, YoError> {
-    Ok(Client::username_free(&Http(transport), &username)?)
+    Ok(Client::username_free(&*wire(transport), &username)?)
 }
 
 /// A link this device opened (spec 2.5): show `text` (as a QR code, or to paste), keep it for `link_wait`.
@@ -760,7 +860,7 @@ pub struct YoLinked {
 /// New device: opens a link at the hub with a one-time key (spec 2.5). `Refused` 404: the hub adds no devices.
 #[uniffi::export]
 pub fn link_start(transport: Arc<dyn HttpTransport>) -> Result<YoLinkRequest, YoError> {
-    let r = yo_core::link::start(&Http(transport))?;
+    let r = yo_core::link::start(&*wire(transport))?;
     Ok(YoLinkRequest { id: r.id, secret: r.secret.to_vec(), text: r.text })
 }
 
@@ -772,7 +872,7 @@ pub fn link_wait(
     wait_s: u64,
 ) -> Result<Option<YoLinked>, YoError> {
     let request = yo_core::link::Request { id: request.id, secret: key_of(request.secret)?, text: request.text };
-    Ok(yo_core::link::wait(&Http(transport), &request, wait_s)?.map(|l| YoLinked {
+    Ok(yo_core::link::wait(&*wire(transport), &request, wait_s)?.map(|l| YoLinked {
         username: l.username,
         account_secret: l.account_secret.to_vec(),
         legacy_storage_key: l.legacy_storage_key.map(|k| k.to_vec()),
@@ -806,7 +906,7 @@ pub struct YoNameCheck {
 /// An unsigned attestation challenge before registering (spec 4.2); `None`: attestation is off at the hub.
 #[uniffi::export]
 pub fn attest_open_challenge(transport: Arc<dyn HttpTransport>) -> Result<Option<Vec<u8>>, YoError> {
-    Ok(Client::attest_open_challenge(&Http(transport))?)
+    Ok(Client::attest_open_challenge(&*wire(transport))?)
 }
 
 /// A name check with the hub's minimum (spec 2.2). `challenge`: the attested unsigned challenge, `None` without.
@@ -816,7 +916,7 @@ pub fn username_check(
     username: String,
     challenge: Option<Vec<u8>>,
 ) -> Result<YoNameCheck, YoError> {
-    let check = Client::username_check(&Http(transport), &username, challenge.as_deref())?;
+    let check = Client::username_check(&*wire(transport), &username, challenge.as_deref())?;
     Ok(YoNameCheck { status: check.status, name_min: check.name_min })
 }
 
@@ -889,7 +989,7 @@ impl YoNameField {
     /// Fetches the unsigned challenge for the platform to attest over (App Attest, Play Integrity); `None`
     /// (off at the hub, no answer): the device is not verifiable, nothing to attest.
     pub fn start_device_check(&self) -> Option<Vec<u8>> {
-        let challenge = Client::attest_open_challenge(&Http(self.transport.clone())).ok().flatten();
+        let challenge = Client::attest_open_challenge(&*wire(self.transport.clone())).ok().flatten();
         match &challenge {
             Some(c) => *self.challenge.lock().unwrap_or_else(PoisonError::into_inner) = Some(c.clone()),
             None => self.device_done(0, None),
@@ -940,7 +1040,7 @@ impl YoNameField {
                 .0;
         };
         drop(field);
-        let answer = Client::username_check(&Http(self.transport.clone()), &query.text, query.challenge.as_deref())
+        let answer = Client::username_check(&*wire(self.transport.clone()), &query.text, query.challenge.as_deref())
             .map(|c| (c.status, c.name_min))
             .map_err(drop);
         let mut field = self.lock();
@@ -1004,13 +1104,13 @@ pub fn help_send(
     text: String,
     app_version: String,
 ) -> Result<(), YoError> {
-    Ok(yo_core::help::send_message(&Http(transport), &install, &text, &app_version)?)
+    Ok(yo_core::help::send_message(&*wire(transport), &install, &text, &app_version)?)
 }
 
 /// The install's thread with the Yo team (empty before its first message).
 #[uniffi::export]
 pub fn help_thread(transport: Arc<dyn HttpTransport>, install: String) -> Result<SupportThread, YoError> {
-    let thread = yo_core::help::thread(&Http(transport), &install)?;
+    let thread = yo_core::help::thread(&*wire(transport), &install)?;
     let messages = thread.messages.into_iter().map(|m| SupportMessage {
         id: m.id,
         from_team: m.from_team == 1,
@@ -1024,7 +1124,7 @@ pub fn help_thread(transport: Arc<dyn HttpTransport>, install: String) -> Result
 /// The team's answers read, through the id shown last.
 #[uniffi::export]
 pub fn help_read(transport: Arc<dyn HttpTransport>, install: String, through: u64) -> Result<(), YoError> {
-    Ok(yo_core::help::read(&Http(transport), &install, through)?)
+    Ok(yo_core::help::read(&*wire(transport), &install, through)?)
 }
 
 /// A crash (`crash` true) or error report, the JSON the app made, by the install id: the hub's status (204 taken,
@@ -1037,7 +1137,7 @@ pub fn help_diagnostic(
     report: String,
 ) -> Result<u16, YoError> {
     let kind = if crash { yo_core::help::Diagnostic::Crash } else { yo_core::help::Diagnostic::Error };
-    Ok(yo_core::help::send_diagnostic(&Http(transport), &install, kind, report.as_bytes())?)
+    Ok(yo_core::help::send_diagnostic(&*wire(transport), &install, kind, report.as_bytes())?)
 }
 
 /// What may be typed as a username (spec 2.2), so the app's field can never disagree with the hub.
@@ -1221,7 +1321,7 @@ impl YoClient {
         lock: Option<Arc<dyn StateLock>>,
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
-        let http: Arc<dyn yo_core::Transport> = Arc::new(Http(transport));
+        let http: Arc<dyn yo_core::Transport> = wire(transport);
         let open = || -> Result<(Client, bool, Shared), YoError> {
             let Loaded::Newer { word, state, records } = db.0.load(None, &key)? else {
                 return Err(YoError::State);
@@ -1276,7 +1376,7 @@ impl YoClient {
         let legacy = legacy_storage_key.map(key_of).transpose()?.or(seed.map(|seed| yo_core::storage::key(&seed)));
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
         let mut turn = first_turn(&lock)?;
-        let http: Arc<dyn yo_core::Transport> = Arc::new(Http(transport));
+        let http: Arc<dyn yo_core::Transport> = wire(transport);
         // This account's registration saved and not answered yet (a lost answer, a kill): finished as it is. A new
         // device would replace the one the hub may have taken already, and what came for it since.
         if let (Some(secret), Ok(Loaded::Newer { word, state, records })) = (account, db.0.load(None, &key)) {

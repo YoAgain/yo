@@ -16,6 +16,12 @@ object Hub {
             android.provider.Settings.System.getString(context.contentResolver, "firebase.test.lab") == "true"
         }.getOrDefault(false)
         if (testLab) url = "https://dev.justyo.app"
+        // Oblivious HTTP to the hub's pinned key (spec 4.1); a debug or QA build goes direct after
+        // `adb shell settings put global yo_direct 1` (measurements against the old way).
+        val direct = (BuildConfig.DEBUG || BuildConfig.APPLICATION_ID.endsWith(".soak")) && runCatching {
+            android.provider.Settings.Global.getString(context.contentResolver, "yo_direct") == "1"
+        }.getOrDefault(false)
+        uniffi.yo.useHub(url, direct)
     }
 
     /** Keys the hub signs key-handing answers with (spec 4.1): the one in use and an offline spare. */

@@ -176,6 +176,24 @@ final class HubTransport: HttpTransport {
   init(base: URL, timeout: TimeInterval = 70) {
     self.base = base
     self.timeout = timeout
+    // Oblivious HTTP to the hub's pinned key (spec 4.1); Yo Dev goes direct with YO_DIRECT=1 (measurements).
+    useHub(url: base.absoluteString, direct: Hub.isDevApp && ProcessInfo.processInfo.environment["YO_DIRECT"] == "1")
+  }
+
+  /// The status inside a wrapped request's answer (outside it is 200): this build too old, the hub's errors.
+  func opened(method: String, path: String, status: UInt16) {
+    let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+    guard route != "/v1/attest", route != "/v1/attest/challenge" else { return }
+    if status == 426 {
+      Self.tooOld.store(true, ordering: .relaxed)
+      AppUpdate.tooOld()
+    }
+    if status >= 400, route != "/v1/help/error", route != "/v1/help/crash",
+      !Noise.status(status, method: method, route: route, signed: false)
+    {
+      Diagnostics.record(NSError(domain: "HTTP", code: Int(status)),
+        place: "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/"))
+    }
   }
 
   /// Signed and anonymous requests never share a connection, cookies, cache or credentials (spec 1).
@@ -211,23 +229,30 @@ final class HubTransport: HttpTransport {
   }
 
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
+    // A request wrapped in Oblivious HTTP (the core's `use_hub`): its connection and the request inside, for this app
+    // only and never sent. Timeouts, turns and marks go by the request inside.
+    let line = headers.first(where: { $0.name == "yo-ohttp-line" })?.value
+    let inner = headers.first(where: { $0.name == "yo-ohttp-inner" })?.value.split(separator: " ", maxSplits: 1)
+    let (outerMethod, outerPath) = (method, path)
+    let (method, path) = inner?.count == 2 ? (String(inner![0]), String(inner![1])) : (method, path)
+    let headers = headers.filter { $0.name != "yo-ohttp-line" && $0.name != "yo-ohttp-inner" }
     guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil, headers: []) }
-    guard let url = URL(string: path, relativeTo: base) else {
+    guard let url = URL(string: outerPath, relativeTo: base) else {
       Diagnostics.record(NSError(domain: "HubTransport", code: -1000))
       return HttpResult(status: 0, body: Data(), error: "bad path", headers: [])
     }
     var request = URLRequest(url: url, timeoutInterval: timeout)
-    request.httpMethod = method
+    request.httpMethod = outerMethod
     for header in headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
     request.setValue(AppUpdate.wire, forHTTPHeaderField: "Yo-App")
-    if !body.isEmpty || method != "GET" { request.httpBody = body }
+    if !body.isEmpty || outerMethod != "GET" { request.httpBody = body }
     let done = DispatchSemaphore(value: 0)
     let answer = Answer()
     let start = Perf.on ? CACurrentMediaTime() : 0
     let started = ContinuousClock.now
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
     // Only what names nobody goes anonymous (yoip::net::api::anonymous, spec 1).
-    let anonymous = !signed && anonymousRequest(method: method, path: path)
+    let anonymous = line.map { $0 == "anonymous" } ?? (!signed && anonymousRequest(method: method, path: path))
     let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
     let longPoll = method == "GET" && path.hasPrefix("/v1/inbox?wait=")
     let turn = SharedAccess.current
@@ -284,7 +309,7 @@ final class HubTransport: HttpTransport {
     }
     if attestation { return answer.result }
     let status = answer.result.status
-    if !diagnosticUpload, status >= 400, !Noise.status(status, method: method, route: route, signed: signed) {
+    if line == nil, !diagnosticUpload, status >= 400, !Noise.status(status, method: method, route: route, signed: signed) {
       Diagnostics.record(NSError(domain: "HTTP", code: Int(status)), place: codePlace)
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500,

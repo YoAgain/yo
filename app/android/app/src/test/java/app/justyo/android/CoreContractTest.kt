@@ -19,6 +19,7 @@ class CoreContractTest {
                 assertTrue(path.startsWith("/v1/"))
                 return HttpResult(429u, byteArrayOf(), null, emptyList())
             }
+            override fun opened(method: String, path: String, status: UShort) {}
         }
         try { usernameFree(transport, "ExampleName"); fail("Expected 429") }
         catch (error: YoException.Refused) { assertEquals(429, error.status.toInt()) }
