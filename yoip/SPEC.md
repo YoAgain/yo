@@ -90,7 +90,7 @@ Not:        an unlisted ZWJ chain or a tag flag
 Start:      a letter, emoji or digit; at least one letter or emoji (1abc valid, 1234 not)
 Skeleton:   uppercase, NFKD, drop nonspacing marks, U+FE0E/F, skin tones, U+200D, U+E0020–E007F; 0→O 1→I VV→W
 ```
-New names below `YO_NAME_MIN` clusters (default 3) get `400`. Existing shorter names still work. Reserved skeletons count as taken (`409`).
+New names below the minimum get `400`: 12 clusters, or 4 with a valid attestation in `Register` (§4.2). Until the hub turns this on, the minimum is `YO_NAME_MIN` (default 3) for everyone. Name checks answer with `Yo-Name-Min`, the minimum for this caller. Existing shorter names still work. Reserved skeletons count as taken (`409`).
 ### 2.3 Verification
 Users compare the safety number as 60 digits (`display_string`) or QR (`compare`). libsignal Fingerprint v2 covers both user ids and `🔐 account keys`, 5200 iterations. Verification survives a new device. A changed verified key warns; clients block sends until `confirm_identity`.
 ### 2.4 Recovery
@@ -395,7 +395,7 @@ Pinned clients MUST send `Yo-Nonce` and reject unverified answers (`Protocol`). 
 | `PUT /access-key` | signed | `AccessKey` | `204` | §3.3 |
 | `DELETE /account` | signed | – | `204` | §4.2 |
 | `POST /attest` | signed | `Attest { platform, payload }` | `AttestResult { verdict }` | §4.2 |
-| `GET /attest/challenge` | signed | – | `AttestChallenge { challenge }`, or empty `204` when off | §4.2 |
+| `GET /attest/challenge` | – or signed | – | `AttestChallenge { challenge }`, or empty `204` when off | §4.2 |
 | `PUT /backup` | signed | `Backup` | `204` | §2.4 |
 | `GET /backup/{user id or locator}` | `🔐 door key` | – | record, else `404` | §2.4 |
 | `PUT /blobs/{id}?fetches=n` | signed by body hash | ciphertext | `201` | §4.3 |
@@ -465,7 +465,7 @@ Request refusals carry `Retry-After` and hold only that recipient. Successful ba
 ### 4.2 Accounts
 Registration proofs carry no timestamp. Device ids are single-use forever.
 ```
-Register { username; NewDevice { device_id, device_key, certificate, auth_key, push, registration_id, prekeys, proof } }
+Register { username; optional<Attest> attest; NewDevice { device_id, device_key, certificate, auth_key, push, registration_id, prekeys, proof } }
 proof = XEdDSA(account key, "yo register v1" || Handle(username) || device id || device key || auth key)
 ```
 ```mermaid
@@ -488,7 +488,7 @@ sequenceDiagram
 - An upload MUST replace the signed and `🔐 last-resort keys` it carries (others stay) and append `🔐 one-time keys` above the highest id (§4.1).
 - The hub MUST return one bundle per device outside `except`, MUST hand out each `🔐 one-time key` only once, then the last-resort key, and MUST omit a bundle without signed or `🔐 last-resort key`.
 
-**Device attestation.** Optional, off by default. Clients fetch the challenge, then post the payload (1 App Attest, 2 Play Integrity). The hub only measures; it MUST NOT let attestation affect access, limits or delivery.
+**Device attestation.** Optional, off by default. Clients fetch the challenge, then post the payload (1 App Attest, 2 Play Integrity). Before registering, clients SHOULD fetch the challenge unsigned and send the payload in `Register`; it binds the challenge, not the account. The hub MUST NOT let attestation affect access, limits or delivery, except the name minimum (§2.2). Devices that cannot attest (no Google services, F-Droid, CLI, bots) get 12.
 
 **Push.** A push wakes the device to fetch; it carries no content. The hub learns only urgency. Clients set the token with `PUT /v1/push`.
 - `yo-urgent: true|false` defaults to true; the hub MUST reject other values with `400`. Senders SHOULD mark Yo, photo and video urgent. Apps SHOULD show only urgent deliveries.
