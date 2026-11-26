@@ -10,9 +10,9 @@ NOW = 29_000_000 * 60000 + 30_000  # half a minute into minute 29,000,000
 class LiveTests(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:")
-        self.db.execute("CREATE TABLE events (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID")
+        self.db.execute("CREATE TABLE stat_minute (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID")
         m = NOW // 60000
-        self.db.executemany("INSERT INTO events VALUES (?,?,?)", [
+        self.db.executemany("INSERT INTO stat_minute VALUES (?,?,?)", [
             ("yo-in", m, 3), ("media-in", m, 2), ("yo-in-bot", m, 50), ("yo-out", m, 9),
             ("yo-in", m - 1, 4), ("yo-in", m - 59, 7), ("yo-in", m - 60, 100), ("yo-in", m + 1, 100)])
 
@@ -26,7 +26,7 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(out["minutes"][0], 7)  # 59 minutes ago is the first; 60 ago and the future are out
         self.assertEqual(sum(out["minutes"]), 66)
         self.assertEqual(sum(out["bots"]), 50)
-        self.db.execute("DELETE FROM events")
+        self.db.execute("DELETE FROM stat_minute")
         self.assertEqual(users.live(self.db, NOW)["minutes"], [0] * 60)
 
 

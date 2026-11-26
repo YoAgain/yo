@@ -14,18 +14,18 @@ class RequestCountTests(unittest.TestCase):
             path = os.path.join(d, "hub.sqlite")
             db = sqlite3.connect(path)
             db.executescript("""
-                CREATE TABLE users(id BLOB, created_at INTEGER);
-                CREATE TABLE devices(id BLOB, user_id BLOB, last_seen_at INTEGER, push_platform INTEGER,
+                CREATE TABLE account(id BLOB, created_at INTEGER);
+                CREATE TABLE account_device(id BLOB, user_id BLOB, last_seen_at INTEGER, push_platform INTEGER,
                     push_token BLOB, app TEXT, created_at INTEGER);
-                CREATE TABLE backups(user_id BLOB, updated_at INTEGER);
-                CREATE TABLE handles(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER);
-                CREATE TABLE messages(device_id BLOB);
-                CREATE TABLE request_hours(user_id BLOB, hour INTEGER, n INTEGER, PRIMARY KEY(user_id, hour));
+                CREATE TABLE account_backup(user_id BLOB, updated_at INTEGER);
+                CREATE TABLE account_name(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER);
+                CREATE TABLE message(device_id BLOB);
+                CREATE TABLE stat_request(user_id BLOB, hour INTEGER, n INTEGER, PRIMARY KEY(user_id, hour));
             """)
             hour = int(time.time() * 1000) // 3_600_000
             a, b, c = b"\x01" * 16, b"\x02" * 16, b"\x03" * 16
-            db.executemany("INSERT INTO users VALUES (?, 0)", [(a,), (b,), (c,)])
-            db.executemany("INSERT INTO request_hours VALUES (?, ?, ?)",
+            db.executemany("INSERT INTO account VALUES (?, 0)", [(a,), (b,), (c,)])
+            db.executemany("INSERT INTO stat_request VALUES (?, ?, ?)",
                            [(a, hour, 500), (a, hour - 23, 20), (a, hour - 24, 1000), (b, hour - 3, 2)])
             db.commit()
             db.close()
@@ -36,11 +36,11 @@ class RequestCountTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "hub.sqlite")
             db = sqlite3.connect(path)
-            db.executescript("CREATE TABLE users(id BLOB, created_at INTEGER); CREATE TABLE devices(id BLOB, user_id BLOB,"
+            db.executescript("CREATE TABLE account(id BLOB, created_at INTEGER); CREATE TABLE account_device(id BLOB, user_id BLOB,"
                              " last_seen_at INTEGER, push_platform INTEGER, push_token BLOB, app TEXT, created_at INTEGER);"
-                             " CREATE TABLE backups(user_id BLOB, updated_at INTEGER);"
-                             " CREATE TABLE handles(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER);"
-                             " CREATE TABLE messages(device_id BLOB); INSERT INTO users VALUES (x'01', 0);")
+                             " CREATE TABLE account_backup(user_id BLOB, updated_at INTEGER);"
+                             " CREATE TABLE account_name(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER);"
+                             " CREATE TABLE message(device_id BLOB); INSERT INTO account VALUES (x'01', 0);")
             db.commit()
             db.close()
             self.assertEqual([u["requests_24h"] for u in users.hub("live", path)["users"]], [0])

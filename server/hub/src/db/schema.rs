@@ -1,4 +1,4 @@
-//! The store's schema (`SCHEMA`, schema 10) and the way every older database a hub has written comes up to it.
+//! The store's schema (`SCHEMA`, schema 11) and the way every older database a hub has written comes up to it.
 //! A database of another schema is refused, never half migrated.
 
 use super::{diagnostic_signature, diagnostic_write, immediate, legacy_crash, newest_builds};
@@ -8,6 +8,16 @@ use yoip::KEY_LEN;
 /// Brings the database to this schema: each step does nothing where it was done before.
 pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     check_version(conn)?;
+    if user_version(conn)? < SCHEMA_VERSION {
+        to_10(conn)?;
+        to_11(conn)?;
+    }
+    conn.execute_batch(SCHEMA)?;
+    skeletons_of_today(conn)
+}
+
+/// Schemas 1 to 10, under the table names of before (`SCHEMA_10`): each step does nothing where it was done before.
+fn to_10(conn: &mut Connection) -> rusqlite::Result<()> {
     if user_version(conn)? == 1 {
         from_1(conn)?;
     }
@@ -15,7 +25,7 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
         from_2(conn)?;
     }
     without_grace(conn)?;
-    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(SCHEMA_10)?;
     if !has_column(conn, "blobs", "gets_left")? {
         immediate(conn, |tx| {
             tx.execute_batch(
@@ -80,9 +90,59 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     without_feedback(conn)?;
     with_installs(conn)?;
     conn.execute_batch("CREATE INDEX IF NOT EXISTS support_by_install ON support_messages(install, created_at, id)")?;
-    with_stats(conn)?;
-    skeletons_of_today(conn)
+    with_stats(conn)
 }
+
+/// Schema 11: every table named by its area (`account`, `name`, `message`, `grp`, `support`, `diag`, `stat`), rows
+/// and all; the indexes and the trigger come back under their new names with `SCHEMA`.
+fn to_11(conn: &mut Connection) -> rusqlite::Result<()> {
+    immediate(conn, |tx| {
+        tx.execute_batch(
+            "DROP TRIGGER IF EXISTS diagnostic_stats_deleted;
+             DROP INDEX IF EXISTS account_keys_by_user; DROP INDEX IF EXISTS handles_by_user;
+             DROP INDEX IF EXISTS devices_by_user; DROP INDEX IF EXISTS messages_by_device;
+             DROP INDEX IF EXISTS messages_by_age; DROP INDEX IF EXISTS reports_by_reported;
+             DROP INDEX IF EXISTS blobs_by_user; DROP INDEX IF EXISTS blobs_by_age;
+             DROP INDEX IF EXISTS diagnostics_recent; DROP INDEX IF EXISTS diagnostic_installs_by_day;",
+        )?;
+        for (old, new) in RENAMED {
+            if has_table(tx, old)? {
+                tx.execute_batch(&format!("ALTER TABLE {old} RENAME TO {new}"))?;
+            }
+        }
+        tx.execute_batch("PRAGMA user_version = 11")
+    })
+}
+
+/// Schema 10's table names and schema 11's.
+pub(super) const RENAMED: [(&str, &str); 26] = [
+    ("users", "account"),
+    ("devices", "account_device"),
+    ("handles", "account_name"),
+    ("account_keys", "account_key"),
+    ("contact_keys", "account_contact_key"),
+    ("prekeys", "account_prekey"),
+    ("profile_commitments", "account_profile"),
+    ("storage", "account_storage"),
+    ("backups", "account_backup"),
+    ("attestation", "account_attestation"),
+    ("reserved", "name_reserved"),
+    ("gone", "account_device_gone"),
+    ("messages", "message"),
+    ("blobs", "message_blob"),
+    ("blob_quota", "message_blob_quota"),
+    ("zk_groups", "grp"),
+    ("zk_groups_gone", "grp_gone"),
+    ("support_messages", "support"),
+    ("reports", "support_report"),
+    ("diagnostics", "diag"),
+    ("diagnostic_seen", "diag_seen"),
+    ("diagnostic_installs", "diag_install"),
+    ("diagnostic_builds", "diag_build"),
+    ("stats", "stat"),
+    ("events", "stat_minute"),
+    ("request_hours", "stat_request"),
+];
 
 /// Usernames are found by their skeleton (spec 2.2), which drops more since 2026-11-24 (U+200D, tag characters): a
 /// name kept under the skeleton of before gets today's, unless another name has that one already (that one keeps it; this
@@ -90,14 +150,14 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
 fn skeletons_of_today(conn: &mut Connection) -> rusqlite::Result<()> {
     immediate(conn, |tx| {
         let names: Vec<(Vec<u8>, String)> = tx
-            .prepare("SELECT value, spelling FROM handles WHERE kind = ?1 AND spelling IS NOT NULL")?
+            .prepare("SELECT value, spelling FROM account_name WHERE kind = ?1 AND spelling IS NOT NULL")?
             .query_map([yoip::net::handle::KIND_USERNAME], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
         for (value, spelling) in names {
             let today = yoip::net::handle::skeleton(&spelling).into_bytes();
             if today != value {
                 tx.execute(
-                    "UPDATE OR IGNORE handles SET value = ?3 WHERE kind = ?1 AND value = ?2",
+                    "UPDATE OR IGNORE account_name SET value = ?3 WHERE kind = ?1 AND value = ?2",
                     params![yoip::net::handle::KIND_USERNAME, value, today],
                 )?;
             }
@@ -107,9 +167,239 @@ fn skeletons_of_today(conn: &mut Connection) -> rusqlite::Result<()> {
 }
 
 /// The schema this hub writes; another is refused, never half migrated (1 and 2 are brought up: `from_1`, `from_2`).
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS account (
+    id BLOB PRIMARY KEY,
+    account_key BLOB NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    bot INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+-- Every account key a user ever had: a key belongs to one user forever.
+CREATE TABLE IF NOT EXISTS account_key (
+    key BLOB PRIMARY KEY,
+    user_id BLOB NOT NULL REFERENCES account(id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS account_key_by_user ON account_key(user_id);
+-- How people find a user: a username by its skeleton (spec 2.2); kind 1, a phone number as its HMAC, is no longer
+-- made. `spelling`: a username as its owner writes it (\"YoGPT\"); NULL for names from before spellings were kept,
+-- shown as their skeleton (`migrate` adds the column to such a database).
+CREATE TABLE IF NOT EXISTS account_name (
+    kind INTEGER NOT NULL,
+    value BLOB NOT NULL,
+    user_id BLOB NOT NULL REFERENCES account(id),
+    spelling TEXT,
+    PRIMARY KEY (kind, value)
+) WITHOUT ROWID;
+-- Usernames nobody may claim, by skeleton (spec 2.2): seeded from the operator's list at every start (INSERT OR
+-- IGNORE), never deleted by the hub. A user who has such a name keeps it.
+CREATE TABLE IF NOT EXISTS name_reserved (
+    skeleton TEXT PRIMARY KEY,
+    spelling TEXT NOT NULL,
+    note TEXT,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS account_name_by_user ON account_name(user_id, kind);
+CREATE TABLE IF NOT EXISTS account_device (
+    id BLOB PRIMARY KEY,
+    user_id BLOB NOT NULL REFERENCES account(id),
+    device_key BLOB NOT NULL UNIQUE,
+    auth_key BLOB NOT NULL,
+    push_platform INTEGER NOT NULL,
+    push_token BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    app TEXT,
+    registration_id INTEGER NOT NULL DEFAULT 0,
+    number INTEGER NOT NULL DEFAULT 1,
+    -- The highest one-time prekey id it uploaded: one not above it is one it uploaded before (a repeat), never taken
+    -- again, so a key handed out once is not handed out again.
+    prekey_max INTEGER NOT NULL DEFAULT 0,
+    -- The version its app named with it (`Yo-App`, spec 4.1: 1.0.0-RC36), if any.
+    version TEXT
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS account_device_by_user ON account_device(user_id);
+-- Devices that were replaced: their own requests answer 410.
+CREATE TABLE IF NOT EXISTS account_device_gone (
+    id BLOB PRIMARY KEY,
+    gone_at INTEGER NOT NULL
+) WITHOUT ROWID;
+-- Each device's prekeys (spec 3.1), as it uploaded them: kind 0 its signed prekey, 1 its last resort Kyber prekey
+-- (one of each), 2 one-time EC prekeys, 3 one-time Kyber prekeys (each handed out once).
+CREATE TABLE IF NOT EXISTS account_prekey (
+    device_id BLOB NOT NULL,
+    kind INTEGER NOT NULL,
+    id INTEGER NOT NULL,
+    key BLOB NOT NULL,
+    signature BLOB NOT NULL,
+    PRIMARY KEY (device_id, kind, id)
+) WITHOUT ROWID;
+-- AUTOINCREMENT: an id is never handed out twice, so an ack can never delete an envelope it did not see.
+CREATE TABLE IF NOT EXISTS message (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id BLOB NOT NULL,
+    envelope BLOB NOT NULL,
+    received_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS message_by_device ON message(device_id, id);
+CREATE INDEX IF NOT EXISTS message_by_age ON message(received_at);
+-- Each user's backup record (spec 2.4), as the client sent it: found by the user id or by its locator, handed out to a
+-- request signed by one of its doors' auth keys (the passkey's NULL without one).
+CREATE TABLE IF NOT EXISTS account_backup (
+    user_id BLOB PRIMARY KEY REFERENCES account(id),
+    locator BLOB UNIQUE,
+    record BLOB NOT NULL,
+    updated_at INTEGER NOT NULL,
+    auth_passkey BLOB,
+    auth_code BLOB
+) WITHOUT ROWID;
+-- Users reported (spec 4.2), for the operator to review: the reporting install id (`with_installs`; never an
+-- account), the reported user, why (1 spam, 2 abuse, 3 other), when. One row per pair, the latest report. No
+-- content: the hub has none. Gone with the reported account.
+CREATE TABLE IF NOT EXISTS support_report (
+    reporter BLOB NOT NULL,
+    reported_id BLOB NOT NULL,
+    reason INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (reporter, reported_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS support_report_by_reported ON support_report(reported_id);
+-- Signed requests (4.10) each sender sent, per hour: a count, nothing of to whom; kept 25 hours, for the operator's
+-- Users page (strangers' floods). Sealed deliveries are never counted by sender (6.6).
+CREATE TABLE IF NOT EXISTS stat_request (
+    user_id BLOB NOT NULL,
+    hour INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (user_id, hour)
+) WITHOUT ROWID;
+-- The hub's hourly summaries, counts only, nothing of who (spec 1/6.6).
+-- One row per metric, key and hour (hours since the epoch), kept for good, never pruned or folded.
+CREATE TABLE IF NOT EXISTS stat (
+    metric TEXT NOT NULL,
+    key TEXT NOT NULL DEFAULT '',
+    hour INTEGER NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (metric, key, hour)
+) WITHOUT ROWID;
+-- Events per minute (minutes since the epoch), a count of each kind and nothing else: no user, device, envelope,
+-- blob or group (6.6). `yo-in` a Yo accepted into an inbox, `yo-out` one a device fetched and acknowledged,
+-- `media-in` a blob uploaded (`media-in-bytes` its bytes), `media-out` a blob fetched, `group-create` a group made;
+-- `yo-in-bot`, `latency-*`, `push-ok`/`push-fail`, `push-folded`/`push-paced`, `http`/`http-4xx`/`http-429`/`http-5xx`, `account-gone` (spec 4.1).
+-- The last 2 hours per minute for the live strip; the hours go to stat.
+CREATE TABLE IF NOT EXISTS stat_minute (
+    kind TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (kind, minute)
+) WITHOUT ROWID;
+-- Each user's access key as a check, never the key (spec 3.3): a delivery that shows it is a contact's; else it
+-- is a request, signed by its sender (`requests_open` is kept, unused: the switch is the device's). Gone with the
+-- account. (The table keeps its
+-- name from the contact keys before Signal's access keys: a check of the old kind matches no delivery, and every
+-- client tells its new one.)
+CREATE TABLE IF NOT EXISTS account_contact_key (
+    user_id BLOB PRIMARY KEY REFERENCES account(id),
+    current BLOB NOT NULL,
+    requests_open INTEGER NOT NULL DEFAULT 1
+) WITHOUT ROWID;
+-- Each user's storage (spec 4.3), sealed by its devices under a key the hub never has; `version` counts its writes,
+-- so one writer never overwrites another's unseen. Gone with the account.
+CREATE TABLE IF NOT EXISTS account_storage (
+    user_id BLOB PRIMARY KEY,
+    version INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
+-- Photos and videos (spec 4.3): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
+-- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
+-- `gets_left`: persisted abuse budget for GETs (three per original fetch).
+-- `fetching`: reserved by older hub versions; recovered once at startup.
+-- `ready`: 0 until the file is in place; such a blob is not handed out, and one left
+-- so (a crash in between) is removed at the next start, or within the hour.
+CREATE TABLE IF NOT EXISTS message_blob (
+    id BLOB PRIMARY KEY,
+    user_id BLOB NOT NULL,
+    size INTEGER NOT NULL,
+    fetches_left INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    fetching INTEGER NOT NULL DEFAULT 0,
+    gets_left INTEGER NOT NULL DEFAULT 192,
+    ready INTEGER NOT NULL DEFAULT 1
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS message_blob_by_user ON message_blob(user_id);
+CREATE INDEX IF NOT EXISTS message_blob_by_age ON message_blob(created_at);
+-- Each user's profile key commitment (zkgroup's `ProfileKeyCommitment`, spec 3.4), told with its access key: what
+-- profile key credentials are issued against. Gone with the account.
+CREATE TABLE IF NOT EXISTS account_profile (
+    user_id BLOB PRIMARY KEY,
+    commitment BLOB NOT NULL
+) WITHOUT ROWID;
+-- Groups (spec 3.4, Signal's Groups v2): by their identifier, the `GroupPublicParams`, the revision and the state
+-- (`GroupState`), whose members and title are encrypted under the group's key. The last member out ends the row.
+CREATE TABLE IF NOT EXISTS grp (
+    id BLOB PRIMARY KEY,
+    params BLOB NOT NULL,
+    revision INTEGER NOT NULL,
+    state BLOB NOT NULL,
+    updated_at INTEGER NOT NULL,
+    -- When it was made (ms); NULL for groups made before hubs kept it.
+    created_at INTEGER
+) WITHOUT ROWID;
+-- Groups ended (their last member left), by identifier: never made again (whoever has an old key cannot bring one
+-- back under its members' eyes). Kept for good, 32 bytes and a time each.
+CREATE TABLE IF NOT EXISTS grp_gone (
+    id BLOB PRIMARY KEY,
+    at INTEGER NOT NULL
+) WITHOUT ROWID;
+-- How many blobs, and bytes, each user uploaded on a day (days since the epoch, UTC); kept two days.
+CREATE TABLE IF NOT EXISTS message_blob_quota (
+    user_id BLOB NOT NULL,
+    day INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (user_id, day)
+) WITHOUT ROWID;
+-- Device attestation (spec 4.2), the last verdict per user.
+CREATE TABLE IF NOT EXISTS account_attestation (
+    user_id BLOB PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK(state IN ('attested','failed')),
+    platform TEXT NOT NULL CHECK(platform IN ('ios','android')),
+    reason TEXT, level TEXT, at_ms INTEGER NOT NULL
+) WITHOUT ROWID;
+-- Help threads by install id (spec 4): `from_team` 1 the team's answers.
+CREATE TABLE IF NOT EXISTS support (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, install BLOB NOT NULL,
+    from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL,
+    created_at INTEGER NOT NULL, read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
+CREATE INDEX IF NOT EXISTS support_by_install ON support(install, created_at, id);
+-- Crash and error groups (spec 4), one per problem; its builds, the uuids it was sent under and the installs per day.
+CREATE TABLE IF NOT EXISTS diag (
+    id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('crash','error')),
+    signature TEXT NOT NULL UNIQUE, count INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+    app TEXT NOT NULL, os TEXT NOT NULL, model TEXT NOT NULL,
+    payload TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0,
+    done_builds TEXT, done_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS diag_recent ON diag(last_seen DESC);
+CREATE TABLE IF NOT EXISTS diag_build (
+    diagnostic_id INTEGER NOT NULL REFERENCES diag(id) ON DELETE CASCADE, app TEXT NOT NULL,
+    count INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, app)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS diag_seen (uuid TEXT PRIMARY KEY,
+    diagnostic_id INTEGER NOT NULL REFERENCES diag(id) ON DELETE CASCADE) WITHOUT ROWID;
+-- Which install sent a group on which day (`at` its last report that day, to the hour); kept 90 days.
+CREATE TABLE IF NOT EXISTS diag_install (
+    diagnostic_id INTEGER NOT NULL REFERENCES diag(id) ON DELETE CASCADE, install BLOB NOT NULL,
+    day INTEGER NOT NULL, at INTEGER, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS diag_install_by_day ON diag_install(day);
+CREATE TRIGGER IF NOT EXISTS diag_stat_deleted AFTER DELETE ON diag BEGIN
+    DELETE FROM stat WHERE metric = 'diag' AND key = CAST(OLD.id AS TEXT);
+END;
+";
+
+/// Schema 10 under its table names (the steps up to it, `to_10`, write these).
+pub(super) const SCHEMA_10: &str = "
 CREATE TABLE IF NOT EXISTS users (
     id BLOB PRIMARY KEY,
     account_key BLOB NOT NULL UNIQUE,
@@ -343,7 +633,7 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 => Ok(()),
+        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 => Ok(()),
         // An empty database needs none of the legacy tables.
         0 if tables == 0 => conn.pragma_update(None, "user_version", SCHEMA_VERSION),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
@@ -366,7 +656,7 @@ fn from_1(conn: &mut Connection) -> rusqlite::Result<()> {
             ("devices", "number", "INTEGER NOT NULL DEFAULT 1"),
             ("devices", "prekey_max", "INTEGER NOT NULL DEFAULT 0"),
         ] {
-            // A table schema 1 never had is made whole by `SCHEMA`.
+            // A table schema 1 never had is made whole by `SCHEMA_10`.
             if has_table(tx, table)? && !has_column(tx, table, column)? {
                 tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
             }
@@ -457,7 +747,7 @@ pub(super) fn migrate_diagnostics(conn: &mut Connection) -> rusqlite::Result<()>
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
         for (text, app, at) in rows {
-            diagnostic_write(tx, "crash", &legacy_crash(&text, &app), at)?;
+            legacy_diagnostic(tx, &text, &app, at)?;
         }
         tx.execute_batch("DELETE FROM feedback WHERE type='crash' OR auto=1; PRAGMA user_version = 4")
     })
@@ -620,7 +910,7 @@ pub(super) fn without_feedback(conn: &mut Connection) -> rusqlite::Result<()> {
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for (text, app, at) in crashes {
-                diagnostic_write(tx, "crash", &legacy_crash(&text, &app), at)?;
+                legacy_diagnostic(tx, &text, &app, at)?;
             }
             tx.execute_batch(
                 "INSERT INTO todos(text,created_at) SELECT text,created_at FROM feedback
@@ -699,6 +989,21 @@ fn with_stats(conn: &mut Connection) -> rusqlite::Result<()> {
     })
 }
 
+/// A crash of the feedback table of before written as a problem (`diagnostic_write`, which writes schema 11's names)
+/// into the tables of schema 10: they carry the new names for that one write.
+fn legacy_diagnostic(tx: &Connection, text: &str, app: &str, at: u64) -> rusqlite::Result<()> {
+    const WRITTEN: [(&str, &str); 3] =
+        [("diagnostics", "diag"), ("diagnostic_builds", "diag_build"), ("stats", "stat")];
+    for (old, new) in WRITTEN {
+        tx.execute_batch(&format!("ALTER TABLE {old} RENAME TO {new}"))?;
+    }
+    diagnostic_write(tx, "crash", &legacy_crash(text, app), at)?;
+    for (old, new) in WRITTEN {
+        tx.execute_batch(&format!("ALTER TABLE {new} RENAME TO {old}"))?;
+    }
+    Ok(())
+}
+
 fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
     conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?.exists([table])
 }
@@ -709,4 +1014,13 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<
 
 fn user_version(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+}
+
+/// A store of this schema back under schema 10's names (tests: a hub of before wrote it).
+#[cfg(test)]
+pub(super) fn as_schema_10(conn: &Connection) {
+    for (old, new) in RENAMED {
+        conn.execute_batch(&format!("ALTER TABLE {new} RENAME TO {old}")).unwrap();
+    }
+    conn.execute_batch("PRAGMA user_version = 10").unwrap();
 }

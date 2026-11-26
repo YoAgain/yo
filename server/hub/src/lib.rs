@@ -608,8 +608,11 @@ mod tests {
         assert!(hub.db.account_key(&user).unwrap().is_none());
         assert!(!hub.db.username_taken(b"deletable").unwrap());
         hub.flush_events(120_000).unwrap();
-        let gone: i64 =
-            hub.db.conn().query_row("SELECT sum(n) FROM events WHERE kind = 'account-gone'", [], |r| r.get(0)).unwrap();
+        let gone: i64 = hub
+            .db
+            .conn()
+            .query_row("SELECT sum(n) FROM stat_minute WHERE kind = 'account-gone'", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(gone, 1, "counted once, not for the refused ones");
         assert!(matches!(hub.db.delete_account(&device.device_id, 2).unwrap(), Write::Refused(_)));
         let mut config = Config::for_tests();
@@ -764,7 +767,7 @@ mod tests {
         hub.flush_events(120_000).unwrap();
         hub.db
             .conn()
-            .prepare("SELECT kind, sum(n) FROM events GROUP BY kind ORDER BY kind")
+            .prepare("SELECT kind, sum(n) FROM stat_minute GROUP BY kind ORDER BY kind")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
@@ -927,7 +930,7 @@ mod tests {
         let rows: Vec<(i64, i64)> = hub
             .db
             .conn()
-            .prepare("SELECT hour, value FROM stats WHERE metric='deliveries' AND key='' ORDER BY hour")
+            .prepare("SELECT hour, value FROM stat WHERE metric='deliveries' AND key='' ORDER BY hour")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
@@ -945,7 +948,7 @@ mod tests {
         let counted: Vec<(String, i64, i64)> = hub
             .db
             .conn()
-            .prepare("SELECT kind, minute, n FROM events ORDER BY kind")
+            .prepare("SELECT kind, minute, n FROM stat_minute ORDER BY kind")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
@@ -1310,7 +1313,7 @@ mod tests {
         let rows = |hub: &Hub| -> Vec<(Vec<u8>, i64, i64)> {
             hub.db
                 .conn()
-                .prepare("SELECT user_id, hour, n FROM request_hours ORDER BY hour")
+                .prepare("SELECT user_id, hour, n FROM stat_request ORDER BY hour")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .unwrap()

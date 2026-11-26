@@ -11,12 +11,12 @@ class ProblemTests(unittest.TestCase):
         db = sqlite3.connect(":memory:")
         h = int(time.time()) // 3600
         db.executescript(f"""
-        CREATE TABLE diagnostics (id INTEGER PRIMARY KEY, kind TEXT, signature TEXT, count INTEGER, first_seen INTEGER,
+        CREATE TABLE diag (id INTEGER PRIMARY KEY, kind TEXT, signature TEXT, count INTEGER, first_seen INTEGER,
             last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER, done_builds TEXT, done_at INTEGER);
-        CREATE TABLE diagnostic_builds (diagnostic_id INTEGER, app TEXT, count INTEGER, last_seen INTEGER);
+        CREATE TABLE diag_build (diagnostic_id INTEGER, app TEXT, count INTEGER, last_seen INTEGER);
         CREATE TABLE diagnostic_hours (diagnostic_id INTEGER, hour INTEGER, count INTEGER);
-        INSERT INTO diagnostics VALUES (1, 'error', 's', 5, 1, 2, 'ios/2', '26', 'x', '{{}}', 1, 'ios/2', 2);
-        INSERT INTO diagnostic_builds VALUES (1, 'ios/2', 3, 2), (1, 'ios/1', 2, 1);
+        INSERT INTO diag VALUES (1, 'error', 's', 5, 1, 2, 'ios/2', '26', 'x', '{{}}', 1, 'ios/2', 2);
+        INSERT INTO diag_build VALUES (1, 'ios/2', 3, 2), (1, 'ios/1', 2, 1);
         INSERT INTO diagnostic_hours VALUES (1, {h}, 4), (1, {h - 3}, 1), (1, {h - 30}, 9);
         """)
         users.prepare_stats(db)
@@ -27,8 +27,8 @@ class ProblemTests(unittest.TestCase):
 
     def test_an_older_hub_has_no_builds(self):
         db = sqlite3.connect(":memory:")
-        db.execute("CREATE TABLE diagnostics (id INTEGER PRIMARY KEY, kind TEXT, count INTEGER, last_seen INTEGER, payload TEXT)")
-        db.execute("INSERT INTO diagnostics VALUES (1, 'error', 1, 1, '{}')")
+        db.execute("CREATE TABLE diag (id INTEGER PRIMARY KEY, kind TEXT, count INTEGER, last_seen INTEGER, payload TEXT)")
+        db.execute("INSERT INTO diag VALUES (1, 'error', 1, 1, '{}')")
         users.prepare_stats(db)
         row = users.diagnostics(db)[0]
         self.assertEqual((row["builds"], sum(row["hours_24h"])), ([], 0))

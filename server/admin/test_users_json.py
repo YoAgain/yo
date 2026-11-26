@@ -15,14 +15,14 @@ class SnapshotTests(unittest.TestCase):
     def test_queue_counts_per_user(self):
         with contextlib.closing(sqlite3.connect(":memory:")) as db:
             db.executescript("""
-                CREATE TABLE users(id, created_at);
-                CREATE TABLE handles(user_id, kind, spelling, value);
-                CREATE TABLE devices(id, user_id, last_seen_at, push_platform, push_token, app);
-                CREATE TABLE backups(user_id, updated_at);
-                CREATE TABLE messages(device_id);
-                INSERT INTO users VALUES(1, 1), (2, 2);
-                INSERT INTO devices VALUES(10, 1, 5, 0, '', ''), (11, 1, 4, 0, '', '');
-                INSERT INTO messages VALUES(10), (10), (11);
+                CREATE TABLE account(id, created_at);
+                CREATE TABLE account_name(user_id, kind, spelling, value);
+                CREATE TABLE account_device(id, user_id, last_seen_at, push_platform, push_token, app);
+                CREATE TABLE account_backup(user_id, updated_at);
+                CREATE TABLE message(device_id);
+                INSERT INTO account VALUES(1, 1), (2, 2);
+                INSERT INTO account_device VALUES(10, 1, 5, 0, '', ''), (11, 1, 4, 0, '', '');
+                INSERT INTO message VALUES(10), (10), (11);
             """)
             self.assertEqual([(r[0], r[3], r[8]) for r in db.execute(users.USERS, (10,))], [(1, 2, 3), (2, 0, 0)])
 
@@ -31,13 +31,13 @@ class SnapshotTests(unittest.TestCase):
         now = 498800 * 3600000
         with contextlib.closing(sqlite3.connect(":memory:")) as db:
             db.executescript("""
-                CREATE TABLE stats(metric TEXT, key TEXT NOT NULL DEFAULT '', hour INTEGER, value INTEGER,
+                CREATE TABLE stat(metric TEXT, key TEXT NOT NULL DEFAULT '', hour INTEGER, value INTEGER,
                     PRIMARY KEY(metric, key, hour));
-                CREATE TABLE events(kind TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(kind, minute));
+                CREATE TABLE stat_minute(kind TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(kind, minute));
                 CREATE TABLE levels(kind, hour, value);
             """)
-            db.executemany("INSERT INTO stats VALUES ('yo-out', '', ?, 800)", [(498800 - h,) for h in range(164)])
-            db.execute("INSERT INTO events VALUES ('yo-out', ?, 3)", (now // 60000,))
+            db.executemany("INSERT INTO stat VALUES ('yo-out', '', ?, 800)", [(498800 - h,) for h in range(164)])
+            db.execute("INSERT INTO stat_minute VALUES ('yo-out', ?, 3)", (now // 60000,))
             sent = users.events(db, now)["yo-out"]
             self.assertEqual(sent["total"], 164 * 800)
             self.assertEqual(sum(sent["year"]), 164 * 800)
@@ -68,10 +68,10 @@ class SnapshotTests(unittest.TestCase):
     def test_hourly_history_and_minute_buffer(self):
         with contextlib.closing(sqlite3.connect(":memory:")) as db:
             db.executescript("""
-                CREATE TABLE stats(metric, key, hour, value);
-                INSERT INTO stats VALUES('yo-in', '', 24, 17), ('yo-in', '', 1, 9);
-                CREATE TABLE events(kind, minute, n);
-                INSERT INTO events VALUES('yo-in', 1440, 3), ('yo-in', 1380, 5);
+                CREATE TABLE stat(metric, key, hour, value);
+                INSERT INTO stat VALUES('yo-in', '', 24, 17), ('yo-in', '', 1, 9);
+                CREATE TABLE stat_minute(kind, minute, n);
+                INSERT INTO stat_minute VALUES('yo-in', 1440, 3), ('yo-in', 1380, 5);
             """)
             counts = users.events(db, users.DAY_MS)["yo-in"]
             self.assertEqual((counts["total"], counts["today"], counts["hours"][-1]), (26, 17, 17))
@@ -81,11 +81,11 @@ class SnapshotTests(unittest.TestCase):
     def test_hourly_stats_and_minute_buffer_are_independent(self):
         with contextlib.closing(sqlite3.connect(":memory:")) as db:
             db.executescript("""
-                CREATE TABLE stats(metric, key, hour INTEGER, value INTEGER);
-                CREATE TABLE events(kind, minute INTEGER, n INTEGER);
-                INSERT INTO stats VALUES('yo-in','',2400,40), ('yo-in','',1920,7),
+                CREATE TABLE stat(metric, key, hour INTEGER, value INTEGER);
+                CREATE TABLE stat_minute(kind, minute INTEGER, n INTEGER);
+                INSERT INTO stat VALUES('yo-in','',2400,40), ('yo-in','',1920,7),
                                         ('deliveries','',2100,8), ('diag','7',2400,19);
-                INSERT INTO events VALUES('yo-in',144000,3);
+                INSERT INTO stat_minute VALUES('yo-in',144000,3);
             """)
             event = users.events(db, 2400 * 3600000)["yo-in"]
             self.assertEqual((event["hours"][-1], event["today"], event["total"]), (40, 40, 47))

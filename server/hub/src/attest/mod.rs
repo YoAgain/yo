@@ -124,7 +124,7 @@ mod tests {
             };
             let response = submit(State(hub.clone()), auth(body)).await.unwrap();
             assert_eq!(decode::<api::AttestResult>(&response).unwrap().verdict, api::ATTEST_UNJUDGED);
-            assert!(!hub.db.conn().prepare("SELECT 1 FROM attestation").unwrap().exists([]).unwrap());
+            assert!(!hub.db.conn().prepare("SELECT 1 FROM account_attestation").unwrap().exists([]).unwrap());
         }
     }
     #[tokio::test]
@@ -188,7 +188,7 @@ mod tests {
         let payload: String = hub
             .db
             .conn()
-            .query_row("SELECT payload FROM diagnostics WHERE kind='error' AND count=1", [], |r| r.get(0))
+            .query_row("SELECT payload FROM diag WHERE kind='error' AND count=1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&payload).unwrap(),

@@ -21,9 +21,9 @@ class MarksTests(unittest.TestCase):
     def test_histories_come_from_the_hubs_levels(self):
         users, hour, day = load("users"), 3600000, 20400
         db = sqlite3.connect(":memory:")
-        db.execute("CREATE TABLE stats (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY (metric,key,hour))")
+        db.execute("CREATE TABLE stat (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY (metric,key,hour))")
         h0 = day * 24  # midnight starting `day`: the levels at the end of day - 1
-        db.executemany("INSERT INTO stats(metric,hour,value) VALUES (?, ?, ?)", [
+        db.executemany("INSERT INTO stat(metric,hour,value) VALUES (?, ?, ?)", [
             ("active-24h", h0 - 24, 4), ("active-24h", h0, 5), ("active-24h", h0 + 3, 9),
             ("queue-envelopes", h0, 2), ("queue-media-bytes", h0, 70), ("queue-envelopes", h0 + 3, 1),
             ("open-errors", h0, 8), ("open-crashes", h0, 2), ("open-errors", h0 + 3, 3),
@@ -115,10 +115,10 @@ class UsersTabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE users(id BLOB, created_at INTEGER)")
-                db.execute("CREATE TABLE devices(id INTEGER, user_id BLOB, last_seen_at INTEGER)")
-                db.executemany("INSERT INTO users VALUES(?,?)", [(b"\x01", midnight + 1), (b"\x02", midnight - 20 * users.DAY_MS), (b"\x03", midnight - 40 * users.DAY_MS)])
-                db.executemany("INSERT INTO devices VALUES(?,?,?)", [(1, b"\x01", midnight), (2, b"\x01", midnight + 5), (3, b"\x02", midnight - 1)])
+                db.execute("CREATE TABLE account(id BLOB, created_at INTEGER)")
+                db.execute("CREATE TABLE account_device(id INTEGER, user_id BLOB, last_seen_at INTEGER)")
+                db.executemany("INSERT INTO account VALUES(?,?)", [(b"\x01", midnight + 1), (b"\x02", midnight - 20 * users.DAY_MS), (b"\x03", midnight - 40 * users.DAY_MS)])
+                db.executemany("INSERT INTO account_device VALUES(?,?,?)", [(1, b"\x01", midnight), (2, b"\x01", midnight + 5), (3, b"\x02", midnight - 1)])
             snapshot = users.hub("live", path)
             self.assertEqual(len(snapshot["signups"]), 30)
             self.assertEqual(snapshot["signups"][-1], 1)
@@ -138,16 +138,16 @@ class UsersTabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE users(id BLOB, created_at INTEGER)")
-                db.execute("CREATE TABLE devices(id INTEGER, user_id BLOB, last_seen_at INTEGER, app TEXT)")
+                db.execute("CREATE TABLE account(id BLOB, created_at INTEGER)")
+                db.execute("CREATE TABLE account_device(id INTEGER, user_id BLOB, last_seen_at INTEGER, app TEXT)")
                 # Signed up 40 days ago: one seen 35 days later, one the day after, one never again; a bot left out;
                 # one 3 days ago, seen 2 days later; one 100 days ago (out of the cohorts, but seen this month).
                 rows = [(1, now - 40 * day, now - 5 * day, "ios/1"), (2, now - 40 * day, now - 39 * day + 1, "ios/1"),
                         (3, now - 40 * day, now - 40 * day, "android/1"), (4, now - 40 * day, now, "yogpt/1"),
                         (5, now - 3 * day, now - day, "ios/1"), (6, now - 100 * day, now - 2 * day, "ios/1")]
                 for i, created, seen, app in rows:
-                    db.execute("INSERT INTO users VALUES(?,?)", (bytes([i]), created))
-                    db.execute("INSERT INTO devices VALUES(?,?,?,?)", (i, bytes([i]), seen, app))
+                    db.execute("INSERT INTO account VALUES(?,?)", (bytes([i]), created))
+                    db.execute("INSERT INTO account_device VALUES(?,?,?,?)", (i, bytes([i]), seen, app))
             snapshot = users.hub("live", path)
             self.assertEqual(snapshot["retention"], {"d1": [3, 4], "d7": [1, 3], "d30": [1, 3]})
             self.assertEqual(snapshot["active_month"], 4)  # 1, the bot, 5 and 6
@@ -159,10 +159,10 @@ class UsersTabCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE users(id BLOB, created_at INTEGER)")
-                db.execute("CREATE TABLE devices(id INTEGER, user_id BLOB, last_seen_at INTEGER)")
-                db.execute("CREATE TABLE events(kind TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(kind, minute))")
-                db.executemany("INSERT INTO events VALUES(?,?,?)", [
+                db.execute("CREATE TABLE account(id BLOB, created_at INTEGER)")
+                db.execute("CREATE TABLE account_device(id INTEGER, user_id BLOB, last_seen_at INTEGER)")
+                db.execute("CREATE TABLE stat_minute(kind TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(kind, minute))")
+                db.executemany("INSERT INTO stat_minute VALUES(?,?,?)", [
                     ("yo-in", minute, 3), ("yo-in", minute - 1, 2) if minute % 60 else ("yo-in", minute + 1, 2),
                     ("yo-out", minute - 60, 4), ("group-create", minute - 2 * 24 * 60, 1),
                     ("media-in", (day - 20) * 24 * 60, 9),  # older than 14 days: only in the total

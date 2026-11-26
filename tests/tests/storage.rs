@@ -209,10 +209,10 @@ fn a_hub_restored_from_a_backup_takes_the_storage_again() {
 
     let restore = |version: Option<u64>| match version {
         Some(version) => db.execute(
-            "UPDATE storage SET version = ?1, data = ?2 WHERE user_id = ?3",
+            "UPDATE account_storage SET version = ?1, data = ?2 WHERE user_id = ?3",
             rusqlite::params![version as i64, older.data.as_slice(), &user],
         ),
-        None => db.execute("DELETE FROM storage WHERE user_id = ?1", [&user]),
+        None => db.execute("DELETE FROM account_storage WHERE user_id = ?1", [&user]),
     };
     restore(Some(1)).unwrap();
     a.set_friend(&friend(2), Some("Mo".into()), None).unwrap();

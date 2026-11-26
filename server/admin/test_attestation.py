@@ -11,12 +11,12 @@ class AttestationTest(unittest.TestCase):
         now = 3 * DAY_MS
         self.assertIsNone(attestation(db, now))
         db.executescript("""
-            CREATE TABLE devices(user_id INTEGER, app TEXT, last_seen_at INTEGER);
-            CREATE TABLE attestation(user_id INTEGER PRIMARY KEY, platform TEXT, state TEXT, reason TEXT, level TEXT, at_ms INTEGER);
-            INSERT INTO attestation VALUES(1,'android','attested',NULL,'strong',20),
+            CREATE TABLE account_device(user_id INTEGER, app TEXT, last_seen_at INTEGER);
+            CREATE TABLE account_attestation(user_id INTEGER PRIMARY KEY, platform TEXT, state TEXT, reason TEXT, level TEXT, at_ms INTEGER);
+            INSERT INTO account_attestation VALUES(1,'android','attested',NULL,'strong',20),
                                           (2,'android','failed','device_integrity','basic',30);
         """)
-        db.executemany("INSERT INTO devices VALUES(?,?,?)", [
+        db.executemany("INSERT INTO account_device VALUES(?,?,?)", [
             (1, "ios/1", now), (3, "ios/2", now), (3, "ios/3", now),
             (4, "android/1", now), (5, "android/1", DAY_MS), (6, "cli/2", now)])
         rows = attestation(db, now)
@@ -30,12 +30,12 @@ class AttestationTest(unittest.TestCase):
         midnight = 20 * DAY_MS
         self.assertIsNone(attested_days(db, midnight))
         db.executescript("""
-            CREATE TABLE users(id INTEGER PRIMARY KEY, created_at INTEGER);
-            CREATE TABLE attestation(user_id INTEGER PRIMARY KEY, platform TEXT, state TEXT, reason TEXT, level TEXT, at_ms INTEGER);
+            CREATE TABLE account(id INTEGER PRIMARY KEY, created_at INTEGER);
+            CREATE TABLE account_attestation(user_id INTEGER PRIMARY KEY, platform TEXT, state TEXT, reason TEXT, level TEXT, at_ms INTEGER);
         """)
         # Today: three accounts, one attested, one failed, one not measured; yesterday: one attested.
-        db.executemany("INSERT INTO users VALUES(?,?)", [(1, midnight + 1), (2, midnight + 2), (3, midnight + 3), (4, midnight - 5)])
-        db.executemany("INSERT INTO attestation VALUES(?,?,?,?,?,?)", [
+        db.executemany("INSERT INTO account VALUES(?,?)", [(1, midnight + 1), (2, midnight + 2), (3, midnight + 3), (4, midnight - 5)])
+        db.executemany("INSERT INTO account_attestation VALUES(?,?,?,?,?,?)", [
             (1, "ios", "attested", None, None, midnight + 9), (2, "android", "failed", "device_integrity", "basic", midnight + 9),
             (4, "android", "attested", None, "strong", midnight + 9)])
         days = attested_days(db, midnight)
@@ -47,7 +47,7 @@ class AttestationTest(unittest.TestCase):
     def test_attested_level_once_sampled(self):
         db = sqlite3.connect(":memory:")
         self.addCleanup(db.close)
-        db.execute("CREATE TABLE stats(metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER)")
+        db.execute("CREATE TABLE stat(metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER)")
         self.assertEqual(levels(db, 3 * DAY_MS)["attested_levels"], {})
-        db.execute("INSERT INTO stats VALUES('attested', '', 70, 5)")
+        db.execute("INSERT INTO stat VALUES('attested', '', 70, 5)")
         self.assertEqual(levels(db, 3 * DAY_MS)["attested_levels"], {"70": 5})

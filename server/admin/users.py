@@ -36,15 +36,15 @@ LIMIT = 1000  # rows per hub; the totals count everyone
 
 USERS = """
 SELECT u.id, u.created_at,
-       (SELECT coalesce(spelling, value) FROM handles WHERE user_id = u.id AND kind = 2 LIMIT 1),
+       (SELECT coalesce(spelling, value) FROM account_name WHERE user_id = u.id AND kind = 2 LIMIT 1),
        count(d.id), max(d.last_seen_at), max(d.push_platform), max(length(d.push_token) > 0),
        b.updated_at,
        coalesce(q.n, 0),
        max(d.app)
-FROM users u
-LEFT JOIN devices d ON d.user_id = u.id
-LEFT JOIN backups b ON b.user_id = u.id
-LEFT JOIN (SELECT d.user_id, count(*) AS n FROM messages m JOIN devices d ON d.id = m.device_id GROUP BY d.user_id) q
+FROM account u
+LEFT JOIN account_device d ON d.user_id = u.id
+LEFT JOIN account_backup b ON b.user_id = u.id
+LEFT JOIN (SELECT d.user_id, count(*) AS n FROM message m JOIN account_device d ON d.id = m.device_id GROUP BY d.user_id) q
        ON q.user_id = u.id
 GROUP BY u.id
 ORDER BY max(d.last_seen_at) DESC, u.created_at DESC
@@ -54,9 +54,9 @@ LIMIT ?
 # Reports (spec 4): which install reported whom, why, when; newest first. No content: the hub has none. The
 # reporter is a random install id (hub schema 9), never an account: no name to look up.
 REPORTS = """
-SELECT r.reporter, r.reported_id, (SELECT coalesce(spelling, value) FROM handles WHERE user_id = r.reported_id AND kind = 2),
+SELECT r.reporter, r.reported_id, (SELECT coalesce(spelling, value) FROM account_name WHERE user_id = r.reported_id AND kind = 2),
        r.reason, r.created_at
-FROM reports r ORDER BY r.created_at DESC LIMIT ?
+FROM support_report r ORDER BY r.created_at DESC LIMIT ?
 """
 REASONS = {1: "spam", 2: "abuse", 3: "other"}
 PUSH = {0: None, 1: "APNs", 2: "APNs (sandbox)", 3: "FCM"}
@@ -82,8 +82,8 @@ def tables(db) -> list:
     for name in names:
         q = '"' + name.replace('"', '""') + '"'
         # The Errors tab: each crash or error group with its distinct installs (kept 90 days by the hub).
-        extra = (", (SELECT count(DISTINCT install) FROM diagnostic_installs i WHERE i.diagnostic_id = diagnostics.id) AS installs"
-                 if name == "diagnostics" and "diagnostic_installs" in names else "")
+        extra = (", (SELECT count(DISTINCT install) FROM diag_install i WHERE i.diagnostic_id = diag.id) AS installs"
+                 if name == "diag" and "diag_install" in names else "")
         cur = db.execute(f"SELECT *{extra} FROM {q} LIMIT ?", (TABLE_ROWS,))
         out.append({"name": name, "columns": [c[0] for c in cur.description],
                     "rows": [[cell_value(v) for v in row] for row in cur],
@@ -152,12 +152,12 @@ def yogpt_min():
 
 def attestation(db, now):
     """Current account verdicts and active phones without any account verdict (spec 4.2)."""
-    if not has_table(db, "attestation"):
+    if not has_table(db, "account_attestation"):
         return None
     counts = {p: {"attested": 0, "failed": 0, "unknown": 0, "reasons": {}, "levels": {}, "last": None}
               for p in ("ios", "android")}
     for platform, state, reason, level, n, last in db.execute("""
-        SELECT platform,state,reason,level,count(*),max(at_ms) FROM attestation
+        SELECT platform,state,reason,level,count(*),max(at_ms) FROM account_attestation
         GROUP BY platform,state,reason,level ORDER BY platform,state,reason,level"""):
         row = counts[platform]
         row[state] += n
@@ -167,9 +167,9 @@ def attestation(db, now):
         if level:
             row["levels"][level] = row["levels"].get(level, 0) + n
     for platform, n in db.execute("""
-        SELECT substr(app,1,instr(app,'/')-1),count(DISTINCT user_id) FROM devices d
+        SELECT substr(app,1,instr(app,'/')-1),count(DISTINCT user_id) FROM account_device d
         WHERE (app LIKE 'ios/%' OR app LIKE 'android/%') AND last_seen_at > ?
-        AND NOT EXISTS (SELECT 1 FROM attestation a WHERE a.user_id=d.user_id) GROUP BY 1""", (now - 2 * DAY_MS,)):
+        AND NOT EXISTS (SELECT 1 FROM account_attestation a WHERE a.user_id=d.user_id) GROUP BY 1""", (now - 2 * DAY_MS,)):
         counts[platform]["unknown"] = n
     return counts
 
@@ -177,10 +177,10 @@ def attestation(db, now):
 def attested_days(db, midnight):
     """Per sign-up UTC day, the last 14 (today last): [accounts made that day, those of them attested now] (spec 4.2),
     as secured_days for backups; None on a hub without the table."""
-    if not has_table(db, "attestation"):
+    if not has_table(db, "account_attestation"):
         return None
     return [list(db.execute(
-        "SELECT count(*), count(a.user_id) FROM users u LEFT JOIN attestation a ON a.user_id = u.id AND a.state = 'attested'"
+        "SELECT count(*), count(a.user_id) FROM account u LEFT JOIN account_attestation a ON a.user_id = u.id AND a.state = 'attested'"
         " WHERE u.created_at >= ? AND u.created_at < ?", (midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS)).fetchone())
         for i in range(13, -1, -1)]
 
@@ -203,23 +203,23 @@ EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-i
 # The same event metrics in each history, without reading the other hourly summaries.
 EVENT_FILTER = "(metric IN (" + ",".join("?" for _ in EVENT_KINDS) + ") OR metric GLOB 'bot-*') AND key = ''"
 # A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
-BOT_USER = ("EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM devices d"
+BOT_USER = ("EXISTS (SELECT 1 FROM account_device d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM account_device d"
             " WHERE d.user_id = u.id AND NOT (coalesce(d.app, '') LIKE 'yogpt/%' OR coalesce(d.app, '') LIKE 'cli/%'))")
 
 
 def prepare_stats(db):
-    # This read-only compatibility view goes once both hubs run schema 10.
-    if has_table(db, "stats"):
+    # A hub from before schema 10 (its counts in tables of their own): a read-only view as `stat`.
+    if has_table(db, "stat"):
         return
     sources = {
         "levels": "SELECT kind, '', hour, value FROM levels",
         "deliveries_hourly": "SELECT 'deliveries', '', hour, n FROM deliveries_hourly",
         "diagnostic_hours": "SELECT 'diag', cast(diagnostic_id AS TEXT), hour, count FROM diagnostic_hours",
         "diagnostic_days": "SELECT 'diagnostics:' || kind, '', day * 24, count FROM diagnostic_days",
-        "events": "SELECT kind, '', minute / 60, sum(n) FROM events GROUP BY kind, minute / 60",
+        "stat_minute": "SELECT kind, '', minute / 60, sum(n) FROM stat_minute GROUP BY kind, minute / 60",
     }
     selects = [sql for table, sql in sources.items() if has_table(db, table)]
-    db.execute("CREATE TEMP VIEW stats(metric, key, hour, value) AS " +
+    db.execute("CREATE TEMP VIEW stat(metric, key, hour, value) AS " +
                (" UNION ALL ".join(selects) or "SELECT '', '', 0, 0 WHERE 0"))
 
 
@@ -228,18 +228,18 @@ def events(db, now: int) -> dict:
     "today" (since UTC midnight), "total" (since the hub began counting) and "year" (the last 365 UTC days, today last), summed from hourly stats."""
     hour, day = now // 3600000, now // DAY_MS
     by_hour = {}
-    for kind, h, n in db.execute(f"SELECT metric, hour, value FROM stats WHERE {EVENT_FILTER} AND hour BETWEEN ? AND ?",
+    for kind, h, n in db.execute(f"SELECT metric, hour, value FROM stat WHERE {EVENT_FILTER} AND hour BETWEEN ? AND ?",
                                  (*EVENT_KINDS, (day - 13) * 24, hour)):
         by_hour.setdefault(kind, {})[h] = n
     # The last 60 minutes per kind (the current minute last): the page's 1H view.
     minute = now // 60000
     by_minute = {}
-    for kind, m, n in db.execute("SELECT kind, minute, sum(n) FROM events WHERE minute > ? AND minute <= ? GROUP BY 1, 2",
+    for kind, m, n in db.execute("SELECT kind, minute, sum(n) FROM stat_minute WHERE minute > ? AND minute <= ? GROUP BY 1, 2",
                                  (minute - 60, minute)):
         by_minute.setdefault(kind, {})[m] = n
-    totals = dict(db.execute(f"SELECT metric, sum(value) FROM stats WHERE {EVENT_FILTER} GROUP BY 1", EVENT_KINDS))
+    totals = dict(db.execute(f"SELECT metric, sum(value) FROM stat WHERE {EVENT_FILTER} GROUP BY 1", EVENT_KINDS))
     by_day = {}
-    for kind, d, n in db.execute(f"SELECT metric, hour / 24, sum(value) FROM stats WHERE {EVENT_FILTER} AND hour >= ? GROUP BY 1, 2",
+    for kind, d, n in db.execute(f"SELECT metric, hour / 24, sum(value) FROM stat WHERE {EVENT_FILTER} AND hour >= ? GROUP BY 1, 2",
                                  (*EVENT_KINDS, (day - 364) * 24)):
         by_day.setdefault(kind, {})[d] = n
     out = {}
@@ -268,13 +268,13 @@ def week_series(db, hour, has_app):
 
     events = {}
     for kind, i, n in db.execute(
-            "SELECT metric, (hour - ?) / 6, sum(value) FROM stats "
+            "SELECT metric, (hour - ?) / 6, sum(value) FROM stat "
             f"WHERE {EVENT_FILTER} AND hour BETWEEN ? AND ? GROUP BY 1, 2", (start, *EVENT_KINDS, start, hour)):
         events.setdefault(kind, [0] * 28)[i] = n
     return {"start": start, "events": events,
-            "signups": counts("users u", f"NOT ({BOT_USER})" if has_app else "1"),
-            "feedback": counts("support_messages", "from_team = 0")
-            if has_table(db, "support_messages") else None}
+            "signups": counts("account u", f"NOT ({BOT_USER})" if has_app else "1"),
+            "feedback": counts("support", "from_team = 0")
+            if has_table(db, "support") else None}
 
 
 LIVE_KINDS = ("yo-in", "media-in")  # people's Yos and media
@@ -289,7 +289,7 @@ def live(db, now: int) -> dict:
     minute = now // 60000
 
     def per_minute(kinds):
-        rows = dict(db.execute(f"SELECT minute, sum(n) FROM events WHERE kind IN ({','.join('?' * len(kinds))})"
+        rows = dict(db.execute(f"SELECT minute, sum(n) FROM stat_minute WHERE kind IN ({','.join('?' * len(kinds))})"
                                " AND minute > ? AND minute <= ? GROUP BY 1",
                                (*kinds, minute - LIVE_MINUTES, minute)).fetchall())
         return [rows.get(m, 0) for m in range(minute - LIVE_MINUTES + 1, minute + 1)]
@@ -305,7 +305,7 @@ def retention(db, now: int) -> dict:
     for n in (1, 7, 30):
         out[f"d{n}"] = list(db.execute(
             "SELECT coalesce(sum(seen >= created_at + ?), 0), count(*) FROM (SELECT u.created_at,"
-            " (SELECT max(d.last_seen_at) FROM devices d WHERE d.user_id = u.id) AS seen FROM users u"
+            " (SELECT max(d.last_seen_at) FROM account_device d WHERE d.user_id = u.id) AS seen FROM account u"
             f" WHERE u.created_at >= ? AND u.created_at < ? AND NOT ({BOT_USER}))",
             (n * DAY_MS, now - 90 * DAY_MS, now - n * DAY_MS)).fetchone())
     return out
@@ -337,15 +337,15 @@ def crash_free(db, now: int):
     """Per range: [installs that sent a crash, phone devices seen] since the range's first UTC day, both from the
     phone apps (iOS, Android; not macOS). The hub has no app start per install id, so the devices seen stand for the
     installs in use (one install, one device): an estimate. None on an older hub without diagnostic_installs."""
-    if not has_table(db, "diagnostic_installs"):
+    if not has_table(db, "diag_install"):
         return None
     out = {}
     for key, days in CRASH_FREE_DAYS.items():
         first = now // DAY_MS - days + 1
-        crashed = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+        crashed = db.execute("SELECT count(DISTINCT i.install) FROM diag_install i JOIN diag d ON d.id = i.diagnostic_id"
                              f" WHERE d.kind = 'crash' AND i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%'",
                              (first,)).fetchone()[0]
-        seen = db.execute(f"SELECT count(*) FROM devices WHERE last_seen_at >= ? AND {PHONE_APP.format('app')}",
+        seen = db.execute(f"SELECT count(*) FROM account_device WHERE last_seen_at >= ? AND {PHONE_APP.format('app')}",
                           (first * DAY_MS,)).fetchone()[0]
         out[key] = [crashed, seen]
     return out
@@ -354,21 +354,21 @@ def crash_free(db, now: int):
 def problem_installs(db, now: int):
     """Per range (as crash_free): the distinct phone installs that sent an error, and any error or crash, since the
     range's first UTC day: counts only. None on an older hub without diagnostic_installs."""
-    if not has_table(db, "diagnostic_installs"):
+    if not has_table(db, "diag_install"):
         return None
     out = {}
     for key, days in CRASH_FREE_DAYS.items():
         first = now // DAY_MS - days + 1
         row = db.execute("SELECT count(DISTINCT CASE WHEN d.kind = 'error' THEN i.install END), count(DISTINCT i.install)"
-                         " FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                         " FROM diag_install i JOIN diag d ON d.id = i.diagnostic_id"
                          f" WHERE i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%' AND {not_network()}", (first,)).fetchone()
         out[key] = [row[0], row[1]]
         # Per platform: installs with an error or crash, phones seen (the same days, apps as in crash_free).
         for prefix in ("ios", "android"):
-            hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+            hit = db.execute("SELECT count(DISTINCT i.install) FROM diag_install i JOIN diag d ON d.id = i.diagnostic_id"
                              f" WHERE i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%' AND {not_network()}", (first, prefix + "/%")).fetchone()[0]
-            seen = db.execute("SELECT count(*) FROM devices WHERE last_seen_at >= ? AND app LIKE ?", (first * DAY_MS, prefix + "/%")).fetchone()[0]
-            crash = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+            seen = db.execute("SELECT count(*) FROM account_device WHERE last_seen_at >= ? AND app LIKE ?", (first * DAY_MS, prefix + "/%")).fetchone()[0]
+            crash = db.execute("SELECT count(DISTINCT i.install) FROM diag_install i JOIN diag d ON d.id = i.diagnostic_id"
                                " WHERE d.kind = 'crash' AND i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%'", (first, prefix + "/%")).fetchone()[0]
             out[key] += [hit, seen, crash]
     return out
@@ -378,10 +378,10 @@ def current_build_installs(db, now: int):
     """[phones on current builds, of them with an error or crash report in the last 24 hours; then the same for iOS and Android]. Current: builds under 24 hours
     old by their id (`ios/YYYYMMDDHHMM`, UTC); the phones are the latest `build:<app>` levels of them, the problem phones the
     distinct installs with a report from such a build in the last 24 hours. Counts only; None on an older hub."""
-    if not has_table(db, "diagnostic_installs"):
+    if not has_table(db, "diag_install"):
         return None
     current = {}
-    for kind, value, _ in db.execute("SELECT metric, value, max(hour) FROM stats WHERE key = '' AND metric LIKE 'build:%' GROUP BY metric"):
+    for kind, value, _ in db.execute("SELECT metric, value, max(hour) FROM stat WHERE key = '' AND metric LIKE 'build:%' GROUP BY metric"):
         app = kind[6:]
         try:
             stamp = datetime.datetime.strptime(app.split("/", 1)[1], "%Y%m%d%H%M").replace(tzinfo=datetime.timezone.utc)
@@ -389,7 +389,7 @@ def current_build_installs(db, now: int):
             continue
         if app.split("/", 1)[0] in ("ios", "android") and 0 <= now - stamp.timestamp() * 1000 < DAY_MS:
             current[app] = value
-    stamp = ("coalesce(i.at, i.day * 86400000)" if "at" in {r[1] for r in db.execute("PRAGMA table_info(diagnostic_installs)")}
+    stamp = ("coalesce(i.at, i.day * 86400000)" if "at" in {r[1] for r in db.execute("PRAGMA table_info(diag_install)")}
              else "i.day * 86400000")
     out = []
     for prefix in ("", "ios/", "android/"):
@@ -397,7 +397,7 @@ def current_build_installs(db, now: int):
         hit = 0
         if apps:
             marks = ",".join("?" * len(apps))
-            hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+            hit = db.execute("SELECT count(DISTINCT i.install) FROM diag_install i JOIN diag d ON d.id = i.diagnostic_id"
                              f" WHERE {stamp} > ? AND d.app IN ({marks}) AND d.os NOT LIKE 'mac%' AND {not_network()}",
                              (now - DAY_MS, *apps)).fetchone()[0]
         out += [sum(current[a] for a in apps), hit]
@@ -405,30 +405,30 @@ def current_build_installs(db, now: int):
 
 
 def daily_problem_installs(db, now: int):
-    if not has_table(db, "diagnostic_installs"):
+    if not has_table(db, "diag_install"):
         return None
     today = now // DAY_MS
     return dict(db.execute(
-        "SELECT i.day, count(DISTINCT i.install) FROM diagnostic_installs i"
-        " JOIN diagnostics d ON d.id = i.diagnostic_id"
+        "SELECT i.day, count(DISTINCT i.install) FROM diag_install i"
+        " JOIN diag d ON d.id = i.diagnostic_id"
         f" WHERE i.day BETWEEN ? AND ? AND {PHONE_APP.format('d.app')}"
         f" AND d.os NOT LIKE 'mac%' AND d.kind IN ('error', 'crash') AND {not_network()} GROUP BY i.day",
         (today - CRASH_FREE_DAYS["0"] + 1, today)))
 
 
 def diagnostics(db):
-    installs = ("(SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id = d.id)"
-                if has_table(db, "diagnostic_installs") else "NULL")
-    cursor = db.execute(f"SELECT d.*, {installs} AS installs FROM diagnostics d ORDER BY last_seen DESC")
+    installs = ("(SELECT count(DISTINCT install) FROM diag_install WHERE diagnostic_id = d.id)"
+                if has_table(db, "diag_install") else "NULL")
+    cursor = db.execute(f"SELECT d.*, {installs} AS installs FROM diag d ORDER BY last_seen DESC")
     columns = [c[0] for c in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor]
     # Its builds ([app, reports, last seen]) and its reports in the last 24 hours, per hour (newer hubs, spec 4).
     builds, hours = {}, {}
-    if has_table(db, "diagnostic_builds"):
-        for i, app, n, seen in db.execute("SELECT diagnostic_id, app, count, last_seen FROM diagnostic_builds ORDER BY app"):
+    if has_table(db, "diag_build"):
+        for i, app, n, seen in db.execute("SELECT diagnostic_id, app, count, last_seen FROM diag_build ORDER BY app"):
             builds.setdefault(i, []).append([app, n, seen])
     now_h = int(time.time()) // 3600
-    for i, hour, n in db.execute("SELECT cast(key AS INTEGER), hour, value FROM stats WHERE metric = 'diag' AND hour > ? AND hour <= ?", (now_h - 24, now_h)):
+    for i, hour, n in db.execute("SELECT cast(key AS INTEGER), hour, value FROM stat WHERE metric = 'diag' AND hour > ? AND hour <= ?", (now_h - 24, now_h)):
         hours.setdefault(i, [0] * 24)[23 - (now_h - hour)] += n
     for r in rows:
         r["builds"], r["hours_24h"] = builds.get(r["id"], []), hours.get(r["id"], [0] * 24)
@@ -438,10 +438,10 @@ def diagnostics(db):
 def with_causes(db, rows):
     """Each diagnostics row with its cause's totals over every group of it (builds, lines): reports (sum of counts) and
     the distinct installs. Counts only."""
-    if not rows or not has_table(db, "diagnostic_installs"):
+    if not rows or not has_table(db, "diag_install"):
         return rows
     ids = {}
-    for diagnostic_id, install in db.execute("SELECT diagnostic_id, install FROM diagnostic_installs"):
+    for diagnostic_id, install in db.execute("SELECT diagnostic_id, install FROM diag_install"):
         ids.setdefault(diagnostic_id, set()).add(install)
     total = {}
     for r in rows:
@@ -473,11 +473,11 @@ def open_problems(db, now: int) -> dict:
     """Problems open at each point: each support message not handled, and each cause (problem_cause) with a crash or
     error group not done, "expected" ones left out."""
     spans = []
-    if has_table(db, "support_messages"):
+    if has_table(db, "support"):
         spans += [(a, b, None) for a, b in
-                  db.execute("SELECT created_at, done_at FROM support_messages WHERE from_team = 0").fetchall()]
-    if has_table(db, "diagnostics"):
-        for kind, first, last, done, payload in db.execute("SELECT kind, first_seen, last_seen, done, payload FROM diagnostics"):
+                  db.execute("SELECT created_at, done_at FROM support WHERE from_team = 0").fetchall()]
+    if has_table(db, "diag"):
+        for kind, first, last, done, payload in db.execute("SELECT kind, first_seen, last_seen, done, payload FROM diag"):
             try:
                 p = json.loads(payload or "{}") or {}
                 p = p if isinstance(p, dict) else {}
@@ -496,7 +496,7 @@ def open_problems(db, now: int) -> dict:
 
 def deliveries(db, hour):
     today = hour // 24
-    counts = dict(db.execute("SELECT hour, value FROM stats WHERE metric = 'deliveries' AND key = '' AND hour BETWEEN ? AND ?",
+    counts = dict(db.execute("SELECT hour, value FROM stat WHERE metric = 'deliveries' AND key = '' AND hour BETWEEN ? AND ?",
                              ((today - 13) * 24, hour)))
     return {"day": sum(n for h, n in counts.items() if h >= hour - 24),
             "hours": [counts.get(h, 0) for h in range(hour - 23, hour + 1)],
@@ -509,7 +509,7 @@ def levels(db, now: int, messages=None, blobs=None) -> dict:
     the page has active_day), "queue_hours" {hour: [envelopes, bytes]} (48 hours) and "queue_days" {day: [...]} with
     the current values for this hour and today, "open_report_history" [{t, errors_open, crashes_open}]."""
     rows = {}
-    for kind, hour, value in db.execute("""SELECT metric, hour, value FROM stats WHERE key = '' AND
+    for kind, hour, value in db.execute("""SELECT metric, hour, value FROM stat WHERE key = '' AND
         (metric IN ('active-48h','active-24h','queue-envelopes','queue-media-bytes','open-errors','open-crashes','attested')
          OR metric GLOB 'build:*' OR metric GLOB 'phones-24h*' OR metric GLOB 'problem-installs-24h*') ORDER BY hour"""):
         rows.setdefault(kind, {})[hour] = value
@@ -576,7 +576,7 @@ def hub(name: str, path: str) -> dict:
         week_ago = now - WEEK_MS
         midnight = now - now % DAY_MS  # UTC days
         # Devices.app (Yo-App, spec 4.1) comes with a newer hub.
-        has_app = part("app", lambda: one("SELECT count(*) FROM pragma_table_info('devices') WHERE name = 'app'"), 0)
+        has_app = part("app", lambda: one("SELECT count(*) FROM pragma_table_info('account_device') WHERE name = 'app'"), 0)
         users = part("users", lambda: [
             {"id": uid.hex(), "created": created, "name": text(name),
              "devices": devices, "last_seen": seen, "push": bool(push_token), "platform": platform,
@@ -588,15 +588,15 @@ def hub(name: str, path: str) -> dict:
         # only, per hour (request_hours, kept 25 hours); a contact's delivery is sealed and never counted by sender.
         hour = now // 3_600_000
         requests = dict(part("requests_24h", lambda: db.execute(
-            "SELECT user_id, sum(n) FROM request_hours WHERE hour > ? GROUP BY user_id", (hour - 24,)).fetchall()
-            if has_table(db, "request_hours") else [], []))
+            "SELECT user_id, sum(n) FROM stat_request WHERE hour > ? GROUP BY user_id", (hour - 24,)).fetchall()
+            if has_table(db, "stat_request") else [], []))
         for u in users:
             u["requests_24h"] = requests.get(bytes.fromhex(u["id"]), 0)
         # Each account's attestation verdict (spec 4.2), measured only: "attested", "failed" (with its reason), none.
         # attest_at is the latest verdict's time: the Attested row's line is derived from it as Secured's is from
         # backup_at, so an account attested again moves to the later time (the hub's `attested` level has no such drift).
         verdicts = {uid: (state, reason, at) for uid, state, reason, at in part("user_attestation", lambda: db.execute(
-            "SELECT user_id, state, reason, at_ms FROM attestation").fetchall() if has_table(db, "attestation") else [], [])}
+            "SELECT user_id, state, reason, at_ms FROM account_attestation").fetchall() if has_table(db, "account_attestation") else [], [])}
         for u in users:
             state, reason, at = verdicts.get(bytes.fromhex(u["id"]), (None, None, None))
             u["attest"], u["attest_reason"], u["attest_at"] = state, text(reason) if reason else None, at
@@ -606,7 +606,7 @@ def hub(name: str, path: str) -> dict:
                          "app": text(app)})
             for uid, created, seen, platform, has_token, app in db.execute(
                 "SELECT user_id, created_at, last_seen_at, push_platform, length(push_token) > 0, "
-                + ("app" if has_app else "NULL") + " FROM devices ORDER BY last_seen_at DESC")], [])
+                + ("app" if has_app else "NULL") + " FROM account_device ORDER BY last_seen_at DESC")], [])
         by_user = {}
         for uid, d in device_list:
             by_user.setdefault(uid, []).append(d)
@@ -615,19 +615,19 @@ def hub(name: str, path: str) -> dict:
         reports = part("reports", lambda: [
             {"id": a.hex()[:16] + b.hex()[:16], "reporter": a.hex(), "reported": b.hex(), "reported_name": text(bn),
              "reason": REASONS.get(reason, str(reason)), "at": at}
-            for a, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "reports") else [])
+            for a, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "support_report") else [])
         ], [])
         out = {
             "users": users,
             "reports": reports,
             "open_report_counts": part("open_report_counts", lambda: dict(db.execute(
-                "SELECT kind, sum(count) FROM diagnostics WHERE done=0 GROUP BY kind"))
-                if has_table(db, "diagnostics") else {}),
-            "diagnostics_open": part("diagnostics_open", lambda: one("SELECT count(*) FROM diagnostics WHERE done=0") if has_table(db,"diagnostics") else 0),
+                "SELECT kind, sum(count) FROM diag WHERE done=0 GROUP BY kind"))
+                if has_table(db, "diag") else {}),
+            "diagnostics_open": part("diagnostics_open", lambda: one("SELECT count(*) FROM diag WHERE done=0") if has_table(db, "diag") else 0),
             "diagnostic_days": part("diagnostic_days", lambda: [{"day": day, "kind": kind, "count": count}
-                for day, kind, count in db.execute("SELECT hour / 24, substr(metric, 13), sum(value) FROM stats"
+                for day, kind, count in db.execute("SELECT hour / 24, substr(metric, 13), sum(value) FROM stat"
                     " WHERE metric GLOB 'diagnostics:*' AND key = '' GROUP BY 1, 2 ORDER BY 1, 2")], []),
-            "diagnostics": part("diagnostics", lambda: diagnostics(db) if has_table(db, "diagnostics") else [], []),
+            "diagnostics": part("diagnostics", lambda: diagnostics(db) if has_table(db, "diag") else [], []),
             "daily_problem_installs": part("daily_problem_installs", lambda: daily_problem_installs(db, now)),
             "problem_installs": part("problem_installs", lambda: problem_installs(db, now)),
             # Crash-free installs (estimated) per range: installs with a crash against the phones seen.
@@ -636,9 +636,9 @@ def hub(name: str, path: str) -> dict:
             # Support chat: unread user messages at the end of each of the last 14 UTC days (today: now), oldest
             # first; and each thread's last line, by the install id's hex (lower case, as the hub's thread list has it).
             "support_unread_days": part("support_unread_days", lambda: [one(
-                "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
+                "SELECT count(*) FROM support WHERE from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
                 end, end) for end in (min(now, midnight - (i - 1) * DAY_MS) for i in range(13, -1, -1))]
-                if has_table(db, "support_messages") else [], []),
+                if has_table(db, "support") else [], []),
             # Problems open at each point: user messages not yet handled, causes with a crash or error group not done (from
             # their first report; a done one counted until its last, the hub keeps no time of the tick), "expected"
             # ones left out. "hours": at the end of each of the last 24 (the current one: now), "days": at the end of
@@ -648,87 +648,87 @@ def hub(name: str, path: str) -> dict:
             # the hub's db::is_bot_app), [[day, n], ...]: Sign-ups' bars and total.
             "week": part("week", lambda: week_series(db, hour, has_app)),
             "signup_days": part("signup_days", lambda: [list(r) for r in db.execute(
-                f"SELECT created_at / ?, count(*) FROM users u WHERE NOT ({BOT_USER}) GROUP BY 1 ORDER BY 1", (DAY_MS,))], []),
+                f"SELECT created_at / ?, count(*) FROM account u WHERE NOT ({BOT_USER}) GROUP BY 1 ORDER BY 1", (DAY_MS,))], []),
             # Messages users wrote to the team per UTC day, the last 365 (today last): Feedback's bars and total.
             "support_days": part("support_days", lambda: [one(
-                "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at >= ? AND created_at < ?",
+                "SELECT count(*) FROM support WHERE from_team = 0 AND created_at >= ? AND created_at < ?",
                 (midnight - i * DAY_MS), (midnight - (i - 1) * DAY_MS)) for i in range(364, -1, -1)]
-                if has_table(db, "support_messages") else None),
+                if has_table(db, "support") else None),
             # Messages users wrote to the team per hour, the last 24 (the current one last): the Feedback card's bars.
             "support_hours": part("support_hours", lambda: [one(
-                "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at >= ? AND created_at < ?",
+                "SELECT count(*) FROM support WHERE from_team = 0 AND created_at >= ? AND created_at < ?",
                 h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]
-                if has_table(db, "support_messages") else None),
+                if has_table(db, "support") else None),
             "support_last": part("support_last", lambda: {h: {"text": text(t)[:160], "team": bool(team)}
                 for h, t, team, _ in db.execute(
-                    "SELECT lower(hex(install)), text, from_team, max(id) FROM support_messages GROUP BY install LIMIT ?", (LIMIT,))}
-                if has_table(db, "support_messages") else {}, {}),
+                    "SELECT lower(hex(install)), text, from_team, max(id) FROM support GROUP BY install LIMIT ?", (LIMIT,))}
+                if has_table(db, "support") else {}, {}),
             "tables": part("tables", lambda: tables(db), []),
             "services": part("services", lambda: services(name, now)),
-            "total": part("total", lambda: one("SELECT count(*) FROM users")),
-            "secured": part("secured", lambda: one("SELECT count(*) FROM backups")),
-            "devices": part("devices", lambda: one("SELECT count(*) FROM devices")),
-            "messages": part("messages", lambda: one("SELECT count(*) FROM messages")),
+            "total": part("total", lambda: one("SELECT count(*) FROM account")),
+            "secured": part("secured", lambda: one("SELECT count(*) FROM account_backup")),
+            "devices": part("devices", lambda: one("SELECT count(*) FROM account_device")),
+            "messages": part("messages", lambda: one("SELECT count(*) FROM message")),
             # Stored reserved names: nobody may claim them.
-            "reserved": part("reserved", lambda: one("SELECT count(*) FROM reserved")),
+            "reserved": part("reserved", lambda: one("SELECT count(*) FROM name_reserved")),
             # Statistics without anyone's friends: with Signal's protocol the hub keeps no chats or groups at all.
             "attestation": part("attestation", lambda: attestation(db, now)),
             "active_users": part("active_users", lambda: one(
-                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", week_ago)),
+                "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?", week_ago)),
             "active_today": part("active_today", lambda: one(
-                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", now - DAY_MS)),
+                "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?", now - DAY_MS)),
             # Users seen since UTC midnight (the admin page keeps its highest value per day).
             "active_day": part("active_day", lambda: one(
-                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at >= ?", midnight)),
+                "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at >= ?", midnight)),
             # Users seen in the last 30 days (DAU/MAU with active_day), and retention D1/D7/D30.
             "active_month": part("active_month", lambda: one(
-                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", now - 30 * DAY_MS)),
+                "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?", now - 30 * DAY_MS)),
             "retention": part("retention", lambda: retention(db, now)),
             # Sign-ups per UTC day, the last 30 days, oldest first.
             "signups": part("signups", lambda: [one(
-                "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
+                "SELECT count(*) FROM account WHERE created_at >= ? AND created_at < ?",
                 midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS) for i in range(29, -1, -1)]),
             # Sign-ups per hour, the last 24 (the current hour last), for the overview's chart.
             "signups_hours": part("signups_hours", lambda: [one(
-                "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
+                "SELECT count(*) FROM account WHERE created_at >= ? AND created_at < ?",
                 h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]),
             # Per sign-up UTC day, the last 14 (today last): [accounts made that day, those of them with a backup now].
             "secured_days": part("secured_days", lambda: [list(db.execute(
-                "SELECT count(*), count(b.user_id) FROM users u LEFT JOIN backups b ON b.user_id = u.id"
+                "SELECT count(*), count(b.user_id) FROM account u LEFT JOIN account_backup b ON b.user_id = u.id"
                 " WHERE u.created_at >= ? AND u.created_at < ?", (midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS)).fetchone())
-                for i in range(13, -1, -1)] if has_table(db, "backups") else None),
+                for i in range(13, -1, -1)] if has_table(db, "account_backup") else None),
             # Accounts attested now (spec 4.2, measured only), and per sign-up day as secured_days; None before the table.
-            "attested": part("attested", lambda: one("SELECT count(*) FROM attestation WHERE state = 'attested'")
-                if has_table(db, "attestation") else None),
+            "attested": part("attested", lambda: one("SELECT count(*) FROM account_attestation WHERE state = 'attested'")
+                if has_table(db, "account_attestation") else None),
             "attested_days": part("attested_days", lambda: attested_days(db, midnight)),
             # Groups on the hub now.
-            "groups": part("groups", lambda: one("SELECT count(*) FROM zk_groups") if has_table(db, "zk_groups") else None),
+            "groups": part("groups", lambda: one("SELECT count(*) FROM grp") if has_table(db, "grp") else None),
             # The hub's event counts (no identifiers): per kind, the last 24 hours, the last 14 UTC days
             # and today; None on a hub without the table.
-            "events": part("events", lambda: events(db, now) if has_table(db, "events") else None),
+            "events": part("events", lambda: events(db, now) if has_table(db, "stat_minute") else None),
             # Yos per minute, the last hour, for the header's live strip (see live).
-            "live": part("live", lambda: live(db, now) if has_table(db, "events") else None),
+            "live": part("live", lambda: live(db, now) if has_table(db, "stat_minute") else None),
             # Devices in push pacing now: more envelopes waiting than the hub's YO_PUSH_BACKLOG (default 50), a count only.
             "push_backlog_devices": part("push_backlog_devices", lambda: one(
-                "SELECT count(*) FROM (SELECT 1 FROM messages GROUP BY device_id HAVING count(*) > ?)", push_backlog())),
-            "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
+                "SELECT count(*) FROM (SELECT 1 FROM message GROUP BY device_id HAVING count(*) > ?)", push_backlog())),
+            "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM message")),
             "blobs": part("blobs", lambda: db.execute(
-                "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),
+                "SELECT count(*), coalesce(sum(size), 0) FROM message_blob").fetchone() if has_table(db, "message_blob") else None),
             "deliveries": part("deliveries", lambda: deliveries(db, hour)),
             "min_app": min_app(name),
             "yogpt_min": yogpt_min(),
             "yogpt_contacts": yogpt_contacts(name),
             "apps": part("apps", lambda: db.execute(
-                "SELECT coalesce(app, 'unknown'), count(*) FROM devices GROUP BY 1 ORDER BY 2 DESC").fetchall()
+                "SELECT coalesce(app, 'unknown'), count(*) FROM account_device GROUP BY 1 ORDER BY 2 DESC").fetchall()
                 if has_app else [], []),
             # The same for the devices seen since UTC midnight: the Versions row's day (see version_day).
             "apps_today": part("apps_today", lambda: db.execute(
-                "SELECT coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at >= ? GROUP BY 1 ORDER BY 2 DESC",
+                "SELECT coalesce(app, 'unknown'), count(*) FROM account_device WHERE last_seen_at >= ? GROUP BY 1 ORDER BY 2 DESC",
                 (midnight,)).fetchall() if has_app else [], []),
             # The version each build named (Yo-App, spec 4.1; devices.version comes with a newer hub).
             "app_versions": part("app_versions", lambda: dict(db.execute(
-                "SELECT app, max(version) FROM devices WHERE app IS NOT NULL AND version IS NOT NULL GROUP BY app")
-                .fetchall()) if has_app and one("SELECT count(*) FROM pragma_table_info('devices') WHERE name = 'version'")
+                "SELECT app, max(version) FROM account_device WHERE app IS NOT NULL AND version IS NOT NULL GROUP BY app")
+                .fetchall()) if has_app and one("SELECT count(*) FROM pragma_table_info('account_device') WHERE name = 'version'")
                 else {}, {}),
             "size": part("size", lambda: os.path.getsize(path)),
         }

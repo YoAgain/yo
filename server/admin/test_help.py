@@ -24,9 +24,9 @@ class HelpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE diagnostics(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
-                db.execute("INSERT INTO diagnostics VALUES(7,'error',20,1,3,'ios/1','26','iPhone','{}',1)")
-                db.execute("INSERT INTO diagnostics VALUES(8,'crash',2,2,4,'ios/1','26','iPhone','{}',0)")
+                db.execute("CREATE TABLE diag(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
+                db.execute("INSERT INTO diag VALUES(7,'error',20,1,3,'ios/1','26','iPhone','{}',1)")
+                db.execute("INSERT INTO diag VALUES(8,'crash',2,2,4,'ios/1','26','iPhone','{}',0)")
                 db.execute("CREATE TABLE diagnostic_days(day INTEGER,kind TEXT,count INTEGER)")
                 db.execute("INSERT INTO diagnostic_days VALUES(20000,'crash',2),(20000,'error',20)")
             snapshot = users.hub("live", path)
@@ -55,16 +55,16 @@ class HelpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE diagnostics(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
-                db.execute("INSERT INTO diagnostics VALUES(1,'crash',5,1,3,'ios/1','26','iPhone','{}',0),(2,'crash',1,1,2,'android/1','16','Pixel','{}',0),(3,'error',9,1,4,'ios/1','26','iPhone','{}',0),"
+                db.execute("CREATE TABLE diag(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
+                db.execute("INSERT INTO diag VALUES(1,'crash',5,1,3,'ios/1','26','iPhone','{}',0),(2,'crash',1,1,2,'android/1','16','Pixel','{}',0),(3,'error',9,1,4,'ios/1','26','iPhone','{}',0),"
                            "(4,'crash',1,1,2,'ios/1','macOS 26','Mac','{}',0)")
-                db.execute("CREATE TABLE devices(id BLOB, user_id BLOB, last_seen_at INTEGER, app TEXT)")
+                db.execute("CREATE TABLE account_device(id BLOB, user_id BLOB, last_seen_at INTEGER, app TEXT)")
                 now = int(users.time.time() * 1000)
-                db.executemany("INSERT INTO devices VALUES(?,?,?,?)", [
+                db.executemany("INSERT INTO account_device VALUES(?,?,?,?)", [
                     (b"1", b"u", now, "ios/1"), (b"2", b"u", now, "android/1"), (b"3", b"v", now, "yogpt/1"),
                     (b"4", b"w", (today - 1) * users.DAY_MS, "ios/1"), (b"5", b"x", (today - 20) * users.DAY_MS, "ios/1")])
-                db.execute("CREATE TABLE diagnostic_installs(diagnostic_id INTEGER, install BLOB, day INTEGER, PRIMARY KEY(diagnostic_id, install, day))")
-                db.executemany("INSERT INTO diagnostic_installs VALUES(?,?,?)", [
+                db.execute("CREATE TABLE diag_install(diagnostic_id INTEGER, install BLOB, day INTEGER, PRIMARY KEY(diagnostic_id, install, day))")
+                db.executemany("INSERT INTO diag_install VALUES(?,?,?)", [
                     (1, a, today), (1, a, today - 1), (1, b, today - 6),  # a twice, b on the 7th day back: 2
                     (2, a, today), (2, c, today - 7),                    # c too old for 7 days
                     (3, c, today),                                       # an error, no crash
@@ -74,7 +74,7 @@ class HelpTests(unittest.TestCase):
             self.assertEqual(snapshot["crash_free"], {"1": [1, 3], "7": [2, 3], "30": [3, 4], "0": [3, 4]})
             self.assertEqual({d["id"]: d["installs"] for d in snapshot["diagnostics"]}, {1: 2, 2: 2, 3: 1, 4: 1})
             # The Errors tab (the diagnostics table as it is) gains an installs column.
-            table = next(t for t in snapshot["tables"] if t["name"] == "diagnostics")
+            table = next(t for t in snapshot["tables"] if t["name"] == "diag")
             self.assertEqual(table["columns"][-1], "installs")
             self.assertEqual(sorted((r[0], r[-1]) for r in table["rows"]), [(1, 2), (2, 2), (3, 1), (4, 1)])
             self.assertEqual(table["count"], 4)
@@ -82,11 +82,11 @@ class HelpTests(unittest.TestCase):
                 stamp = users.datetime.datetime.fromtimestamp(now / 1000 - 3600, users.datetime.timezone.utc).strftime("%Y%m%d%H%M")
                 db.execute("CREATE TABLE levels(kind TEXT, hour INTEGER, value INTEGER, PRIMARY KEY(kind, hour))")
                 db.executemany("INSERT INTO levels VALUES(?,?,?)", [(f"build:ios/{stamp}", 1, 9), (f"build:ios/{stamp}", 2, 2), ("build:ios/202001010000", 2, 7)])
-                db.execute("INSERT INTO diagnostics VALUES(5,'error',1,1,2,?,'26','iPhone','{}',0)", (f"ios/{stamp}",))
-                db.execute("INSERT INTO diagnostic_installs VALUES(5,?,?)", (a, today))  # no at: the day's start
+                db.execute("INSERT INTO diag VALUES(5,'error',1,1,2,?,'26','iPhone','{}',0)", (f"ios/{stamp}",))
+                db.execute("INSERT INTO diag_install VALUES(5,?,?)", (a, today))  # no at: the day's start
                 # The network's own errors count against no phone.
-                db.execute("INSERT INTO diagnostics VALUES(6,'error',1,1,2,?,'26','iPhone','{\"domain\":\"NSURLErrorDomain\",\"code\":\"-1001\"}',0)", (f"ios/{stamp}",))
-                db.execute("INSERT INTO diagnostic_installs VALUES(6,?,?)", (c, today))
+                db.execute("INSERT INTO diag VALUES(6,'error',1,1,2,?,'26','iPhone','{\"domain\":\"NSURLErrorDomain\",\"code\":\"-1001\"}',0)", (f"ios/{stamp}",))
+                db.execute("INSERT INTO diag_install VALUES(6,?,?)", (c, today))
                 # Phones on builds under 24 h (latest level), and of them those with a report.
                 users.prepare_stats(db)
                 self.assertEqual(users.current_build_installs(db, now), [2, 1, 2, 1, 0, 0])
@@ -97,10 +97,10 @@ class HelpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE handles(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER)")
-                db.execute("INSERT INTO handles VALUES('eve','Eve',?,2)", (reported,))
-                db.execute("CREATE TABLE reports(reporter BLOB, reported_id BLOB, reason INTEGER, created_at INTEGER, PRIMARY KEY(reporter, reported_id))")
-                db.execute("INSERT INTO reports VALUES(?,?,2,9)", (install, reported))
+                db.execute("CREATE TABLE account_name(value TEXT, spelling TEXT, user_id BLOB, kind INTEGER)")
+                db.execute("INSERT INTO account_name VALUES('eve','Eve',?,2)", (reported,))
+                db.execute("CREATE TABLE support_report(reporter BLOB, reported_id BLOB, reason INTEGER, created_at INTEGER, PRIMARY KEY(reporter, reported_id))")
+                db.execute("INSERT INTO support_report VALUES(?,?,2,9)", (install, reported))
             [r] = users.hub("live", path)["reports"]
             self.assertEqual(r, {"id": install.hex()[:16] + reported.hex()[:16], "reporter": install.hex(),
                                  "reported": reported.hex(), "reported_name": "Eve", "reason": "abuse", "at": 9})
@@ -113,9 +113,9 @@ class HelpTests(unittest.TestCase):
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
                 # Hub schema 9: threads by a random install id (16 bytes), no account.
-                db.execute("CREATE TABLE support_messages(id INTEGER PRIMARY KEY, install BLOB NOT NULL, from_team INTEGER, text TEXT, created_at INTEGER, read_at INTEGER, app_version TEXT, done_at INTEGER)")
+                db.execute("CREATE TABLE support(id INTEGER PRIMARY KEY, install BLOB NOT NULL, from_team INTEGER, text TEXT, created_at INTEGER, read_at INTEGER, app_version TEXT, done_at INTEGER)")
                 day = users.DAY_MS
-                db.executemany("INSERT INTO support_messages VALUES(?,?,?,?,?,?,?,?)", [
+                db.executemany("INSERT INTO support VALUES(?,?,?,?,?,?,?,?)", [
                     (1, b"\x01" * 16, 0, "old, read yesterday", now - 5 * day, now - day, "ios/1", now - day),
                     (2, b"\x01" * 16, 1, "team answer", now - day + 1000, None, None, None),
                     (3, b"\xab" * 16, 0, "still open", now - 3 * day, now - day, "ios/1", None)])
@@ -137,9 +137,9 @@ class HelpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "hub.sqlite")
             with sqlite3.connect(path) as db:
-                db.execute("CREATE TABLE diagnostics(id INTEGER PRIMARY KEY, kind TEXT, signature TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
+                db.execute("CREATE TABLE diag(id INTEGER PRIMARY KEY, kind TEXT, signature TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
                 error = lambda app, place, **more: json.dumps({"app": app, "domain": "SharedAccess", "code": "35", "place": place, **more})
-                db.executemany("INSERT INTO diagnostics(kind, signature, count, first_seen, last_seen, app, os, model, payload, done) VALUES(?,?,1,?,?,?,'','',?,?)", [
+                db.executemany("INSERT INTO diag(kind, signature, count, first_seen, last_seen, app, os, model, payload, done) VALUES(?,?,1,?,?,?,'','',?,?)", [
                     # One cause on three builds, from the app and the notification service, on other lines: one problem.
                     ("error", "a", now - 3000, now - 3000, "ios/1", error("ios/1", "YoNotify/SharedAccess.swift:140 take(_:)"), 0),
                     ("error", "b", now - 2000, now - 2000, "ios/2", error("ios/2", "YoApp/SharedAccess.swift:142 take(_:)"), 0),
@@ -171,16 +171,16 @@ class HelpTests(unittest.TestCase):
             done.write_text(json.dumps(["dev:3","dev:4","live:5","dev:r123"]))
             with sqlite3.connect(path) as db:
                 db.executescript("CREATE TABLE todos(id INTEGER,text TEXT,done_at INTEGER);"
-                    "CREATE TABLE support_messages(id INTEGER,from_team INTEGER,read_at INTEGER);"
+                    "CREATE TABLE support(id INTEGER,from_team INTEGER,read_at INTEGER);"
                     "INSERT INTO todos VALUES(3,'task',NULL),(5,'other hub',NULL);"
-                    "INSERT INTO support_messages VALUES(4,0,NULL),(4,1,NULL);")
+                    "INSERT INTO support VALUES(4,0,NULL),(4,1,NULL);")
             migration.migrate("dev",path,str(done))
             with sqlite3.connect(path) as db:
                 first = db.execute("SELECT done_at FROM todos WHERE id=3").fetchone()[0]
                 self.assertIsNotNone(first)
                 self.assertIsNone(db.execute("SELECT done_at FROM todos WHERE id=5").fetchone()[0])
-                self.assertIsNotNone(db.execute("SELECT read_at FROM support_messages WHERE from_team=0").fetchone()[0])
-                self.assertIsNone(db.execute("SELECT read_at FROM support_messages WHERE from_team=1").fetchone()[0])
+                self.assertIsNotNone(db.execute("SELECT read_at FROM support WHERE from_team=0").fetchone()[0])
+                self.assertIsNone(db.execute("SELECT read_at FROM support WHERE from_team=1").fetchone()[0])
             migration.migrate("dev",path,str(done))
             with sqlite3.connect(path) as db:
                 self.assertEqual(db.execute("SELECT done_at FROM todos WHERE id=3").fetchone()[0],first)

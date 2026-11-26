@@ -939,11 +939,11 @@ fn watch_hub(w: &World, db: &Option<rusqlite::Connection>) -> String {
     let (blob_bytes, _) = dir_bytes(&std::path::PathBuf::from(format!("{}/blobs", w.args.dir)));
     let (mut pending, mut drained) = (-1, -1);
     if let Some(db) = db {
-        pending = db.query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap_or(-1);
+        pending = db.query_row("SELECT count(*) FROM message", [], |r| r.get(0)).unwrap_or(-1);
         drained = db
             .query_row(
-                "SELECT count(*) FROM devices d WHERE NOT EXISTS
-                 (SELECT 1 FROM prekeys p WHERE p.device_id = d.id AND p.kind = 3)",
+                "SELECT count(*) FROM account_device d WHERE NOT EXISTS
+                 (SELECT 1 FROM account_prekey p WHERE p.device_id = d.id AND p.kind = 3)",
                 [],
                 |r| r.get(0),
             )
@@ -2310,10 +2310,10 @@ fn audit(w: &World) -> serde_json::Value {
     let before = dir_bytes(&blobs);
     let db = rusqlite::Connection::open(w.args.db()).unwrap();
     let rows = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(-1);
-    let waiting_blobs = rows("SELECT count(*) FROM blobs");
-    let waiting_envelopes = rows("SELECT count(*) FROM messages");
+    let waiting_blobs = rows("SELECT count(*) FROM message_blob");
+    let waiting_envelopes = rows("SELECT count(*) FROM message");
     let drained = rows(
-        "SELECT count(*) FROM devices d WHERE NOT EXISTS (SELECT 1 FROM prekeys p WHERE p.device_id = d.id AND p.kind = 3)",
+        "SELECT count(*) FROM account_device d WHERE NOT EXISTS (SELECT 1 FROM account_prekey p WHERE p.device_id = d.id AND p.kind = 3)",
     );
     // A blob uploaded now and never fetched: a month later it is gone.
     let probe = blob_probe(w);
@@ -2332,7 +2332,7 @@ fn audit(w: &World) -> serde_json::Value {
     let tmp = dir_bytes(&blobs.join("tmp"));
     let after = dir_bytes(&blobs);
     let after = (after.0 - tmp.0, after.1 - tmp.1);
-    let blobs_left = rows("SELECT count(*) FROM blobs");
+    let blobs_left = rows("SELECT count(*) FROM message_blob");
     if blobs_left != 0 {
         failed.push(format!("{blobs_left} blobs past their time"));
     }

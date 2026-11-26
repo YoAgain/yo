@@ -456,14 +456,14 @@ fn a_commitment_the_hub_lacks_is_told_again_and_not_asked_for_after_every_read()
     let mut c = register(https[1].clone(), &username(base + 7), Some("BOT"));
     rounds(&mut c, 2);
     let user = yo_tests::user_id(c.user_id()).to_vec();
-    let gone = db.execute("DELETE FROM profile_commitments WHERE user_id = ?1", [&user]).unwrap();
+    let gone = db.execute("DELETE FROM account_profile WHERE user_id = ?1", [&user]).unwrap();
     assert_eq!(gone, 1, "the commitment was told at first");
     let (id, _) = a.create_group("BOTS", &[c.user_id().to_owned()]).unwrap();
     take(&mut c);
     c.accept_group(&id).unwrap();
     rounds(&mut c, 3);
     let told: usize =
-        db.query_row("SELECT count(*) FROM profile_commitments WHERE user_id = ?1", [&user], |row| row.get(0)).unwrap();
+        db.query_row("SELECT count(*) FROM account_profile WHERE user_id = ?1", [&user], |row| row.get(0)).unwrap();
     assert_eq!(told, 1, "the commitment is at the hub again");
     let before = asked(&https[1], yoip::net::api::GROUP_CREDENTIAL);
     assert!(before <= 2, "its own credential asked for {before} times");

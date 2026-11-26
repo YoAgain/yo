@@ -34,48 +34,48 @@ ADMIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOUR, DAY = 3600_000, 86400_000
 
 SCHEMA = """
-CREATE TABLE users (id BLOB PRIMARY KEY, account_key BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE account_keys (key BLOB PRIMARY KEY, user_id BLOB NOT NULL) WITHOUT ROWID;
-CREATE TABLE handles (kind INTEGER NOT NULL, value BLOB NOT NULL, user_id BLOB NOT NULL, spelling TEXT,
+CREATE TABLE account (id BLOB PRIMARY KEY, account_key BLOB NOT NULL UNIQUE, created_at INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE account_key (key BLOB PRIMARY KEY, user_id BLOB NOT NULL) WITHOUT ROWID;
+CREATE TABLE account_name (kind INTEGER NOT NULL, value BLOB NOT NULL, user_id BLOB NOT NULL, spelling TEXT,
     PRIMARY KEY (kind, value)) WITHOUT ROWID;
-CREATE TABLE reserved (skeleton TEXT PRIMARY KEY, spelling TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE devices (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, device_key BLOB NOT NULL UNIQUE, auth_key BLOB NOT NULL,
+CREATE TABLE name_reserved (skeleton TEXT PRIMARY KEY, spelling TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE account_device (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, device_key BLOB NOT NULL UNIQUE, auth_key BLOB NOT NULL,
     push_platform INTEGER NOT NULL, push_token BLOB NOT NULL, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
     app TEXT, registration_id INTEGER NOT NULL DEFAULT 0, number INTEGER NOT NULL DEFAULT 1,
     prekey_max INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
-CREATE TABLE gone (id BLOB PRIMARY KEY, gone_at INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE prekeys (device_id BLOB NOT NULL, kind INTEGER NOT NULL, id INTEGER NOT NULL, key BLOB NOT NULL,
+CREATE TABLE account_device_gone (id BLOB PRIMARY KEY, gone_at INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE account_prekey (device_id BLOB NOT NULL, kind INTEGER NOT NULL, id INTEGER NOT NULL, key BLOB NOT NULL,
     signature BLOB NOT NULL, PRIMARY KEY (device_id, kind, id)) WITHOUT ROWID;
-CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id BLOB NOT NULL, envelope BLOB NOT NULL,
+CREATE TABLE message (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id BLOB NOT NULL, envelope BLOB NOT NULL,
     received_at INTEGER NOT NULL);
-CREATE TABLE backups (user_id BLOB PRIMARY KEY, locator BLOB UNIQUE, record BLOB NOT NULL, updated_at INTEGER NOT NULL,
+CREATE TABLE account_backup (user_id BLOB PRIMARY KEY, locator BLOB UNIQUE, record BLOB NOT NULL, updated_at INTEGER NOT NULL,
     auth_passkey BLOB, auth_code BLOB) WITHOUT ROWID;
-CREATE TABLE reports (reporter BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
+CREATE TABLE support_report (reporter BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
     created_at INTEGER NOT NULL, PRIMARY KEY (reporter, reported_id)) WITHOUT ROWID;
-CREATE TABLE attestation (user_id BLOB PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('attested','failed')),
+CREATE TABLE account_attestation (user_id BLOB PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('attested','failed')),
     platform TEXT NOT NULL CHECK(platform IN ('ios','android')), reason TEXT, level TEXT, at_ms INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE stats (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY(metric,key,hour)) WITHOUT ROWID;
-CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY, current BLOB NOT NULL, requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
-CREATE TABLE storage (user_id BLOB PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE blobs (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, size INTEGER NOT NULL, fetches_left INTEGER NOT NULL,
+CREATE TABLE stat (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY(metric,key,hour)) WITHOUT ROWID;
+CREATE TABLE account_contact_key (user_id BLOB PRIMARY KEY, current BLOB NOT NULL, requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
+CREATE TABLE account_storage (user_id BLOB PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE message_blob (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, size INTEGER NOT NULL, fetches_left INTEGER NOT NULL,
     created_at INTEGER NOT NULL, fetching INTEGER NOT NULL DEFAULT 0, gets_left INTEGER NOT NULL DEFAULT 192,
     ready INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
-CREATE TABLE profile_commitments (user_id BLOB PRIMARY KEY, commitment BLOB NOT NULL) WITHOUT ROWID;
-CREATE TABLE zk_groups (id BLOB PRIMARY KEY, params BLOB NOT NULL, revision INTEGER NOT NULL, state BLOB NOT NULL,
+CREATE TABLE account_profile (user_id BLOB PRIMARY KEY, commitment BLOB NOT NULL) WITHOUT ROWID;
+CREATE TABLE grp (id BLOB PRIMARY KEY, params BLOB NOT NULL, revision INTEGER NOT NULL, state BLOB NOT NULL,
     updated_at INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE blob_quota (user_id BLOB NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL, bytes INTEGER NOT NULL,
+CREATE TABLE message_blob_quota (user_id BLOB NOT NULL, day INTEGER NOT NULL, count INTEGER NOT NULL, bytes INTEGER NOT NULL,
     PRIMARY KEY (user_id, day)) WITHOUT ROWID;
-CREATE TABLE diagnostics (id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('crash','error')),
+CREATE TABLE diag (id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('crash','error')),
     signature TEXT NOT NULL UNIQUE, count INTEGER NOT NULL DEFAULT 1, first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL, app TEXT NOT NULL, os TEXT NOT NULL, model TEXT NOT NULL, payload TEXT NOT NULL,
     done INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE diagnostic_installs (diagnostic_id INTEGER NOT NULL, install BLOB NOT NULL, day INTEGER NOT NULL,
+CREATE TABLE diag_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE diag_install (diagnostic_id INTEGER NOT NULL, install BLOB NOT NULL, day INTEGER NOT NULL,
     PRIMARY KEY (diagnostic_id, install, day)) WITHOUT ROWID;
-CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, install BLOB NOT NULL,
+CREATE TABLE support (id INTEGER PRIMARY KEY AUTOINCREMENT, install BLOB NOT NULL,
     from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL, created_at INTEGER NOT NULL,
     read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
-CREATE TABLE events (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID;
+CREATE TABLE stat_minute (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID;
 """
 
 # ---- names --------------------------------------------------------------------------------------------------------
@@ -193,12 +193,12 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
     spellings = names(rng, n_users)
     for i, name in enumerate(spellings):
         uid, created = rid(rng), min(now - 60_000, signup_time(i))
-        db.execute("INSERT INTO users VALUES (?,?,?)", (uid, rid(rng, 32), created))
-        db.execute("INSERT INTO account_keys VALUES (?,?)", (rid(rng, 32), uid))
-        db.execute("INSERT INTO handles VALUES (2,?,?,?)", (skeleton(name).encode(), uid, name))
-        db.execute("INSERT INTO contact_keys VALUES (?,?,1)", (uid, rid(rng, 32)))
-        db.execute("INSERT INTO profile_commitments VALUES (?,?)", (uid, rid(rng, 64)))
-        db.execute("INSERT INTO storage VALUES (?,?,?,?)", (uid, rng.randint(1, 40), rid(rng, 96), created + rng.randint(0, now - created)))
+        db.execute("INSERT INTO account VALUES (?,?,?)", (uid, rid(rng, 32), created))
+        db.execute("INSERT INTO account_key VALUES (?,?)", (rid(rng, 32), uid))
+        db.execute("INSERT INTO account_name VALUES (2,?,?,?)", (skeleton(name).encode(), uid, name))
+        db.execute("INSERT INTO account_contact_key VALUES (?,?,1)", (uid, rid(rng, 32)))
+        db.execute("INSERT INTO account_profile VALUES (?,?)", (uid, rid(rng, 64)))
+        db.execute("INSERT INTO account_storage VALUES (?,?,?,?)", (uid, rng.randint(1, 40), rid(rng, 96), created + rng.randint(0, now - created)))
         platform = rng.choices(["ios", "android", "dev"], weights=[86, 10, 4])[0]
         if platform == "ios":
             age = now - created
@@ -210,56 +210,56 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         for d in range(rng.choices([1, 2, 3], weights=[80, 16, 4])[0]):
             seen = max(created, now - int(rng.expovariate(1 / (2.5 * DAY))))
             push = 3 if platform == "android" else rng.choices([1, 2, 0], weights=[85, 5, 10])[0]
-            db.execute("INSERT INTO devices (id,user_id,device_key,auth_key,push_platform,push_token,created_at,"
+            db.execute("INSERT INTO account_device (id,user_id,device_key,auth_key,push_platform,push_token,created_at,"
                        "last_seen_at,app,registration_id,number,prekey_max) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                        (rid(rng), uid, rid(rng, 33), rid(rng, 32), push, rid(rng, 32) if push else b"",
                         created + d * rng.randint(0, DAY), seen, app if d == 0 else rng.choice(builds),
                         rng.randint(1, 16000), d + 1, rng.randint(20, 300)))
         if rng.random() < 0.35:
-            db.execute("INSERT INTO backups VALUES (?,?,?,?,?,?)", (uid, rid(rng), rid(rng, 120),
+            db.execute("INSERT INTO account_backup VALUES (?,?,?,?,?,?)", (uid, rid(rng), rid(rng, 120),
                        created + rng.randint(60_000, max(120_000, now - created)), rid(rng, 32), None))
         users.append(uid)
     # Attestation verdicts (spec 4.2), measured since three days ago, from a generator of their own so the rest of
     # the made-up world stays as it was.
     at_rng, since = random.Random(611), now - 3 * DAY
-    for uid, app in db.execute("SELECT user_id, min(app) FROM devices GROUP BY user_id").fetchall():
+    for uid, app in db.execute("SELECT user_id, min(app) FROM account_device GROUP BY user_id").fetchall():
         platform = app.split("/")[0]
         if platform in ("ios", "android") and app != "ios/1" and at_rng.random() < 0.7:
             failed = at_rng.random() < 0.1
             reason = ("device_integrity" if platform == "android" else "invalid_assertion") if failed else None
             level = at_rng.choice(["strong", "device", "basic"]) if platform == "android" else None
-            created = db.execute("SELECT created_at FROM users WHERE id = ?", (uid,)).fetchone()[0]
+            created = db.execute("SELECT created_at FROM account WHERE id = ?", (uid,)).fetchone()[0]
             start = max(since, created)
-            db.execute("INSERT INTO attestation VALUES (?,?,?,?,?,?)", (uid, "failed" if failed else "attested", platform,
+            db.execute("INSERT INTO account_attestation VALUES (?,?,?,?,?,?)", (uid, "failed" if failed else "attested", platform,
                        reason, level, start + at_rng.randint(0, max(1, now - start))))
     # The bots.
     for name, app in (("YoGPT", "yogpt/" + time.strftime("%Y%m%d%H%M", time.gmtime((now - 26 * HOUR) / 1000))), ("PING", "cli/7")):
         uid = rid(rng)
-        db.execute("INSERT INTO users VALUES (?,?,?)", (uid, rid(rng, 32), now - 28 * DAY))
-        db.execute("INSERT INTO handles VALUES (2,?,?,?)", (skeleton(name).encode(), uid, name))
-        db.execute("INSERT INTO devices (id,user_id,device_key,auth_key,push_platform,push_token,created_at,last_seen_at,app)"
+        db.execute("INSERT INTO account VALUES (?,?,?)", (uid, rid(rng, 32), now - 28 * DAY))
+        db.execute("INSERT INTO account_name VALUES (2,?,?,?)", (skeleton(name).encode(), uid, name))
+        db.execute("INSERT INTO account_device (id,user_id,device_key,auth_key,push_platform,push_token,created_at,last_seen_at,app)"
                    " VALUES (?,?,?,?,0,X'',?,?,?)", (rid(rng), uid, rid(rng, 33), rid(rng, 32), now - 28 * DAY, now - 600_000, app))
-        db.execute("INSERT INTO backups VALUES (?,?,?,?,NULL,NULL)", (uid, rid(rng), rid(rng, 120), now - 20 * DAY))
-    devices = [r[0] for r in db.execute("SELECT id FROM devices")]
+        db.execute("INSERT INTO account_backup VALUES (?,?,?,?,NULL,NULL)", (uid, rid(rng), rid(rng, 120), now - 20 * DAY))
+    devices = [r[0] for r in db.execute("SELECT id FROM account_device")]
     # Yos waiting for their device; photos and videos until their last fetch.
     for _ in range(rng.randint(30, 55) if live else 4):
-        db.execute("INSERT INTO messages (device_id,envelope,received_at) VALUES (?,?,?)",
+        db.execute("INSERT INTO message (device_id,envelope,received_at) VALUES (?,?,?)",
                    (rng.choice(devices), rid(rng, 180), now - int(rng.expovariate(1 / (6 * HOUR)))))
     # A few for a phone that has been off for days.
     for _ in range(3 if live else 0):
-        db.execute("INSERT INTO messages (device_id,envelope,received_at) VALUES (?,?,?)",
+        db.execute("INSERT INTO message (device_id,envelope,received_at) VALUES (?,?,?)",
                    (devices[-1], rid(rng, 180), now - 2 * DAY - rng.randint(0, 8 * HOUR)))
     for _ in range(rng.randint(6, 14) if live else 1):
-        db.execute("INSERT INTO blobs VALUES (?,?,?,?,?,0,192,1)", (rid(rng), rng.choice(users), rng.randint(80_000, 9_000_000),
+        db.execute("INSERT INTO message_blob VALUES (?,?,?,?,?,0,192,1)", (rid(rng), rng.choice(users), rng.randint(80_000, 9_000_000),
                    rng.randint(1, 4), now - rng.randint(0, 20 * HOUR)))
-    db.execute("INSERT INTO gone VALUES (?,?)", (rid(rng), now - 3 * DAY))
+    db.execute("INSERT INTO account_device_gone VALUES (?,?)", (rid(rng), now - 3 * DAY))
     for dev in devices[:40]:
         for k in range(3):
-            db.execute("INSERT INTO prekeys VALUES (?,?,?,?,?)", (dev, k, rng.randint(1, 999), rid(rng, 33), rid(rng, 64)))
+            db.execute("INSERT INTO account_prekey VALUES (?,?,?,?,?)", (dev, k, rng.randint(1, 999), rid(rng, 33), rid(rng, 64)))
     # Groups: some made today and not changed since.
     for g in range(rng.randint(22, 30) if live else 2):
         fresh = g < 4 and live
-        db.execute("INSERT INTO zk_groups VALUES (?,?,?,?,?)", (rid(rng, 32), rid(rng, 97), 0 if fresh else rng.randint(1, 40),
+        db.execute("INSERT INTO grp VALUES (?,?,?,?,?)", (rid(rng, 32), rid(rng, 97), 0 if fresh else rng.randint(1, 40),
                    rid(rng, 300), now - rng.randint(0, 6 * HOUR) if fresh else now - rng.randint(DAY, 12 * DAY)))
     # Deliveries per hour (8 days), a day curve with an evening peak, more today.
     hour0 = now // HOUR
@@ -270,7 +270,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         n = int(rng.gauss(base * boost, base * 0.2))
         if h == hour0:
             n = n * (int(now % HOUR) // 60_000) // 60
-        db.execute("INSERT INTO stats VALUES ('deliveries','',?,?)", (h, max(0, n)))
+        db.execute("INSERT INTO stat VALUES ('deliveries','',?,?)", (h, max(0, n)))
     # Photos and videos today, per uploader.
     media_hours = {}
     for h in range(midnight // HOUR, hour0 + 1):
@@ -281,15 +281,15 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
     for k, u in enumerate(uploaders):
         c = total // len(uploaders) + (1 if k < total % len(uploaders) else 0)
         if c:
-            db.execute("INSERT INTO blob_quota VALUES (?,?,?,?)", (u, now // DAY, c, c * rng.randint(400_000, 3_000_000)))
-        db.execute("INSERT INTO blob_quota VALUES (?,?,?,?)", (u, now // DAY - 1, rng.randint(1, 6), rng.randint(1, 9) * 1_000_000))
+            db.execute("INSERT INTO message_blob_quota VALUES (?,?,?,?)", (u, now // DAY, c, c * rng.randint(400_000, 3_000_000)))
+        db.execute("INSERT INTO message_blob_quota VALUES (?,?,?,?)", (u, now // DAY - 1, rng.randint(1, 6), rng.randint(1, 9) * 1_000_000))
     # Support threads: (u)ser and (t)eam lines, the newest open ones unread; each by a random install id (16 bytes, hub
     # schema 9), never an account.
     threads = [rng.randbytes(16) for _ in range(len(SUPPORT) if live else 2)]
     # Reports: by an install (some of them the support threads'), about a user.
     for reason, age in [(1, 2 * HOUR), (2, 9 * HOUR), (1, DAY + 3 * HOUR), (3, 3 * DAY), (2, 6 * DAY), (1, 10 * DAY)][: 6 if live else 1]:
         a, b = rng.choice(threads) if rng.random() < 0.5 else rng.randbytes(16), rng.choice(users)
-        db.execute("INSERT OR IGNORE INTO reports VALUES (?,?,?,?)", (a, b, reason, now - age))
+        db.execute("INSERT OR IGNORE INTO support_report VALUES (?,?,?,?)", (a, b, reason, now - age))
     photo_user = None
     for k, (uid, lines) in enumerate(zip(threads, SUPPORT)):
         t = now - int((k + rng.random()) * (11 * HOUR if k < 5 else DAY))
@@ -302,7 +302,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             answered = any(w == "t" for w, _ in lines[j + 1:])
             done = None if (not team and not answered and k % 3 != 2) else (t + 600_000 if not team else None)
             read = t + rng.randint(5, 120) * 60_000 if team and j < len(lines) - 1 or (team and rng.random() < 0.5) else None
-            db.execute("INSERT INTO support_messages (install,from_team,text,created_at,read_at,app_version,done_at) VALUES (?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO support (install,from_team,text,created_at,read_at,app_version,done_at) VALUES (?,?,?,?,?,?,?)",
                        (uid, int(team), text, t, read if read and read < now else None, newest if not team else "", done))
     # The hub's event counts (per kind and minute, nothing of who): 20 days, busier in the afternoon, few at night.
     for m in range((now // 60_000) - 20 * 1440, now // 60_000 + 1, 7):
@@ -316,10 +316,10 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         for kind, rate in kinds:
             n = sum(rng.random() < rate * busy / 3 for _ in range(3))
             if n:
-                db.execute("INSERT INTO events VALUES (?,?,?)", (kind, m, n))
+                db.execute("INSERT INTO stat_minute VALUES (?,?,?)", (kind, m, n))
                 out = kind.replace("-in", "-out", 1)
                 if out != kind and not kind.endswith("-bot"):
-                    db.execute("INSERT INTO events VALUES (?,?,?)", (out, m, n + rng.randint(0, 2)))
+                    db.execute("INSERT INTO stat_minute VALUES (?,?,?)", (out, m, n + rng.randint(0, 2)))
                 if kind == "yo-in":  # the hub's own counts that follow the Yos: delivery latency, pushes
                     acked = n + rng.randint(0, 2)
                     lat = [0, 0, 0, 0]
@@ -330,15 +330,15 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                         lat[3 if r < off else 0 if r < off + 0.8 else 1 if r < off + 0.92 else 2] += 1
                     for k, c in zip(("latency-1s", "latency-5s", "latency-60s", "latency-slow"), lat):
                         if c:
-                            db.execute("INSERT INTO events VALUES (?,?,?)", (k, m, c))
+                            db.execute("INSERT INTO stat_minute VALUES (?,?,?)", (k, m, c))
                     fail = sum(rng.random() < 0.015 for _ in range(n))
-                    db.execute("INSERT INTO events VALUES (?,?,?)", ("push-ok", m, n - fail + rng.randint(0, 1)))
+                    db.execute("INSERT INTO stat_minute VALUES (?,?,?)", ("push-ok", m, n - fail + rng.randint(0, 1)))
                     if fail:
-                        db.execute("INSERT INTO events VALUES (?,?,?)", ("push-fail", m, fail))
+                        db.execute("INSERT INTO stat_minute VALUES (?,?,?)", ("push-fail", m, fail))
                 if kind == "media-in":  # each upload's bytes: photos of a few hundred KB, now and then a video
                     size = sum(int(rng.lognormvariate(12.6, 0.6)) if rng.random() < 0.9 else rng.randint(5, 40) * 1_000_000
                                for _ in range(n))
-                    db.execute("INSERT INTO events VALUES (?,?,?)", ("media-in-bytes", m, size))
+                    db.execute("INSERT INTO stat_minute VALUES (?,?,?)", ("media-in-bytes", m, size))
     # Every answer of the hub (a few dozen a minute in the day), its 4xx, 429 and 5xx; accounts deleted now and then.
     for m in range((now // 60_000) - 20 * 1440, now // 60_000 + 1, 7):
         busy = 0.15 + 0.85 * max(0.0, 1 - abs((m // 60) % 24 - 15) / 9)
@@ -347,7 +347,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                         ("http-429", int(rng.random() < 0.05)), ("http-5xx", int(rng.random() < (0.04 if live else 0.01))),
                         ("account-gone", int(rng.random() < (0.004 if live else 0.001)))):
             if n:
-                db.execute("INSERT INTO events VALUES (?,?,?)", (kind, m, n))
+                db.execute("INSERT INTO stat_minute VALUES (?,?,?)", (kind, m, n))
     # Crashes and errors, from a pool of installs (some of them the support threads').
     n_open = 0
     installs = threads + [rng.randbytes(16) for _ in range(30 if live else 4)]
@@ -356,7 +356,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         last = min(now - 120_000, first + rng.randint(0, now - first))
         done = int(k in (3, 9))
         n_open += not done
-        cur = db.execute("INSERT INTO diagnostics (kind,signature,count,first_seen,last_seen,app,os,model,payload,done) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        cur = db.execute("INSERT INTO diag (kind,signature,count,first_seen,last_seen,app,os,model,payload,done) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    (kind, hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:24],
                     rng.choice([1, 1, 2, 3, 5, 8, 14, 41, 230]) if payload.get("severity") != "expected" else rng.randint(80, 900),
                     first, last, payload.get("app") or rng.choice(builds[:3]),
@@ -365,22 +365,22 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                     json.dumps(payload), done))
         # Which installs sent it on which day (a few, over its days; at most 90 days back).
         for _ in range(rng.randint(1, 6 if live else 2)):
-            db.execute("INSERT OR IGNORE INTO diagnostic_installs VALUES (?,?,?)",
+            db.execute("INSERT OR IGNORE INTO diag_install VALUES (?,?,?)",
                        (cur.lastrowid, rng.choice(installs), rng.randint(first // DAY, last // DAY)))
     for d in range(now // DAY - 13, now // DAY + 1):
         crashes = rng.randint(0, 4 if live else 1)
-        db.execute("INSERT INTO stats VALUES ('diagnostics:crash','',?,?)", (d * 24, crashes))
+        db.execute("INSERT INTO stat VALUES ('diagnostics:crash','',?,?)", (d * 24, crashes))
         # The same crashes as the hub's "crash" events, at a minute of their day (not after now): per hour on the page.
         for _ in range(crashes):
             m = rng.randint(d * 1440, min((d + 1) * 1440, now // 60_000 + 1) - 1)
-            db.execute("INSERT INTO events VALUES (?,?,1) ON CONFLICT(kind, minute) DO UPDATE SET n=n+1", ("crash", m))
-        db.execute("INSERT INTO stats VALUES ('diagnostics:error','',?,?)", (d * 24, rng.randint(2, 30 if live else 3)))
-    db.execute("INSERT INTO diagnostic_seen VALUES (?,1)", ("550e8400-e29b-41d4-a716-446655440000",))
-    db.execute("INSERT INTO stats SELECT kind, '', minute / 60, sum(n) FROM events GROUP BY kind, minute / 60")
-    db.execute("DELETE FROM events WHERE minute <= ?", (now // 60_000 - 120,))
+            db.execute("INSERT INTO stat_minute VALUES (?,?,1) ON CONFLICT(kind, minute) DO UPDATE SET n=n+1", ("crash", m))
+        db.execute("INSERT INTO stat VALUES ('diagnostics:error','',?,?)", (d * 24, rng.randint(2, 30 if live else 3)))
+    db.execute("INSERT INTO diag_seen VALUES (?,1)", ("550e8400-e29b-41d4-a716-446655440000",))
+    db.execute("INSERT INTO stat SELECT kind, '', minute / 60, sum(n) FROM stat_minute GROUP BY kind, minute / 60")
+    db.execute("DELETE FROM stat_minute WHERE minute <= ?", (now // 60_000 - 120,))
     # Reserved names.
     for name, note in RESERVED if live else RESERVED[:4]:
-        db.execute("INSERT INTO reserved VALUES (?,?,?,?)", (skeleton(name), name, note, now - 25 * DAY))
+        db.execute("INSERT INTO name_reserved VALUES (?,?,?,?)", (skeleton(name), name, note, now - 25 * DAY))
     db.commit()
     db.close()
     return {"threads": threads, "photo_user": photo_user, "media_hours": media_hours,
@@ -403,7 +403,7 @@ class FakeHubs:
             if body is None and method is None and suffix == "messages":
                 rows = [{"install": i, "at": a, "unread": n} for i, a, n in db.execute(
                     "SELECT lower(hex(s.install)),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL) "
-                    "FROM support_messages s GROUP BY s.install "
+                    "FROM support s GROUP BY s.install "
                     "ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC")]
                 return rows
             if body is None and method is None and parts[0] == "messages" and len(parts) == 2:
@@ -413,14 +413,14 @@ class FakeHubs:
                                      "support_messages WHERE install=? ORDER BY created_at,id", (user,))]}
             if parts[0] == "messages" and len(parts) == 2:  # a reply
                 user = bytes.fromhex(parts[1])
-                if not db.execute("SELECT 1 FROM support_messages WHERE install=?", (user,)).fetchone():
+                if not db.execute("SELECT 1 FROM support WHERE install=?", (user,)).fetchone():
                     raise OSError("409: no conversation")
-                db.execute("INSERT INTO support_messages (install,from_team,text,created_at) VALUES (?,1,?,?)", (user, body, now))
+                db.execute("INSERT INTO support (install,from_team,text,created_at) VALUES (?,1,?,?)", (user, body, now))
             elif parts[0] == "messages" and parts[-1] == "handled":
-                db.execute("UPDATE support_messages SET done_at=? WHERE install=? AND from_team=0 AND id<=? AND done_at IS NULL",
+                db.execute("UPDATE support SET done_at=? WHERE install=? AND from_team=0 AND id<=? AND done_at IS NULL",
                            (now, bytes.fromhex(parts[1]), int(body)))
             elif parts[0] == "messages":  # messages/done/<id>
-                db.execute("UPDATE support_messages SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))
+                db.execute("UPDATE support SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))
             else:
                 raise ValueError(suffix)
         self.on_change()
@@ -432,11 +432,11 @@ class FakeHubs:
                 for n in data:
                     spelling = (n if isinstance(n, str) else n["name"]).strip()
                     note = None if isinstance(n, str) else n.get("note")
-                    db.execute("INSERT INTO reserved VALUES (?,?,?,?) ON CONFLICT(skeleton) DO UPDATE SET note=excluded.note",
+                    db.execute("INSERT INTO name_reserved VALUES (?,?,?,?) ON CONFLICT(skeleton) DO UPDATE SET note=excluded.note",
                                (skeleton(spelling), spelling, note, int(time.time() * 1000)))
             elif method == "DELETE":
-                db.execute("DELETE FROM reserved WHERE skeleton=?", (skeleton(name),))
-            out = {"names": [r[0] for r in db.execute("SELECT spelling FROM reserved ORDER BY skeleton")],
+                db.execute("DELETE FROM name_reserved WHERE skeleton=?", (skeleton(name),))
+            out = {"names": [r[0] for r in db.execute("SELECT spelling FROM name_reserved ORDER BY skeleton")],
                    "name_min": 3, "name_max": 32, "name_comparison": "skeleton",
                    "name_form": "NFC Latin letters, digits, underscore or emoji; no _ first, at least one letter or emoji"}
         if method != "GET":
@@ -445,7 +445,7 @@ class FakeHubs:
 
     def diagnostics(self, hub, data):
         with self.lock, self.db(hub) as db:
-            db.execute("UPDATE diagnostics SET done=? WHERE id=?", (int(data["done"]), data["id"]))
+            db.execute("UPDATE diag SET done=? WHERE id=?", (int(data["done"]), data["id"]))
         self.on_change()
         return []
 
@@ -638,9 +638,9 @@ def main():
     import migrate_levels  # noqa: E402
     for hub_name, path in paths.items():
         with sqlite3.connect(path) as db:
-            db.executemany("INSERT OR IGNORE INTO stats(metric,hour,value) VALUES (?, ?, ?)", migrate_levels.rows(hub_name, state, now))
+            db.executemany("INSERT OR IGNORE INTO stat(metric,hour,value) VALUES (?, ?, ?)", migrate_levels.rows(hub_name, state, now))
             # Active accounts (seen within 48 hours), sampled hourly for the last five days: the line starts when data does.
-            db.executemany("INSERT OR IGNORE INTO stats(metric,hour,value) VALUES ('active-48h', ?, ?)",
+            db.executemany("INSERT OR IGNORE INTO stat(metric,hour,value) VALUES ('active-48h', ?, ?)",
                            [(h, int(args.users * (0.5 + 0.1 * math.sin(h / 9)) + (h - now // HOUR))) for h in range(now // HOUR - 119, now // HOUR + 1)])
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
@@ -680,18 +680,18 @@ def main():
             t = int(time.time() * 1000)
             if tick:
                 with sqlite3.connect(paths["live"]) as db:
-                    db.execute("INSERT INTO stats VALUES ('deliveries','',?,?) ON CONFLICT(metric,key,hour) DO UPDATE SET value=value+excluded.value",
+                    db.execute("INSERT INTO stat VALUES ('deliveries','',?,?) ON CONFLICT(metric,key,hour) DO UPDATE SET value=value+excluded.value",
                                (t // HOUR, rng.randint(0, 6)))
-                    db.execute("UPDATE devices SET last_seen_at=? WHERE id IN (SELECT id FROM devices ORDER BY random() LIMIT ?)",
+                    db.execute("UPDATE account_device SET last_seen_at=? WHERE id IN (SELECT id FROM account_device ORDER BY random() LIMIT ?)",
                                (t, rng.randint(0, 2)))
                     # Yos arriving now, for the header's live strip.
                     for kind, n in (("yo-in", rng.randint(0, 9)), ("media-in", rng.randint(0, 2)), ("yo-in-bot", rng.randint(0, 3))):
                         if n:
-                            db.execute("INSERT INTO stats VALUES (?, '', ?, ?) ON CONFLICT(metric,key,hour) DO UPDATE SET value=value+excluded.value",
+                            db.execute("INSERT INTO stat VALUES (?, '', ?, ?) ON CONFLICT(metric,key,hour) DO UPDATE SET value=value+excluded.value",
                                        (kind, t // HOUR, n))
-                            db.execute("INSERT INTO events VALUES (?,?,?) ON CONFLICT(kind, minute) DO UPDATE SET n=n+?",
+                            db.execute("INSERT INTO stat_minute VALUES (?,?,?) ON CONFLICT(kind, minute) DO UPDATE SET n=n+?",
                                        (kind, t // 60_000, n, n))
-                    db.execute("DELETE FROM events WHERE minute <= ?", (t // 60_000 - 120,))
+                    db.execute("DELETE FROM stat_minute WHERE minute <= ?", (t // 60_000 - 120,))
             out = collector_module.collect(lambda previous: server.updates())
             live_out = out["live"]
             write("status-last.json", {"at": int(time.time()) - 17 * 60, "users": live_out["total"], "since": live_out["total"] - (args.users - 14),

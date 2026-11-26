@@ -28,9 +28,9 @@ class BuildNameTests(unittest.TestCase):
             path = Path(d) / "hub.sqlite"
             with sqlite3.connect(path) as db:
                 db.executescript("""
-                CREATE TABLE devices (id BLOB, user_id BLOB, last_seen_at INTEGER, app TEXT, version TEXT);
-                INSERT INTO devices VALUES (x'01', x'01', 0, 'ios/202611241600', '1.0.0-RC37');
-                INSERT INTO devices VALUES (x'02', x'02', 0, 'ios/202611241700', NULL);
+                CREATE TABLE account_device (id BLOB, user_id BLOB, last_seen_at INTEGER, app TEXT, version TEXT);
+                INSERT INTO account_device VALUES (x'01', x'01', 0, 'ios/202611241600', '1.0.0-RC37');
+                INSERT INTO account_device VALUES (x'02', x'02', 0, 'ios/202611241700', NULL);
                 """)
             h = users.hub("live", str(path))
             self.assertEqual(h["app_versions"], {"ios/202611241600": "1.0.0-RC37"})

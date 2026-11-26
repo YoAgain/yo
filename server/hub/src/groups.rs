@@ -400,15 +400,14 @@ mod tests {
         let counted: Vec<(String, i64, i64)> = hub
             .db
             .conn()
-            .prepare("SELECT kind, minute, n FROM events")
+            .prepare("SELECT kind, minute, n FROM stat_minute")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(counted, [("group-create".to_owned(), 2, 1)]);
-        let made_at: Option<i64> =
-            hub.db.conn().query_row("SELECT created_at FROM zk_groups", [], |r| r.get(0)).unwrap();
+        let made_at: Option<i64> = hub.db.conn().query_row("SELECT created_at FROM grp", [], |r| r.get(0)).unwrap();
         assert!(made_at.is_some_and(|at| at > 0));
         // A stranger's presentation is no member's.
         let fetch = |who: &UserId| api::GroupRequest { auth: auth(&hub, who, &secret), revision: 0, actions: vec![] };

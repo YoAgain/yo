@@ -1098,7 +1098,7 @@ if (document.body.classList.contains("login")) {
     }
   };
 
-  // ---- support chat (the Database widget, support_messages): the people who wrote on the left, "Open" or
+  // ---- support chat (the Database widget, support): the people who wrote on the left, "Open" or
   // "Answered"; the chosen one's conversation on the right, under one line of facts. Each message of theirs is ticked
   // handled by hand; a reply ticks the ones it answers.
   let supportInstall = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
@@ -1389,15 +1389,10 @@ if (document.body.classList.contains("login")) {
   const reasonTag = (reason) => tag(reason, reason === "abuse" ? "bad" : reason === "spam" ? "warn" : "muted");
 
   // ---- database: every table, grouped by topic; reserved names --------------------------------
-  // Table groups as the README's endpoint groups ("What the hub knows per endpoint group"), in this order, each table
-  // in its listed order; a name ending in "*" takes every table it starts. Each with a line icon (drawn like the
-  // Overview's). The rest (Litestream's bookkeeping) under Internal.
-  const TABLE_GROUPS = [
-    ["Account", "user", ["users", "devices", "handles", "gone", "reserved", "account_keys", "contact_keys", "prekeys", "profile_commitments", "storage", "zk_groups", "zk_groups_gone", "backups", "attestation"]],
-    ["Messages", "mail", ["messages", "blobs", "blob_quota"]],
-    ["Support, Problems and Reports", "chat", ["support_messages", "reports", "diagnostics", "diagnostic_seen", "diagnostic_installs"]],
-    ["Stats", "chart", ["stats", "events", "request_hours"]],
-  ];
+  // Tables grouped by their name's prefix (the hub names each by its area: account_device under "account"), the
+  // prefix the heading; the hub's areas in this order, any other prefix after them, Litestream's and SQLite's
+  // bookkeeping under internal.
+  const TABLE_AREAS = ["account", "name", "message", "grp", "support", "diag", "stat"];
   Object.assign(ICONS, {
     user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
     key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/>',
@@ -1428,45 +1423,49 @@ if (document.body.classList.contains("login")) {
     ["v-reports", "Reports", "flag", "Reported users: how many reports, from how many installs, why; the raw table is under Database"],
     ["v-services", "Services", "yogpt", "The bots: their traffic, and who they will Yo later (server/services/)"],
   ];
-  const VIEW_TABLE = { people: "users", "v-support": "support_messages", "v-errors": "diagnostics", "v-reports": "reports", "v-services": "services_yos" };
+  const VIEW_TABLE = { people: "account", "v-support": "support", "v-errors": "diag", "v-reports": "support_report", "v-services": "services_yos" };
   // What each table is for, from the hub's schema (server/hub/src/db.rs); "(?)" marks a guess.
   const TABLE_INFO = {
-    users: "Accounts: id, account key, sign-up time",
-    handles: "Usernames by skeleton, as their owners spell them",
-    reserved: "Usernames nobody may claim, by skeleton",
-    gone: "Replaced devices; their requests answer 410",
-    account_keys: "Every account key a user ever had",
-    devices: "Each user's devices: keys, push, app, last seen",
-    contact_keys: "Checks of users' access keys, never the keys",
-    profile_commitments: "Users' profile key commitments, for credentials",
-    messages: "Encrypted envelopes waiting for their device",
-    prekeys: "Devices' prekeys, to start encrypted sessions",
-    blobs: "Photos and videos until their last fetch",
-    blob_quota: "Uploads per user and day, kept two days",
-    zk_groups: "Groups: encrypted state, revision (Signal Groups v2)",
-    storage: "Each user's sealed storage, versioned writes",
-    backups: "Each user's backup record; it secures the name",
-    support_messages: "Support chat messages, by random install id (no account)",
-    diagnostics: "App problems, one row per signature",
-    diagnostic_seen: "Report ids already counted, never counted twice",
-    diagnostic_installs: "Which install sent a group on which day, kept 90 days",
-    reports: "Users reported by installs (random id, no account), latest per pair",
-    stats: "The hub's hourly summaries, kept for good: counts only",
-    request_hours: "Signed requests (to strangers) per sender and hour, kept 25 hours",
+    account: "Accounts: id, account key, sign-up time",
+    account_name: "Usernames by skeleton, as their owners spell them",
+    account_key: "Every account key a user ever had",
+    account_device: "Each user's devices: keys, push, app, last seen",
+    account_contact_key: "Checks of users' access keys, never the keys",
+    account_profile: "Users' profile key commitments, for credentials",
+    account_prekey: "Devices' prekeys, to start encrypted sessions",
+    account_storage: "Each user's sealed storage, versioned writes",
+    account_backup: "Each user's backup record; it secures the name",
+    account_attestation: "Each user's last device attestation verdict",
+    name_reserved: "Usernames nobody may claim, by skeleton",
+    account_device_gone: "Replaced devices; their requests answer 410",
+    message: "Encrypted envelopes waiting for their device",
+    message_blob: "Photos and videos until their last fetch",
+    message_blob_quota: "Uploads per user and day, kept two days",
+    grp: "Groups: encrypted state, revision (Signal Groups v2)",
+    grp_gone: "Ended groups, never made again",
+    support: "Support chat messages, by random install id (no account)",
+    support_report: "Users reported by installs (random id, no account), latest per pair",
+    diag: "App problems, one row per signature",
+    diag_seen: "Report ids already counted, never counted twice",
+    diag_install: "Which install sent a group on which day, kept 90 days",
+    diag_build: "A problem's reports per build",
+    stat: "The hub's hourly summaries, kept for good: counts only",
+    stat_minute: "Events per minute for the live strip, kept 2 hours",
+    stat_request: "Signed requests (to strangers) per sender and hour, kept 25 hours",
     services_yos: "The services' own database: a row per Yo of a bot, its time and its reminder",
     _litestream_lock: "Litestream replication bookkeeping (?)",
     _litestream_seq: "Litestream replication bookkeeping (?)",
   };
+  const tableArea = (name) => /^(_|sqlite_)/.test(name) ? "internal" : name.split("_")[0];
   const tableGroups = (list) => {
-    const known = new Set();
-    const groups = TABLE_GROUPS.map(([title, ico, names]) => {
-      const ts = names.flatMap((n) => list.filter((t) => !known.has(t.name) && (n.endsWith("*") ? t.name.startsWith(n.slice(0, -1)) : t.name === n))
-        .sort((x, y) => x.name.localeCompare(y.name)));
-      ts.forEach((t) => known.add(t.name));
-      return [title, ico, ts];
-    });
-    groups.push(["Internal", "gear", list.filter((t) => !known.has(t.name))]);
-    return groups.filter(([, , ts]) => ts.length);
+    const groups = new Map();
+    for (const t of [...list].sort((x, y) => x.name.localeCompare(y.name))) {
+      const area = tableArea(t.name);
+      if (!groups.has(area)) groups.set(area, []);
+      groups.get(area).push(t);
+    }
+    const rank = (area) => area === "internal" ? Infinity : TABLE_AREAS.includes(area) ? TABLE_AREAS.indexOf(area) : TABLE_AREAS.length;
+    return [...groups].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b));
   };
   // Install id columns (help, spec 4.2) in their short form.
   const INSTALL_COL = /^(install|reporter)$/;
@@ -1699,7 +1698,7 @@ if (document.body.classList.contains("login")) {
     const openSupport = openSupportCount(last?.[which]), openReports = openReportCount(last?.[which]);
     const occurrences = openGroups.reduce((n, d) => n + (d.count || 0), 0);
     const drawn = JSON.stringify([which, tableOpen, tableOpen === "v-services" && [whoShown, last?.[which]?.services], openSupport, openReports, openCauses, openGroups.length, occurrences, tableOpen === "v-errors" && last?.[which]?.diagnostics?.map(d => [d.id, d.last_seen, d.count, d.done, d.cause_installs]), tableOpen === "v-reports" && [(last?.[which]?.reports || []).map(r => [r.id, r.at, lastDone.has(reportKey(r))]), (last?.[which]?.users || []).length], list.map((t) => [t.name, t.count]),
-      (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
+      (list.find((t) => t.name === (VIEW_TABLE[tableOpen] || tableOpen)) || {}).rows?.length, tableOpen === "name_reserved" ? list.find((t) => t.name === "name_reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
     // The views at the top, each over one table (Users put together from several); below, every table as it is, by name.
@@ -1739,7 +1738,7 @@ if (document.body.classList.contains("login")) {
       }
     };
     side.append(el("div", "tside-h", "Database"));
-    for (const [kind, , ts] of tableGroups(list.filter((t) => t !== book))) {
+    for (const [kind, ts] of tableGroups(list.filter((t) => t !== book))) {
       side.append(el("div", "tside-k", kind));
       rawTables(ts);
     }
@@ -1764,7 +1763,7 @@ if (document.body.classList.contains("login")) {
     if (t) {
       if (chat) pane.append($("people"));
       if (usersView) pane.append($("all-users"));
-      if (t.name === "reserved") pane.append(reservedBar());
+      if (t.name === "name_reserved") pane.append(reservedBar());
       if (tableOpen === "v-errors") pane.append(diagnosticList(last?.[which]?.diagnostics || [], box));
       else if (tableOpen === "v-reports") pane.append(reportList(last?.[which], box));
       else if (tableOpen === "v-services") pane.append(serviceList(last?.[which]));
@@ -1773,13 +1772,13 @@ if (document.body.classList.contains("login")) {
       table.dataset.name = t.name;
       const hr = table.createTHead().insertRow();
       for (const c of t.columns) hr.append(el("th", null, c));
-      if (t.name === "reserved") hr.append(el("th"));
+      if (t.name === "name_reserved") hr.append(el("th"));
       const body = table.createTBody();
       for (const row of t.rows) {
         const tr = body.insertRow();
         row.forEach((v, i) => {
           // A reserved name's reason: edited in place, saved on Enter or leaving the field.
-          if (t.name === "reserved" && t.columns[i] === "note") {
+          if (t.name === "name_reserved" && t.columns[i] === "note") {
             const name = row[t.columns.indexOf("spelling")], note = el("input", "note");
             note.value = v ?? ""; note.maxLength = 200; note.placeholder = "Add a reason"; note.setAttribute("aria-label", `Reason for ${name}`);
             note.addEventListener("change", async () => {
@@ -1791,20 +1790,20 @@ if (document.body.classList.contains("login")) {
           }
           if (t.name === "services_yos" && /^(at|cron_due|cron_done)$/.test(t.columns[i]) && v) cell(tr, date(v * 1000), "mono", String(v));
           else if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
-          // A random install id (support, reports, diagnostic_installs): its first 6 hex, the full one on hover.
+          // A random install id (support, support_report, diag_install): its first 6 hex, the full one on hover.
           else if (INSTALL_COL.test(t.columns[i]) && typeof v === "string" && /^[0-9a-f]{32}$/i.test(v)) cell(tr, installShort(v), "mono", v);
           else if (v != null && PII_COL.test(t.columns[i])) cell(tr, pii(String(v)), "mono", String(v).length > 40 ? String(v) : "");
           else cell(tr, v == null ? "–" : String(v), "mono", v != null && String(v).length > 40 ? String(v) : "");
           tr.lastChild.dataset.col = t.columns[i];
         });
-        if (t.name === "reserved") {
+        if (t.name === "name_reserved") {
           const name = row[t.columns.indexOf("spelling")] ?? row[0];
           const x = el("button", "ghost-x", "Remove"); x.type = "button";
           x.addEventListener("click", async () => { x.disabled = true; try { await changeReserved({ action: "remove", name }); } catch { x.disabled = false; } });
           cell(tr, x);
         }
       }
-      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : 0);
+      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "name_reserved" ? 1 : 0);
       wrap.append(table);
       pane.append(wrap);
       }
@@ -3058,7 +3057,7 @@ if (document.body.classList.contains("login")) {
   }
   // Links, old ones too: #support/#feedback at the chat, #crashes/#diagnostics at diagnostics, #reserved, #users.
   const legacy = { book: "v-services", users: "people", inbox: "v-support", support: "v-support", feedback: "v-support",
-    crashes: "v-errors", diagnostics: "v-errors", reports: "v-reports", reserved: "reserved" };
+    crashes: "v-errors", diagnostics: "v-errors", reports: "v-reports", reserved: "name_reserved" };
   const landing = () => {
     unpin(false);
     const hash = location.hash.slice(1);

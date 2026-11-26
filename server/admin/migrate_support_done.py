@@ -23,7 +23,7 @@ def migrate(hub, path, done_path):
                 continue
             fid = int(number)
             db.execute("UPDATE todos SET done_at=? WHERE id=? AND done_at IS NULL", (now, fid))
-            db.execute("UPDATE support_messages SET read_at=? WHERE id=? AND from_team=0 AND read_at IS NULL", (now, fid))
+            db.execute("UPDATE support SET read_at=? WHERE id=? AND from_team=0 AND read_at IS NULL", (now, fid))
 
 
 if __name__ == "__main__":

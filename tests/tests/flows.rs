@@ -764,20 +764,22 @@ fn old_app(config: &yo_hub::config::Config, b: &Phone) -> impl FnOnce() {
     let db = rusqlite::Connection::open(&config.db_path).unwrap();
     db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
     let device: Vec<u8> = db
-        .query_row("SELECT id FROM devices WHERE user_id = ?1", [yo_tests::user_id(&b.user()).to_vec()], |r| r.get(0))
+        .query_row("SELECT id FROM account_device WHERE user_id = ?1", [yo_tests::user_id(&b.user()).to_vec()], |r| {
+            r.get(0)
+        })
         .unwrap();
     let rows: Vec<(i64, i64, Vec<u8>, Vec<u8>)> = db
-        .prepare("SELECT kind, id, key, signature FROM prekeys WHERE device_id = ?1")
+        .prepare("SELECT kind, id, key, signature FROM account_prekey WHERE device_id = ?1")
         .unwrap()
         .query_map([&device], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    db.execute("DELETE FROM prekeys WHERE device_id = ?1", [&device]).unwrap();
+    db.execute("DELETE FROM account_prekey WHERE device_id = ?1", [&device]).unwrap();
     move || {
         for (kind, id, key, signature) in &rows {
             db.execute(
-                "INSERT INTO prekeys (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO account_prekey (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![&device, kind, id, key, signature],
             )
             .unwrap();

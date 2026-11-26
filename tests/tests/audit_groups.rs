@@ -151,12 +151,12 @@ fn unhex(id: &str) -> Vec<u8> {
 }
 
 fn stored(db: &rusqlite::Connection, id: &str) -> yoip::net::api::GroupState {
-    let state: Vec<u8> = db.query_row("SELECT state FROM zk_groups WHERE id = ?1", [unhex(id)], |r| r.get(0)).unwrap();
+    let state: Vec<u8> = db.query_row("SELECT state FROM grp WHERE id = ?1", [unhex(id)], |r| r.get(0)).unwrap();
     yoip::decode(&state).unwrap()
 }
 
 fn store(db: &rusqlite::Connection, id: &str, state: &yoip::net::api::GroupState) {
-    db.execute("UPDATE zk_groups SET state = ?2 WHERE id = ?1", (unhex(id), yoip::encode(state))).unwrap();
+    db.execute("UPDATE grp SET state = ?2 WHERE id = ?1", (unhex(id), yoip::encode(state))).unwrap();
 }
 
 fn view(c: &Client, id: &str) -> yo_core::groups::GroupView {
@@ -256,7 +256,7 @@ fn one_unreadable_member_entry_is_skipped_and_removed() {
     s.members.push(stored(&db, &other).members[0].clone());
     s.revision += 1;
     store(&db, &id, &s);
-    db.execute("UPDATE zk_groups SET revision = ?2 WHERE id = ?1", (unhex(&id), s.revision)).unwrap();
+    db.execute("UPDATE grp SET revision = ?2 WHERE id = ?1", (unhex(&id), s.revision)).unwrap();
     a.rename_group(&id, "AGAIN").unwrap(); // a 409 on the stale revision, made again on the hub's: and purged
     assert_eq!(stored(&db, &id).members.len(), 2);
     let _ = std::fs::remove_dir_all(&dir);

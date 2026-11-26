@@ -6,7 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 // The in-file tests use these through `super::*`.
 #[cfg(test)]
 use schema::{
-    migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, LEGACY_FEEDBACK, SCHEMA,
+    as_schema_10, migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos,
+    LEGACY_FEEDBACK, SCHEMA_10,
 };
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use yoip::net::api;
@@ -232,12 +233,12 @@ fn array<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {
 }
 
 fn roster(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<Roster>> {
-    let Some(account_key) = row(tx, "SELECT account_key FROM users WHERE id = ?1", [user], |row| array(row.get(0)?))?
+    let Some(account_key) = row(tx, "SELECT account_key FROM account WHERE id = ?1", [user], |row| array(row.get(0)?))?
     else {
         return Ok(None);
     };
     let devices = tx
-        .prepare_cached("SELECT device_key, number FROM devices WHERE user_id = ?1 ORDER BY device_key")?
+        .prepare_cached("SELECT device_key, number FROM account_device WHERE user_id = ?1 ORDER BY device_key")?
         .query_map([user], |row| Ok(api::Device { key: array(row.get(0)?)?, id: row.get(1)? }))?
         .collect::<Result<_, _>>()?;
     Ok(Some(Roster { account_key, devices }))
@@ -246,19 +247,20 @@ fn roster(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<Roster
 /// Stores an upload of prekeys, up to `most` one-time ones of each kind, none with an id used before: never twice.
 fn insert_prekeys(tx: &Transaction<'_>, device: &DeviceId, prekeys: &api::Prekeys, most: u32) -> rusqlite::Result<()> {
     let mut insert = tx.prepare_cached(
-        "INSERT OR IGNORE INTO prekeys (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR IGNORE INTO account_prekey (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for (kind, signed) in [(SIGNED, &prekeys.signed), (LAST_RESORT, &prekeys.last_resort)] {
         if let Some(signed) = signed {
-            tx.execute("DELETE FROM prekeys WHERE device_id = ?1 AND kind = ?2", params![device, kind])?;
+            tx.execute("DELETE FROM account_prekey WHERE device_id = ?1 AND kind = ?2", params![device, kind])?;
             insert.execute(params![device, kind, signed.id, signed.key.as_slice(), signed.signature.as_slice()])?;
         }
     }
     let count = |kind: i64| -> rusqlite::Result<u32> {
-        tx.prepare_cached("SELECT count(*) FROM prekeys WHERE device_id = ?1 AND kind = ?2")?
+        tx.prepare_cached("SELECT count(*) FROM account_prekey WHERE device_id = ?1 AND kind = ?2")?
             .query_row(params![device, kind], |row| row.get(0))
     };
-    let max: u32 = row(tx, "SELECT prekey_max FROM devices WHERE id = ?1", [device], |row| row.get(0))?.unwrap_or(0);
+    let max: u32 =
+        row(tx, "SELECT prekey_max FROM account_device WHERE id = ?1", [device], |row| row.get(0))?.unwrap_or(0);
     let room = most.saturating_sub(count(ONE_TIME)?) as usize;
     for one in prekeys.one_time.iter().filter(|p| p.id > max).take(room) {
         insert.execute(params![device, ONE_TIME, one.id, one.key.as_slice(), &[] as &[u8]])?;
@@ -268,7 +270,7 @@ fn insert_prekeys(tx: &Transaction<'_>, device: &DeviceId, prekeys: &api::Prekey
         insert.execute(params![device, KYBER, kyber.id, kyber.key.as_slice(), kyber.signature.as_slice()])?;
     }
     let newest = prekeys.one_time.iter().map(|p| p.id).chain(prekeys.kyber.iter().map(|p| p.id)).max().unwrap_or(0);
-    tx.execute("UPDATE devices SET prekey_max = max(prekey_max, ?2) WHERE id = ?1", params![device, newest])?;
+    tx.execute("UPDATE account_device SET prekey_max = max(prekey_max, ?2) WHERE id = ?1", params![device, newest])?;
     Ok(())
 }
 
@@ -276,12 +278,15 @@ fn insert_prekeys(tx: &Transaction<'_>, device: &DeviceId, prekeys: &api::Prekey
 fn prekey(tx: &Transaction<'_>, device: &[u8], kind: i64, take: bool) -> rusqlite::Result<Option<api::SignedPrekey>> {
     let found: Option<(u32, Vec<u8>, Vec<u8>)> = row(
         tx,
-        "SELECT id, key, signature FROM prekeys WHERE device_id = ?1 AND kind = ?2 ORDER BY id LIMIT 1",
+        "SELECT id, key, signature FROM account_prekey WHERE device_id = ?1 AND kind = ?2 ORDER BY id LIMIT 1",
         params![device, kind],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     if let (Some((id, _, _)), true) = (&found, take) {
-        tx.execute("DELETE FROM prekeys WHERE device_id = ?1 AND kind = ?2 AND id = ?3", params![device, kind, id])?;
+        tx.execute(
+            "DELETE FROM account_prekey WHERE device_id = ?1 AND kind = ?2 AND id = ?3",
+            params![device, kind, id],
+        )?;
     }
     Ok(found.map(|(id, key, signature)| api::SignedPrekey { id, key: key.into(), signature: signature.into() }))
 }
@@ -292,7 +297,7 @@ fn prekey(tx: &Transaction<'_>, device: &[u8], kind: i64, take: bool) -> rusqlit
 fn release_push_token(tx: &Transaction<'_>, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<()> {
     if !token.is_empty() {
         tx.prepare_cached(
-            "UPDATE devices SET push_platform = 0, push_token = x''
+            "UPDATE account_device SET push_platform = 0, push_token = x''
              WHERE push_platform = ?2 AND push_token = ?3 AND id != ?1",
         )?
         .execute(params![device, platform, token])?;
@@ -303,22 +308,22 @@ fn release_push_token(tx: &Transaction<'_>, device: &DeviceId, platform: u8, tok
 /// Removes a user's devices with their prekeys and envelopes. Their own requests answer 410 from then on.
 fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT OR REPLACE INTO gone (id, gone_at) SELECT id, ?2 FROM devices WHERE user_id = ?1",
+        "INSERT OR REPLACE INTO account_device_gone (id, gone_at) SELECT id, ?2 FROM account_device WHERE user_id = ?1",
         params![user, now],
     )?;
-    for table in ["prekeys", "messages"] {
+    for table in ["account_prekey", "message"] {
         tx.execute(
-            &format!("DELETE FROM {table} WHERE device_id IN (SELECT id FROM devices WHERE user_id = ?1)"),
+            &format!("DELETE FROM {table} WHERE device_id IN (SELECT id FROM account_device WHERE user_id = ?1)"),
             [user],
         )?;
     }
-    tx.execute("DELETE FROM devices WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM account_device WHERE user_id = ?1", [user])?;
     Ok(())
 }
 
 /// The user of a device, in a transaction: none for a device replaced since it authenticated.
 fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<Option<UserId>> {
-    row(tx, "SELECT user_id FROM devices WHERE id = ?1", [device], |row| array(row.get(0)?))
+    row(tx, "SELECT user_id FROM account_device WHERE id = ?1", [device], |row| array(row.get(0)?))
 }
 
 /// Removes a user and everything about it; its devices answer 410. Reports about it go; help by install ids (spec
@@ -327,20 +332,20 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     retire_devices(tx, user, now)?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     for table in [
-        "backups",
-        "handles",
-        "account_keys",
-        "storage",
-        "contact_keys",
-        "profile_commitments",
-        "blobs",
-        "blob_quota",
-        "request_hours",
+        "account_backup",
+        "account_name",
+        "account_key",
+        "account_storage",
+        "account_contact_key",
+        "account_profile",
+        "message_blob",
+        "message_blob_quota",
+        "stat_request",
     ] {
         tx.execute(&format!("DELETE FROM {table} WHERE user_id = ?1"), [user])?;
     }
-    tx.execute("DELETE FROM reports WHERE reported_id = ?1", [user])?;
-    tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
+    tx.execute("DELETE FROM support_report WHERE reported_id = ?1", [user])?;
+    tx.execute("DELETE FROM account WHERE id = ?1", [user])?;
     Ok(())
 }
 
@@ -348,7 +353,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 fn username_of(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<String>> {
     row(
         tx,
-        "SELECT coalesce(spelling, CAST(value AS TEXT)) FROM handles WHERE user_id = ?1 AND kind = ?2",
+        "SELECT coalesce(spelling, CAST(value AS TEXT)) FROM account_name WHERE user_id = ?1 AND kind = ?2",
         params![user, KIND_USERNAME],
         |row| row.get(0),
     )
@@ -356,7 +361,7 @@ fn username_of(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<S
 
 /// Whether a skeleton is reserved, in a transaction.
 fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> {
-    tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
+    tx.prepare_cached("SELECT 1 FROM name_reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
 }
 
 /// The network's own errors (domain, code), which are not the app's: a lost, timed-out or refused connection, a
@@ -433,37 +438,37 @@ fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, 
     // problem, so done from the first report on.
     let expected = field("severity") == "expected";
     conn.execute(
-        "INSERT INTO diagnostics(kind, signature, count, first_seen, last_seen, app, os, model, payload, done)
+        "INSERT INTO diag(kind, signature, count, first_seen, last_seen, app, os, model, payload, done)
         VALUES (?1,?2,?8,?3,?3,?4,?5,?6,?7,?9)
         ON CONFLICT(signature) DO UPDATE SET count=count+excluded.count, last_seen=excluded.last_seen,
         app=excluded.app, os=excluded.os, model=excluded.model, payload=excluded.payload",
         params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string(), count, expected],
     )?;
     conn.execute(
-        "INSERT INTO stats(metric, hour, value) VALUES ('diagnostics:' || ?2, ?1, ?3)
+        "INSERT INTO stat(metric, hour, value) VALUES ('diagnostics:' || ?2, ?1, ?3)
          ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
         params![now / HOUR_MS, kind, count],
     )?;
     let (id, done_builds): (i64, Option<String>) = conn.query_row(
-        "SELECT id, CASE WHEN done = 1 THEN coalesce(done_builds, '') END FROM diagnostics WHERE signature=?1",
+        "SELECT id, CASE WHEN done = 1 THEN coalesce(done_builds, '') END FROM diag WHERE signature=?1",
         [&signature],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     // The builds it came in, and reports per hour: "still reported" on the operator's page.
     conn.execute(
-        "INSERT INTO diagnostic_builds(diagnostic_id, app, count, last_seen) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO diag_build(diagnostic_id, app, count, last_seen) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(diagnostic_id, app) DO UPDATE SET count = count + excluded.count, last_seen = excluded.last_seen",
         params![id, field("app"), count, now],
     )?;
     conn.execute(
-        "INSERT INTO stats(metric, key, hour, value) VALUES ('diag', CAST(?1 AS TEXT), ?2, ?3)
+        "INSERT INTO stat(metric, key, hour, value) VALUES ('diag', CAST(?1 AS TEXT), ?2, ?3)
          ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
         params![id, (now / 3_600_000) as i64, count],
     )?;
     // Done, and now reported by a newer build than any it was marked done in: open again. Expected ones stay counts.
     if let Some(done_builds) = done_builds {
         if !expected && newer_than(field("app"), &done_builds) {
-            conn.execute("UPDATE diagnostics SET done = 0, done_at = NULL, done_builds = NULL WHERE id = ?1", [id])?;
+            conn.execute("UPDATE diag SET done = 0, done_at = NULL, done_builds = NULL WHERE id = ?1", [id])?;
         }
     }
     Ok(id)
@@ -481,7 +486,7 @@ fn legacy_crash(text: &str, app: &str) -> serde_json::Value {
 fn blob_quota_left(tx: &Connection, user: &UserId, size: u64, now: u64, quota: &BlobQuota) -> rusqlite::Result<bool> {
     let (count, bytes): (i64, i64) = row(
         tx,
-        "SELECT count, bytes FROM blob_quota WHERE user_id = ?1 AND day = ?2",
+        "SELECT count, bytes FROM message_blob_quota WHERE user_id = ?1 AND day = ?2",
         params![user, (now / DAY_MS) as i64],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?
@@ -490,7 +495,7 @@ fn blob_quota_left(tx: &Connection, user: &UserId, size: u64, now: u64, quota: &
         return Ok(false);
     }
     let stored: i64 = tx
-        .prepare_cached("SELECT coalesce(sum(size), 0) FROM blobs WHERE user_id = ?1")?
+        .prepare_cached("SELECT coalesce(sum(size), 0) FROM message_blob WHERE user_id = ?1")?
         .query_row([user], |row| row.get(0))?;
     Ok(stored as u64 + size <= quota.stored)
 }
@@ -515,7 +520,7 @@ impl Db {
         schema::upgrade(&mut conn)?;
         // Expected groups are counts, never open problems (`diagnostic_write`): those kept open before are done too.
         conn.execute(
-            "UPDATE diagnostics SET done = 1 WHERE done = 0 AND json_extract(payload, '$.severity') = 'expected'",
+            "UPDATE diag SET done = 1 WHERE done = 0 AND json_extract(payload, '$.severity') = 'expected'",
             [],
         )?;
         Ok(Db { conn: Mutex::new(conn), add_devices: false })
@@ -556,7 +561,7 @@ impl Db {
     /// Stored names and their notes for the admin API.
     pub fn reserved_state(&self) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT spelling, note FROM reserved ORDER BY skeleton")?;
+        let mut stmt = conn.prepare("SELECT spelling, note FROM name_reserved ORDER BY skeleton")?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -567,7 +572,7 @@ impl Db {
     }
 
     pub fn remove_reserved(&self, name: &str) -> rusqlite::Result<()> {
-        self.run("DELETE FROM reserved WHERE skeleton=?1", [yoip::net::handle::skeleton(name)])
+        self.run("DELETE FROM name_reserved WHERE skeleton=?1", [yoip::net::handle::skeleton(name)])
     }
 
     /// Add names by skeleton, preserving existing spellings and notes. Returns how many were new.
@@ -584,9 +589,9 @@ impl Db {
     fn reserve(&self, names: &[Reserved], notes: bool, now: u64) -> rusqlite::Result<usize> {
         self.write(|tx| {
             let mut insert = tx.prepare_cached(
-                "INSERT OR IGNORE INTO reserved (skeleton, spelling, note, created_at) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR IGNORE INTO name_reserved (skeleton, spelling, note, created_at) VALUES (?1, ?2, ?3, ?4)",
             )?;
-            let mut note = tx.prepare_cached("UPDATE reserved SET note=?2 WHERE skeleton=?1")?;
+            let mut note = tx.prepare_cached("UPDATE name_reserved SET note=?2 WHERE skeleton=?1")?;
             let mut added = 0;
             for name in names {
                 let skeleton = yoip::net::handle::skeleton(&name.spelling);
@@ -603,7 +608,7 @@ impl Db {
     // ---- users and devices ----
 
     pub fn device(&self, device: &DeviceId) -> rusqlite::Result<Option<Device>> {
-        let sql = "SELECT user_id, auth_key, last_seen_at, app, version FROM devices WHERE id = ?1";
+        let sql = "SELECT user_id, auth_key, last_seen_at, app, version FROM account_device WHERE id = ?1";
         row(&self.conn(), sql, [device], |row| {
             Ok(Device {
                 user_id: array(row.get(0)?)?,
@@ -616,7 +621,7 @@ impl Db {
     }
 
     pub fn is_gone(&self, device: &DeviceId) -> rusqlite::Result<bool> {
-        self.conn().prepare_cached("SELECT 1 FROM gone WHERE id = ?1")?.exists([device])
+        self.conn().prepare_cached("SELECT 1 FROM account_device_gone WHERE id = ?1")?.exists([device])
     }
 
     /// Seen at `now` (kept to the hour), with the app it names and that app's version (no app: the one it had stays,
@@ -624,7 +629,7 @@ impl Db {
     pub fn touch(&self, device: &DeviceId, now: u64, app: Option<(&str, Option<&str>)>) -> rusqlite::Result<()> {
         let (app, version) = (app.map(|(a, _)| a), app.and_then(|(_, v)| v));
         self.run(
-            "UPDATE devices SET last_seen_at = ?2, app = coalesce(?3, app),
+            "UPDATE account_device SET last_seen_at = ?2, app = coalesce(?3, app),
                  version = CASE WHEN ?3 IS NULL THEN version ELSE ?4 END WHERE id = ?1",
             params![device, to_the_hour(now), app, version],
         )
@@ -632,21 +637,21 @@ impl Db {
 
     /// The user an account key belongs to now: a registration with it restores that user (spec 4.2).
     pub fn user_of_account_key(&self, account_key: &Key) -> rusqlite::Result<Option<UserId>> {
-        row(&self.conn(), "SELECT id FROM users WHERE account_key = ?1", [account_key], |row| array(row.get(0)?))
+        row(&self.conn(), "SELECT id FROM account WHERE account_key = ?1", [account_key], |row| array(row.get(0)?))
     }
 
     /// Who has a username (by its skeleton), if anyone.
     pub fn username_owner(&self, skeleton: &[u8]) -> rusqlite::Result<Option<UserId>> {
         row(
             &self.conn(),
-            "SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2",
+            "SELECT user_id FROM account_name WHERE kind = ?1 AND value = ?2",
             params![KIND_USERNAME, skeleton],
             |row| array(row.get(0)?),
         )
     }
 
     pub fn account_key(&self, user: &UserId) -> rusqlite::Result<Option<Key>> {
-        row(&self.conn(), "SELECT account_key FROM users WHERE id = ?1", [user], |row| array(row.get(0)?))
+        row(&self.conn(), "SELECT account_key FROM account WHERE id = ?1", [user], |row| array(row.get(0)?))
     }
 
     /// Registers a device (spec 4.2): the current account key's user again, else a new user by a free name.
@@ -665,33 +670,33 @@ impl Db {
         self.write(|tx| {
             let taken = tx
                 .prepare_cached(
-                    "SELECT 1 FROM devices WHERE id = ?1 OR device_key = ?2 UNION ALL SELECT 1 FROM gone WHERE id = ?1",
+                    "SELECT 1 FROM account_device WHERE id = ?1 OR device_key = ?2 UNION ALL SELECT 1 FROM account_device_gone WHERE id = ?1",
                 )?
                 .exists(params![device.device_id, device.device_key])?;
             if taken {
                 return Ok(Write::Refused(Conflict::DeviceTaken));
             }
             let restored: Option<UserId> =
-                row(tx, "SELECT id FROM users WHERE account_key = ?1", [account_key], |row| array(row.get(0)?))?;
+                row(tx, "SELECT id FROM account WHERE account_key = ?1", [account_key], |row| array(row.get(0)?))?;
             let user = match restored {
                 Some(user) => user,
                 None => {
-                    if tx.prepare_cached("SELECT 1 FROM account_keys WHERE key = ?1")?.exists([account_key])? {
+                    if tx.prepare_cached("SELECT 1 FROM account_key WHERE key = ?1")?.exists([account_key])? {
                         return Ok(Write::Refused(Conflict::KeyTaken));
                     }
                     let holder = tx
-                        .prepare_cached("SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2")?
+                        .prepare_cached("SELECT 1 FROM account_name WHERE kind = ?1 AND value = ?2")?
                         .exists(params![KIND_USERNAME, skeleton])?;
                     if holder || is_reserved(tx, skeleton)? {
                         return Ok(Write::Refused(Conflict::UsernameTaken));
                     }
                     tx.execute(
-                        "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, ?3)",
+                        "INSERT INTO account (id, account_key, created_at) VALUES (?1, ?2, ?3)",
                         params![fresh, account_key, now],
                     )?;
-                    tx.execute("INSERT INTO account_keys (key, user_id) VALUES (?1, ?2)", params![account_key, fresh])?;
+                    tx.execute("INSERT INTO account_key (key, user_id) VALUES (?1, ?2)", params![account_key, fresh])?;
                     tx.execute(
-                        "INSERT INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO account_name (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
                         params![KIND_USERNAME, skeleton, fresh, spelling],
                     )?;
                     *fresh
@@ -701,19 +706,19 @@ impl Db {
                 retire_devices(tx, &user, now)?;
             } else {
                 let count: usize =
-                    tx.query_row("SELECT count(*) FROM devices WHERE user_id = ?1", [&user], |r| r.get(0))?;
+                    tx.query_row("SELECT count(*) FROM account_device WHERE user_id = ?1", [&user], |r| r.get(0))?;
                 // Never one removed by itself: the new device asks which one may go (multi-device phase 2).
                 if count >= yoip::net::limits::MAX_DEVICES {
                     return Ok(Write::Refused(Conflict::DeviceLimit));
                 }
             }
             let taken: Vec<u8> = tx
-                .prepare_cached("SELECT number FROM devices WHERE user_id = ?1")?
+                .prepare_cached("SELECT number FROM account_device WHERE user_id = ?1")?
                 .query_map([&user], |row| row.get(0))?
                 .collect::<Result<_, _>>()?;
             let number = (1..=127u8).find(|n| !taken.contains(n)).ok_or(rusqlite::Error::InvalidQuery)?;
             tx.execute(
-                "INSERT INTO devices
+                "INSERT INTO account_device
                      (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app,
                       registration_id, number, version)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?11, ?8, ?9, ?10, ?12)",
@@ -743,7 +748,7 @@ impl Db {
     /// Written as `device`, which must still be there (a replaced one is `410`).
     pub fn set_bot(&self, device: &DeviceId, bot: bool) -> rusqlite::Result<Write<()>> {
         self.as_device(device, |tx, user| {
-            tx.execute("UPDATE users SET bot = ?2 WHERE id = ?1", params![user, bot])?;
+            tx.execute("UPDATE account SET bot = ?2 WHERE id = ?1", params![user, bot])?;
             Ok(Write::Done(()))
         })
     }
@@ -757,12 +762,12 @@ impl Db {
     ) -> rusqlite::Result<Write<()>> {
         self.as_device(device, |tx, user| {
             tx.prepare_cached(
-                "INSERT INTO contact_keys (user_id, current, requests_open) VALUES (?1, ?2, ?3)
+                "INSERT INTO account_contact_key (user_id, current, requests_open) VALUES (?1, ?2, ?3)
                  ON CONFLICT(user_id) DO UPDATE SET current = ?2, requests_open = ?3",
             )?
             .execute(params![user, check.as_slice(), requests_open])?;
             tx.prepare_cached(
-                "INSERT INTO profile_commitments (user_id, commitment) VALUES (?1, ?2)
+                "INSERT INTO account_profile (user_id, commitment) VALUES (?1, ?2)
                  ON CONFLICT(user_id) DO UPDATE SET commitment = ?2",
             )?
             .execute(params![user, commitment])?;
@@ -775,7 +780,7 @@ impl Db {
     pub fn set_commitment_for_tests(&self, user: &UserId, commitment: &[u8]) {
         self.conn()
             .execute(
-                "INSERT OR REPLACE INTO profile_commitments (user_id, commitment) VALUES (?1, ?2)",
+                "INSERT OR REPLACE INTO account_profile (user_id, commitment) VALUES (?1, ?2)",
                 params![user, commitment],
             )
             .unwrap();
@@ -783,7 +788,7 @@ impl Db {
 
     /// A user's profile key commitment (spec 3.4), if it told one.
     pub fn commitment(&self, user: &UserId) -> rusqlite::Result<Option<Vec<u8>>> {
-        row(&self.conn(), "SELECT commitment FROM profile_commitments WHERE user_id = ?1", [user], |row| row.get(0))
+        row(&self.conn(), "SELECT commitment FROM account_profile WHERE user_id = ?1", [user], |row| row.get(0))
     }
 
     /// What a delivery to `user` is (spec 3.3): a contact's (its key shown, or none set), a signed request, or closed.
@@ -794,10 +799,10 @@ impl Db {
         sender: Option<&UserId>,
     ) -> rusqlite::Result<Admission> {
         let current: Option<Vec<u8>> =
-            row(&self.conn(), "SELECT current FROM contact_keys WHERE user_id = ?1", [user], |row| row.get(0))?;
+            row(&self.conn(), "SELECT current FROM account_contact_key WHERE user_id = ?1", [user], |row| row.get(0))?;
         let Some(current) = current else {
             // A made-up id must not leave a recipient's bucket behind (`inbound:<user>`, kept a day).
-            let known = self.conn().prepare_cached("SELECT 1 FROM users WHERE id = ?1")?.exists([user])?;
+            let known = self.conn().prepare_cached("SELECT 1 FROM account WHERE id = ?1")?.exists([user])?;
             return Ok(if known { Admission::Contact } else { Admission::Unknown });
         };
         // In constant time, as Signal compares an access key.
@@ -812,8 +817,8 @@ impl Db {
     pub fn username_taken(&self, skeleton: &[u8]) -> rusqlite::Result<bool> {
         self.conn()
             .prepare_cached(
-                "SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2
-                 UNION ALL SELECT 1 FROM reserved WHERE skeleton = CAST(?2 AS TEXT)",
+                "SELECT 1 FROM account_name WHERE kind = ?1 AND value = ?2
+                 UNION ALL SELECT 1 FROM name_reserved WHERE skeleton = CAST(?2 AS TEXT)",
             )?
             .exists(params![KIND_USERNAME, skeleton])
     }
@@ -823,9 +828,9 @@ impl Db {
         self.write(|tx| {
             let id = |row: &rusqlite::Row<'_>| array(row.get(0)?);
             let user: Option<UserId> = match kind {
-                KIND_USER => row(tx, "SELECT id FROM users WHERE id = ?1", [value], id)?,
-                KIND_ACCOUNT_KEY => row(tx, "SELECT id FROM users WHERE account_key = ?1", [value], id)?,
-                _ => row(tx, "SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2", params![kind, value], id)?,
+                KIND_USER => row(tx, "SELECT id FROM account WHERE id = ?1", [value], id)?,
+                KIND_ACCOUNT_KEY => row(tx, "SELECT id FROM account WHERE account_key = ?1", [value], id)?,
+                _ => row(tx, "SELECT user_id FROM account_name WHERE kind = ?1 AND value = ?2", params![kind, value], id)?,
             };
             let Some(user) = user else { return Ok(None) };
             let Some(Roster { account_key, devices: roster_devices }) = roster(tx, &user)? else { return Ok(None) };
@@ -836,7 +841,7 @@ impl Db {
             if take {
                 let devices: Vec<(Vec<u8>, Key, u32)> = tx
                     .prepare_cached(
-                        "SELECT id, device_key, registration_id FROM devices WHERE user_id = ?1 ORDER BY device_key",
+                        "SELECT id, device_key, registration_id FROM account_device WHERE user_id = ?1 ORDER BY device_key",
                     )?
                     .query_map([&user], |row| Ok((row.get(0)?, array(row.get(1)?)?, row.get(2)?)))?
                     .collect::<Result<_, _>>()?;
@@ -860,7 +865,7 @@ impl Db {
                 }
             }
             let username = username_of(tx, &user)?;
-            let bot = tx.query_row("SELECT bot FROM users WHERE id = ?1", [&user], |row| row.get(0))?;
+            let bot = tx.query_row("SELECT bot FROM account WHERE id = ?1", [&user], |row| row.get(0))?;
             Ok(Some(Found { user_id: user, account_key, devices: roster_devices, bundles, username, bot }))
         })
     }
@@ -876,11 +881,11 @@ impl Db {
     /// Operator deletion, using the same cleanup as account deletion; unknown users change nothing.
     pub fn admin_delete_user(&self, user: &UserId, now: u64) -> rusqlite::Result<Option<Vec<(BlobId, u64)>>> {
         self.write(|tx| {
-            if !tx.prepare_cached("SELECT 1 FROM users WHERE id = ?1")?.exists([user])? {
+            if !tx.prepare_cached("SELECT 1 FROM account WHERE id = ?1")?.exists([user])? {
                 return Ok(None);
             }
             let blobs = tx
-                .prepare_cached("SELECT id, created_at FROM blobs WHERE user_id = ?1")?
+                .prepare_cached("SELECT id, created_at FROM message_blob WHERE user_id = ?1")?
                 .query_map([user], blob_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             remove_user(tx, user, now)?;
@@ -893,23 +898,21 @@ impl Db {
     /// A new group at revision 1; false if its id is taken, or was a group that ended.
     pub fn create_group(&self, id: &[u8], params: &[u8], state: &[u8], now: u64) -> rusqlite::Result<bool> {
         self.one_changed(
-            "INSERT OR IGNORE INTO zk_groups (id, params, revision, state, updated_at, created_at)
-             SELECT ?1, ?2, 1, ?3, ?4, ?4 WHERE NOT EXISTS (SELECT 1 FROM zk_groups_gone WHERE id = ?1)",
+            "INSERT OR IGNORE INTO grp (id, params, revision, state, updated_at, created_at)
+             SELECT ?1, ?2, 1, ?3, ?4, ?4 WHERE NOT EXISTS (SELECT 1 FROM grp_gone WHERE id = ?1)",
             params![id, params, state, now as i64],
         )
     }
 
     /// A group's params and state.
     pub fn group(&self, id: &[u8]) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
-        row(&self.conn(), "SELECT params, state FROM zk_groups WHERE id = ?1", [id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+        row(&self.conn(), "SELECT params, state FROM grp WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
     }
 
     /// A group's next revision, only if it is still at `revision` (compare and swap).
     pub fn update_group(&self, id: &[u8], revision: u32, state: &[u8], now: u64) -> rusqlite::Result<bool> {
         self.one_changed(
-            "UPDATE zk_groups SET revision = revision + 1, state = ?3, updated_at = ?4 WHERE id = ?1 AND revision = ?2",
+            "UPDATE grp SET revision = revision + 1, state = ?3, updated_at = ?4 WHERE id = ?1 AND revision = ?2",
             params![id, revision, state, now as i64],
         )
     }
@@ -917,10 +920,9 @@ impl Db {
     /// The group ends (its last member left), if it is still at `revision`; its id is gone for good.
     pub fn end_group(&self, id: &[u8], revision: u32, now: u64) -> rusqlite::Result<bool> {
         self.write(|tx| {
-            let ended =
-                tx.execute("DELETE FROM zk_groups WHERE id = ?1 AND revision = ?2", params![id, revision])? == 1;
+            let ended = tx.execute("DELETE FROM grp WHERE id = ?1 AND revision = ?2", params![id, revision])? == 1;
             if ended {
-                tx.execute("INSERT OR IGNORE INTO zk_groups_gone (id, at) VALUES (?1, ?2)", params![id, now as i64])?;
+                tx.execute("INSERT OR IGNORE INTO grp_gone (id, at) VALUES (?1, ?2)", params![id, now as i64])?;
             }
             Ok(ended)
         })
@@ -933,8 +935,8 @@ impl Db {
         let stored = self
             .conn()
             .prepare_cached(
-                "INSERT INTO reports (reporter, reported_id, reason, created_at)
-                 SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?2)
+                "INSERT INTO support_report (reporter, reported_id, reason, created_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM account WHERE id = ?2)
                  ON CONFLICT (reporter, reported_id) DO UPDATE SET
                      reason = excluded.reason, created_at = excluded.created_at",
             )?
@@ -953,12 +955,12 @@ impl Db {
         self.write(|tx| {
             // A full thread is retained, never silently trimmed.
             let count: i64 =
-                tx.query_row("SELECT count(*) FROM support_messages WHERE install = ?1", [install], |r| r.get(0))?;
+                tx.query_row("SELECT count(*) FROM support WHERE install = ?1", [install], |r| r.get(0))?;
             if count >= 1000 {
                 return Ok(Write::Refused(Conflict::SupportFull));
             }
             tx.execute(
-                "INSERT INTO support_messages(install,from_team,text,created_at,app_version) VALUES (?1,0,?2,?3,?4)",
+                "INSERT INTO support(install,from_team,text,created_at,app_version) VALUES (?1,0,?2,?3,?4)",
                 params![install, text, now, app_version],
             )?;
             Ok(Write::Done(()))
@@ -967,7 +969,7 @@ impl Db {
 
     pub fn support_thread(&self, install: &Install) -> rusqlite::Result<yoip::net::api::SupportThread> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,coalesce(read_at,0) FROM support_messages WHERE install=?1 ORDER BY created_at,id")?;
+        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,coalesce(read_at,0) FROM support WHERE install=?1 ORDER BY created_at,id")?;
         let messages = stmt
             .query_map([install], |r| {
                 Ok(yoip::net::api::SupportMessage {
@@ -986,7 +988,7 @@ impl Db {
     /// The team's answers read by the install (`from_team`), or the install's messages handled by the operator.
     pub fn support_read(&self, install: &Install, from_team: bool, through: u64, now: u64) -> rusqlite::Result<()> {
         self.conn().execute(
-            "UPDATE support_messages SET read_at=CASE WHEN ?3 THEN coalesce(read_at,?1) ELSE read_at END, done_at=CASE WHEN ?3 THEN done_at ELSE ?1 END WHERE install=?2 AND from_team=?3 AND id<=?4
+            "UPDATE support SET read_at=CASE WHEN ?3 THEN coalesce(read_at,?1) ELSE read_at END, done_at=CASE WHEN ?3 THEN done_at ELSE ?1 END WHERE install=?2 AND from_team=?3 AND id<=?4
             ",
             params![now, install, from_team, through],
         )?;
@@ -997,9 +999,9 @@ impl Db {
     pub fn support_reply(&self, install: &Install, text: &str, now: u64) -> rusqlite::Result<bool> {
         let conn = self.conn();
         Ok(conn.execute(
-            "INSERT INTO support_messages(install,from_team,text,created_at)
-            SELECT ?1,1,?2,?3 WHERE EXISTS (SELECT 1 FROM support_messages WHERE install=?1)
-            AND (SELECT count(*) FROM support_messages WHERE install=?1)<1000",
+            "INSERT INTO support(install,from_team,text,created_at)
+            SELECT ?1,1,?2,?3 WHERE EXISTS (SELECT 1 FROM support WHERE install=?1)
+            AND (SELECT count(*) FROM support WHERE install=?1)<1000",
             params![install, text, now],
         )? == 1)
     }
@@ -1009,7 +1011,7 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT lower(hex(s.install)),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL)
-            FROM support_messages s GROUP BY s.install
+            FROM support s GROUP BY s.install
             ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC LIMIT 999",
         )?;
         let rows: Vec<_> = stmt.query_map([], |r| Ok(serde_json::json!({"install":r.get::<_,String>(0)?,"at":r.get::<_,i64>(1)?,"unread":r.get::<_,i64>(2)?})))?.collect::<rusqlite::Result<_>>()?;
@@ -1018,7 +1020,9 @@ impl Db {
 
     pub fn admin_support_thread(&self, install: &Install) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,read_at,done_at FROM support_messages WHERE install=?1 ORDER BY created_at,id")?;
+        let mut stmt = conn.prepare(
+            "SELECT id,from_team,text,created_at,read_at,done_at FROM support WHERE install=?1 ORDER BY created_at,id",
+        )?;
         let rows = stmt.query_map([install], |r| Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"from_team":r.get::<_,bool>(1)?,"text":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"read_at":r.get::<_,Option<i64>>(4)?,"done_at":r.get::<_,Option<i64>>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::json!({"messages": rows}))
     }
@@ -1026,7 +1030,7 @@ impl Db {
     /// Deliveries taken in the hour of `now` (`n` more).
     pub fn count_deliveries(&self, now: u64, n: u64) -> rusqlite::Result<()> {
         self.run(
-            "INSERT INTO stats(metric, hour, value) VALUES ('deliveries', ?1, ?2)
+            "INSERT INTO stat(metric, hour, value) VALUES ('deliveries', ?1, ?2)
              ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
             params![now / HOUR_MS, n],
         )
@@ -1038,11 +1042,11 @@ impl Db {
         let hour = (now / 3_600_000) as i64;
         let conn = self.conn();
         conn.prepare_cached(
-            "INSERT INTO request_hours (user_id, hour, n) VALUES (?1, ?2, 1)
+            "INSERT INTO stat_request (user_id, hour, n) VALUES (?1, ?2, 1)
              ON CONFLICT(user_id, hour) DO UPDATE SET n = n + 1",
         )?
         .execute(params![sender, hour])?;
-        conn.prepare_cached("DELETE FROM request_hours WHERE hour < ?1")?.execute([hour - 25])?;
+        conn.prepare_cached("DELETE FROM stat_request WHERE hour < ?1")?.execute([hour - 25])?;
         Ok(())
     }
 
@@ -1051,18 +1055,18 @@ impl Db {
         let minute = (now / 60_000) as i64;
         self.write(|tx| {
             let mut add = tx.prepare_cached(
-                "INSERT INTO events (kind, minute, n) VALUES (?1, ?2, ?3)
+                "INSERT INTO stat_minute (kind, minute, n) VALUES (?1, ?2, ?3)
                  ON CONFLICT(kind, minute) DO UPDATE SET n = n + excluded.n",
             )?;
             let mut hourly = tx.prepare_cached(
-                "INSERT INTO stats(metric, hour, value) VALUES (?1, ?2, ?3)
+                "INSERT INTO stat(metric, hour, value) VALUES (?1, ?2, ?3)
                  ON CONFLICT(metric, key, hour) DO UPDATE SET value = value + excluded.value",
             )?;
             for (kind, n) in counts {
                 add.execute(params![kind, minute, n])?;
                 hourly.execute(params![kind, minute / 60, n])?;
             }
-            tx.execute("DELETE FROM events WHERE minute < ?1", [minute - 120])?;
+            tx.execute("DELETE FROM stat_minute WHERE minute < ?1", [minute - 120])?;
             Ok(())
         })
     }
@@ -1072,28 +1076,31 @@ impl Db {
     /// after one is marked done, replacing the hour's.
     pub fn sample_levels(&self, now: u64, problems_only: bool) -> rusqlite::Result<()> {
         const PROBLEMS: [(&str, &str); 2] = [
-            ("open-errors", "SELECT coalesce(sum(count), 0) FROM diagnostics WHERE done = 0 AND kind = 'error'"),
-            ("open-crashes", "SELECT coalesce(sum(count), 0) FROM diagnostics WHERE done = 0 AND kind = 'crash'"),
+            ("open-errors", "SELECT coalesce(sum(count), 0) FROM diag WHERE done = 0 AND kind = 'error'"),
+            ("open-crashes", "SELECT coalesce(sum(count), 0) FROM diag WHERE done = 0 AND kind = 'crash'"),
         ];
         const OTHERS: [(&str, &str); 5] = [
-            ("queue-envelopes", "SELECT count(*) FROM messages"),
-            ("queue-media-bytes", "SELECT coalesce(sum(size), 0) FROM blobs"),
-            ("active-24h", "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 86400000"),
+            ("queue-envelopes", "SELECT count(*) FROM message"),
+            ("queue-media-bytes", "SELECT coalesce(sum(size), 0) FROM message_blob"),
+            ("active-24h", "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?1 - 86400000"),
             // People, not bots (`is_bot_app`): an account with a device of a person's app heard from in 48 hours.
             (
                 "active-48h",
-                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 172800000 \
+                "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?1 - 172800000 \
                  AND (app IS NULL OR (app NOT LIKE 'yogpt/%' AND app NOT LIKE 'cli/%'))",
             ),
-            ("active-30d", "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?1 - 30 * 86400000"),
+            (
+                "active-30d",
+                "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?1 - 30 * 86400000",
+            ),
         ];
         let others: &[_] = if problems_only { &[] } else { &OTHERS };
         let hour = (now / 3_600_000) as i64;
         self.write(|tx| {
             let mut put = tx.prepare_cached(if problems_only {
-                "INSERT OR REPLACE INTO stats (metric, hour, value) VALUES (?1, ?2, ?3)"
+                "INSERT OR REPLACE INTO stat (metric, hour, value) VALUES (?1, ?2, ?3)"
             } else {
-                "INSERT OR IGNORE INTO stats (metric, hour, value) VALUES (?1, ?2, ?3)"
+                "INSERT OR IGNORE INTO stat (metric, hour, value) VALUES (?1, ?2, ?3)"
             })?;
             for (kind, sql) in PROBLEMS.iter().chain(others) {
                 let mut query = tx.prepare_cached(sql)?;
@@ -1110,10 +1117,10 @@ impl Db {
                 // `NETWORK_ERRORS`): the error-free share of who is still here, in all and per platform.
                 let net = network_errors_sql();
                 for (suffix, like) in [("", "%"), (":ios", "ios/%"), (":android", "android/%")] {
-                    let phones = "SELECT count(*) FROM devices WHERE last_seen_at > ?1 - 86400000 AND app LIKE ?2 \
+                    let phones = "SELECT count(*) FROM account_device WHERE last_seen_at > ?1 - 86400000 AND app LIKE ?2 \
                          AND (app LIKE 'ios/%' OR app LIKE 'android/%')";
                     let hit = format!(
-                        "SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id \
+                        "SELECT count(DISTINCT i.install) FROM diag_install i JOIN diag d ON d.id = i.diagnostic_id \
                          WHERE coalesce(i.at, i.day * 86400000) > ?1 - 86400000 AND d.os NOT LIKE 'mac%' \
                          AND d.app LIKE ?2 AND (d.app LIKE 'ios/%' OR d.app LIKE 'android/%') AND {net}"
                     );
@@ -1127,7 +1134,7 @@ impl Db {
                 // 48 hours, not 24: last seen is written once a day, so a phone used every day stays in the window
                 // and the hourly shares move smoothly instead of stepping each time a day-old touch ages out.
                 let mut builds = tx.prepare_cached(
-                    "SELECT 'build:' || coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at > ?1 - 172800000 \
+                    "SELECT 'build:' || coalesce(app, 'unknown'), count(*) FROM account_device WHERE last_seen_at > ?1 - 172800000 \
                      AND (app IS NULL OR app LIKE 'ios/%' OR app LIKE 'android/%') GROUP BY 1",
                 )?;
                 let rows = builds
@@ -1152,17 +1159,17 @@ impl Db {
         self.write(|tx| {
             let uuid = payload["uuid"].as_str().map(str::to_ascii_lowercase);
             if let Some(uuid) = &uuid {
-                if tx.prepare("SELECT 1 FROM diagnostic_seen WHERE uuid=?1")?.exists([uuid])? {
+                if tx.prepare("SELECT 1 FROM diag_seen WHERE uuid=?1")?.exists([uuid])? {
                     return Ok(());
                 }
             }
             let id = diagnostic_write(tx, kind, payload, now)?;
             if let Some(uuid) = uuid {
-                tx.execute("INSERT INTO diagnostic_seen(uuid, diagnostic_id) VALUES (?1, ?2)", params![uuid, id])?;
+                tx.execute("INSERT INTO diag_seen(uuid, diagnostic_id) VALUES (?1, ?2)", params![uuid, id])?;
             }
             if let Some(install) = install {
                 tx.execute(
-                    "INSERT INTO diagnostic_installs(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO diag_install(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT(diagnostic_id, install, day) DO UPDATE SET at = ?4",
                     params![id, install, now / DAY_MS, to_the_hour(now) as i64],
                 )?;
@@ -1175,11 +1182,11 @@ impl Db {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,
-            (SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id=d.id), done_builds, done_at,
-            (SELECT json_group_array(json_array(app, count, last_seen)) FROM diagnostic_builds WHERE diagnostic_id=d.id),
-            (SELECT json_group_object(hour, value) FROM stats WHERE metric = 'diag' AND key = CAST(d.id AS TEXT)
+            (SELECT count(DISTINCT install) FROM diag_install WHERE diagnostic_id=d.id), done_builds, done_at,
+            (SELECT json_group_array(json_array(app, count, last_seen)) FROM diag_build WHERE diagnostic_id=d.id),
+            (SELECT json_group_object(hour, value) FROM stat WHERE metric = 'diag' AND key = CAST(d.id AS TEXT)
              AND hour >= unixepoch() / 3600 - 8 * 24)
-            FROM diagnostics d ORDER BY last_seen DESC",
+            FROM diag d ORDER BY last_seen DESC",
         )?;
         let json =
             |text: Option<String>| text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(serde_json::Value::Null);
@@ -1198,12 +1205,12 @@ impl Db {
     pub fn diagnostic_done(&self, id: i64, done: bool, now: u64) -> rusqlite::Result<()> {
         self.write(|tx| {
             let apps: Vec<String> = tx
-                .prepare("SELECT app FROM diagnostic_builds WHERE diagnostic_id = ?1")?
+                .prepare("SELECT app FROM diag_build WHERE diagnostic_id = ?1")?
                 .query_map([id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             let builds = done.then(|| newest_builds(apps.iter().map(String::as_str)));
             tx.execute(
-                "UPDATE diagnostics SET done = ?2, done_builds = ?3, done_at = CASE WHEN ?2 THEN ?4 END WHERE id = ?1",
+                "UPDATE diag SET done = ?2, done_builds = ?3, done_at = CASE WHEN ?2 THEN ?4 END WHERE id = ?1",
                 params![id, done, builds, now as i64],
             )?;
             Ok(())
@@ -1212,14 +1219,14 @@ impl Db {
 
     /// A support message done (`Some(at)`) or open again.
     pub fn message_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
-        self.one_changed("UPDATE support_messages SET done_at=?1 WHERE id=?2", params![done, id])
+        self.one_changed("UPDATE support SET done_at=?1 WHERE id=?2", params![done, id])
     }
 
     // ---- storage (spec 4.3) ----
 
     /// The storage of a user: its version and sealed bytes.
     pub fn storage(&self, user: &UserId) -> rusqlite::Result<Option<Sealed>> {
-        row(&self.conn(), "SELECT version, data FROM storage WHERE user_id = ?1", [user], |row| {
+        row(&self.conn(), "SELECT version, data FROM account_storage WHERE user_id = ?1", [user], |row| {
             Ok((row.get::<_, i64>(0)? as u64, row.get(1)?))
         })
     }
@@ -1233,15 +1240,16 @@ impl Db {
         now: u64,
     ) -> rusqlite::Result<Write<Result<(), Sealed>>> {
         self.as_device(device, |tx, user| {
-            let current: Sealed = row(tx, "SELECT version, data FROM storage WHERE user_id = ?1", [&user], |row| {
-                Ok((row.get::<_, i64>(0)? as u64, row.get(1)?))
-            })?
-            .unwrap_or_default();
+            let current: Sealed =
+                row(tx, "SELECT version, data FROM account_storage WHERE user_id = ?1", [&user], |row| {
+                    Ok((row.get::<_, i64>(0)? as u64, row.get(1)?))
+                })?
+                .unwrap_or_default();
             if current.0 != replaces {
                 return Ok(Write::Done(Err(current)));
             }
             tx.prepare_cached(
-                "INSERT INTO storage (user_id, version, data, updated_at) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO account_storage (user_id, version, data, updated_at) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (user_id) DO UPDATE SET
                      version = excluded.version, data = excluded.data, updated_at = excluded.updated_at",
             )?
@@ -1265,8 +1273,8 @@ impl Db {
             if let Some(locator) = locator {
                 let taken = tx
                     .prepare_cached(
-                        "SELECT 1 FROM backups WHERE locator = ?1 AND user_id != ?2
-                         UNION ALL SELECT 1 FROM users WHERE id = ?1",
+                        "SELECT 1 FROM account_backup WHERE locator = ?1 AND user_id != ?2
+                         UNION ALL SELECT 1 FROM account WHERE id = ?1",
                     )?
                     .exists(params![locator, user])?;
                 if taken {
@@ -1274,7 +1282,7 @@ impl Db {
                 }
             }
             tx.prepare_cached(
-                "INSERT INTO backups (user_id, locator, record, updated_at, auth_passkey, auth_code)
+                "INSERT INTO account_backup (user_id, locator, record, updated_at, auth_passkey, auth_code)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT (user_id) DO UPDATE SET
                      locator = excluded.locator, record = excluded.record, updated_at = excluded.updated_at,
@@ -1290,9 +1298,9 @@ impl Db {
         let key = |value: Option<Vec<u8>>| value.and_then(|v| v.try_into().ok());
         row(
             &self.conn(),
-            "SELECT record, auth_passkey, auth_code FROM backups WHERE user_id = ?1
-             UNION ALL SELECT record, auth_passkey, auth_code FROM backups
-                 WHERE locator = ?1 AND NOT EXISTS (SELECT 1 FROM users WHERE id = ?1)
+            "SELECT record, auth_passkey, auth_code FROM account_backup WHERE user_id = ?1
+             UNION ALL SELECT record, auth_passkey, auth_code FROM account_backup
+                 WHERE locator = ?1 AND NOT EXISTS (SELECT 1 FROM account WHERE id = ?1)
              LIMIT 1",
             [id],
             |row| Ok((row.get(0)?, BackupAuth { passkey: key(row.get(1)?), code: key(row.get(2)?) })),
@@ -1309,17 +1317,17 @@ impl Db {
     /// The bytes of all blobs stored.
     pub fn blobs_stored(&self) -> rusqlite::Result<u64> {
         self.conn()
-            .prepare_cached("SELECT coalesce(sum(size), 0) FROM blobs")?
+            .prepare_cached("SELECT coalesce(sum(size), 0) FROM message_blob")?
             .query_row([], |row| row.get::<_, i64>(0).map(|n| n as u64))
     }
 
     pub fn blob_exists(&self, id: &BlobId) -> rusqlite::Result<bool> {
-        self.conn().prepare_cached("SELECT 1 FROM blobs WHERE id = ?1")?.exists([id])
+        self.conn().prepare_cached("SELECT 1 FROM message_blob WHERE id = ?1")?.exists([id])
     }
 
     /// A blob there and ready (`Some(true)`), there with its file on its way (`Some(false)`), or none.
     pub fn blob_ready_state(&self, id: &BlobId) -> rusqlite::Result<Option<bool>> {
-        row(&self.conn(), "SELECT ready FROM blobs WHERE id = ?1", [id], |row| row.get(0))
+        row(&self.conn(), "SELECT ready FROM message_blob WHERE id = ?1", [id], |row| row.get(0))
     }
 
     /// Stores a blob's row, not ready, if the id is free and the quota has room.
@@ -1334,7 +1342,7 @@ impl Db {
     ) -> rusqlite::Result<BlobPut> {
         self.write(|tx| {
             let Some(user) = user_of_device(tx, device)? else { return Ok(BlobPut::DeviceGone) };
-            let ready: Option<bool> = row(tx, "SELECT ready FROM blobs WHERE id = ?1", [id], |row| row.get(0))?;
+            let ready: Option<bool> = row(tx, "SELECT ready FROM message_blob WHERE id = ?1", [id], |row| row.get(0))?;
             match ready {
                 Some(true) => return Ok(BlobPut::Taken),
                 Some(false) => return Ok(BlobPut::Unfinished),
@@ -1344,11 +1352,11 @@ impl Db {
                 return Ok(BlobPut::Quota);
             }
             tx.prepare_cached(
-                "INSERT INTO blobs (id, user_id, size, fetches_left, created_at, ready) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                "INSERT INTO message_blob (id, user_id, size, fetches_left, created_at, ready) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
             )?
             .execute(params![id, user, size as i64, fetches, now])?;
             tx.prepare_cached(
-                "INSERT INTO blob_quota (user_id, day, count, bytes) VALUES (?1, ?2, 1, ?3)
+                "INSERT INTO message_blob_quota (user_id, day, count, bytes) VALUES (?1, ?2, 1, ?3)
                  ON CONFLICT (user_id, day) DO UPDATE SET count = count + 1, bytes = bytes + excluded.bytes",
             )?
             .execute(params![user, (now / DAY_MS) as i64, size as i64])?;
@@ -1359,7 +1367,7 @@ impl Db {
     /// The file is in place, the blob handed out from now on; `false`: its row went meanwhile, the upload failed.
     pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
         self.one_changed(
-            "UPDATE blobs SET ready = 1, gets_left = fetches_left + 3 WHERE id = ?1 AND created_at = ?2 AND ready = 0",
+            "UPDATE message_blob SET ready = 1, gets_left = fetches_left + 3 WHERE id = ?1 AND created_at = ?2 AND ready = 0",
             params![id, created_at as i64],
         )
     }
@@ -1368,7 +1376,7 @@ impl Db {
     pub fn take_blob_get(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
         row(
             &self.conn(),
-            "UPDATE blobs SET gets_left = gets_left - 1 WHERE id = ?1 AND ready = 1
+            "UPDATE message_blob SET gets_left = gets_left - 1 WHERE id = ?1 AND ready = 1
              AND fetches_left > 0 AND gets_left > 0 AND created_at >= ?2 RETURNING size, created_at",
             params![id, now.saturating_sub(ttl_ms) as i64],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1377,7 +1385,7 @@ impl Db {
 
     pub fn return_blob_get(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<()> {
         self.run(
-            "UPDATE blobs SET gets_left = gets_left + 1 WHERE id = ?1 AND created_at = ?2",
+            "UPDATE message_blob SET gets_left = gets_left + 1 WHERE id = ?1 AND created_at = ?2",
             params![id, created_at as i64],
         )
     }
@@ -1386,18 +1394,18 @@ impl Db {
     pub fn ack_blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<u64>> {
         self.write(|tx| {
             let last: Option<u64> = tx.prepare_cached(
-                "UPDATE blobs SET fetches_left = fetches_left - 1 WHERE id = ?1 AND ready = 1
+                "UPDATE message_blob SET fetches_left = fetches_left - 1 WHERE id = ?1 AND ready = 1
                  AND fetches_left > 0 AND created_at >= ?2 RETURNING CASE WHEN fetches_left = 0 THEN created_at ELSE NULL END"
             )?.query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| row.get::<_, Option<u64>>(0)).optional()?.flatten();
             if last.is_some() {
-                tx.execute("DELETE FROM blobs WHERE id = ?1", [id])?;
+                tx.execute("DELETE FROM message_blob WHERE id = ?1", [id])?;
             }
             Ok(last)
         })
     }
 
     pub fn delete_blob(&self, id: &BlobId) -> rusqlite::Result<()> {
-        self.run("DELETE FROM blobs WHERE id = ?1", [id])
+        self.run("DELETE FROM message_blob WHERE id = ?1", [id])
     }
 
     /// Deletes blobs past their time, or not ready for an hour, and returns them (their files go too).
@@ -1405,14 +1413,14 @@ impl Db {
         self.write(|tx| {
             let ids = tx
                 .prepare_cached(
-                    "DELETE FROM blobs WHERE created_at < ?1 OR (ready = 0 AND created_at < ?2) RETURNING id, created_at",
+                    "DELETE FROM message_blob WHERE created_at < ?1 OR (ready = 0 AND created_at < ?2) RETURNING id, created_at",
                 )?
                 .query_map(
                     params![now.saturating_sub(ttl_ms) as i64, now.saturating_sub(NOT_READY_KEPT_MS) as i64],
                     blob_row,
                 )?
                 .collect::<Result<_, _>>()?;
-            tx.execute("DELETE FROM blob_quota WHERE day < ?1", [(now / DAY_MS) as i64 - 1])?;
+            tx.execute("DELETE FROM message_blob_quota WHERE day < ?1", [(now / DAY_MS) as i64 - 1])?;
             Ok(ids)
         })
     }
@@ -1420,9 +1428,12 @@ impl Db {
     /// At a start: fetches under way given back, blobs not ready (a crash mid-upload) deleted and returned.
     pub fn recover_blobs(&self) -> rusqlite::Result<Vec<(BlobId, u64)>> {
         self.write(|tx| {
-            tx.execute("UPDATE blobs SET fetches_left = fetches_left + fetching, fetching = 0 WHERE fetching > 0", [])?;
+            tx.execute(
+                "UPDATE message_blob SET fetches_left = fetches_left + fetching, fetching = 0 WHERE fetching > 0",
+                [],
+            )?;
             let ids = tx
-                .prepare_cached("DELETE FROM blobs WHERE ready = 0 RETURNING id, created_at")?
+                .prepare_cached("DELETE FROM message_blob WHERE ready = 0 RETURNING id, created_at")?
                 .query_map([], blob_row)?
                 .collect::<Result<_, _>>()?;
             Ok(ids)
@@ -1431,14 +1442,14 @@ impl Db {
 
     /// Every blob, by id and when it was stored: what the sweep keeps.
     pub fn blob_ids(&self) -> rusqlite::Result<Vec<(BlobId, u64)>> {
-        self.conn().prepare_cached("SELECT id, created_at FROM blobs")?.query_map([], blob_row)?.collect()
+        self.conn().prepare_cached("SELECT id, created_at FROM message_blob")?.query_map([], blob_row)?.collect()
     }
 
     /// The blobs a device's user uploaded: whose files go when the account is deleted.
     pub fn blobs_of(&self, device: &DeviceId) -> rusqlite::Result<Vec<(BlobId, u64)>> {
         self.conn()
             .prepare_cached(
-                "SELECT b.id, b.created_at FROM blobs b JOIN devices d ON d.user_id = b.user_id WHERE d.id = ?1",
+                "SELECT b.id, b.created_at FROM message_blob b JOIN account_device d ON d.user_id = b.user_id WHERE d.id = ?1",
             )?
             .query_map([device], blob_row)?
             .collect()
@@ -1459,8 +1470,8 @@ impl Db {
         self.conn()
             .prepare_cached(
                 "SELECT min(
-                     (SELECT count(*) FROM prekeys WHERE device_id = ?1 AND kind = ?2),
-                     (SELECT count(*) FROM prekeys WHERE device_id = ?1 AND kind = ?3))",
+                     (SELECT count(*) FROM account_prekey WHERE device_id = ?1 AND kind = ?2),
+                     (SELECT count(*) FROM account_prekey WHERE device_id = ?1 AND kind = ?3))",
             )?
             .query_row(params![device, ONE_TIME, KYBER], |row| row.get(0))
     }
@@ -1475,12 +1486,12 @@ impl Db {
         now: u64,
     ) -> rusqlite::Result<()> {
         self.conn().execute(
-            "INSERT INTO attestation(user_id,state,platform,reason,level,at_ms)
-             SELECT user_id,?2,?3,?4,?5,?6 FROM devices WHERE id=?1
+            "INSERT INTO account_attestation(user_id,state,platform,reason,level,at_ms)
+             SELECT user_id,?2,?3,?4,?5,?6 FROM account_device WHERE id=?1
              ON CONFLICT(user_id) DO UPDATE SET state=excluded.state, platform=excluded.platform,
                reason=excluded.reason, level=excluded.level, at_ms=excluded.at_ms
-             WHERE (excluded.state='attested' AND attestation.state='failed')
-                OR (excluded.state=attestation.state AND excluded.at_ms>=attestation.at_ms)",
+             WHERE (excluded.state='attested' AND account_attestation.state='failed')
+                OR (excluded.state=account_attestation.state AND excluded.at_ms>=account_attestation.at_ms)",
             params![device, if reason.is_some() { "failed" } else { "attested" }, platform, reason, level, now],
         )?;
         Ok(())
@@ -1491,7 +1502,7 @@ impl Db {
     pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<Write<()>> {
         self.write(|tx| {
             let changed = tx
-                .prepare_cached("UPDATE devices SET push_platform = ?2, push_token = ?3 WHERE id = ?1")?
+                .prepare_cached("UPDATE account_device SET push_platform = ?2, push_token = ?3 WHERE id = ?1")?
                 .execute(params![device, platform, token])?
                 == 1;
             if !changed {
@@ -1505,7 +1516,7 @@ impl Db {
     /// Clears a push token the push service refused, unless the device set another meanwhile.
     pub fn clear_push(&self, device: &DeviceId, token: &[u8]) -> rusqlite::Result<()> {
         self.run(
-            "UPDATE devices SET push_platform = 0, push_token = x'' WHERE id = ?1 AND push_token = ?2",
+            "UPDATE account_device SET push_platform = 0, push_token = x'' WHERE id = ?1 AND push_token = ?2",
             params![device, token],
         )
     }
@@ -1529,7 +1540,9 @@ impl Db {
                 continue;
             }
             let mut devices: Vec<(u8, Wake)> = tx
-                .prepare_cached("SELECT id, number, push_platform, push_token, app FROM devices WHERE user_id = ?1")?
+                .prepare_cached(
+                    "SELECT id, number, push_platform, push_token, app FROM account_device WHERE user_id = ?1",
+                )?
                 .query_map([user], |row| {
                     Ok((
                         row.get(1)?,
@@ -1562,7 +1575,7 @@ impl Db {
             }
             devices.retain(|(number, _)| listed.contains(number));
             // Only the last allowed slot matters: an index probe, no count.
-            let mut slot = tx.prepare_cached("SELECT 1 FROM messages WHERE device_id = ?1 LIMIT 1 OFFSET ?2")?;
+            let mut slot = tx.prepare_cached("SELECT 1 FROM message WHERE device_id = ?1 LIMIT 1 OFFSET ?2")?;
             let mut full = most == 0;
             for (_, device) in &devices {
                 if full {
@@ -1575,8 +1588,8 @@ impl Db {
                 continue;
             }
             let mut insert =
-                tx.prepare_cached("INSERT INTO messages (device_id, envelope, received_at) VALUES (?1, ?2, ?3)")?;
-            let mut waiting = tx.prepare_cached("SELECT COUNT(*) FROM messages WHERE device_id = ?1")?;
+                tx.prepare_cached("INSERT INTO message (device_id, envelope, received_at) VALUES (?1, ?2, ?3)")?;
+            let mut waiting = tx.prepare_cached("SELECT COUNT(*) FROM message WHERE device_id = ?1")?;
             // Each device only its own copy (Signal's per-device message): nothing stored N times.
             for (number, device) in &mut devices {
                 let envelope = match copies {
@@ -1596,7 +1609,7 @@ impl Db {
     /// A device's envelopes, oldest first: id, envelope, when it came (ms).
     pub fn fetch(&self, device: &DeviceId, most: usize) -> rusqlite::Result<Vec<(u64, Vec<u8>, u64)>> {
         self.conn()
-            .prepare_cached("SELECT id, envelope, received_at FROM messages WHERE device_id = ?1 ORDER BY id LIMIT ?2")?
+            .prepare_cached("SELECT id, envelope, received_at FROM message WHERE device_id = ?1 ORDER BY id LIMIT ?2")?
             .query_map(params![device, most as i64], |row| {
                 Ok((row.get::<_, i64>(0)? as u64, row.get(1)?, row.get::<_, i64>(2)? as u64))
             })?
@@ -1605,7 +1618,7 @@ impl Db {
 
     /// A device's number among its user's devices (spec 3).
     pub fn device_number(&self, device: &DeviceId) -> rusqlite::Result<Option<u8>> {
-        row(&self.conn(), "SELECT number FROM devices WHERE id = ?1", [device], |row| row.get(0))
+        row(&self.conn(), "SELECT number FROM account_device WHERE id = ?1", [device], |row| row.get(0))
     }
 
     /// Deletes a device's envelopes by id (WAL NORMAL: one undone by a power loss comes again, spec 3.2).
@@ -1618,7 +1631,7 @@ impl Db {
         let mut acked = Vec::new();
         {
             let mut delete =
-                tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2 RETURNING received_at")?;
+                tx.prepare_cached("DELETE FROM message WHERE device_id = ?1 AND id = ?2 RETURNING received_at")?;
             for id in ids {
                 if let Some(at) = delete.query_row(params![device, *id as i64], |r| r.get::<_, i64>(0)).optional()? {
                     acked.push(at as u64);
@@ -1626,7 +1639,7 @@ impl Db {
             }
         }
         let app: Option<String> =
-            tx.query_row("SELECT app FROM devices WHERE id = ?1", [device], |r| r.get(0)).optional()?.flatten();
+            tx.query_row("SELECT app FROM account_device WHERE id = ?1", [device], |r| r.get(0)).optional()?.flatten();
         tx.commit()?;
         Ok((acked, is_bot_app(app.as_deref())))
     }
@@ -1638,18 +1651,19 @@ impl Db {
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
-        let messages = conn.execute("DELETE FROM messages WHERE received_at < ?1", [before])?;
+        let messages = conn.execute("DELETE FROM message WHERE received_at < ?1", [before])?;
         // Crash and error groups not seen for 90 days go, with their uuids and installs (spec 4).
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
-        conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
-        conn.execute("DELETE FROM diagnostic_installs WHERE day < ?1", [(kept / DAY_MS) as i64])?;
+        conn.execute("DELETE FROM diag WHERE last_seen < ?1", [kept as i64])?;
+        conn.execute("DELETE FROM diag_install WHERE day < ?1", [(kept / DAY_MS) as i64])?;
         Ok(messages)
     }
 
     /// The apps the devices named last (`Yo-App`), with how many devices each. For the operator; reads only.
     pub fn apps(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         let conn = self.conn();
-        let mut statement = conn.prepare("SELECT coalesce(app, ''), count(*) FROM devices GROUP BY 1 ORDER BY 1")?;
+        let mut statement =
+            conn.prepare("SELECT coalesce(app, ''), count(*) FROM account_device GROUP BY 1 ORDER BY 1")?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
@@ -1658,19 +1672,19 @@ impl Db {
     pub fn audit(&self) -> rusqlite::Result<Vec<(&'static str, i64)>> {
         // Each: what fails, and the rows that fail it (`SELECT count(*) FROM …`).
         const CHECKS: &[(&str, &str)] = &[
-            ("devices without their user", "devices WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("users without a device", "users WHERE id NOT IN (SELECT user_id FROM devices)"),
-            ("users whose key is not theirs", "users u WHERE NOT EXISTS (SELECT 1 FROM account_keys k WHERE k.key = u.account_key AND k.user_id = u.id)"),
-            ("account keys without their user", "account_keys WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("handles without their user", "handles WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("backups without their user", "backups WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("reports about nobody", "reports WHERE reported_id NOT IN (SELECT id FROM users)"),
-            ("storage without its user", "storage WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("blobs without their user", "blobs WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("blob quotas without their user", "blob_quota WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("prekeys without their device", "prekeys WHERE device_id NOT IN (SELECT id FROM devices)"),
-            ("envelopes without their device", "messages WHERE device_id NOT IN (SELECT id FROM devices)"),
-            ("devices both there and gone", "devices WHERE id IN (SELECT id FROM gone)"),
+            ("devices without their user", "account_device WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("users without a device", "account WHERE id NOT IN (SELECT user_id FROM account_device)"),
+            ("users whose key is not theirs", "account u WHERE NOT EXISTS (SELECT 1 FROM account_key k WHERE k.key = u.account_key AND k.user_id = u.id)"),
+            ("account keys without their user", "account_key WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("handles without their user", "account_name WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("backups without their user", "account_backup WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("reports about nobody", "support_report WHERE reported_id NOT IN (SELECT id FROM account)"),
+            ("storage without its user", "account_storage WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("blobs without their user", "message_blob WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("blob quotas without their user", "message_blob_quota WHERE user_id NOT IN (SELECT id FROM account)"),
+            ("prekeys without their device", "account_prekey WHERE device_id NOT IN (SELECT id FROM account_device)"),
+            ("envelopes without their device", "message WHERE device_id NOT IN (SELECT id FROM account_device)"),
+            ("devices both there and gone", "account_device WHERE id IN (SELECT id FROM account_device_gone)"),
         ];
         let conn = self.conn();
         let mut failed = Vec::new();
@@ -1730,7 +1744,7 @@ mod tests {
         register(&db, b"test", 1, 2, 1).done().unwrap();
         let id = [2; 16];
         let row = || {
-            db.conn().query_row("SELECT platform,reason,level,at_ms FROM attestation", [], |r| {
+            db.conn().query_row("SELECT platform,reason,level,at_ms FROM account_attestation", [], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<String>>(1)?,
@@ -1782,10 +1796,7 @@ mod tests {
         );
         assert_eq!(conn.query_row("SELECT text FROM todos WHERE id=3", [], |r| r.get::<_, String>(0)).unwrap(), "todo");
         assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(
-            db.conn().query_row("SELECT kind FROM diagnostics", [], |r| r.get::<_, String>(0)).unwrap(),
-            "crash"
-        );
+        assert_eq!(db.conn().query_row("SELECT kind FROM diag", [], |r| r.get::<_, String>(0)).unwrap(), "crash");
     }
 
     #[test]
@@ -1796,6 +1807,7 @@ mod tests {
             {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let mut conn = db.conn();
+                as_schema_10(&conn);
                 conn.execute_batch(LEGACY_FEEDBACK).unwrap();
                 conn.execute_batch(
                     "DROP TABLE support_messages;
@@ -1818,9 +1830,9 @@ mod tests {
             for _ in 0..2 {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let conn = db.conn();
-                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
                 let message: (String, String, i64) = conn
-                    .query_row("SELECT text,app_version,created_at FROM support_messages WHERE id=10", [], |r| {
+                    .query_row("SELECT text,app_version,created_at FROM support WHERE id=10", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                     })
                     .unwrap();
@@ -1829,21 +1841,21 @@ mod tests {
                     conn.query_row("SELECT text FROM todos", [], |r| r.get::<_, String>(0)).unwrap(),
                     "Fix notifications"
                 );
-                assert!(!conn.prepare("SELECT 1 FROM support_messages WHERE install=X''").unwrap().exists([]).unwrap());
+                assert!(!conn.prepare("SELECT 1 FROM support WHERE install=X''").unwrap().exists([]).unwrap());
                 assert!(!conn
                     .prepare("SELECT 1 FROM sqlite_master WHERE name='feedback'")
                     .unwrap()
                     .exists([])
                     .unwrap());
                 let diagnostic: (i64, i64, i64, bool) = conn
-                    .query_row("SELECT count,first_seen,last_seen,done FROM diagnostics", [], |r| {
+                    .query_row("SELECT count,first_seen,last_seen,done FROM diag", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                     })
                     .unwrap();
                 assert_eq!(diagnostic, (2, 1700000001000, 1700000003000, version == 4));
                 if version == 3 {
                     assert!(
-                        conn.query_row("SELECT seq FROM sqlite_sequence WHERE name='support_messages'", [], |r| r
+                        conn.query_row("SELECT seq FROM sqlite_sequence WHERE name='support'", [], |r| r
                             .get::<_, i64>(0))
                             .unwrap()
                             >= 13
@@ -1851,7 +1863,7 @@ mod tests {
                 }
                 if version == 4 {
                     assert_eq!(
-                        conn.query_row("SELECT count(*) FROM diagnostic_seen", [], |r| r.get::<_, i64>(0)).unwrap(),
+                        conn.query_row("SELECT count(*) FROM diag_seen", [], |r| r.get::<_, i64>(0)).unwrap(),
                         1
                     );
                 }
@@ -1957,7 +1969,7 @@ mod tests {
             db.diagnostic("error", &expected, None, 1).unwrap();
             db.diagnostic("error", &error, None, 1).unwrap();
             // As an older hub kept it: open.
-            db.conn().execute("UPDATE diagnostics SET done = 0", []).unwrap();
+            db.conn().execute("UPDATE diag SET done = 0", []).unwrap();
         }
         let db = Db::open(path).unwrap();
         let done = |code: &str| {
@@ -2008,12 +2020,15 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         {
             let mut conn = db.conn();
+            as_schema_10(&conn);
             conn.execute_batch("DROP TABLE diagnostics; PRAGMA user_version = 3").unwrap();
             conn.execute_batch(LEGACY_FEEDBACK).unwrap();
             conn.execute("INSERT INTO feedback(user_id,text,app_version,created_at,auto,type) VALUES(X'', 'trace','1',2,1,'crash'), (X'', 'trace','1',3,1,'crash')", []).unwrap();
             migrate_diagnostics(&mut conn).unwrap();
             migrate_diagnostics(&mut conn).unwrap();
             assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            conn.execute_batch("PRAGMA user_version = 10").unwrap();
+            schema::upgrade(&mut conn).unwrap();
         }
         let rows = db.diagnostics().unwrap();
         assert_eq!(rows[0]["count"], 2);
@@ -2087,6 +2102,7 @@ mod tests {
         {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
+            as_schema_10(&conn);
             conn.execute_batch(
                 "ALTER TABLE diagnostics DROP COLUMN done_builds; ALTER TABLE diagnostics DROP COLUMN done_at;
                  INSERT INTO diagnostics(id, kind, signature, count, first_seen, last_seen, app, os, model, payload, done) VALUES
@@ -2110,7 +2126,7 @@ mod tests {
         assert_eq!((merged["done"].as_bool(), merged["done_builds"].as_str()), (Some(true), Some("ios/200")));
         assert_eq!(merged["installs"], 2);
         assert_eq!(merged["builds"], serde_json::json!([["ios/100", 3, 20], ["ios/200", 2, 30]]));
-        let seen: i64 = db.conn().query_row("SELECT diagnostic_id FROM diagnostic_seen", [], |r| r.get(0)).unwrap();
+        let seen: i64 = db.conn().query_row("SELECT diagnostic_id FROM diag_seen", [], |r| r.get(0)).unwrap();
         assert_eq!(seen, 2);
         let open = rows.iter().find(|r| r["id"] == 3).unwrap();
         assert_eq!((open["done"].as_bool(), open["done_builds"].is_null()), (Some(false), true));
@@ -2135,7 +2151,7 @@ mod tests {
         };
         let counts = |metric: &str| -> Vec<(i64, i64)> {
             db.conn()
-                .prepare("SELECT hour, value FROM stats WHERE metric=?1 ORDER BY hour")
+                .prepare("SELECT hour, value FROM stat WHERE metric=?1 ORDER BY hour")
                 .unwrap()
                 .query_map([metric], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
@@ -2144,13 +2160,13 @@ mod tests {
         };
         let h = (day / HOUR_MS) as i64;
         assert_eq!(counts("diag"), [(h, 4), (h + 24, 1)]);
-        assert_eq!(left("diagnostic_installs"), 3, "one row per install and day");
+        assert_eq!(left("diag_install"), 3, "one row per install and day");
         db.prune(day + 90 * DAY_MS, DAY_MS).unwrap();
-        assert_eq!((left("diagnostics"), left("diagnostic_installs")), (1, 3), "seen 90 days ago: kept");
+        assert_eq!((left("diag"), left("diag_install")), (1, 3), "seen 90 days ago: kept");
         db.prune(day + 91 * DAY_MS, DAY_MS).unwrap();
-        assert_eq!((left("diagnostics"), left("diagnostic_installs")), (1, 1), "an install's day 90 days ago goes");
+        assert_eq!((left("diag"), left("diag_install")), (1, 1), "an install's day 90 days ago goes");
         db.prune(day + 92 * DAY_MS, DAY_MS).unwrap();
-        assert_eq!((left("diagnostics"), left("diagnostic_installs")), (0, 0));
+        assert_eq!((left("diag"), left("diag_install")), (0, 0));
         assert!(counts("diag").is_empty());
         assert_eq!(counts("diagnostics:crash"), [(h, 4), (h + 24, 1)]);
     }
@@ -2183,9 +2199,9 @@ mod tests {
         for _ in 0..2 {
             let db = Db::open(path.to_str().unwrap()).unwrap();
             let conn = db.conn();
-            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
             let rows: Vec<(String, String, i64, i64)> = conn
-                .prepare("SELECT metric, key, hour, value FROM stats ORDER BY metric, key, hour")
+                .prepare("SELECT metric, key, hour, value FROM stat ORDER BY metric, key, hour")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
                 .unwrap()
@@ -2203,7 +2219,7 @@ mod tests {
                 ]
             );
             assert_eq!(
-                conn.query_row("SELECT count(*), min(minute) FROM events", [], |r| {
+                conn.query_row("SELECT count(*), min(minute) FROM stat_minute", [], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
                 })
                 .unwrap(),
@@ -2223,6 +2239,7 @@ mod tests {
         {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
+            as_schema_10(&conn);
             conn.execute_batch(
                 "DROP TABLE support_messages; DROP TABLE reports;
                 CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id BLOB NOT NULL,
@@ -2242,9 +2259,9 @@ mod tests {
         for _ in 0..2 {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
-            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
             let threads: Vec<(Vec<u8>, i64)> = conn
-                .prepare("SELECT install, count(*) FROM support_messages GROUP BY install ORDER BY min(id)")
+                .prepare("SELECT install, count(*) FROM support GROUP BY install ORDER BY min(id)")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
@@ -2252,7 +2269,7 @@ mod tests {
                 .unwrap();
             assert_eq!(threads.iter().map(|t| t.1).collect::<Vec<_>>(), [2, 1], "each thread stays one thread");
             assert!(threads.iter().all(|t| t.0.len() == 16 && t.0 != [1; 16] && t.0 != [2; 16]), "no account left");
-            let reporter: Vec<u8> = conn.query_row("SELECT reporter FROM reports", [], |r| r.get(0)).unwrap();
+            let reporter: Vec<u8> = conn.query_row("SELECT reporter FROM support_report", [], |r| r.get(0)).unwrap();
             assert!(reporter.len() == 16 && reporter != [1; 16]);
             assert!(conn
                 .prepare("SELECT 1 FROM sqlite_master WHERE name='support_by_install'")
@@ -2288,7 +2305,7 @@ mod tests {
         assert_eq!((last.kyber.id, last.one_time), (2, None), "the last resort, no one-time key left");
         // Of a device asked not to hand out, nothing; and nothing taken by a lookup without prekeys.
         assert!(db.lookup(KIND_USER, &leo, true, &[[1; 32]]).unwrap().unwrap().bundles.is_empty());
-        db.conn().execute("DELETE FROM prekeys", []).unwrap();
+        db.conn().execute("DELETE FROM account_prekey", []).unwrap();
         let found = db.lookup(KIND_USER, &leo, true, &[]).unwrap().unwrap();
         assert_eq!((found.devices.len(), found.bundles.len()), (1, 0), "a device without prekeys: no bundle");
     }
@@ -2339,7 +2356,7 @@ mod tests {
         db.count_events(11 * minute, &[("yo-out", 4)]).unwrap();
         let rows = |db: &Db| -> Vec<(String, i64, i64)> {
             db.conn()
-                .prepare("SELECT kind, minute, n FROM events ORDER BY minute, kind")
+                .prepare("SELECT kind, minute, n FROM stat_minute ORDER BY minute, kind")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .unwrap()
@@ -2350,7 +2367,7 @@ mod tests {
         assert_eq!(rows(&db), [row("media-in", 10, 1), row("yo-in", 10, 5), row("yo-out", 11, 4)]);
         let columns: Vec<String> = db
             .conn()
-            .prepare("SELECT name FROM pragma_table_info('events')")
+            .prepare("SELECT name FROM pragma_table_info('stat_minute')")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
@@ -2361,7 +2378,7 @@ mod tests {
         assert_eq!(rows(&db), [row("yo-out", 11, 4)]);
         assert_eq!(
             db.conn()
-                .query_row("SELECT value FROM stats WHERE metric='yo-in' AND key='' AND hour=0", [], |r| r
+                .query_row("SELECT value FROM stat WHERE metric='yo-in' AND key='' AND hour=0", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
             5
@@ -2387,13 +2404,13 @@ mod tests {
         let payload =
             serde_json::json!({"app": "ios/1", "os": "26", "model": "x", "domain": "d", "code": "1", "place": "p"});
         db.diagnostic("error", &payload, Some(&install), now - 23 * hour).unwrap();
-        let at: i64 = db.conn().query_row("SELECT at FROM diagnostic_installs", [], |r| r.get(0)).unwrap();
+        let at: i64 = db.conn().query_row("SELECT at FROM diag_install", [], |r| r.get(0)).unwrap();
         assert_eq!(at as u64, to_the_hour(now - 23 * hour), "an install's report: to the hour");
         db.sample_levels(now, false).unwrap();
         let level = |kind: &str| -> i64 {
             db.conn()
                 .query_row(
-                    "SELECT value FROM stats WHERE key = '' AND metric = ?1 AND hour = ?2",
+                    "SELECT value FROM stat WHERE key = '' AND metric = ?1 AND hour = ?2",
                     params![kind, (now / hour) as i64],
                     |r| r.get(0),
                 )
@@ -2414,22 +2431,22 @@ mod tests {
         let conn = db.conn();
         for (kind, signature, count, done) in [("error", "a", 3, 0), ("error", "b", 4, 1), ("crash", "c", 2, 0)] {
             conn.execute(
-                "INSERT INTO diagnostics (kind, signature, count, first_seen, last_seen, app, os, model, payload, done)
+                "INSERT INTO diag (kind, signature, count, first_seen, last_seen, app, os, model, payload, done)
                  VALUES (?1, ?2, ?3, 0, 0, '', '', '', '{}', ?4)",
                 params![kind, signature, count, done],
             )
             .unwrap();
         }
-        conn.execute("INSERT INTO messages (device_id, envelope, received_at) VALUES (X'01', X'00', 0)", []).unwrap();
+        conn.execute("INSERT INTO message (device_id, envelope, received_at) VALUES (X'01', X'00', 0)", []).unwrap();
         conn.execute(
-            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at) VALUES (X'01', X'01', 700, 1, 0)",
+            "INSERT INTO message_blob (id, user_id, size, fetches_left, created_at) VALUES (X'01', X'01', 700, 1, 0)",
             [],
         )
         .unwrap();
         drop(conn);
         let rows = |db: &Db| -> Vec<(String, i64, i64)> {
             db.conn()
-                .prepare("SELECT metric, hour, value FROM stats WHERE key = '' ORDER BY metric, hour")
+                .prepare("SELECT metric, hour, value FROM stat WHERE key = '' ORDER BY metric, hour")
                 .unwrap()
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .unwrap()
@@ -2467,7 +2484,7 @@ mod tests {
         assert_eq!(rows(&db).len(), 14);
         let columns: Vec<String> = db
             .conn()
-            .prepare("SELECT name FROM pragma_table_info('stats')")
+            .prepare("SELECT name FROM pragma_table_info('stat')")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
@@ -2476,12 +2493,15 @@ mod tests {
         assert_eq!(columns, ["metric", "key", "hour", "value"]);
         // A bot's device (the CLI, YoGPT) is no active account: bob on the CLI leaves no one seen within 48 hours.
         db.conn()
-            .execute("UPDATE devices SET app = 'cli/1' WHERE last_seen_at = ?1", [to_the_hour(now - hour) as i64])
+            .execute(
+                "UPDATE account_device SET app = 'cli/1' WHERE last_seen_at = ?1",
+                [to_the_hour(now - hour) as i64],
+            )
             .unwrap();
         db.sample_levels(now + hour, false).unwrap();
         let bots: i64 = db
             .conn()
-            .query_row("SELECT value FROM stats WHERE key = '' AND metric = 'active-48h' AND hour = ?1", [h + 1], |r| {
+            .query_row("SELECT value FROM stat WHERE key = '' AND metric = 'active-48h' AND hour = ?1", [h + 1], |r| {
                 r.get(0)
             })
             .unwrap();
@@ -2489,7 +2509,7 @@ mod tests {
         // Devices per build seen within 48 hours, the apps' alone: bob on the CLI is no build, an iOS device is.
         let build = |db: &Db, hour: i64| -> Vec<(String, i64)> {
             db.conn()
-                .prepare("SELECT metric, value FROM stats WHERE key = '' AND metric LIKE 'build:%' AND hour = ?1 ORDER BY metric")
+                .prepare("SELECT metric, value FROM stat WHERE key = '' AND metric LIKE 'build:%' AND hour = ?1 ORDER BY metric")
                 .unwrap()
                 .query_map([hour], |r| Ok((r.get(0)?, r.get(1)?)))
                 .unwrap()
@@ -2497,21 +2517,23 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(build(&db, h + 1), []);
-        db.conn().execute("UPDATE devices SET app = 'ios/202611191626', last_seen_at = ?1", [now as i64]).unwrap();
+        db.conn()
+            .execute("UPDATE account_device SET app = 'ios/202611191626', last_seen_at = ?1", [now as i64])
+            .unwrap();
         db.sample_levels(now + 2 * hour, false).unwrap();
         assert_eq!(build(&db, h + 2), [("build:ios/202611191626".to_owned(), 2)]);
         // The error-free share: an install with an error counts, one with only the network's (a timeout) does not.
         let report = |id: i64, install: u8, payload: &str| {
             db.conn()
                 .execute(
-                    "INSERT INTO diagnostics(id, kind, signature, count, first_seen, last_seen, app, os, model, payload, done) \
+                    "INSERT INTO diag(id, kind, signature, count, first_seen, last_seen, app, os, model, payload, done) \
                      VALUES (?1, 'error', ?1, 1, ?2, ?2, 'ios/202611191626', '26', 'iPhone', ?3, 0)",
                     params![id, now as i64, payload],
                 )
                 .unwrap();
             db.conn()
                 .execute(
-                    "INSERT INTO diagnostic_installs(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO diag_install(diagnostic_id, install, day, at) VALUES (?1, ?2, ?3, ?4)",
                     params![id, [install], (now / DAY_MS) as i64, now as i64],
                 )
                 .unwrap();
@@ -2523,7 +2545,7 @@ mod tests {
         let level = |kind: &str| -> i64 {
             db.conn()
                 .query_row(
-                    "SELECT value FROM stats WHERE key = '' AND metric = ?1 AND hour = ?2",
+                    "SELECT value FROM stat WHERE key = '' AND metric = ?1 AND hour = ?2",
                     params![kind, h + 3],
                     |r| r.get(0),
                 )
@@ -2546,6 +2568,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
         {
             let db = Db::open(path).unwrap();
+            as_schema_10(&db.conn());
             db.conn().execute_batch("ALTER TABLE zk_groups DROP COLUMN created_at").unwrap();
             db.conn()
                 .execute(
@@ -2558,7 +2581,7 @@ mod tests {
         assert!(db.create_group(&[2], &[], &[], 7).unwrap());
         let made: Vec<Option<i64>> = db
             .conn()
-            .prepare("SELECT created_at FROM zk_groups ORDER BY id")
+            .prepare("SELECT created_at FROM grp ORDER BY id")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
@@ -2589,7 +2612,7 @@ mod tests {
         let mod_user = user(register(&db, b"Moderator", 1, 1, 0));
         assert_eq!(reserve(&db, &["Admin", "Moderator", "Support"]), 3);
         assert_eq!(reserve(&db, &["ADMIN", "Admin", "Help"]), 1, "seeding again adds only what is new");
-        let count: i64 = db.conn().query_row("SELECT count(*) FROM reserved", [], |row| row.get(0)).unwrap();
+        let count: i64 = db.conn().query_row("SELECT count(*) FROM name_reserved", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 4);
         for name in ["admin", "ADMIN", "Adm1n", "ÄDMIN", "help"] {
             assert!(
@@ -2617,7 +2640,7 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("PRAGMA user_version = 1").unwrap();
-            let schema = SCHEMA
+            let schema = SCHEMA_10
                 .replace("    spelling TEXT,\n", "")
                 .replace("    app TEXT,\n    registration_id INTEGER NOT NULL DEFAULT 0\n", "    app TEXT\n");
             conn.execute_batch(&schema).unwrap();
@@ -2813,13 +2836,13 @@ mod tests {
         let taken = user(register(&db, b"TOM", 2, 2, 0));
         db.conn()
             .execute(
-                "UPDATE handles SET value = ?1, spelling = ?2 WHERE user_id = ?3",
+                "UPDATE account_name SET value = ?1, spelling = ?2 WHERE user_id = ?3",
                 params![old_skeleton(joined), joined, leo],
             )
             .unwrap();
         db.conn()
             .execute(
-                "UPDATE handles SET value = ?1, spelling = ?2 WHERE user_id = ?3",
+                "UPDATE account_name SET value = ?1, spelling = ?2 WHERE user_id = ?3",
                 params![yoip::net::handle::skeleton(apart).into_bytes(), apart, taken],
             )
             .unwrap();
@@ -2827,7 +2850,7 @@ mod tests {
         let second = "Zoe\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
         db.conn()
             .execute(
-                "UPDATE handles SET value = ?1, spelling = ?2 WHERE user_id = ?3",
+                "UPDATE account_name SET value = ?1, spelling = ?2 WHERE user_id = ?3",
                 params![old_skeleton(second), second, other],
             )
             .unwrap();
@@ -2837,7 +2860,7 @@ mod tests {
         assert_eq!(owner(apart), Some(taken), "the name that had it keeps it");
         assert_eq!(owner(joined), Some(taken), "one skeleton, one name");
         let kept: Vec<u8> =
-            db.conn().query_row("SELECT value FROM handles WHERE user_id = ?1", [leo], |r| r.get(0)).unwrap();
+            db.conn().query_row("SELECT value FROM account_name WHERE user_id = ?1", [leo], |r| r.get(0)).unwrap();
         assert_eq!(kept, old_skeleton(joined), "the later one keeps its old skeleton");
         schema::upgrade(&mut db.conn()).unwrap();
     }
@@ -2862,7 +2885,7 @@ mod tests {
         assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, mia, "the stranger keeps the name and the device");
         assert!(db.is_gone(&[2; 16]).unwrap());
         // No name at all: the same user, without one.
-        db.conn().execute("DELETE FROM handles WHERE user_id = ?1", [leo]).unwrap();
+        db.conn().execute("DELETE FROM account_name WHERE user_id = ?1", [leo]).unwrap();
         assert!(matches!(register(&db, b"LEON", 1, 5, 0), Write::Done((user, None, _)) if user == leo));
     }
 
@@ -2935,7 +2958,7 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let token = |n: u8| -> (u8, Vec<u8>) {
             db.conn()
-                .query_row("SELECT push_platform, push_token FROM devices WHERE id = ?1", [[n; 16]], |r| {
+                .query_row("SELECT push_platform, push_token FROM account_device WHERE id = ?1", [[n; 16]], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })
                 .unwrap()
@@ -2992,6 +3015,7 @@ mod tests {
             let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
             db.put_blob(&[1; 16], &[9; 16], 100, 2, 5, &quota).unwrap();
             db.blob_ready(&[9; 16], 5).unwrap();
+            as_schema_10(&db.conn());
             db.conn().execute_batch("ALTER TABLE blobs DROP COLUMN gets_left").unwrap();
         }
         {
@@ -3181,6 +3205,119 @@ mod tests {
         }
     }
 
+    /// Schema 10 to 11: every table under its area's name, its rows, indexes and trigger with it (`schema::RENAMED`).
+    #[test]
+    fn schema_10_reaches_11_with_every_row_under_the_new_names() {
+        let path = std::env::temp_dir().join(format!("yo-hub-schema-11-{}.sqlite", std::process::id()));
+        let path = path.to_str().unwrap().to_owned();
+        let _ = std::fs::remove_file(&path);
+        let count = |conn: &Connection, table: &str| -> i64 {
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0)).unwrap()
+        };
+        let before: Vec<i64> = {
+            let db = Db::open(&path).unwrap();
+            let leo = user(register(&db, b"LEO", 1, 1, 0));
+            user(register(&db, b"MIA", 2, 2, 0));
+            db.put_backup(&leo, Some(&[9; 16]), b"record", &BackupAuth::default(), 0).unwrap();
+            let incoming = Incoming {
+                user: leo,
+                devices_hash: yoip::net::devices::hash(&[1; 32], &[[1; 32]]),
+                from: None,
+                copies: Copies::Legacy(b"envelope"),
+            };
+            db.deliver(&[incoming], 0, 10).unwrap();
+            db.report(&[5; 16], &leo, 1, 0).unwrap();
+            db.support_message(&[5; 16], "hi", "1", 0).unwrap();
+            db.diagnostic("crash", &legacy_crash("trace", "1"), Some(&[5; 16]), 7).unwrap();
+            reserve(&db, &["Admin"]);
+            db.count_events(crate::now_ms(), &[("yo-in", 1)]).unwrap();
+            let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
+            db.put_blob(&leo, &[9; 16], 100, 2, 5, &quota).unwrap();
+            assert!(db.create_group(&[2], &[], &[], 7).unwrap());
+            let conn = db.conn();
+            conn.execute_batch(
+                "INSERT INTO account_device_gone VALUES (X'02', 1);
+                 INSERT INTO grp_gone VALUES (X'03', 1);
+                 INSERT INTO diag_seen VALUES ('u1', 1);
+                 INSERT INTO stat_request VALUES (X'01', 1, 1);",
+            )
+            .unwrap();
+            conn.execute("INSERT INTO account_attestation VALUES (?1, 'attested', 'ios', NULL, NULL, 1)", [leo])
+                .unwrap();
+            conn.execute("INSERT INTO account_storage VALUES (?1, 1, X'00', 1)", [leo]).unwrap();
+            conn.execute("INSERT OR IGNORE INTO account_contact_key VALUES (?1, X'00', 1)", [leo]).unwrap();
+            conn.execute("INSERT OR IGNORE INTO account_profile VALUES (?1, X'00')", [leo]).unwrap();
+            let before = schema::RENAMED.iter().map(|(_, new)| count(&conn, new)).collect();
+            as_schema_10(&conn);
+            before
+        };
+        for (n, (old, _)) in before.iter().zip(schema::RENAMED) {
+            assert!(*n > 0, "{old}: a row to move");
+        }
+        for _ in 0..2 {
+            let db = Db::open(&path).unwrap();
+            let conn = db.conn();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
+            for (n, (old, new)) in before.iter().zip(schema::RENAMED) {
+                assert_eq!(count(&conn, new), *n, "{new}");
+                assert!(!conn.prepare("SELECT 1 FROM sqlite_master WHERE name = ?1").unwrap().exists([old]).unwrap());
+            }
+            let names: Vec<String> = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY name")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(
+                names,
+                [
+                    "account_device_by_user",
+                    "account_key_by_user",
+                    "account_name_by_user",
+                    "diag_install_by_day",
+                    "diag_recent",
+                    "diag_stat_deleted",
+                    "message_blob_by_age",
+                    "message_blob_by_user",
+                    "message_by_age",
+                    "message_by_device",
+                    "support_by_install",
+                    "support_report_by_reported",
+                ]
+            );
+            let seq: Vec<String> = conn
+                .prepare("SELECT name FROM sqlite_sequence ORDER BY name")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(seq, ["message", "support"]);
+            let fresh = Db::open(":memory:").unwrap();
+            let columns = |conn: &Connection, table: &str| -> Vec<String> {
+                let mut names: Vec<String> = conn
+                    .prepare("SELECT name FROM pragma_table_info(?1)")
+                    .unwrap()
+                    .query_map([table], |r| r.get(0))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                names.sort();
+                names
+            };
+            for (_, new) in schema::RENAMED {
+                assert_eq!(columns(&conn, new), columns(&fresh.conn(), new), "{new}: as a new hub makes it");
+            }
+            drop(conn);
+            assert_eq!(db.audit().unwrap(), []);
+            assert_eq!(db.support_thread(&[5; 16]).unwrap().messages.len(), 1);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
+    }
+
     #[test]
     fn a_deleted_account_leaves_nothing_behind() {
         for admin in [false, true] {
@@ -3211,8 +3348,12 @@ mod tests {
             let left = |table: &str| -> i64 {
                 db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
             };
-            assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (1, 2, 1), "only MIA's are left");
-            assert_eq!(left("support_messages"), 1, "help by install id names no account and stays");
+            assert_eq!(
+                (left("support_report"), left("account_prekey"), left("account_key")),
+                (1, 2, 1),
+                "only MIA's are left"
+            );
+            assert_eq!(left("support"), 1, "help by install id names no account and stays");
             assert_eq!(db.audit().unwrap(), [], "nothing of LEO's is left behind");
             assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
             // The name and the key are free again.
@@ -3229,7 +3370,7 @@ mod tests {
         assert!(matches!(db.support_message(&phone, "again", "1.2 (35)", 6).unwrap(), Write::Done(())));
         let rows: Vec<(i64, Vec<u8>, String, String, i64)> = db
             .conn()
-            .prepare("SELECT id, install, text, app_version, created_at FROM support_messages ORDER BY id")
+            .prepare("SELECT id, install, text, app_version, created_at FROM support ORDER BY id")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
             .unwrap()
@@ -3252,6 +3393,7 @@ mod tests {
             let db = Db::open(path).unwrap();
             let leo = user(register(&db, b"LEO", 1, 1, 0));
             let conn = db.conn();
+            as_schema_10(&conn);
             conn.execute_batch(LEGACY_FEEDBACK).unwrap();
             conn.execute(
                 "INSERT INTO feedback(user_id,text,app_version,created_at,auto,type) VALUES
@@ -3271,14 +3413,14 @@ mod tests {
         for _ in 0..2 {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
-            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 10);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 11);
             assert!(!conn
                 .prepare("SELECT 1 FROM sqlite_master WHERE name LIKE 'feedback%'")
                 .unwrap()
                 .exists([])
                 .unwrap());
             let message: (Vec<u8>, String, String, i64) = conn
-                .query_row("SELECT install,text,app_version,created_at FROM support_messages", [], |r| {
+                .query_row("SELECT install,text,app_version,created_at FROM support", [], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .unwrap();
@@ -3289,7 +3431,7 @@ mod tests {
             );
             assert_ne!(message.0, leo.to_vec());
             assert_eq!(conn.query_row("SELECT text FROM todos", [], |r| r.get::<_, String>(0)).unwrap(), "a task");
-            assert_eq!(conn.query_row("SELECT first_seen FROM diagnostics", [], |r| r.get::<_, i64>(0)).unwrap(), 101);
+            assert_eq!(conn.query_row("SELECT first_seen FROM diag", [], |r| r.get::<_, i64>(0)).unwrap(), 101);
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
@@ -3305,6 +3447,7 @@ mod tests {
         let leo = {
             let db = Db::open(path).unwrap();
             let leo = user(register(&db, b"LEO", 1, 1, 0));
+            as_schema_10(&db.conn());
             db.conn()
                 .execute_batch(
                     "DROP TABLE contact_keys;

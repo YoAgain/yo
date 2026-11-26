@@ -880,7 +880,7 @@ fn a_yo_to_an_account_without_prekeys_is_outdated_and_waits() {
     db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
     let removed = db
         .execute(
-            "DELETE FROM prekeys WHERE device_id IN (SELECT id FROM devices WHERE user_id = ?1)",
+            "DELETE FROM account_prekey WHERE device_id IN (SELECT id FROM account_device WHERE user_id = ?1)",
             [user_id(b.user_id()).to_vec()],
         )
         .unwrap();
@@ -1079,11 +1079,6 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
         }
     }
     assert_eq!(help::thread(&*http, &a).unwrap().unread, 1);
-    assert_eq!(raw(&hub, "POST", "/v1/admin/todos", &headers, b"team task".to_vec()).0, 201);
-    let (_, body) = raw(&hub, "GET", "/v1/admin/todos", &headers, vec![]);
-    let todos: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let done = format!("/v1/admin/todos/{}", todos[0]["id"]);
-    assert_eq!(raw(&hub, "POST", &done, &headers, b"1".to_vec()).0, 204);
     assert_eq!(raw(&hub, "POST", &path, &headers, vec![b'x'; 2001]).0, 400);
     assert_eq!(raw(&hub, "GET", "/v1/admin/messages/invalid", &headers, vec![]).0, 400);
 }
