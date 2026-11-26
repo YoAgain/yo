@@ -1437,7 +1437,10 @@ impl YoClient {
             begun => begun?,
         };
         match whois.send() {
-            Ok((user, username, bot)) => Ok(Some(YoWhois { user, username, bot })),
+            Ok((user, username, bot)) => {
+                self.with(|c| c.note_bot(&user, bot))??;
+                Ok(Some(YoWhois { user, username, bot }))
+            }
             Err(yo_core::Error::NotOnYo) => Ok(None),
             Err(error) => Err(error.into()),
         }

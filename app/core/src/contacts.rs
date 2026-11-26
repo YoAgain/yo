@@ -157,6 +157,18 @@ impl Client {
         self.persist()
     }
 
+    /// Takes in whether a user is a bot, as a lookup (`Whois::send`) said: "/" before its name from now on.
+    pub fn note_bot(&mut self, user: &str, bot: bool) -> Result<()> {
+        let changed = match bot {
+            true => self.state.bots.insert(user.to_owned()),
+            false => self.state.bots.remove(user),
+        };
+        if changed {
+            self.persist()?;
+        }
+        Ok(())
+    }
+
     /// Whether `to` names a user by its id (hex), not by a name.
     pub fn is_user_id(to: &str) -> bool {
         Handle::parse(to).is_ok_and(|handle| handle.kind == KIND_USER)
