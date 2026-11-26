@@ -490,7 +490,7 @@ sequenceDiagram
 - An upload MUST replace the signed and `🔐 last-resort keys` it carries (others stay) and append `🔐 one-time keys` above the highest id (§4.1).
 - The hub MUST return one bundle per device outside `except`, MUST hand out each `🔐 one-time key` only once, then the last-resort key, and MUST omit a bundle without signed or `🔐 last-resort key`.
 
-**Device attestation.** Optional, off by default. Clients fetch the challenge, then post the payload (1 App Attest, 2 Play Integrity). Before registering, clients SHOULD fetch the challenge unsigned and send the payload in `Register`; it binds the challenge, not the account. The hub MUST NOT let attestation affect access, limits or delivery, except the name minimum (§2.2). Devices that cannot attest (no Google services, F-Droid, CLI, bots) get 12.
+**Device attestation.** Optional, off by default. Clients fetch the challenge, then post the payload (1 App Attest, 2 Play Integrity). Before registering, clients SHOULD fetch the challenge unsigned and send the payload in `Register` with the challenge in `Yo-Attest-Challenge`; it binds the challenge, not the account. A name check carrying an open challenge gets `Yo-Name-Min` 4 while that challenge is unanswered. The hub MUST NOT let attestation affect access, limits or delivery, except the name minimum (§2.2). Devices that cannot attest (no Google services, F-Droid, CLI, bots) get 12.
 
 **Push.** A push wakes the device to fetch; it carries no content. The hub learns only urgency. Clients set the token with `PUT /v1/push`.
 - `yo-urgent: true|false` defaults to true; the hub MUST reject other values with `400`. Senders SHOULD mark Yo, photo and video urgent. Apps SHOULD show only urgent deliveries.
