@@ -1779,15 +1779,15 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut found = Vec::new();
-        let mut duplicates = crate::lifecycle::Duplicates::new();
+        let duplicates = crate::lifecycle::Duplicates::new();
         {
             let mut local = tx.prepare_cached("SELECT 1 FROM corro.message WHERE id=? AND device_id=?")?;
             let mut receipt = tx.prepare_cached("INSERT OR REPLACE INTO peer_inbox_receipt VALUES(?,?,?)")?;
             let recent = self.agent.as_ref().unwrap().recent_acks.lock().unwrap();
             for item in items {
-                // TRANSITION(#15): remove with the delivery checker.
-                if let Some(age) = recent.age(device, item.id) {
-                    duplicates.insert(item.id, age);
+                // An id acked here that a peer still holds: its delete has not reached the peer yet (counted as
+                // mesh-ack-lost there if it stays), never handed out again; not a duplicate.
+                if recent.age(device, item.id).is_some() {
                     continue;
                 }
                 if local.exists(params![item.id, device])? {
