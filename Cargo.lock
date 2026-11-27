@@ -3813,6 +3813,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
  "aws-lc-rs",
+ "pem",
  "rustls-pki-types",
  "time",
  "x509-parser",
@@ -5882,6 +5883,23 @@ dependencies = [
  "x509-parser",
  "yoip",
  "zkgroup",
+]
+
+[[package]]
+name = "yo-mesh"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "toml 1.2.3+spec-1.1.0",
 ]
 
 [[package]]

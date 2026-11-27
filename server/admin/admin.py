@@ -551,6 +551,15 @@ def hub_unit() -> dict:
     return {**unit(os.environ.get("YO_HUB_UNIT", "yo-hub.service")), "version": version}
 
 
+# The mesh heartbeat (yo-mesh): this node's view of the other servers, rewritten every second.
+def mesh() -> dict | None:
+    try:
+        with open(os.environ.get("MESH_STATUS_FILE", "/run/yo-mesh/status.json")) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
 # The server's figures once a minute, the last hour: the Server rows' bars. All three series are kept in a small file
 # (HISTORY_FILE) so a restart does not empty them.
 # Each [ms, cpu %, memory %, disk %, rx B/s, tx B/s].
@@ -669,6 +678,7 @@ def stats_now() -> dict:
         "tunnel": section("tunnel", lambda: unit(os.environ.get("ADMIN_TUNNEL_UNIT", "cloudflared.service"))),
         "yogpt": section("yogpt", lambda: unit(os.environ.get("YOGPT_UNIT", "yo-yogpt.service"))),
         "failed_units": section("failed_units", failed_unit_count),
+        "mesh": section("mesh", mesh),
     }
 
 

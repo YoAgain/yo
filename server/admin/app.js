@@ -39,6 +39,41 @@ const reportGroups = ({ reports, users = [], isDone = () => false }) => {
   }).sort((a, b) => b.count - a.count || b.last - a.last);
 };
 // </report-groups>
+// <mesh-view> The Mesh card, pure (server/admin/test_nodes.py runs it in node): yo-mesh's status on this server (its
+// heartbeat to the other servers, with each peer's own view of its peers, rewritten every second) as three nodes and
+// the lines between them: each line the round trip of both directions, green when both answer, red when one does
+// not, grey when nothing is known. A status older than 10 s: yo-mesh here is down, all red.
+const MESH_SHORT = { "yo-falkenstein": "FSN", "yo-ohio": "OHIO", "yo-tokyo": "TYO" };
+const meshView = (m, now) => {
+  if (!m) return null;
+  const fresh = now - (m.at_ms || 0) < 10000, short = (n) => MESH_SHORT[n] || n.replace(/^yo-/, "").slice(0, 4).toUpperCase();
+  // seen[a][b]: what a knows of b (this server's own view, the others' from their last answer).
+  const seen = { [m.node]: m.peers || {} };
+  for (const [n, p] of Object.entries(m.peers || {})) seen[n] = (p.online && p.view) || null;
+  const names = [m.node, ...Object.keys(m.peers || {}).sort()];
+  const dir = (a, b) => { const v = seen[a]?.[b]; return !fresh ? { state: "bad" } : v ? { state: v.online ? "ok" : "bad", rtt: v.rtt_ms, last: v.last_ok_ms, error: v.error } : { state: "unknown" }; };
+  const edges = [];
+  names.forEach((a, i) => names.slice(i + 1).forEach((b) => {
+    const ab = dir(a, b), ba = dir(b, a), states = [ab.state, ba.state];
+    const rtts = [ab.rtt, ba.rtt].filter((x) => x != null);
+    edges.push({ a, b, ab, ba, rtt: rtts.length ? Math.round(rtts.reduce((x, y) => x + y) / rtts.length) : null,
+      state: states.includes("bad") ? "bad" : states.every((x) => x === "ok") ? "ok" : states.includes("ok") ? "ok" : "unknown" });
+  }));
+  const nodes = names.map((n) => ({ name: n, label: short(n), state: !fresh ? "bad" : n === m.node || names.some((o) => seen[o]?.[n]?.online) ? "ok" : "bad" }));
+  const ago = (ms) => (ms ? `${Math.max(0, Math.round((now - ms) / 1000))} s ago` : "never");
+  const rows = [], dirs = [], written = ago(m.at_ms), version = m.version || "–";
+  for (const e of edges) for (const [from, to, d] of [[e.a, e.b, e.ab], [e.b, e.a, e.ba]]) {
+    const label = `${short(from)} → ${short(to)}`, value = d.state === "bad" ? "down" : d.rtt == null ? "–" : `${Math.round(d.rtt)} ms`;
+    const last = { label: "Last answer", value: ago(d.last) }, errors = d.error ? [{ label: "Error", value: d.error }] : [];
+    const tip = { head: label, rows: [{ label: "Round trip", value }, last, ...errors, { label: "Status written", value: written }, { label: "yo-mesh", value: version }] };
+    dirs.push({ from, to, label, state: d.state, rtt: d.rtt ?? null, value, last: d.last ?? null, error: d.error ?? null, tip });
+    rows.push({ label, value, cls: d.state === "unknown" ? "" : d.state });
+    if (d.state === "bad" && d.last !== undefined) rows.push(last, ...errors);
+  }
+  rows.push({ section: "Status" }, { label: "Written", value: written }, { label: "yo-mesh", value: version });
+  return { nodes, edges, rows, dirs, up: nodes.filter((n) => n.state === "ok").length, total: nodes.length, ok: nodes.every((n) => n.state === "ok") && edges.every((e) => e.state === "ok") };
+};
+// </mesh-view>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
 const diagPayload = (d) => {
   try { return JSON.parse(d.payload) ?? {}; } catch { return d.payload ?? {}; }
@@ -237,6 +272,43 @@ if (document.body.classList.contains("login")) {
     state("t-cli", y?.ok === false ? "bad" : y?.ok ? "ok" : null);
     svcInfo.cli = { parts: [["YoGPT", y]] };
   }
+  let meshNow = null, meshPending = false;
+  const MESH_AT = [[120, 23], [36, 118], [204, 118]];
+  const renderMesh = () => {
+    meshPending = false;
+    const face = $("mesh-svg"), count = $("mesh-n"), dirs = $("mesh-dirs"), v = meshNow;
+    count.textContent = v ? `${v.up}/${v.total} online` : "–";
+    count.className = v ? (v.up === v.total ? "ok" : "bad") : "";
+    face.replaceChildren();
+    dirs.replaceChildren();
+    if (!v) return;
+    const at = Object.fromEntries(v.nodes.map((n, i) => [n.name, MESH_AT[i % 3]]));
+    for (const e of v.edges) {
+      const [x1, y1] = at[e.a], [x2, y2] = at[e.b];
+      face.append(svg("line", { x1, y1, x2, y2, class: `mesh-line ${e.state}` }));
+      const t = svg("text", { x: (x1 + x2) / 2 + (y1 === y2 ? 0 : (x1 < x2) === (y1 < y2) ? 22 : -22), y: (y1 + y2) / 2 + (y1 === y2 ? 14 : 0), class: "mesh-rtt" });
+      t.textContent = e.state === "bad" ? "✕" : e.rtt == null ? "–" : `${e.rtt} ms`;
+      face.append(t);
+    }
+    for (const n of v.nodes) {
+      const [x, y] = at[n.name];
+      face.append(svg("circle", { cx: x, cy: y, r: 18, class: `mesh-node ${n.state}` }));
+      const t = svg("text", { x, y: y + 4, class: "mesh-label" });
+      t.textContent = n.label;
+      face.append(t);
+    }
+    for (const d of v.dirs) {
+      const row = el("div");
+      row.append(el("span", "", d.label), el("b", d.state, d.value));
+      dirs.append(hint(row, d.tip));
+    }
+  };
+  const drawMesh = (m) => {
+    meshNow = meshView(m, Date.now());
+    if (matchMedia("(any-hover: hover)").matches && $("t-mesh").matches(":hover")) { meshPending = true; return; }
+    renderMesh();
+  };
+  $("t-mesh").addEventListener("pointerleave", () => { if (meshPending) renderMesh(); });
   let statsBusy = false;
   async function tick() {
     if (document.hidden || statsBusy) return;
@@ -289,6 +361,7 @@ if (document.body.classList.contains("login")) {
       const people = last?.live?.yogpt_contacts;
       if (s.yogpt?.state === "active" && people != null) svcInfo.yogpt.rows.push(["Knows", `${num(people)} people`]);
     });
+    part(() => drawMesh(s.mesh));
     redrawDetail(["server", "svc"]);
     if (firstSample && pinned?.dataset.detail) landing();
   }
@@ -684,6 +757,7 @@ if (document.body.classList.contains("login")) {
   let problemCard;
   const serverHints = () => {
     hint($("problem-dial"), () => problemCard || { head: "Problems", note: "Waiting for data" });
+    hint($("mesh-svg"), () => meshNow ? { head: "Mesh, round trips", rows: meshNow.rows } : { head: "Mesh", note: "No status from yo-mesh on this server" });
     const pct = (v) => `${Math.round(v)} %`;
     hint($("c-cpu"), () => { const s = srvNow || {}, c = s.cpu || {};
       return { cap: 1, head: "CPU", nodes: histNode((p) => p[1] ?? 0, pct), rows: [c.cores ? { label: "Cores", value: String(c.cores) } : null, c.load?.length ? { label: "Load", value: c.load.map((x) => x.toFixed(2)).join(" · ") } : null, s.uptime == null ? null : { label: "Up", value: span(s.uptime) }] }; });
@@ -1381,6 +1455,7 @@ if (document.body.classList.contains("login")) {
   // bookkeeping under internal.
   const TABLE_AREAS = ["account", "name", "message", "grp", "support", "diag", "stat"];
   Object.assign(ICONS, {
+    node: '<rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/>',
     user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>',
     key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/>',
     mail: '<rect x="3" y="5.5" width="18" height="13" rx="2"/><path d="m3.5 7 8.5 6 8.5-6"/>',

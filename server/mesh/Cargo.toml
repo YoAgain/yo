@@ -1,0 +1,33 @@
+[package]
+name = "yo-mesh"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "A heartbeat between the Yo servers over mutual TLS (a library, so the hub can take it in later)."
+
+[lib]
+name = "yo_mesh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "yo-mesh"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+# TLS on tokio's sockets, with the workspace's rustls (aws-lc-rs).
+tokio-rustls = { version = "=0.26.6", default-features = false }
+# HTTP/2 both ways on one connection per peer, without a web framework: the versions the hub already links.
+hyper = { version = "=1.13.0", features = ["server", "client", "http2"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+http-body-util = "=0.1.5"
+bytes = "=1.12.2"
+
+[dev-dependencies]
+# Test CAs and certificates, made in the test (the hub's tests use it the same way).
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
