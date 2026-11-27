@@ -139,6 +139,9 @@ dev/                                scripts
 |---|---|
 | Hub alone | **10,431 Yos/s** · 1 CPU core · p50 2.1 ms · p99 130 ms |
 | Yo to Yo | **p50 71 ms** · p90 89 ms · real phone, Wi-Fi, round trip to a bot |
+| Yo to Yo, CLI | **p50 64 ms** · p90 75 ms · round trip, CLI to CLI, Germany, through the Cloudflare tunnel |
+| After 100 s quiet | **p50 88 ms** · p90 101 ms · same round trip, first Yo after a pause |
+| `yo NAME` | **p50 74 ms** to delivery · process ends at 71 ms · **34 ms** with a listener running |
 | Send, one client core | **50 Yos/s** · p50 290 ms · p99 708 ms |
 | Lost | **0** |
 
