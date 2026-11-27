@@ -21,6 +21,9 @@ use std::{
 const BATCH: usize = 512;
 const WINDOW: u64 = 900_000;
 const GRACE: u64 = 30_000;
+/// A second ack sooner than this is a client that fetched while its first ack was on the way (a short fetch waits up
+/// to 5 s for the other hubs), not a Yo handed out twice.
+const DUP_AFTER: u64 = 7_000;
 
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct Answer {
@@ -100,14 +103,6 @@ pub(crate) fn report(db: &Db, now: u64, kind: &'static str, id: u64, peer: &str,
     db.count_mesh_events(now, &[(kind, 1)]);
 }
 
-pub(crate) type Duplicates = HashMap<u64, Duration>;
-pub(crate) fn duplicates(db: &Db, items: Duplicates) {
-    let now = crate::now_ms();
-    for (id, age) in items {
-        report(db, now, "mesh-dup", id, &db.agent.as_ref().unwrap().config.hub, age.as_millis() as u64);
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct Checks {
     acknowledged: HashMap<u64, (yoip::DeviceId, u64)>,
@@ -118,7 +113,7 @@ impl Checks {
     fn duplicate_age(&self, device: &yoip::DeviceId, id: u64, now: u64) -> Option<u64> {
         let (owner, at) = self.acknowledged.get(&id)?;
         let age = now.saturating_sub(*at);
-        (owner == device && age <= WINDOW).then_some(age)
+        (owner == device && (DUP_AFTER..=WINDOW).contains(&age)).then_some(age)
     }
 
     pub fn record(&mut self, db: &Db, device: &yoip::DeviceId, requested: &[u64], deleted: &[u64]) {
@@ -261,6 +256,13 @@ mod tests {
         assert!(history.candidates(100 + GRACE - 1).is_empty());
         assert_eq!(history.candidates(100 + GRACE), [(7, 100)]);
         assert!(history.candidates(101 + WINDOW).is_empty());
+    }
+
+    #[test]
+    fn an_ack_crossing_a_fetch_is_no_duplicate() {
+        let history = Checks { acknowledged: [(7, ([1; 16], 100))].into(), ..Default::default() };
+        assert_eq!(history.duplicate_age(&[1; 16], 7, 100 + 132), None);
+        assert_eq!(history.duplicate_age(&[1; 16], 7, 100 + 8_000), Some(8_000));
     }
 
     #[test]

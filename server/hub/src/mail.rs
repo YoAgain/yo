@@ -345,22 +345,12 @@ impl RecentAcks {
     }
 }
 
-fn merge_items(
-    mut items: Vec<api::InboxItem>,
-    device: &DeviceId,
-    recent: &RecentAcks,
-    mut duplicate: impl FnMut(u64, Duration),
-) -> Vec<api::InboxItem> {
+fn merge_items(mut items: Vec<api::InboxItem>, device: &DeviceId, recent: &RecentAcks) -> Vec<api::InboxItem> {
     items.sort_by_key(|item| item.id);
     items.dedup_by_key(|item| item.id);
-    // TRANSITION(#15): remove with the delivery checker.
-    items.retain(|item| match recent.age(device, item.id) {
-        Some(age) => {
-            duplicate(item.id, age);
-            false
-        }
-        None => true,
-    });
+    // An id acked here moments ago (its ack crossed this fetch, or a peer has not seen the delete yet) is never handed
+    // out again; not a duplicate. TRANSITION(#15): remove with the delivery checker.
+    items.retain(|item| recent.age(device, item.id).is_none());
     items.truncate(MAX_INBOX_FETCH);
     items
 }
@@ -454,8 +444,6 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
     };
     let mut status = StatusCode::OK;
     let mut remote = Vec::new();
-    // TRANSITION(#15): remove with the delivery checker.
-    let mut duplicates = crate::lifecycle::Duplicates::new();
     let (mut items, mut prekeys_left) = match peers {
         Some(_) if split == Some(1) => {
             status = StatusCode::PARTIAL_CONTENT;
@@ -466,8 +454,7 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
             let (local, answers) = tokio::join!(hub.blocking(read), ask_peers(&hub, client, &id));
             let local = local??;
             if !answers.is_empty() {
-                (remote, duplicates) =
-                    hub.blocking(move |h| h.db.peer_items(&id, answers, only_missing, h.clock_ms())).await??;
+                remote = hub.blocking(move |h| h.db.peer_items(&id, answers, only_missing, h.clock_ms())).await??;
             }
             local
         }
@@ -496,10 +483,7 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
         let local: std::collections::HashSet<_> = items.iter().map(|item| item.id).collect();
         items.append(&mut remote);
         // TRANSITION(#15): remove with the delivery checker.
-        items = merge_items(items, &id, &agent.recent_acks.lock().unwrap(), |id, age| {
-            duplicates.insert(id, age);
-        });
-        crate::lifecycle::duplicates(&hub.db, duplicates);
+        items = merge_items(items, &id, &agent.recent_acks.lock().unwrap());
         let peer_items = items.iter().filter(|item| !local.contains(&item.id)).count();
         if peer_items > 0 {
             let now = hub.clock_ms();
@@ -699,9 +683,7 @@ mod peer_tests {
         let item = |id| api::InboxItem { id, received_ms: 0, envelope: vec![0].into() };
         let mut rows = vec![api::InboxItem { received_ms: 10, ..item(3) }];
         rows.extend((1..=MAX_INBOX_FETCH as u64 + 4).rev().map(item));
-        let mut duplicates = vec![];
-        let rows = merge_items(rows, &device, &recent, |id, _| duplicates.push(id));
-        assert_eq!(duplicates, [1]);
+        let rows = merge_items(rows, &device, &recent);
         assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), (2..2 + MAX_INBOX_FETCH as u64).collect::<Vec<_>>());
         assert_eq!(rows[1].received_ms, 10);
         recent.expire();

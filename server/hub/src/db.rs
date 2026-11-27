@@ -1792,11 +1792,10 @@ impl Db {
         items: Vec<api::InboxItem>,
         only_missing: bool,
         now: u64,
-    ) -> rusqlite::Result<(Vec<api::InboxItem>, crate::lifecycle::Duplicates)> {
+    ) -> rusqlite::Result<Vec<api::InboxItem>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut found = Vec::new();
-        let duplicates = crate::lifecycle::Duplicates::new();
         {
             let mut local = tx.prepare_cached("SELECT 1 FROM corro.message WHERE id=? AND device_id=?")?;
             let mut receipt = tx.prepare_cached("INSERT OR REPLACE INTO peer_inbox_receipt VALUES(?,?,?)")?;
@@ -1818,7 +1817,7 @@ impl Db {
             }
         }
         tx.commit()?;
-        Ok((found, duplicates))
+        Ok(found)
     }
 
     /// A device's number among its user's devices (spec 3).
