@@ -266,15 +266,19 @@ impl Hub {
             .corrosion
             .as_ref()
             .filter(|c| c.peer_token.as_deref().is_some_and(|t| !t.is_empty()))
-            .and_then(|c| c.mesh_peers.as_ref())
-            .map(yo_mesh::Client::load)
+            .and_then(|c| c.mesh_peers.as_ref().map(|path| (path, c.mesh_host.clone())))
+            .map(|(path, host)| yo_mesh::Client::load(path).map(|c| c.with_host(host)))
             .transpose()
             .map_err(|e| format!("mesh peers: {e}"))?
             .filter(|c| c.peers().next().is_some());
         let edge = config
             .corrosion
             .as_ref()
-            .and_then(|c| c.upstream.as_deref().map(|origin| edge::Edge::new(origin, c.peer_token.as_deref())))
+            .and_then(|c| {
+                c.upstream
+                    .as_deref()
+                    .map(|origin| edge::Edge::new(origin, c.peer_token.as_deref(), c.mesh_host.as_deref()))
+            })
             .transpose()?;
         let mut db = Db::configured(&config).map_err(|e| format!("database: {e}"))?;
         db.add_devices = config.add_devices;

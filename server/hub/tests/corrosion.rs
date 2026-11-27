@@ -99,6 +99,7 @@ path = {admin:?}
                 upstream: None,
                 mesh_peers: None,
                 peer_token: None,
+                mesh_host: None,
             });
         }
         (cluster, configs)
@@ -482,6 +483,7 @@ async fn peer_mesh(
         peers: [(name.into(), listen), ("stalled".into(), stalled)].into(),
         certs: Some(dir.clone()),
         forward: None,
+        forwards: Default::default(),
         status: Some(status.clone()),
         history: Some(root.join("reader-history.json")),
     }));
@@ -491,6 +493,7 @@ async fn peer_mesh(
         peers: Default::default(),
         certs: Some(dir),
         forward: Some(forward),
+        forwards: Default::default(),
         status: Some(root.join("mesh-status")),
         history: None,
     }));

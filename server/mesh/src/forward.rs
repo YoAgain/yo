@@ -65,22 +65,35 @@ pub(super) fn response(mut res: Response<Incoming>, version: Version) -> Respons
 
 #[derive(Clone)]
 pub(super) struct Forward {
-    addr: Authority,
+    default: Option<Authority>,
+    by_host: Arc<BTreeMap<String, Authority>>,
     client: Client<HttpConnector, Incoming>,
 }
 
+fn authority(addr: SocketAddr) -> Authority {
+    addr.to_string().parse().unwrap()
+}
+
 impl Forward {
-    pub(super) fn new(addr: SocketAddr) -> Self {
-        Self {
-            addr: addr.to_string().parse().unwrap(),
-            client: Client::builder(TokioExecutor::new()).pool_max_idle_per_host(8).build_http(),
+    /// None when it forwards nowhere.
+    pub(super) fn new(default: Option<SocketAddr>, by_host: BTreeMap<String, SocketAddr>) -> Option<Self> {
+        if default.is_none() && by_host.is_empty() {
+            return None;
         }
+        Some(Self {
+            default: default.map(authority),
+            by_host: Arc::new(by_host.into_iter().map(|(h, a)| (h.to_ascii_lowercase(), authority(a))).collect()),
+            client: Client::builder(TokioExecutor::new()).pool_max_idle_per_host(8).build_http(),
+        })
     }
 
     pub(super) async fn send(&self, mut req: Request<Incoming>) -> Response<Payload> {
-        let Some(host) = req.uri().authority().and_then(|a| a.as_str().parse().ok()) else { return empty(400) };
-        if rewrite(&mut req, "http", self.addr.clone(), Version::HTTP_11).is_err()
-            || !req.headers().contains_key("cf-connecting-ip")
+        let Some(host) = req.uri().authority().cloned() else { return empty(400) };
+        let Some(addr) = self.by_host.get(&host.host().to_ascii_lowercase()).or(self.default.as_ref()).cloned() else {
+            return empty(404);
+        };
+        let Ok(host) = host.as_str().parse() else { return empty(400) };
+        if rewrite(&mut req, "http", addr, Version::HTTP_11).is_err() || !req.headers().contains_key("cf-connecting-ip")
         {
             return empty(400);
         }

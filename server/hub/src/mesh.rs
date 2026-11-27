@@ -38,7 +38,11 @@ pub async fn command(args: &[String]) -> Result<bool> {
                 )
                 .join("mesh.toml"),
             };
-            let listen = var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8090".into()).parse()?;
+            let listen = var("YO_LISTEN")
+                .unwrap_or_else(|| "127.0.0.1:8090".into())
+                .split(',')
+                .map(|a| a.trim().parse())
+                .collect::<std::result::Result<Vec<SocketAddr>, _>>()?;
             yo_mesh::relay(load(path)?, upstream.clone(), listen, status, shutdown_signal()).await?;
             Ok(true)
         }

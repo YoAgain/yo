@@ -1,12 +1,13 @@
-# Corrosion on NODE (yo #15), written by the deploy: @ADDR@ the node's tailnet address, @PEERS@ the others'.
+# Corrosion on NODE (yo #15), written by the deploy: @ADDR@ the node's tailnet address, @PEERS@ the others'; @DIR@
+# yo-corrosion (dev: gossip 7001, API 8097) or yo-corrosion-live (live: 7002, 8098), two clusters that never meet.
 [db]
-path = "/var/lib/yo-corrosion/corrosion.db"
-schema_paths = ["/etc/yo-corrosion/schema"]
+path = "/var/lib/@DIR@/corrosion.db"
+schema_paths = ["/etc/@DIR@/schema"]
 # Its page cache: 1 GiB by default, far beyond a 512 MB edge.
 cache_size_kib = -16384
 
 [gossip]
-addr = "@ADDR@:7001"
+addr = "@ADDR@:@GOSSIP@"
 bootstrap = [@PEERS@]
 # Tailscale's MTU is 1280: QUIC's packets must fit in it.
 max_mtu = 1232
@@ -16,19 +17,19 @@ max_mtu = 1232
 [gossip.broadcast.plumtree]
 
 [gossip.tls]
-cert_file = "/etc/yo-corrosion/tls/server.crt"
-key_file = "/etc/yo-corrosion/tls/server.key"
-ca_file = "/etc/yo-corrosion/tls/ca.crt"
+cert_file = "/etc/@DIR@/tls/server.crt"
+key_file = "/etc/@DIR@/tls/server.key"
+ca_file = "/etc/@DIR@/tls/ca.crt"
 
 [gossip.tls.client]
-cert_file = "/etc/yo-corrosion/tls/client.crt"
-key_file = "/etc/yo-corrosion/tls/client.key"
+cert_file = "/etc/@DIR@/tls/client.crt"
+key_file = "/etc/@DIR@/tls/client.key"
 
 [api]
-addr = "127.0.0.1:8097"
+addr = "127.0.0.1:@API@"
 
 [admin]
-path = "/run/yo-corrosion/admin.sock"
+path = "/run/@DIR@/admin.sock"
 
 [log]
 format = "plaintext"

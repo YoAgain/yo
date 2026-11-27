@@ -120,21 +120,46 @@ async fn connection(stream: TcpStream, edge: Arc<Edge>, status: bool, mut stop: 
     }
 }
 
-/// Serve the loopback relay and heartbeat over the same peer connection.
+/// Serve the loopback relay and heartbeat over the same peer connection. Every listener relays alike: the host of
+/// a request picks where it goes at the upstream (`Config::forwards`).
 pub async fn relay(
     config: Config,
     upstream: String,
-    listen: SocketAddr,
+    listen: Vec<SocketAddr>,
     status: SocketAddr,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    if !listen.ip().is_loopback() || !status.ip().is_loopback() {
+    if listen.is_empty() || listen.iter().chain([&status]).any(|a| !a.ip().is_loopback()) {
         return Err("relay listeners require loopback".into());
     }
     if !config.peers.contains_key(&upstream) {
         return Err("unknown upstream peer".into());
     }
-    let listener = TcpListener::bind(listen).await?;
+    let mut listeners = Vec::new();
+    for addr in listen {
+        listeners.push(TcpListener::bind(addr).await?);
+    }
+    let (accepted, mut streams) = tokio::sync::mpsc::channel::<TcpStream>(64);
+    let mut accepting = JoinSet::new();
+    for listener in listeners {
+        let accepted = accepted.clone();
+        accepting.spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        if accepted.send(stream).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("accept: {e}");
+                        sleep(SECOND).await;
+                    }
+                }
+            }
+        });
+    }
+    drop(accepted);
     let status = TcpListener::bind(status).await?;
     let (tx, mut health) = watch::channel(Upstream::default());
     let mut mesh = start(config, Some((&upstream, tx)))?;
@@ -162,10 +187,11 @@ pub async fn relay(
             result = mesh.join_next() => { result.unwrap()?; return Err("mesh task stopped".into()); }
             Some(_) = connections.join_next() => {}
             stream = status.accept() => { connections.spawn(connection(stream?.0, edge.clone(), true, stopping.clone())); }
-            stream = listener.accept() => { connections.spawn(connection(stream?.0, edge.clone(), false, stopping.clone())); }
+            Some(stream) = streams.recv() => { connections.spawn(connection(stream, edge.clone(), false, stopping.clone())); }
         }
     };
-    drop((listener, status));
+    accepting.shutdown().await;
+    drop((streams, status));
     stop.send_replace(true);
     let grace = if dead { UPSTREAM_DEAD } else { 30 * SECOND };
     let _ = timeout(grace, async { while connections.join_next().await.is_some() {} }).await;

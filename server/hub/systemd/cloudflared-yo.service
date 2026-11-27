@@ -1,0 +1,28 @@
+[Unit]
+Description=Cloudflare Tunnel yo on an edge (all hostnames, yo #15)
+After=network-online.target yo-hub-edge-live.service yo-hub-edge.service yo-hub-relay.service
+Wants=network-online.target
+# Cloudflare hands any of the tunnel's hostnames to any connector: here hub.justyo.app and the apex's .well-known go
+# to the live edge hub (127.0.0.1:8080), dev.justyo.app to the dev edge hub (8090), api.justyo.app (8095) and
+# a.justyo.app (8081) to the relay. Without any of them no connector: the others take its share.
+BindsTo=yo-hub-edge-live.service yo-hub-edge.service yo-hub-relay.service
+
+# Falkenstein runs tunnel yo from Cloudflare's own cloudflared.service; the edges from this unit, the same token.
+[Service]
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20241 --grace-period 30s run --token-file %d/token
+LoadCredential=token:/etc/cloudflared/yo.token
+Restart=always
+RestartSec=2
+TimeoutStopSec=40
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

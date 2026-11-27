@@ -17,6 +17,8 @@ use yoip::net::{api, limits};
 pub(crate) struct Edge {
     peer_token: Option<axum::http::HeaderValue>,
     upstream: axum::http::uri::Authority,
+    /// The host the edge's own requests (upkeep) name: the mesh picks the central hub by it.
+    host: axum::http::HeaderValue,
     client: Client<HttpConnector, Body>,
     reading: std::sync::Arc<tokio::sync::Semaphore>,
 }
@@ -66,14 +68,16 @@ fn strip(headers: &mut HeaderMap) {
 }
 
 impl Edge {
-    pub fn new(upstream: &str, token: Option<&str>) -> Result<Self, String> {
+    pub fn new(upstream: &str, token: Option<&str>, host: Option<&str>) -> Result<Self, String> {
         let uri: Uri = upstream.parse().map_err(|_| "invalid edge upstream")?;
         if uri.scheme_str() != Some("http") || uri.path() != "/" || uri.query().is_some() {
             return Err("expected an HTTP relay origin".into());
         }
+        let upstream = uri.authority().ok_or("missing relay authority")?.clone();
         Ok(Self {
             peer_token: token.map(str::parse).transpose().map_err(|_| "invalid peer token")?,
-            upstream: uri.authority().ok_or("missing relay authority")?.clone(),
+            host: host.unwrap_or(upstream.as_str()).parse().map_err(|_| "invalid YO_MESH_HOST")?,
+            upstream,
             client: Client::builder(TokioExecutor::new()).build_http(),
             reading: std::sync::Arc::new(tokio::sync::Semaphore::new(crate::READING_AT_ONCE)),
         })
@@ -113,10 +117,9 @@ impl Edge {
             Some(peer.to_string().parse().expect("an IP address is a header value"))
         });
         strip(request.headers_mut());
-        // The relay needs a host (a client's request has its own; the edge's upkeep names the relay).
+        // The relay needs a host (a client's request has its own; the edge's upkeep names YO_MESH_HOST or the relay).
         if !request.headers().contains_key(axum::http::header::HOST) {
-            let host = self.upstream.as_str().parse().expect("an authority is a header value");
-            request.headers_mut().insert(axum::http::header::HOST, host);
+            request.headers_mut().insert(axum::http::header::HOST, self.host.clone());
         }
         request.headers_mut().remove("yo-peer-token");
         if let Some(token) = self.peer_token.as_ref().filter(|_| forwarded) {

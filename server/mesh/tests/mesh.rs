@@ -55,6 +55,7 @@ fn node(name: &str, addr: SocketAddr, peer: &str, other: SocketAddr, dir: &Path)
         status: Some(dir.join("status.json")),
         history: None,
         forward: None,
+        forwards: Default::default(),
     }
 }
 
@@ -209,12 +210,34 @@ async fn relay_round_trip() -> Result<()> {
     let (root, issuer) = ca();
     let a = identity(&dir.0, "node-a", &issuer, &root);
     let b = identity(&dir.0, "node-b", &issuer, &root);
-    let sockets: Vec<_> = (0..4).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<std::io::Result<_>>()?;
-    let (addr, other, listen, status) =
-        (sockets[0].local_addr()?, sockets[1].local_addr()?, sockets[2].local_addr()?, sockets[3].local_addr()?);
+    let sockets: Vec<_> = (0..5).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<std::io::Result<_>>()?;
+    let (addr, other, listen, status, second) = (
+        sockets[0].local_addr()?,
+        sockets[1].local_addr()?,
+        sockets[2].local_addr()?,
+        sockets[3].local_addr()?,
+        sockets[4].local_addr()?,
+    );
     let hub = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    // A second hub behind the same node, picked by the request's host (live and dev on one mesh).
+    let live = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let mut config = node("node-a", addr, "node-b", other, &a);
     config.forward = Some(hub.local_addr()?);
+    config.forwards = [("live.example".into(), live.local_addr()?)].into();
+    tokio::spawn(async move {
+        loop {
+            let stream = live.accept().await.unwrap().0;
+            tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                TokioIo::new(stream),
+                hyper::service::service_fn(|req: Request<hyper::body::Incoming>| async move {
+                    hyper::Response::builder()
+                        .status(202)
+                        .header("x-host", &req.headers()["host"])
+                        .body(Full::<Bytes>::default())
+                }),
+            ));
+        }
+    });
     let echo_server = tokio::spawn(async move {
         loop {
             let stream = hub.accept().await.unwrap().0;
@@ -230,7 +253,7 @@ async fn relay_round_trip() -> Result<()> {
         let edge = tokio::spawn(yo_mesh::relay(
             node("node-b", other, "node-a", addr, &b),
             "node-a".into(),
-            listen,
+            vec![listen, second],
             status,
             async {
                 let _ = stopped.await;
@@ -265,6 +288,16 @@ async fn relay_round_trip() -> Result<()> {
             .header("connection", "cf-connecting-ip"),
     ] {
         assert_eq!(edge_request(listen, req.body(Full::default())?).await?.status(), 400);
+    }
+
+    // By host, on either listener: a named host to its hub, any other to the default.
+    let by_host = |host: &'static str| {
+        Request::get("/").header("host", host).header("cf-connecting-ip", "192.0.2.1").body(Full::default())
+    };
+    for at in [listen, second] {
+        let res = edge_request(at, by_host("LIVE.example:443")?).await?;
+        assert_eq!((res.status().as_u16(), res.headers()["x-host"].to_str()?), (202, "LIVE.example:443"));
+        assert_eq!(edge_request(at, by_host("dev.example")?).await?.status(), 201);
     }
 
     // The echo starts before the upload finishes, through both proxies.

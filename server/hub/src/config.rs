@@ -201,6 +201,9 @@ pub struct CorrosionConfig {
     pub upstream: Option<String>,
     pub mesh_peers: Option<std::path::PathBuf>,
     pub peer_token: Option<String>,
+    /// The host this hub's mesh requests name (`YO_MESH_HOST`, its public one): the mesh nodes forward by it, so live
+    /// and dev share one mesh. None: the peer's node name, which goes to a node's default forward.
+    pub mesh_host: Option<String>,
 }
 
 #[derive(Debug, Clone)]

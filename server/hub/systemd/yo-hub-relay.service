@@ -1,8 +1,8 @@
 [Unit]
-Description=Yo dev hub relay
+Description=Yo edge relay: the mesh node, and requests over it to Falkenstein (yo #15)
 After=network-online.target
 Wants=network-online.target
-Upholds=cloudflared-yo-dev.service
+Upholds=cloudflared-yo.service
 StartLimitIntervalSec=0
 
 [Service]

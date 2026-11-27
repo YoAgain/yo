@@ -43,6 +43,10 @@ pub struct Config {
     pub certs: Option<PathBuf>,
     pub status: Option<PathBuf>,
     pub forward: Option<SocketAddr>,
+    /// Relayed requests by their host (no port): one mesh carries live and dev, the hub, its API and the admin.
+    /// A host not named here goes to `forward`.
+    #[serde(default)]
+    pub forwards: BTreeMap<String, SocketAddr>,
     pub history: Option<PathBuf>,
 }
 
@@ -329,6 +333,7 @@ pub struct Client {
     tls: TlsConnector,
     peers: BTreeMap<String, (SocketAddr, tokio::sync::Mutex<Option<Sender>>)>,
     status: PathBuf,
+    host: Option<String>,
 }
 
 impl Client {
@@ -365,7 +370,13 @@ impl Client {
         }
         // The node on this server writes its heartbeat there (another process: its runtime directory, not ours).
         let status = status.map_or_else(|| PathBuf::from("/run/yo-mesh/status.json"), Path::to_owned);
-        Ok(Self { tls: TlsConnector::from(client_config(&certs)?), peers, status })
+        Ok(Self { tls: TlsConnector::from(client_config(&certs)?), peers, status, host: None })
+    }
+
+    /// The host the requests name (the peer's `forwards` pick the hub by it); the peer's node name without one.
+    pub fn with_host(mut self, host: Option<String>) -> Self {
+        self.host = host;
+        self
     }
 
     pub fn peers(&self) -> impl Iterator<Item = &str> {
@@ -400,7 +411,7 @@ impl Client {
                 slot.as_ref().unwrap().clone()
             };
             let path = req.uri().path_and_query().ok_or("missing path")?;
-            *req.uri_mut() = format!("https://{peer}{path}").parse()?;
+            *req.uri_mut() = format!("https://{}{path}", self.host.as_deref().unwrap_or(peer)).parse()?;
             req.headers_mut().insert(forward::MARKER, "1".parse()?);
             req.headers_mut().entry("cf-connecting-ip").or_insert("127.0.0.1".parse()?);
             let (parts, body) = sender.send_request(req.map(forward::full)).await?.into_parts();
@@ -587,7 +598,7 @@ fn start(config: Config, monitored: Option<(&str, watch::Sender<relay::Upstream>
         peers.clone(),
         history.clone(),
         acceptor,
-        config.forward.map(Forward::new),
+        Forward::new(config.forward, config.forwards),
     ));
     for (name, addr) in config.peers {
         rustls::pki_types::DnsName::try_from(name.as_str())?;

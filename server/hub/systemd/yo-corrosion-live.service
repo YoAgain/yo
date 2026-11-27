@@ -1,0 +1,36 @@
+[Unit]
+Description=Corrosion: the live hubs' shared tables (messages, read copies), gossiped over the tailnet (yo #15)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+# The live cluster, apart from dev's yo-corrosion (own CA, database and ports): the live hubs read its database directly
+# (group yo-corro) and write through its API on 127.0.0.1:8098. Gossip: QUIC,
+# mutual TLS by its own CA, on the tailnet address, port 7002/udp. Config: /etc/yo-corrosion-live/config.toml.
+[Service]
+ExecStart=/opt/yo/corrosion -c /etc/yo-corrosion-live/config.toml agent
+User=yo-corro
+Group=yo-corro
+UMask=0007
+StateDirectory=yo-corrosion-live
+StateDirectoryMode=0750
+RuntimeDirectory=yo-corrosion-live
+Restart=always
+RestartSec=2
+TimeoutStopSec=30
+Environment=RUST_LOG=warn
+# 512 MB edges: what it takes, at most (about 50 MB under load in tests).
+MemoryHigh=160M
+MemoryMax=220M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -5,8 +5,9 @@ Wants=network-online.target yo-corrosion.service
 ConditionPathExists=/opt/yo/yo-hub
 
 # Delivery (POST /v1/inbox/{user}, GET /v1/inbox, POST /v1/inbox/ack, those inside OHTTP) against Corrosion; every
-# other request through the relay (127.0.0.1:8094) over the mesh to Falkenstein's dev hub. cloudflared-yo-dev points
-# at 127.0.0.1:8090. The environment: /etc/yo/hub-edge.env (YO_HUB_NAME, YO_HUB_INDEX, push and OHTTP as the dev hub's).
+# other request through the relay (127.0.0.1:8094) over the mesh to Falkenstein's dev hub. Tunnel yo's dev.justyo.app
+# points at 127.0.0.1:8090. The environment: /etc/yo/hub-edge.env (YO_HUB_NAME, YO_HUB_INDEX, push and OHTTP as the
+# dev hub's).
 [Service]
 ExecStart=/opt/yo/yo-hub
 EnvironmentFile=/etc/yo/hub-edge.env
