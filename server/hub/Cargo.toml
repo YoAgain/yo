@@ -19,6 +19,7 @@ yoip = { path = "../../yoip" }
 curve25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 getrandom = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { version = "=0.7.20", features = ["io"] }

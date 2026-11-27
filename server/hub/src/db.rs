@@ -570,12 +570,14 @@ impl Db {
             let agent = crate::corrosion::Agent::open(&mut db.conn(), config)?;
             db.agent = Some(agent);
         } else {
+            // TRANSITION(#15): remove once account reads are authoritative on every hub.
             crate::corrosion::detach_mirror(&mut db.conn())?;
         }
         Ok(db)
     }
 
     /// Restores the replicated inboxes before restarting in standalone mode.
+    // TRANSITION(#15): remove the rollback command once the read-table mirror retires.
     pub fn corrosion_back(config: &crate::config::Config) -> rusqlite::Result<()> {
         let cfg = config
             .corrosion
@@ -1661,6 +1663,10 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut batch = Vec::new();
+        // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+        if self.edge_off() {
+            return Ok(items.iter().map(|_| Delivered::Unknown).collect());
+        }
         let mut pending = std::collections::HashMap::<DeviceId, u32>::new();
         let mut outcomes = Vec::with_capacity(items.len());
         for Incoming { user, devices_hash, from, copies } in items {
@@ -1769,16 +1775,19 @@ impl Db {
         items: Vec<api::InboxItem>,
         only_missing: bool,
         now: u64,
-    ) -> rusqlite::Result<Vec<api::InboxItem>> {
+    ) -> rusqlite::Result<(Vec<api::InboxItem>, crate::lifecycle::Duplicates)> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut found = Vec::new();
+        let mut duplicates = crate::lifecycle::Duplicates::new();
         {
             let mut local = tx.prepare_cached("SELECT 1 FROM corro.message WHERE id=? AND device_id=?")?;
             let mut receipt = tx.prepare_cached("INSERT OR REPLACE INTO peer_inbox_receipt VALUES(?,?,?)")?;
             let recent = self.agent.as_ref().unwrap().recent_acks.lock().unwrap();
             for item in items {
-                if recent.contains(device, item.id) {
+                // TRANSITION(#15): remove with the delivery checker.
+                if let Some(age) = recent.age(device, item.id) {
+                    duplicates.insert(item.id, age);
                     continue;
                 }
                 if local.exists(params![item.id, device])? {
@@ -1792,7 +1801,7 @@ impl Db {
             }
         }
         tx.commit()?;
-        Ok(found)
+        Ok((found, duplicates))
     }
 
     /// A device's number among its user's devices (spec 3).
@@ -1861,6 +1870,8 @@ impl Db {
         tx.commit()?;
         if let Some(agent) = &self.agent {
             agent.recent_acks.lock().unwrap().remember(*device, &acknowledged);
+            // TRANSITION(#15): remove with the delivery checker.
+            agent.checks.lock().unwrap().record(self, device, ids, &acknowledged);
         }
         Ok((acked, remote, is_bot_app(app.as_deref())))
     }
@@ -1879,6 +1890,10 @@ impl Db {
             return Ok(0);
         }
         let messages = if let Some(agent) = &self.agent {
+            // TRANSITION(#15): remove the pre-prune observation with the delivery checker.
+            if let Err(error) = crate::lifecycle::expired(self, &conn, now, before as u64) {
+                eprintln!("yo-hub: lifecycle expiry: {error}");
+            }
             agent.write(vec![serde_json::json!(["DELETE FROM message WHERE received_at < ?", [before]])])?
         } else {
             conn.execute("DELETE FROM message WHERE received_at < ?1", [before])?

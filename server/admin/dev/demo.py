@@ -407,6 +407,23 @@ class FakeHubs:
 
     def support(self, hub, suffix="", body=None, method=None):
         now = int(time.time() * 1000)
+        if suffix == "stats":
+            rng = random.Random(now // 60000)
+            hubs = {}
+            for name in ("falkenstein", "tokyo", "ohio"):
+                kinds = {"accepted": 35, "delivered": 32, "push-ok-apns": 24, "push-ok-fcm": 9,
+                         "push-fail-apns": 1, "push-fail-fcm": 1, "peer-hit": 3, "peer-miss": 1,
+                         "sync-lt250": 12, "sync-lt500": 21, "sync-lt1000": 4, "sync-lt5000": 2, "sync-ge5000": 1}
+                series = {k: [rng.randint(0, limit) for _ in range(144)] for k, limit in kinds.items()}
+                series["peer-items"] = [hits * rng.randint(1, 3) for hits in series["peer-hit"]]
+                series["sync-in"] = list(map(sum, zip(*(v for k, v in series.items() if k.startswith("sync-")))))
+                for service, reason in (("apns", "unregistered"), ("fcm", "throttled")):
+                    series[f"push-fail-{service}-{reason}"] = series[f"push-fail-{service}"]
+                if name == "ohio":
+                    series["mesh-stuck"] = [0] * 143 + [2]
+                    series["mesh-check-skip"] = [0] * 143 + [1]
+                hubs[name] = series
+            return {"hubs": hubs}
         with self.lock, self.db(hub) as db:
             parts = suffix.split("/")
             if body is None and method is None and suffix == "messages":

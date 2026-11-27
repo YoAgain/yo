@@ -50,3 +50,8 @@ CREATE TABLE hub_stat_minute (
     n INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(hub, kind, minute)
 );
+-- TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+CREATE TABLE hub_setting (
+    key TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL DEFAULT ''
+);

@@ -1346,6 +1346,14 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .mesh-series small { display: block; }
 .mesh-trace circle { fill: #5dade2; }
 .mesh-trace path { fill: none; stroke: #5dade2; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.mesh-counts { margin-top: var(--gap); }
+#mesh-hubs { overflow-x: auto; }
+#mesh-hubs table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+#mesh-hubs th, #mesh-hubs td { padding: 3px 5px; text-align: right; white-space: nowrap; }
+#mesh-hubs th:first-child { padding-left: 0; text-align: left; }
+#mesh-hubs tbody { color: var(--text); }
+#mesh-hubs td.bad { color: var(--bad); }
+#mesh-hubs .spark { width: 44px; height: 14px; margin-right: 6px; vertical-align: middle; }
 .mesh-graphs .gap-key { color: var(--warn); }
 .spark .gap-mark { fill: var(--warn); }
 #mesh-n { margin-left: auto; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }

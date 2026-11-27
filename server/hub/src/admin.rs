@@ -21,7 +21,11 @@ use std::time::Duration;
 use yoip::{net::limits, sha256, UserId};
 
 pub(crate) fn routes(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
-    Router::new()
+    let mut routes = Router::new();
+    if hub.db.agent.is_some() && hub.edge.is_none() {
+        routes = routes.route("/v1/admin/stats", get(get_stats));
+    }
+    routes
         .route("/v1/admin/users/{user}", delete(delete_user))
         .route("/v1/admin/messages", get(get_threads))
         .route("/v1/admin/messages/{install}", get(get_thread).post(post_reply))
@@ -73,6 +77,11 @@ fn parsed<T: std::str::FromStr>(body: &[u8]) -> Res<T> {
 
 fn json_body(body: &[u8]) -> Res<Value> {
     serde_json::from_slice(body).map_err(|_| bad())
+}
+
+async fn get_stats(State(hub): Hubs) -> Res<Json<Value>> {
+    let hubs = hub.blocking(|h| h.db.hub_history(h.clock_ms())).await??;
+    Ok(Json(json!({ "hubs": hubs })))
 }
 
 async fn delete_user(State(hub): Hubs, Path(user): Path<String>) -> Res<StatusCode> {

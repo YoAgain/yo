@@ -86,6 +86,8 @@ impl Transport for Recorder {
 pub enum Outcome {
     Sent,
     /// The service says the token is dead: forget it.
+    TokenRejected(Failure),
+    /// A malformed local token, discarded before contacting the service.
     TokenInvalid,
     Failed(Failure),
     /// No service configured for the platform, or no token.
@@ -99,11 +101,19 @@ pub struct Failure {
     pub service: &'static str,
     pub reason: String,
     pub detail: String,
+    pub category: &'static str,
+    pub status: u16,
 }
 
 impl Failure {
-    fn new(service: &'static str, reason: impl Into<String>, detail: impl Into<String>) -> Self {
-        Failure { service, reason: reason.into(), detail: detail.into() }
+    fn new(
+        service: &'static str,
+        reason: impl Into<String>,
+        detail: impl Into<String>,
+        category: &'static str,
+        status: u16,
+    ) -> Self {
+        Failure { service, reason: reason.into(), detail: detail.into(), category, status }
     }
 }
 
@@ -142,23 +152,44 @@ fn outcome(
 ) -> Outcome {
     let (status, body) = match sent {
         Ok(answer) => answer,
-        Err(error) => return Outcome::Failed(Failure::new(service, "no answer", error)),
+        Err(error) => return Outcome::Failed(Failure::new(service, "no answer", error, "network", 0)),
     };
+    if status == 200 {
+        return Outcome::Sent;
+    }
+    let said: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let word = said["reason"].as_str().or(said["error"]["status"].as_str()).unwrap_or("");
+    let unregistered = matches!(word, "BadDeviceToken" | "Unregistered" | "UNREGISTERED")
+        || said["error"]["details"]
+            .as_array()
+            .is_some_and(|details| details.iter().any(|d| d["errorCode"] == "UNREGISTERED"));
+    let category = reason(status, unregistered);
+    let reason = format!("{status} {}", word.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>());
+    let failure = Failure::new(
+        service,
+        reason.trim_end(),
+        format!("{service} {status} {}", told(&body, token)),
+        category,
+        status,
+    );
+    if dead(status, &String::from_utf8_lossy(&body)) {
+        Outcome::TokenRejected(failure)
+    } else {
+        Outcome::Failed(failure)
+    }
+}
+
+fn reason(status: u16, unregistered: bool) -> &'static str {
+    if unregistered {
+        return "unregistered";
+    }
     match status {
-        200 => Outcome::Sent,
-        _ if dead(status, &String::from_utf8_lossy(&body)) => Outcome::TokenInvalid,
-        _ => {
-            // APNs says why in "reason", FCM in "error.status".
-            let said: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-            let word = said["reason"].as_str().or(said["error"]["status"].as_str()).unwrap_or("");
-            let reason =
-                format!("{status} {}", word.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>());
-            Outcome::Failed(Failure::new(
-                service,
-                reason.trim_end(),
-                format!("{service} {status} {}", told(&body, token)),
-            ))
-        }
+        410 => "unregistered",
+        401 | 403 => "auth",
+        429 => "throttled",
+        500..=599 => "server",
+        0 => "network",
+        _ => "other",
     }
 }
 
@@ -233,7 +264,7 @@ impl Pusher {
                     header.kid = Some(apns.config.key_id.clone());
                     let claims = json!({ "iss": apns.config.team_id, "iat": crate::now_ms() / 1000 });
                     let Ok(value) = jsonwebtoken::encode(&header, &claims, &apns.key) else {
-                        return Outcome::Failed(Failure::new("APNs", "token", "APNs token"));
+                        return Outcome::Failed(Failure::new("APNs", "token", "APNs token", "auth", 0));
                     };
                     // Apple accepts a token for an hour and refuses one renewed more than every 20 minutes.
                     *cached =
@@ -263,7 +294,7 @@ impl Pusher {
         outcome("APNs", self.transport.send(request).await, token, dead)
     }
 
-    async fn fcm_access(&self, fcm: &Fcm) -> Result<String, String> {
+    async fn fcm_access(&self, fcm: &Fcm) -> Result<String, Failure> {
         let mut access = fcm.access.lock().await;
         if let Some(c) = access.as_ref().filter(|c| c.until > Instant::now()) {
             return Ok(c.value.clone());
@@ -277,16 +308,35 @@ impl Pusher {
             "exp": now + 3600,
         });
         let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &fcm.key)
-            .map_err(|e| format!("FCM assertion: {e}"))?;
+            .map_err(|_| Failure::new("FCM", "OAuth", "FCM assertion", "auth", 0))?;
         let request = Request {
             url: fcm.token_uri.clone(),
             headers: vec![("content-type".into(), "application/x-www-form-urlencoded".into())],
             body: format!("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}")
                 .into_bytes(),
         };
-        let (status, body) = self.transport.send(request).await?;
-        let answer: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
-        let token = answer["access_token"].as_str().filter(|_| status == 200).ok_or(format!("FCM OAuth {status}"))?;
+        let (status, body) = self
+            .transport
+            .send(request)
+            .await
+            .map_err(|_| Failure::new("FCM", "OAuth", "FCM OAuth transport", "network", 0))?;
+        let auth_error = || {
+            Failure::new(
+                "FCM",
+                "OAuth",
+                format!("FCM OAuth {status}"),
+                match status {
+                    400 | 200 => "auth",
+                    _ => reason(status, false),
+                },
+                status,
+            )
+        };
+        if status != 200 {
+            return Err(auth_error());
+        }
+        let answer: serde_json::Value = serde_json::from_slice(&body).map_err(|_| auth_error())?;
+        let token = answer["access_token"].as_str().ok_or_else(auth_error)?;
         let lifetime = answer["expires_in"].as_u64().unwrap_or(3600).saturating_sub(300);
         *access = Some(Cached { value: token.to_owned(), until: Instant::now() + Duration::from_secs(lifetime) });
         Ok(token.to_owned())
@@ -295,7 +345,7 @@ impl Pusher {
     async fn fcm(&self, fcm: &Fcm, token: &str, urgent: bool) -> Outcome {
         let access = match self.fcm_access(fcm).await {
             Ok(access) => access,
-            Err(error) => return Outcome::Failed(Failure::new("FCM", "OAuth", error)),
+            Err(error) => return Outcome::Failed(error),
         };
         let body = json!({ "message": { "token": token, "data": { "yo": "1", "urgent": urgent.to_string() }, "android": { "priority": if urgent { "HIGH" } else { "NORMAL" } } } });
         let request = Request {
@@ -314,6 +364,25 @@ impl Pusher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_categories_are_bounded() {
+        for (status, category) in [
+            (410, "unregistered"),
+            (401, "auth"),
+            (403, "auth"),
+            (429, "throttled"),
+            (503, "server"),
+            (0, "network"),
+            (400, "other"),
+        ] {
+            assert_eq!(reason(status, false), category);
+        }
+        for body in [r#"{"reason":"BadDeviceToken"}"#, r#"{"error":{"details":[{"errorCode":"UNREGISTERED"}]}}"#] {
+            let outcome = outcome("test", Ok((400, body.as_bytes().into())), "test-token", |_, _| false);
+            assert!(matches!(outcome, Outcome::Failed(f) if f.category=="unregistered" && f.status==400));
+        }
+    }
 
     #[tokio::test]
     async fn fcm_urgency_sets_data_and_android_priority() {

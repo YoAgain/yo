@@ -251,6 +251,8 @@ if (document.body.classList.contains("login")) {
     which = which === "live" ? "dev" : "live";
     try { localStorage.setItem("hub", which); } catch {}
     devAsked = false;
+    drawHubCounts(null);
+    tick();
     showHub();
     liveConnect();
     if (last) render();
@@ -342,7 +344,7 @@ if (document.body.classList.contains("login")) {
   };
   const drawMesh = (m) => {
     meshNow = meshView(m, Date.now());
-    if (matchMedia("(any-hover: hover)").matches && $("t-mesh").matches(":hover")) { meshPending = true; return; }
+    if ($("mesh-svg").childElementCount && matchMedia("(any-hover: hover)").matches && $("t-mesh").matches(":hover")) { meshPending = true; return; }
     renderMesh();
   };
   $("t-mesh").addEventListener("pointerleave", () => { if (meshPending) renderMesh(); });
@@ -350,9 +352,10 @@ if (document.body.classList.contains("login")) {
   async function tick() {
     if (document.hidden || statsBusy) return;
     statsBusy = true;
+    const hub = which;
     let s;
     try {
-      const r = await fetch("/stats.json", { cache: "no-store" });
+      const r = await fetch(hub === "dev" ? "/stats.json?hub=dev" : "/stats.json", { cache: "no-store" });
       if (r.status === 401 || r.status === 403) { location.reload(); return; }
       s = await r.json();
       $("stale").hidden = true;
@@ -400,6 +403,8 @@ if (document.body.classList.contains("login")) {
     });
     part(() => drawMesh(s.mesh));
     part(() => drawMeshHistory(s.mesh_history));
+    if (hub === which) part(() => drawHubCounts(s.hubs));
+    else tick();
     redrawDetail(["server", "svc"]);
     if (firstSample && pinned?.dataset.detail) landing();
   }
@@ -2698,6 +2703,59 @@ if (document.body.classList.contains("login")) {
     if (tip) hoverTip(s, values.length, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
     return s;
   };
+  const syncBuckets = [["sync-lt250", "<250 ms"], ["sync-lt500", "<500 ms"], ["sync-lt1000", "<1,000 ms"],
+    ["sync-lt5000", "<5,000 ms"], ["sync-ge5000", "≥5,000 ms"]];
+  let previousHubCounts;
+  function drawHubCounts(hubs) {
+    const key = JSON.stringify(hubs || {});
+    if (previousHubCounts === key) return;
+    previousHubCounts = key;
+    const area = $("mesh-hubs");
+    if (!Object.keys(hubs || {}).length) { area.textContent = "no data yet"; return; }
+    const table = el("table"), header = table.createTHead().insertRow(), body = table.createTBody();
+    for (const title of ["Hub", "Accepted", "Delivered", "Push ok / fail", "Peer hits", "Sync in", "Sync p50", "Errors"]) header.append(el("th", "", title));
+    for (const name of ["falkenstein", "tokyo", "ohio"]) {
+      const series = hubs[name] || hubs["yo-" + name], row = body.insertRow();
+      const label = meshShort("yo-" + name);
+      row.append(el("th", "", label));
+      if (!series) {
+        const cell = row.insertCell();
+        cell.colSpan = 7;
+        cell.textContent = "no data yet";
+        continue;
+      }
+      const total = k => (series[k] || []).reduce((a, b) => a + b, 0);
+      const buckets = syncBuckets.map(([k]) => total(k)), samples = buckets.reduce((a, b) => a + b, 0);
+      let seen = 0;
+      const median = samples ? syncBuckets[buckets.findIndex(n => (seen += n) * 2 >= samples)][1] : "–";
+      const push = (outcome, service) => total("push-" + outcome + "-" + service);
+      const pushes = outcome => num(push(outcome, "apns") + push(outcome, "fcm"));
+      const accepted = row.insertCell();
+      if (series.accepted) accepted.append(sparkBars(series.accepted, "cool"));
+      accepted.append(num(total("accepted")));
+      row.insertCell().textContent = num(total("delivered"));
+      const pushCell = row.insertCell();
+      pushCell.textContent = pushes("ok") + " / " + pushes("fail");
+      const reasons = ["unregistered", "auth", "throttled", "server", "network", "other"];
+      hint(pushCell, {head: "Push failures · 24 h", rows: ["apns", "fcm"].flatMap(service => [
+        {section: service === "apns" ? "APNs" : "FCM"},
+        ...reasons.map(label => ({label, value: num(total("push-fail-" + service + "-" + label))})),
+      ])});
+      for (const value of [num(total("peer-hit")), num(total("sync-in")), median]) row.insertCell().textContent = value;
+      const errors = ["mesh-stuck", "mesh-ack-lost", "mesh-dup", "mesh-expired"];
+      const count = errors.reduce((n, k) => n + total(k), 0), errorCell = row.insertCell();
+      errorCell.textContent = num(count);
+      errorCell.classList.toggle("bad", count > 0);
+      hint(errorCell, {head: "Delivery checks · 24 h", rows: [...errors, "mesh-check-skip"].map(label => ({label, value: num(total(label))}))});
+      hint(row, {head: label + " · 24 h", rows: [
+        {label: "Accepted Yos", value: num(total("accepted"))}, {label: "Acknowledged envelopes", value: num(total("delivered"))},
+        ...["apns", "fcm"].map((s, i) => ({label: ["APNs", "FCM"][i] + " ok / fail", value: num(push("ok", s)) + " / " + num(push("fail", s))})),
+        {label: "Fetches with peer items", value: num(total("peer-hit"))}, {label: "Peer-only envelopes", value: num(total("peer-items"))},
+        {label: "Fetches with a peer failure", value: num(total("peer-miss"))}, {label: "Incoming replicated envelopes", value: num(total("sync-in"))},
+        {section: "Replication delay"}, ...["<250 ms", "250–499 ms", "500–999 ms", "1,000–4,999 ms", "≥5,000 ms"].map((label, i) => ({label, value: num(buckets[i])}))]});
+    }
+    area.replaceChildren(table);
+  }
   const meshSeries = (label, chart) => {
     const row = el("div", "mesh-series");
     row.append(el("span", "", label), chart || el("span", "", "no data yet"));

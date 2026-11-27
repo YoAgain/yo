@@ -5875,6 +5875,7 @@ dependencies = [
  "rustix 1.1.6",
  "rustls-pki-types",
  "rustls-webpki",
+ "serde",
  "serde_json",
  "sha2 0.11.2",
  "subtle",

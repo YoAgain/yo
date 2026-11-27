@@ -3,13 +3,14 @@
 use crate::{blobs::hex, config::CorrosionConfig, db::Db, Hub};
 use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicI64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::time::Duration;
 
-const EPOCH: u64 = 1_767_225_600_000;
+pub(crate) const EPOCH: u64 = 1_767_225_600_000;
 const MASK: i64 = (1 << 18) - 1;
 
 struct Ids {
@@ -54,9 +55,14 @@ struct MinuteCount {
 pub(crate) struct Agent {
     pub config: CorrosionConfig,
     pub recent_acks: Mutex<crate::mail::RecentAcks>,
+    // TRANSITION(#15): remove with the delivery checker.
+    pub checks: Mutex<crate::lifecycle::Checks>,
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+    pub switch: Option<crate::killswitch::Switch>,
     ids: Ids,
     writes: mpsc::Sender<Job>,
-    counts: Mutex<std::collections::BTreeMap<(i64, String), MinuteCount>>,
+    mesh_events: Mutex<BTreeMap<(i64, String), u64>>,
+    counts: Mutex<BTreeMap<(i64, String), MinuteCount>>,
 }
 
 pub(crate) fn attach(conn: &Connection, path: &str) -> Result<()> {
@@ -117,8 +123,18 @@ impl Agent {
                 }
             })
             .map_err(error)?;
-        let agent =
-            Self { config: config.clone(), ids, writes, counts: Mutex::default(), recent_acks: Mutex::default() };
+        let agent = Self {
+            config: config.clone(),
+            ids,
+            writes,
+            mesh_events: Mutex::default(),
+            counts: Mutex::default(),
+            recent_acks: Mutex::default(),
+            // TRANSITION(#15): remove with the delivery checker.
+            checks: Mutex::default(),
+            // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+            switch: crate::killswitch::Switch::open(config, conn)?,
+        };
         if config.upstream.is_some() {
             let tx = conn.transaction()?;
             for table in [
@@ -137,11 +153,12 @@ impl Agent {
             }
             tx.commit()?;
         } else {
+            // TRANSITION(#15): remove once account reads are authoritative on every hub.
             reconcile(conn)?;
             agent.migrate(conn)?;
         }
         let last = conn.query_row(
-            "SELECT coalesce(max(id), -1) FROM corro.message WHERE ((id >> 18) & 15) = ?",
+            "SELECT coalesce(max(id), -1) FROM corro.message__crsql_pks WHERE ((id >> 18) & 15) = ?",
             [config.index],
             |r| r.get(0),
         )?;
@@ -191,6 +208,7 @@ impl Agent {
     }
 }
 
+// TRANSITION(#15): remove once account reads are authoritative on every hub.
 // Replicated table, source table and primary key. Prekey material stays in main.
 const TABLES: &[(&str, &str, &str)] = &[
     ("account", "account", "id"),
@@ -201,6 +219,7 @@ const TABLES: &[(&str, &str, &str)] = &[
 ];
 
 /// A standalone hub no longer queues writes for the mirror.
+// TRANSITION(#15): remove once account reads are authoritative on every hub.
 pub(crate) fn detach_mirror(conn: &mut Connection) -> Result<()> {
     if !conn.prepare("SELECT 1 FROM sqlite_schema WHERE name='mirror_dirty' AND type='table'")?.exists([])? {
         return Ok(());
@@ -214,6 +233,7 @@ pub(crate) fn detach_mirror(conn: &mut Connection) -> Result<()> {
     tx.commit()
 }
 
+// TRANSITION(#15): remove once account reads are authoritative on every hub.
 fn reconcile(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS mirror_dirty(tbl TEXT, pk BLOB, v INTEGER, PRIMARY KEY(tbl,pk));
@@ -266,7 +286,11 @@ fn upsert(table: &str, pk: &str, names: &[&str], row: &rusqlite::Row<'_>) -> Res
     ]))
 }
 
+const MESH_KINDS: &str = "'accepted','delivered','push-ok-apns','push-ok-fcm','push-fail-apns','push-fail-fcm',
+    'peer-hit','peer-items','peer-miss','sync-in','sync-lt250','sync-lt500','sync-lt1000','sync-lt5000','sync-ge5000'";
+
 impl Db {
+    // TRANSITION(#15): remove once account reads are authoritative on every hub.
     pub(crate) fn mirror(&self) -> Result<()> {
         let agent = self.agent.as_ref().unwrap();
         let conn = self.conn();
@@ -308,13 +332,29 @@ impl Db {
         tx.commit()
     }
 
+    pub(crate) fn count_mesh_events(&self, now: u64, counts: &[(&str, u64)]) {
+        if let Some(agent) = &self.agent {
+            let mut events = agent.mesh_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for &(kind, n) in counts {
+                if n > 0 {
+                    *events.entry(((now / 60_000) as i64, kind.to_owned())).or_default() += n;
+                }
+            }
+        }
+    }
+
     /// Keep each minute until the agent confirms it. A retry may follow a lost HTTP answer.
-    pub(crate) fn edge_counts(&self, now: u64, counts: &[(&str, u64)]) -> Result<()> {
+    pub(crate) fn flush_hub_counts(&self, now: u64, counts: &[(&str, u64)]) -> Result<()> {
         let agent = self.agent.as_ref().unwrap();
         let minute = (now / 60_000) as i64;
         let mut pending = agent.counts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for &(kind, n) in counts {
             pending.entry((minute, kind.to_owned())).or_default().added += n;
+        }
+        for ((at, kind), n) in
+            std::mem::take(&mut *agent.mesh_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        {
+            pending.entry((at, kind)).or_default().added += n;
         }
         let mut batch = Vec::with_capacity(pending.len() + 1);
         {
@@ -333,23 +373,44 @@ impl Db {
                 };
                 batch.push(json!([
                     "INSERT INTO hub_stat_minute(hub,kind,minute,n)
-                     VALUES (?1,?2,?3,max(0,?4-coalesce((SELECT n FROM hub_stat_minute WHERE hub=?1 AND kind=?2 AND minute=?3),0)))
-                     ON CONFLICT(hub,kind,minute) DO UPDATE SET n=n+excluded.n",
-                    [agent.config.hub,kind,at,prior+count.added]
+                     VALUES (?1,?2,?3,?4)
+                     ON CONFLICT(hub,kind,minute) DO UPDATE SET n=excluded.n",
+                    [agent.config.hub, kind, at, prior + count.added]
                 ]));
             }
         }
-        batch.push(json!(["DELETE FROM hub_stat_minute WHERE hub=? AND minute<?", [agent.config.hub, minute - 180]]));
+        batch.push(json!([
+            "DELETE FROM hub_stat_minute WHERE hub=? AND minute<=?",
+            [agent.config.hub, minute - 48 * 60]
+        ]));
         agent.write(batch)?;
         pending.clear();
         Ok(())
     }
 
+    /// Rolling 24 hours in 144 ten-minute bins, oldest first.
+    pub(crate) fn hub_history(&self, now: u64) -> Result<BTreeMap<String, BTreeMap<String, Vec<u64>>>> {
+        let last = (now / 60_000) as i64;
+        let first = last - 1439;
+        let conn = self.conn();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT hub,kind,(minute-?1)/10 AS slot,sum(n) FROM corro.hub_stat_minute
+             WHERE minute BETWEEN ?1 AND ?2 AND (kind IN ({MESH_KINDS}) OR kind GLOB 'mesh-*' OR kind GLOB 'push-fail-*-*') GROUP BY hub,kind,slot"
+        ))?;
+        let mut rows = stmt.query(params![first, last])?;
+        let mut hubs = BTreeMap::<String, BTreeMap<String, Vec<u64>>>::new();
+        while let Some(row) = rows.next()? {
+            let series = hubs.entry(row.get(0)?).or_default().entry(row.get(1)?).or_insert_with(|| vec![0; 144]);
+            series[row.get::<_, usize>(2)?] = row.get(3)?;
+        }
+        Ok(hubs)
+    }
+
     pub(crate) fn fold(&self, hub: &str, now: u64) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let rows: Vec<(String,String,i64,i64,i64)> = tx.prepare("SELECT s.hub,s.kind,s.minute,s.n,s.n-coalesce(f.n,0)
-            FROM corro.hub_stat_minute s LEFT JOIN stat_folded f USING(hub,kind,minute) WHERE s.hub != ? AND s.n > coalesce(f.n,0)")?
+        let rows: Vec<(String,String,i64,i64,i64)> = tx.prepare(&format!("SELECT s.hub,s.kind,s.minute,s.n,s.n-coalesce(f.n,0)
+            FROM corro.hub_stat_minute s LEFT JOIN stat_folded f USING(hub,kind,minute) WHERE s.hub != ? AND s.kind NOT IN ({MESH_KINDS}) AND s.kind NOT GLOB 'mesh-*' AND s.kind NOT GLOB 'push-fail-*-*' AND s.n > coalesce(f.n,0)"))?
             .query_map([hub],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?.collect::<Result<_>>()?;
         for (origin, kind, minute, n, delta) in rows {
             if minute >= (now / 60_000) as i64 - 120 {
@@ -390,16 +451,29 @@ async fn updates(
             if let Some(id) = line["notify"][1][0].as_i64() {
                 let db = hub.db.clone();
                 // A row this hub cannot read (no device id of 16 bytes) wakes nobody; it never ends the stream.
-                let device = tokio::task::spawn_blocking(move || {
+                let arrival = hub.clock_ms();
+                let message = tokio::task::spawn_blocking(move || {
                     db.conn()
-                        .query_row("SELECT device_id FROM corro.message WHERE id=?", [id], |r| r.get::<_, Vec<u8>>(0))
+                        .query_row("SELECT device_id,hub,received_at FROM corro.message WHERE id=?", [id], |r| {
+                            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?))
+                        })
                         .optional()
                 })
                 .await?
                 .ok()
-                .flatten()
-                .and_then(|bytes| yoip::DeviceId::try_from(bytes).ok());
-                if let Some(device) = device {
+                .flatten();
+                let Some((bytes, origin, received)) = message else { continue };
+                if origin != hub.db.agent.as_ref().unwrap().config.hub && !origin.is_empty() {
+                    let bucket = match arrival.saturating_sub(received) {
+                        0..250 => "sync-lt250",
+                        250..500 => "sync-lt500",
+                        500..1000 => "sync-lt1000",
+                        1000..5000 => "sync-lt5000",
+                        _ => "sync-ge5000",
+                    };
+                    hub.db.count_mesh_events(arrival, &[("sync-in", 1), (bucket, 1)]);
+                }
+                if let Ok(device) = yoip::DeviceId::try_from(bytes) {
                     if let Some(waiter) =
                         hub.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&device)
                     {

@@ -176,6 +176,7 @@ pub(crate) async fn post(hub: Arc<Hub>, inner: Router, peer: SocketAddr, headers
     if let Err(refusal) = hub.limit_ohttp(peer, &headers) {
         return refusal.into_response();
     }
+    // TRANSITION(#15): remove when wrapped requests no longer fall back to the relay.
     let fallback = |status| {
         let mut response = outer(status);
         if hub.edge.is_some() {
@@ -265,6 +266,7 @@ async fn unwrapped(
     if path.starts_with("/v1/peer/") {
         return Err(StatusCode::NOT_FOUND);
     }
+    // TRANSITION(#15): remove when wrapped requests no longer fall back to the relay.
     if hub.edge.is_some() && !crate::edge::local(&method, path.split('?').next().unwrap_or(path)) {
         return Ok(None);
     }
@@ -345,6 +347,7 @@ async fn unwrapped(
     let body = to_bytes(response.into_body(), limits::MAX_OHTTP_RESPONSE)
         .await
         .map_err(|_| StatusCode::INSUFFICIENT_STORAGE)?;
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
     if hub.edge.is_some() && crate::edge::retry(status) {
         return Ok(None);
     }

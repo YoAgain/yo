@@ -701,6 +701,17 @@ def remember(out: dict, now: float) -> list:
         return list(HISTORY)
 
 
+@lru_cache(maxsize=4)
+def hub_counts(hub, minute):
+    """The selected hub flushes once a minute. Standalone and older hubs have no stats route."""
+    try:
+        return support_request(hub, "stats").get("hubs", {})
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return {}
+        raise
+
+
 def stats() -> dict:
     out = stats_now()
     out["history"] = remember(out, time.time())
@@ -807,7 +818,12 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/stats.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(stats()).encode(), "application/json")
+            hub = parse_qs(self.path.partition("?")[2]).get("hub", ["live"])[0]
+            if hub not in HUB_URLS:
+                return self.send(400, b"Bad request", "text/plain")
+            out = stats()
+            out["hubs"] = section("hub counts", lambda: hub_counts(hub, int(time.time() // 60)))
+            return self.send(200, json.dumps(out).encode(), "application/json")
         if path == "/support.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")

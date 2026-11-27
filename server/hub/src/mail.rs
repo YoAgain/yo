@@ -105,6 +105,7 @@ pub(crate) fn writer(
                             },
                             1,
                         );
+                        hub.db.count_mesh_events(now, &[("accepted", 1)]);
                         hub.woken(std::mem::take(devices), delivery.urgent, delivery.request, &delivery.runtime);
                     }
                     let _ = delivery.stored.send(Ok(outcome));
@@ -258,15 +259,42 @@ impl Hub {
     }
 
     pub(crate) async fn push(self: Arc<Self>, wake: db::Wake, urgent: bool) {
-        match self.pusher.wake(wake.push_platform, &wake.push_token, urgent).await {
-            push::Outcome::TokenInvalid => {
+        // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+        if self.db.edge_off() {
+            return;
+        }
+        let outcome = self.pusher.wake(wake.push_platform, &wake.push_token, urgent).await;
+        let mesh_kind = match (&outcome, wake.push_platform) {
+            (push::Outcome::Sent, api::PUSH_APNS | api::PUSH_APNS_SANDBOX) => Some("push-ok-apns"),
+            (push::Outcome::Sent, api::PUSH_FCM) => Some("push-ok-fcm"),
+            (push::Outcome::Failed(_) | push::Outcome::TokenRejected(_), api::PUSH_APNS | api::PUSH_APNS_SANDBOX) => {
+                Some("push-fail-apns")
+            }
+            (push::Outcome::Failed(_) | push::Outcome::TokenRejected(_), api::PUSH_FCM) => Some("push-fail-fcm"),
+            _ => None,
+        };
+        if let Some(kind) = mesh_kind {
+            self.db.count_mesh_events(self.clock_ms(), &[(kind, 1)]);
+        }
+        if self.db.agent.is_some() {
+            if let push::Outcome::Failed(f) | push::Outcome::TokenRejected(f) = &outcome {
+                let service = f.service.to_ascii_lowercase();
+                let kind = format!("push-fail-{service}-{}", f.category);
+                self.db.count_mesh_events(self.clock_ms(), &[(&kind, 1)]);
+                eprintln!("yo-hub: PUSH-ERROR {service} {} status={}", f.category, f.status);
+            }
+        }
+        match outcome {
+            push::Outcome::TokenInvalid | push::Outcome::TokenRejected(_) => {
                 let cleared = self.blocking(move |hub| hub.db.clear_push(&wake.device_id, &wake.push_token));
                 if let Ok(Err(error)) = cleared.await {
                     eprintln!("yo-hub: clear push: {error}");
                 }
             }
             push::Outcome::Failed(failure) => {
-                eprintln!("yo-hub: push: {}", failure.detail);
+                if self.db.agent.is_none() {
+                    eprintln!("yo-hub: push: {}", failure.detail);
+                }
                 self.count(crate::Event::PushFail, 1);
                 // An error as the apps report theirs (domain "push", the reason as its code, the service as its
                 // place, app "hub"): grouped by those, nothing of the device; the operator's Errors.
@@ -305,15 +333,27 @@ impl RecentAcks {
         }
     }
 
-    pub fn contains(&self, device: &DeviceId, id: u64) -> bool {
-        self.0.get(device).and_then(|ids| ids.get(&id)).is_some_and(|at| at.elapsed() < ACK_WINDOW)
+    pub fn age(&self, device: &DeviceId, id: u64) -> Option<Duration> {
+        self.0.get(device)?.get(&id).map(Instant::elapsed).filter(|age| *age < ACK_WINDOW)
     }
 }
 
-fn merge_items(mut items: Vec<api::InboxItem>, device: &DeviceId, recent: &RecentAcks) -> Vec<api::InboxItem> {
-    items.retain(|item| !recent.contains(device, item.id));
+fn merge_items(
+    mut items: Vec<api::InboxItem>,
+    device: &DeviceId,
+    recent: &RecentAcks,
+    mut duplicate: impl FnMut(u64, Duration),
+) -> Vec<api::InboxItem> {
     items.sort_by_key(|item| item.id);
     items.dedup_by_key(|item| item.id);
+    // TRANSITION(#15): remove with the delivery checker.
+    items.retain(|item| match recent.age(device, item.id) {
+        Some(age) => {
+            duplicate(item.id, age);
+            false
+        }
+        None => true,
+    });
     items.truncate(MAX_INBOX_FETCH);
     items
 }
@@ -324,12 +364,17 @@ fn inbox_items(rows: Vec<(u64, Vec<u8>, u64)>) -> Vec<api::InboxItem> {
         .collect()
 }
 
-pub(crate) async fn peer_inbox(State(hub): Hubs, headers: HeaderMap, Path(device): Path<String>) -> Res<Vec<u8>> {
+pub(crate) fn authorize_peer(hub: &Hub, headers: &HeaderMap) -> Res<()> {
     use subtle::ConstantTimeEq;
     let token = hub.config.corrosion.as_ref().and_then(|c| c.peer_token.as_deref()).filter(|t| !t.is_empty());
     if !token.zip(headers.get("yo-peer-token")).is_some_and(|(t, h)| bool::from(t.as_bytes().ct_eq(h.as_bytes()))) {
         return Err(refuse(StatusCode::NOT_FOUND));
     }
+    Ok(())
+}
+
+pub(crate) async fn peer_inbox(State(hub): Hubs, headers: HeaderMap, Path(device): Path<String>) -> Res<Vec<u8>> {
+    authorize_peer(&hub, &headers)?;
     let id = path_id(&device)?;
     let rows = hub.blocking(move |h| h.db.fetch(&id, MAX_INBOX_FETCH)).await??;
     Ok(encode(&api::Inbox { prekeys_left: 0, items: inbox_items(rows) }))
@@ -353,10 +398,16 @@ async fn ask_peers(hub: &Hub, client: &yo_mesh::Client, device: &DeviceId) -> Ve
         })
         .collect::<FuturesUnordered<_>>();
     let mut items = Vec::new();
+    let mut missed = false;
     while let Some(reply) = requests.next().await {
         if let Some(inbox) = reply {
             items.extend(inbox.items);
+        } else {
+            missed = true;
         }
+    }
+    if missed {
+        hub.db.count_mesh_events(hub.clock_ms(), &[("peer-miss", 1)]);
     }
     items
 }
@@ -376,16 +427,20 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
     };
     let mut status = StatusCode::OK;
     let mut remote = Vec::new();
+    // TRANSITION(#15): remove with the delivery checker.
+    let mut duplicates = crate::lifecycle::Duplicates::new();
     let (mut items, mut prekeys_left) = match peers {
         Some(_) if split == Some(1) => {
             status = StatusCode::PARTIAL_CONTENT;
             hub.blocking(read).await??
         }
+        // TRANSITION(#15): remove the merged peer answer when every client supports split fetches.
         Some(client) => {
             let (local, answers) = tokio::join!(hub.blocking(read), ask_peers(&hub, client, &id));
             let local = local??;
             if !answers.is_empty() {
-                remote = hub.blocking(move |h| h.db.peer_items(&id, answers, only_missing, h.clock_ms())).await??;
+                (remote, duplicates) =
+                    hub.blocking(move |h| h.db.peer_items(&id, answers, only_missing, h.clock_ms())).await??;
             }
             local
         }
@@ -398,7 +453,8 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
         notified.as_mut().enable();
         // Mail that came between the first fetch and `enable` is found here.
         (items, prekeys_left) = hub.blocking(read).await??;
-        if items.is_empty() {
+        // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+        if items.is_empty() && !hub.db.edge_off() {
             // A stopping hub answers at once: the client asks again and reaches the next process.
             let mut closing = hub.closing.subscribe();
             tokio::select! {
@@ -409,9 +465,19 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
         }
     }
     let mut items = inbox_items(items);
-    if peers.is_some() {
+    if let Some(agent) = &hub.db.agent {
+        let local: std::collections::HashSet<_> = items.iter().map(|item| item.id).collect();
         items.append(&mut remote);
-        items = merge_items(items, &id, &hub.db.agent.as_ref().unwrap().recent_acks.lock().unwrap());
+        // TRANSITION(#15): remove with the delivery checker.
+        items = merge_items(items, &id, &agent.recent_acks.lock().unwrap(), |id, age| {
+            duplicates.insert(id, age);
+        });
+        crate::lifecycle::duplicates(&hub.db, duplicates);
+        let peer_items = items.iter().filter(|item| !local.contains(&item.id)).count();
+        if peer_items > 0 {
+            let now = hub.clock_ms();
+            hub.db.count_mesh_events(now, &[("peer-hit", 1), ("peer-items", peer_items as u64)]);
+        }
     }
     let mut response = held(encode(&api::Inbox { prekeys_left, items }), fetching);
     *response.status_mut() = status;
@@ -429,7 +495,9 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
     let (acked, remote, bot) = hub.db.ack_inbox(&device.device_id, &request.ids)?;
-    hub.count_acked(&acked, hub.clock_ms(), bot);
+    let now = hub.clock_ms();
+    hub.db.count_mesh_events(now, &[("delivered", (acked.len() + remote) as u64)]);
+    hub.count_acked(&acked, now, bot);
     if remote > 0 {
         hub.count(if bot { crate::Event::YoOutBot } else { crate::Event::YoOut }, remote as u64);
     }
@@ -617,7 +685,9 @@ mod peer_tests {
         let item = |id| api::InboxItem { id, received_ms: 0, envelope: vec![0].into() };
         let mut rows = vec![api::InboxItem { received_ms: 10, ..item(3) }];
         rows.extend((1..=MAX_INBOX_FETCH as u64 + 4).rev().map(item));
-        let rows = merge_items(rows, &device, &recent);
+        let mut duplicates = vec![];
+        let rows = merge_items(rows, &device, &recent, |id, _| duplicates.push(id));
+        assert_eq!(duplicates, [1]);
         assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), (2..2 + MAX_INBOX_FETCH as u64).collect::<Vec<_>>());
         assert_eq!(rows[1].received_ms, 10);
         recent.expire();

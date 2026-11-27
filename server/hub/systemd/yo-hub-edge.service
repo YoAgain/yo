@@ -36,6 +36,9 @@ MemoryMax=160M
 DynamicUser=yes
 SupplementaryGroups=yo-corro
 StateDirectory=yo-edge
+# TRANSITION(#15): remove the override directory when the edge relay retires.
+RuntimeDirectory=yo-edge
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=/var/lib/yo-corrosion
 UMask=0077
 CapabilityBoundingSet=

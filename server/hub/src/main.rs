@@ -37,6 +37,9 @@
 //!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 3.4); their public half is
 //!                         pinned in the apps
 //!
+//! On the central hub, `yo-hub edges off|on|status` controls all edges. On one edge, the presence of
+//! YO_EDGE_OFF_FILE (default /run/yo-edge/off) forces relay mode until the file is removed.
+//!
 //! Rollback: stop the central hub and run `yo-hub corrosion-back` with its environment to copy pending mail
 //! into YO_DB before restarting in standalone mode.
 //!
@@ -97,6 +100,26 @@ fn megabytes(name: &str, default: u64) -> Result<u64, String> {
     var(name).map_or(Ok(default), |mb| bytes(mb).ok_or(format!("{name}: a number of MiB")))
 }
 
+fn corrosion_config() -> Result<Option<yo_hub::config::CorrosionConfig>, String> {
+    Ok(if let Some(api) = var("YO_CORROSION_API") {
+        Some(yo_hub::config::CorrosionConfig {
+            api,
+            db: required("YO_CORROSION_DB")?,
+            hub: required("YO_HUB_NAME")?,
+            index: required("YO_HUB_INDEX")?
+                .parse::<u8>()
+                .ok()
+                .filter(|i| *i < 16)
+                .ok_or("YO_HUB_INDEX must be 0..15")?,
+            upstream: var("YO_EDGE_UPSTREAM"),
+            mesh_peers: var("YO_MESH_PEERS").map(Into::into),
+            peer_token: var("YO_PEER_TOKEN").filter(|t| !t.is_empty()),
+        })
+    } else {
+        None
+    })
+}
+
 fn config() -> Result<(Config, String), String> {
     let apns = match file("YO_APNS_KEY_FILE")? {
         Some(key_pem) => Some(ApnsConfig {
@@ -153,23 +176,7 @@ fn config() -> Result<(Config, String), String> {
         add_devices: var("YO_ADD_DEVICES").as_deref() == Some("1"),
         admin_token: var("YO_ADMIN_TOKEN"),
         db_path,
-        corrosion: if let Some(api) = var("YO_CORROSION_API") {
-            Some(yo_hub::config::CorrosionConfig {
-                api,
-                db: required("YO_CORROSION_DB")?,
-                hub: required("YO_HUB_NAME")?,
-                index: required("YO_HUB_INDEX")?
-                    .parse::<u8>()
-                    .ok()
-                    .filter(|i| *i < 16)
-                    .ok_or("YO_HUB_INDEX must be 0..15")?,
-                upstream: var("YO_EDGE_UPSTREAM"),
-                mesh_peers: var("YO_MESH_PEERS").map(Into::into),
-                peer_token: var("YO_PEER_TOKEN").filter(|t| !t.is_empty()),
-            })
-        } else {
-            None
-        },
+        corrosion: corrosion_config()?,
         reserved: Vec::new(), // the names live in the database, added through the admin page
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
         robot_ranges: parse_ranges(&var("YO_ROBOT_RANGES").unwrap_or_else(|| ROBOT_RANGES.to_owned()))?,
@@ -371,7 +378,12 @@ async fn main() {
     if args.first().is_some_and(|command| ["hub-key", "zk", "trust-root", "ohttp"].contains(&command.as_str())) {
         return or_exit(tool(&args));
     }
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+    if args.first().is_some_and(|s| s == "edges") {
+        return or_exit(yo_hub::killswitch::command(or_exit(corrosion_config()).as_ref(), &args[1..]).await);
+    }
     let (config, listen) = or_exit(config());
+    // TRANSITION(#15): remove the rollback command once the read-table mirror retires.
     if args.as_slice() == ["corrosion-back"] {
         return or_exit(yo_hub::db::Db::corrosion_back(&config).map_err(|e| e.to_string()));
     }

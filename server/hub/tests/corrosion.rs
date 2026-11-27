@@ -48,7 +48,8 @@ fn count(path: &Path, sql: &str) -> Option<i64> {
 
 impl Cluster {
     async fn start(binary: &str, joined: bool) -> (Self, Vec<CorrosionConfig>) {
-        let root = std::env::temp_dir().join(format!("yo-corro-{}-{}-{joined}", std::process::id(), now_ms()));
+        let root =
+            std::env::temp_dir().join(format!("yo-corro-{}-{}-{joined}", std::process::id(), rand::random::<u64>()));
         fs::create_dir(&root).unwrap();
         let schema = root.join("schema");
         fs::create_dir(&schema).unwrap();
@@ -258,7 +259,9 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
         c.corrosion = Some(configs[i].clone());
         c
     };
-    let central_config = config(0);
+    let mut central_config = config(0);
+    let admin_token = yoip::b64(&rand::random::<[u8; 32]>());
+    central_config.admin_token = Some(admin_token.clone());
     // A pending envelope from a standalone hub keeps the id an older client may have seen.
     drop(yo_hub::db::Db::open(&central_config.db_path).unwrap());
     Connection::open(&central_config.db_path)
@@ -268,7 +271,15 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
             rusqlite::params![[2u8; 16], vec![7u8; 1024], now_ms()],
         )
         .unwrap();
-    let central = Hub::new(central_config.clone(), Arc::new(push::Recorder::default())).unwrap();
+    central_config.apns = Some(yo_hub::config::ApnsConfig {
+        key_pem: include_str!("../../../tests/fixtures/test-apns.p8").into(),
+        key_id: "test".into(),
+        team_id: "test".into(),
+        topic: "test".into(),
+    });
+    let recorder = Arc::new(push::Recorder::default());
+    *recorder.device_status.lock().unwrap() = Some(429);
+    let central = Hub::new(central_config.clone(), recorder).unwrap();
     let edge = Hub::new(config(1), Arc::new(push::Recorder::default())).unwrap();
     assert_eq!(count(Path::new(&central_config.db_path), "SELECT count(*) FROM message"), Some(0));
     // Serve the authority before its mirror starts, so the negative fallback is deterministic.
@@ -284,6 +295,9 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     let phone = Arc::new(Phone::register(&authority, "MAILBOXX", 1).await);
     let other = Phone::register(&authority, "ANOTHERBOX", 2).await;
     assert_eq!(count(Path::new(&configs[1].db), "SELECT count(*) FROM account"), Some(0));
+    let push =
+        api::Push { platform: api::PUSH_APNS, token: format!("{:064x}", rand::random::<u128>()).into_bytes().into() };
+    other.signed(&authority, reqwest::Method::PUT, api::PUSH, yoip::encode(&push)).await;
     other.deliver(&edge_url).await;
     let forwarded: api::Inbox = yoip::decode(&other.wrapped_get(&edge_url, api::INBOX, 200).await).unwrap();
     let devices = other.wrapped_get(&edge_url, api::DEVICES, 200).await;
@@ -343,13 +357,80 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     central.flush_events(now_ms()).unwrap();
     central.flush_events(now_ms()).unwrap();
     assert_eq!(count(&cluster.root.join("hub0.db"), "SELECT sum(value) FROM stat WHERE metric='deliveries'"), Some(2));
+    let stats: serde_json::Value = reqwest::Client::new()
+        .get(format!("{url}/v1/admin/stats"))
+        .header("yo-admin-token", admin_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let total = |hub: &str, kind: &str| {
+        let bins = stats["hubs"][hub][kind].as_array().unwrap();
+        assert_eq!(bins.len(), 144);
+        bins.iter().map(|v| v.as_u64().unwrap()).sum::<u64>()
+    };
+    assert_eq!(total("hub0", "push-fail-apns"), 1);
+    assert_eq!(total("hub0", "push-fail-apns-throttled"), 1);
+    assert_eq!(total("hub0", "accepted"), 1);
+    assert_eq!(total("hub1", "accepted"), 1);
+    assert_eq!(total("hub0", "delivered"), 2);
+    assert_eq!(total("hub1", "delivered"), 1);
+    assert_eq!(total("hub0", "sync-in"), 1);
+    assert_eq!(
+        stats["hubs"]["hub0"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.starts_with("sync-lt") || k.as_str() == "sync-ge5000")
+            .flat_map(|(_, v)| v.as_array().unwrap())
+            .map(|v| v.as_u64().unwrap())
+            .sum::<u64>(),
+        1
+    );
+    assert!(stats["hubs"]["hub1"].get("yo-in").is_none());
     phone.deliver(&edge_url).await;
     let rollback_id = phone.inbox(&edge_url, 0).await.items[0].id;
     until(|| count(Path::new(&configs[0].db), "SELECT id FROM message") == Some(rollback_id as i64)).await;
+    let result: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/v1/transactions", configs[0].api))
+        .json(&["INSERT INTO message(id,hub) VALUES (10,'old'),(11,'old')"])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["results"][0]["rows_affected"], 2);
+    central.prune(now_ms()).unwrap();
+    central.flush_events(now_ms()).unwrap();
+    assert_eq!(
+        count(Path::new(&configs[0].db), "SELECT sum(n) FROM hub_stat_minute WHERE kind='mesh-expired'"),
+        Some(2)
+    );
     central_stop.send(()).unwrap();
     edge_stop.send(()).unwrap();
     central_task.await.unwrap().unwrap();
     edge_task.await.unwrap().unwrap();
+    let now = now_ms();
+    let accepted = |hub: &str| {
+        count(
+            Path::new(&configs[1].db),
+            &format!("SELECT sum(n) FROM hub_stat_minute WHERE hub='{hub}' AND kind='accepted'"),
+        )
+    };
+    edge.flush_events(now).unwrap();
+    assert_eq!(accepted("hub1"), Some(2));
+    edge.flush_events(now + 47 * 3_600_000).unwrap();
+    assert_eq!(accepted("hub1"), Some(2));
+    edge.flush_events(now + 48 * 3_600_000).unwrap();
+    assert_eq!(accepted("hub1"), None);
+    until(|| accepted("hub0") == Some(1)).await;
     for _ in 0..2 {
         yo_hub::db::Db::corrosion_back(&central_config).unwrap();
     }
@@ -362,6 +443,7 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
 // One real mesh listener forwards to B. A uses the outbound-only client.
 async fn peer_mesh(
     root: &Path,
+    name: &str,
     forward: SocketAddr,
     stalled: SocketAddr,
 ) -> (PathBuf, tokio::task::JoinHandle<yo_mesh::Result<()>>) {
@@ -374,7 +456,7 @@ async fn peer_mesh(
     fs::write(dir.join("ca.crt"), ca.self_signed(&key).unwrap().pem()).unwrap();
     let issuer = Issuer::new(ca, key);
     let node = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::new(vec!["peer".into()]).unwrap();
+    let mut params = CertificateParams::new(vec![name.into()]).unwrap();
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
     fs::write(dir.join("node.key"), node.serialize_pem()).unwrap();
     fs::write(dir.join("node.crt"), params.signed_by(&node, &issuer).unwrap().pem()).unwrap();
@@ -382,9 +464,10 @@ async fn peer_mesh(
     let listen = socket.local_addr().unwrap();
     drop(socket);
     let path = root.join("mesh.toml");
-    fs::write(&path, format!("name='reader'\ncerts={dir:?}\n[peers]\npeer='{listen}'\nstalled='{stalled}'\n")).unwrap();
+    fs::write(&path, format!("name='reader'\ncerts={dir:?}\n[peers]\n{name}='{listen}'\nstalled='{stalled}'\n"))
+        .unwrap();
     let task = tokio::spawn(yo_mesh::run(yo_mesh::Config {
-        name: "peer".into(),
+        name: name.into(),
         listen,
         peers: Default::default(),
         certs: Some(dir),
@@ -404,7 +487,7 @@ async fn peer_only_ack_survives_replication() {
     // This peer accepts TCP but never completes TLS. Every fan-out must still return B's answer.
     let stalled = TcpListener::bind("127.0.0.1:0").unwrap();
     let (mesh_path, mesh) =
-        peer_mesh(&cluster.root, socket_b.local_addr().unwrap(), stalled.local_addr().unwrap()).await;
+        peer_mesh(&cluster.root, "hub1", socket_b.local_addr().unwrap(), stalled.local_addr().unwrap()).await;
     let token = yoip::b64(&rand::random::<[u8; 32]>());
     agents[0].mesh_peers = Some(mesh_path);
     for agent in &mut agents {
@@ -498,8 +581,37 @@ async fn peer_only_ack_survives_replication() {
     assert_eq!(phone.inbox(&origin_a, 0).await.items, local);
     phone.signed(&origin_a, reqwest::Method::POST, api::INBOX_ACK, yoip::encode(&api::Ack { ids: vec![id] })).await;
     hub_a.flush_events(now_ms()).unwrap();
+    for (kind, n) in [("accepted", 1), ("delivered", 1), ("peer-hit", 2), ("peer-items", 2), ("peer-miss", 3)] {
+        assert_eq!(
+            count(
+                Path::new(&agents[0].db),
+                &format!("SELECT sum(n) FROM hub_stat_minute WHERE hub='hub0' AND kind='{kind}'")
+            ),
+            Some(n),
+            "{kind}"
+        );
+    }
     assert_eq!(count(&db_a, "SELECT sum(value) FROM stat WHERE metric='yo-out'"), Some(1));
     assert_eq!(count(&db_a, "SELECT coalesce(sum(value),0) FROM stat WHERE metric LIKE 'latency-%'"), Some(0));
+    // Start the checker with both events past its grace period while gossip is still cut.
+    hub_a.shift_clock(35_000);
+    let (socket, _) = listener().await;
+    let (stop, done) = tokio::sync::oneshot::channel();
+    let checker = tokio::spawn(hub_a.clone().serve(socket, async {
+        let _ = done.await;
+    }));
+    until(|| {
+        hub_a.flush_events(now_ms()).unwrap();
+        ["mesh-stuck", "mesh-ack-lost", "mesh-check-skip"].into_iter().all(|kind| {
+            count(
+                Path::new(&agents[0].db),
+                &format!("SELECT sum(n) FROM hub_stat_minute WHERE hub='hub0' AND kind='{kind}'"),
+            ) == Some(1)
+        })
+    })
+    .await;
+    assert_eq!(count(Path::new(&agents[0].db), "SELECT sum(n) FROM hub_stat_minute WHERE kind='mesh-dup'"), Some(2));
+    hub_a.shift_clock(0);
     // An independent delivery in each direction witnesses replication after reconnecting.
     phone.deliver(&origin_b).await;
     let witness = phone.inbox(&origin_b, 0).await.items.into_iter().find(|item| item.id != id).unwrap();
@@ -519,8 +631,137 @@ async fn peer_only_ack_survives_replication() {
     until(|| agents.iter().all(|a| count(Path::new(&a.db), &converged) == Some(1))).await;
     assert_eq!(phone.inbox(&origin_a, 0).await.items, survivors);
     assert_eq!(phone.inbox(&origin_b, 0).await.items, survivors);
+    let answer: serde_json::Value = reqwest::Client::new()
+        .post(format!("{origin_b}/v1/peer/check"))
+        .header("yo-peer-token", &token)
+        .json(&[id, survivors[0].id, 7])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answer["deleted"], serde_json::json!([id]));
+    assert_eq!(answer["alive"], serde_json::json!([survivors[0].id]));
+    stop.send(()).unwrap();
+    checker.await.unwrap().unwrap();
     for task in [server_a, server_b] {
         task.abort();
     }
     mesh.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edge_off_forwards_wakes_polls_and_drains_deleted_mail() {
+    let Ok(bin) = std::env::var("YO_CORROSION_BIN") else { return };
+    let (mut cluster, mut configs) = Cluster::start(&bin, true).await;
+    let (socket, central_url) = listener().await;
+    let (peer_socket, _) = listener().await;
+    let stalled = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (mesh_path, mesh) =
+        peer_mesh(&cluster.root, "yo-falkenstein", peer_socket.local_addr().unwrap(), stalled.local_addr().unwrap())
+            .await;
+    let token = yoip::b64(&rand::random::<[u8; 32]>());
+    configs[0].hub = "falkenstein".into();
+    configs[0].peer_token = Some(token.clone());
+    let mut config = Config::for_tests();
+    config.corrosion = Some(configs[0].clone());
+    config.db_path = cluster.root.join("central.db").to_str().unwrap().into();
+    let central = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
+    let (stop, done) = tokio::sync::oneshot::channel();
+    let central_task = tokio::spawn(central.clone().serve(socket, async {
+        let _ = done.await;
+    }));
+    let (relay, relay_url) = listener().await;
+    let relay_task = tokio::spawn(async move {
+        axum::serve(relay, axum::Router::new().fallback(|| async { "relay" })).await.unwrap();
+    });
+    // A separate process gives this edge a private off file and captures the actual operator-visible drain log.
+    let root = &cluster.root;
+    let off = root.join("off");
+    let log = root.join("edge.log");
+    let (socket, edge_url) = listener().await;
+    let addr = socket.local_addr().unwrap();
+    drop(socket);
+    for (name, bytes) in
+        [("key", config.hub_key.as_slice()), ("cert", &config.server_certificate), ("zk", &config.zk_params)]
+    {
+        fs::write(root.join(name), bytes).unwrap();
+    }
+    cluster.agents.push(
+        Command::new(env!("CARGO_BIN_EXE_yo-hub"))
+            .env_clear()
+            .env("YO_DB", root.join("edge.db"))
+            .env("YO_LISTEN", addr.to_string())
+            .env("YO_HUB_NAME", "edge")
+            .env("YO_HUB_INDEX", "1")
+            .env("YO_EDGE_UPSTREAM", &relay_url)
+            .env("YO_CORROSION_API", &configs[1].api)
+            .env("YO_CORROSION_DB", &configs[1].db)
+            .env("YO_MESH_PEERS", mesh_path)
+            .env("YO_EDGE_OFF_FILE", &off)
+            .env("YO_PEER_TOKEN", &token)
+            .env("YO_HUB_KEY_FILE", root.join("key"))
+            .env("YO_SERVER_CERT_FILE", root.join("cert"))
+            .env("YO_ZK_PARAMS_FILE", root.join("zk"))
+            .stderr(fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    until(|| std::net::TcpStream::connect(addr).is_ok()).await;
+    let phone = Arc::new(Phone::register(&central_url, "SWITCHBOX", 1).await);
+    until(|| count(Path::new(&configs[1].db), "SELECT count(*) FROM account_device") == Some(1)).await;
+    phone.deliver(&edge_url).await;
+    let items = phone.inbox(&edge_url, 0).await.items;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id >> 18 & 15, 1);
+    phone
+        .signed(&edge_url, reqwest::Method::POST, api::INBOX_ACK, yoip::encode(&api::Ack { ids: vec![items[0].id] }))
+        .await;
+
+    let polling = phone.clone();
+    let url = edge_url.clone();
+    let poll = tokio::spawn(async move { polling.inbox(&url, 60).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fs::write(&off, []).unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(4), poll).await.unwrap().unwrap().items.is_empty());
+    // The central mesh endpoint is still unreachable, though gossip has replicated the tombstone.
+    until(|| fs::read_to_string(&log).unwrap().contains("EDGE-OFF waiting n=1")).await;
+    assert!(!fs::read_to_string(&log).unwrap().contains("EDGE-OFF drained"));
+    let peer_router = central.router().into_make_service_with_connect_info::<SocketAddr>();
+    let peer_task = tokio::spawn(async move { axum::serve(peer_socket, peer_router).await.unwrap() });
+    until(|| fs::read_to_string(&log).unwrap().contains("EDGE-OFF drained n=1")).await;
+    let root_response = || async { reqwest::get(format!("{edge_url}/")).await.unwrap().text().await.unwrap() };
+    assert_eq!(root_response().await, "relay");
+    let command = |action: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_yo-hub"))
+            .env_clear()
+            .env("YO_CORROSION_API", &configs[0].api)
+            .env("YO_HUB_NAME", "falkenstein")
+            .env("YO_HUB_INDEX", "0")
+            .env("YO_CORROSION_DB", &configs[0].db)
+            .args(["edges", action])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(command("status"), "edges on\n");
+    assert_eq!(command("off"), "edges off\n");
+    assert_eq!(command("status"), "edges off\n");
+    until(|| count(Path::new(&configs[1].db), "SELECT value='off' FROM hub_setting WHERE key='edges'") == Some(1))
+        .await;
+    fs::remove_file(off).unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(root_response().await, "relay");
+    assert_eq!(command("on"), "edges on\n");
+    until(|| fs::read_to_string(&log).unwrap().contains("EDGE-ON")).await;
+    assert_ne!(root_response().await, "relay");
+    mesh.abort();
+    relay_task.abort();
+    peer_task.abort();
+    stop.send(()).unwrap();
+    central_task.await.unwrap().unwrap();
 }

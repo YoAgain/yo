@@ -18,6 +18,10 @@ pub mod error;
 pub mod groups;
 mod help;
 pub mod limiter;
+// TRANSITION(#15): remove with the delivery checker.
+mod lifecycle;
+// TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+pub mod killswitch;
 mod link;
 mod mail;
 pub mod ohttp;
@@ -424,10 +428,12 @@ impl Hub {
                 put(transfer.clone()).get(transfer).layer(DefaultBodyLimit::disable()),
             );
         if self.config.corrosion.is_some() {
+            // TRANSITION(#15): remove with the delivery checker.
+            router = router.route("/v1/peer/check", post(lifecycle::check).with_state(self.clone()));
             router = router.route("/v1/peer/inbox/{device}", get(mail::peer_inbox).with_state(self.clone()));
         }
-        if let Some(edge) = &self.edge {
-            Router::new().fallback_service(router).layer(from_fn_with_state(edge.clone(), edge::route))
+        if self.edge.is_some() {
+            Router::new().fallback_service(router).layer(from_fn_with_state(self.clone(), edge::route))
         } else {
             router
         }
@@ -442,6 +448,11 @@ impl Hub {
         let pruner = tokio::spawn(self.clone().every_minute());
         let updates =
             self.config.corrosion.as_ref().map(|cfg| tokio::spawn(corrosion::watch(self.clone(), cfg.api.clone())));
+        // TRANSITION(#15): remove with the delivery checker.
+        let checks = self.config.corrosion.as_ref().map(|_| tokio::spawn(lifecycle::run(self.clone())));
+        // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+        let switch = self.edge.as_ref().map(|_| tokio::spawn(killswitch::run(self.clone())));
+        // TRANSITION(#15): remove once account reads are authoritative on every hub.
         let mirror = self.config.corrosion.as_ref().filter(|c| c.upstream.is_none()).map(|_| {
             let db = self.db.clone();
             tokio::spawn(async move {
@@ -480,7 +491,7 @@ impl Hub {
                 Ok(())
             }
         };
-        for task in [updates, mirror].into_iter().flatten() {
+        for task in [updates, mirror, checks, switch].into_iter().flatten() {
             task.abort();
         }
         pruner.abort();
@@ -589,7 +600,7 @@ impl Hub {
             .filter(|(_, n)| *n > 0)
             .collect();
         if self.edge.is_some() {
-            return self.db.edge_counts(now, &counts);
+            return self.db.flush_hub_counts(now, &counts);
         }
         // Deliveries per hour count every Yo, a bot's too.
         let delivered: u64 = counts
@@ -602,6 +613,7 @@ impl Hub {
         }
         self.db.count_events(now, &counts)?;
         if let Some(agent) = &self.db.agent {
+            self.db.flush_hub_counts(now, &[])?;
             self.db.fold(&agent.config.hub, now)?;
         }
         Ok(())

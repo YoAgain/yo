@@ -30,6 +30,7 @@ pub(crate) fn local(method: &Method, path: &str) -> bool {
             && path.strip_prefix("/v1/inbox/").is_some_and(|user| !user.is_empty() && !user.contains('/')))
 }
 
+// TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
 pub(crate) fn retry(status: StatusCode) -> bool {
     matches!(status.as_u16(), 401 | 403 | 404 | 409 | 410)
 }
@@ -72,6 +73,7 @@ impl Edge {
         })
     }
 
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
     async fn send(&self, mut request: Request) -> Response {
         let path = request.uri().path_and_query().cloned().unwrap_or_else(|| "/".parse().unwrap());
         let Ok(uri) = Uri::builder().scheme("http").authority(self.upstream.clone()).path_and_query(path).build()
@@ -99,7 +101,13 @@ impl Edge {
     }
 }
 
-pub(crate) async fn route(State(edge): State<Edge>, request: Request, next: Next) -> Response {
+// TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+pub(crate) async fn route(State(hub): State<std::sync::Arc<crate::Hub>>, request: Request, next: Next) -> Response {
+    let edge = hub.edge.as_ref().unwrap();
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+    if hub.db.edge_off() {
+        return edge.send(request).await;
+    }
     let path = request.uri().path();
     if path.starts_with("/v1/peer/") || (request.method() == Method::GET && path == "/") {
         return next.run(request).await;
