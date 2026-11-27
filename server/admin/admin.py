@@ -565,20 +565,38 @@ def mesh_slots(history):
     """Ten-minute slots, oldest first. Weight each minute's RTT by its answers."""
     step, minutes = 10, history["minutes"]
     links = {}
-    for name, link in history["links"].items():
+    pairs = {}
+    for name, direction in history["links"].items():
+        source, dest = name.split(">")
+        pair = tuple(sorted((source, dest)))
+        pairs.setdefault(pair, {})[source] = direction
+    for pair, directions in pairs.items():
         slots = []
+        first = None
         for start in range(0, minutes, step):
-            span = slice(start, start + step)
-            samples = zip(link["rtt"][span], link["ok"][span], link["fail"][span], strict=True)
-            elapsed = answers = failures = gaps = 0
-            for rtt, ok, fail in samples:
-                if rtt is not None:
-                    elapsed += rtt * ok
-                    answers += ok
-                failures += fail
-                gaps += ok + fail == 0
-            slots.append([round(elapsed / answers, 1) if answers else None, failures, gaps])
-        links[name] = slots
+            elapsed, answers = [0, 0], [0, 0]
+            failures = gaps = 0
+            for minute in range(start, min(start + step, minutes)):
+                pings = 0
+                for i, source in enumerate(pair):
+                    link = directions.get(source)
+                    if link is None:
+                        continue
+                    ok, fail = link["ok"][minute], link["fail"][minute]
+                    pings += ok + fail
+                    failures += fail
+                    if link["rtt"][minute] is not None:
+                        elapsed[i] += link["rtt"][minute] * ok
+                        answers[i] += ok
+                if first is None and pings:
+                    first = minute
+                if first is not None and not pings:
+                    gaps += 1
+            if first is not None:
+                avg = [round(t / n, 1) if n else None for t, n in zip(elapsed, answers)]
+                slots.append([*avg, failures, gaps])
+        if first is not None:
+            links[">".join(pair)] = {"first_min": history["end_min"] - minutes + 1 + first, "slots": slots}
     return {"end_min": history["end_min"], "minutes": minutes, "step": step, "links": links}
 
 

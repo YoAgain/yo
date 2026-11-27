@@ -507,7 +507,8 @@ class FakeServer:
                     rtt, ok, fail = [], [], []
                     base = {(0, 1): 106, (0, 2): 252, (1, 2): 155}[tuple(sorted((i, j)))]
                     for m in range(end - 1439, end + 1):
-                        gap = (m + i * 71) % 971 < 9
+                        age = end - m
+                        gap = age >= 180 or 64 <= age < 68
                         lost = 0 if gap else int((m + j * 17) % 173 < 3)
                         ok.append(0 if gap else 60 - lost)
                         fail.append(lost)
@@ -516,10 +517,10 @@ class FakeServer:
             self.mesh_past = admin.mesh_slots({"minutes": 1440, "end_min": end, "links": links})
             self.mesh_end = end
         views = {n: {} for n in nodes}
-        for link, slots in self.mesh_past["links"].items():
+        for link, series in self.mesh_past["links"].items():
             source, dest = link.split(">")
-            rtt = slots[-1][0]
-            views[source][dest] = {"online": rtt is not None, "rtt_ms": rtt, "last_ok_ms": now - 1000}
+            for a, b, rtt in ((source, dest, series["slots"][-1][0]), (dest, source, series["slots"][-1][1])):
+                views[a][b] = {"online": rtt is not None, "rtt_ms": rtt, "last_ok_ms": now - 1000}
         peers = {n: {**p, "view": views[n]} for n, p in views[nodes[0]].items()}
         return {"mesh": {"node": nodes[0], "version": "0.1.0", "at_ms": now, "peers": peers}, "mesh_history": self.mesh_past}
 

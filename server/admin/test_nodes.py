@@ -59,15 +59,18 @@ class MeshViewTests(unittest.TestCase):
           assert.deepEqual(r.values, [30, null, 0]);
           assert.equal(r.tip(0).head, "first");
           assert.deepEqual(r.tip(0).rows.slice(1).map(r => r.value), [10, "30", 2, 1, 3, 0, 4]);
-          assert.deepEqual(meshHistoryView(null), []);
-          const [l] = meshHistoryView({end_min: 30, minutes: 11, step: 10,
-            links: {"yo-falkenstein>yo-tokyo": [[250, 2, 1], [null, 0, 1]]}});
-          assert.equal(l.label, "FSN → TYO");
-          assert.deepEqual(l.rtt, [250, null]);
+          assert.equal(meshHistoryView(null).length, 3);
+          const [empty, l, east] = meshHistoryView({end_min: 30, minutes: 21, step: 10,
+            links: {"yo-falkenstein>yo-tokyo": {first_min: 22, slots: [[250, 255, 2, 1], [null, 240, 0, 0]]}}});
+          assert.equal(empty.rtt, undefined);
+          assert.equal(east.label, "OHIO–TYO");
+          assert.equal(l.label, "FSN–TYO");
+          assert.equal(l.offset, 1);
+          assert.deepEqual(l.rtt, [255, 240]);
           assert.deepEqual(l.fail, [2, 0]);
-          assert.deepEqual(l.gaps, [1, 1]);
+          assert.deepEqual(l.gaps, [1, 0]);
           assert.notEqual(l.tip(0).head, l.tip(1).head);
-          assert.deepEqual(l.tip(1).rows.slice(1).map(r => r.value), ["–", 0, 1]);
+          assert.deepEqual(l.tip(1).rows.slice(1).map(r => r.value), ["–", "240 ms", 0, 0]);
         """
         subprocess.run(["node", "-e", script], check=True)
 
@@ -99,13 +102,22 @@ class MeshStatsTests(unittest.TestCase):
         self.status.write_text(json.dumps(STATUS))
         self.assertEqual(self.admin.mesh(), STATUS)
 
+    def test_history_starts_at_first_ping_in_either_direction(self):
+        empty = {"rtt": [None] * 23, "ok": [0] * 23, "fail": [0] * 23}
+        forward = {**empty, "ok": [0] * 22 + [1], "rtt": [None] * 22 + [40]}
+        reverse = {**empty, "fail": [0] * 18 + [2] + [0] * 4}
+        result = self.admin.mesh_slots({"end_min": 122, "minutes": 23,
+            "links": {"b>a": reverse, "a>b": forward, "b>c": empty}})
+        self.assertEqual(result["links"], {"a>b": {"first_min": 118,
+            "slots": [[None, None, 2, 1], [40, None, 0, 2]]}})
+
     def test_history_weighted_rtt_failures_gaps_and_replacement(self):
         self.assertIsNone(self.admin.mesh_history())
         link = {"rtt": [20, 60] + [None] * 9, "ok": [3, 1] + [0] * 9, "fail": [1, 2, 5] + [0] * 8}
         data = {"end_min": 20, "minutes": 11, "links": {"a>b": link}}
         self.history.write_text(json.dumps(data))
         result = self.admin.mesh_history()
-        self.assertEqual(result, {**data, "step": 10, "links": {"a>b": [[30, 8, 7], [None, 0, 1]]}})
+        self.assertEqual(result, {**data, "step": 10, "links": {"a>b": {"first_min": 10, "slots": [[30, None, 8, 7], [None, None, 0, 1]]}}})
         self.assertIs(self.admin.mesh_history(), result)
         self.status.write_text(json.dumps({**data, "end_min": 21}))
         self.status.replace(self.history)

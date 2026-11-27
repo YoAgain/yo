@@ -1334,7 +1334,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 :is(#problem-dial, #c-svc) .dial-arc { stroke: var(--accent, #35313d); }
 #c-svc .dial-face { color: var(--accent, var(--text)); }
 .ctip .tr.ok .tv { color: var(--ok); } .ctip .tr.bad .tv { color: var(--bad); }
-@media (min-width: 1200px) { .overview-grid > #t-mesh { grid-column: 1 / span 2; } }
+
 @media (760px <= width < 1200px) { .overview-grid > #t-mesh { grid-row: 2; } }
 .mesh-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: var(--gap); }
 @media (width < 760px) { .mesh-body { grid-template-columns: minmax(0, 1fr); } }
@@ -1342,7 +1342,10 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .mesh-graphs h3 { margin: 8px 0 4px; color: var(--text); font-size: inherit; }
 .mesh-graphs h3:first-child { margin-top: 0; }
 .mesh-series { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; min-height: 18px; }
-.mesh-graphs .mesh-series .spark { grid-column: 2; height: 16px; width: 100%; }
+.mesh-graphs .mesh-series .spark { grid-column: 2; height: 16px; width: 100%; max-width: none; }
+.mesh-series small { display: block; }
+.mesh-trace circle { fill: #5dade2; }
+.mesh-trace path { fill: none; stroke: #5dade2; stroke-width: 2; vector-effect: non-scaling-stroke; }
 .mesh-graphs .gap-key { color: var(--warn); }
 .spark .gap-mark { fill: var(--warn); }
 #mesh-n { margin-left: auto; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -1381,7 +1384,12 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
   .topbar #range { margin-right: 6px; }
 }
 .ctip :is(.th.cap, .tsec), .tside .tside-k { font-size: 12px; }
-@media (min-width: 1200px) { .overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 1200px) {
+  .overview-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .overview-grid > :is(.chartw, #grp-vr, #grp-pr) { grid-column: span 2 !important; }
+  .overview-grid > #t-mesh { grid-column: span 4; }
+  .overview-grid > #uc-rows, .overview-grid > #delivery-rows { grid-column: span 3; }
+}
 
 @media (width < 760px) {
   body.dash { --gap: 12px; padding: 16px 16px 32px; }

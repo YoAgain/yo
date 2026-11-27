@@ -87,19 +87,27 @@ const userRttView = (buckets, names, region, formatShare) => {
   return { values, tip };
 };
 const meshHistoryView = history => {
-  if (!history) return [];
-  const start = history.end_min - history.minutes + 1;
+  const nodes = Object.keys(MESH_SHORT);
   const fmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  const names = Array.from({ length: Math.ceil(history.minutes / history.step) }, (_, i) => {
-    const min = start + i * history.step;
-    return fmt.formatRange(min * 60000, Math.min(min + history.step - 1, history.end_min) * 60000);
-  });
-  return Object.entries(history.links).sort(([a], [b]) => a.localeCompare(b)).map(([link, slots]) => {
-    const label = link.split(">").map(meshShort).join(" → ");
-    const tip = i => ({ head: names[i], rows: [{ section: label },
-      { label: "Average RTT", value: slots[i][0] == null ? "–" : slots[i][0] + " ms" },
-      { label: "Failed pings", value: slots[i][1] }, { label: "Gap minutes", value: slots[i][2] }] });
-    return { label, tip, rtt: slots.map(s => s[0]), fail: slots.map(s => s[1]), gaps: slots.map(s => s[2]) };
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return [[0, 1], [0, 2], [1, 2]].map(([a, b]) => {
+    const from = nodes[a], to = nodes[b], label = meshShort(from) + "–" + meshShort(to);
+    const series = history?.links[[from, to].join(">")];
+    if (!series?.slots?.length) return { label };
+    const { first_min: first, slots } = series;
+    const start = history.end_min - history.minutes + 1;
+    const offset = Math.floor((first - start) / history.step);
+    const tip = i => {
+      const [out, back, fail, gaps] = slots[i];
+      const min = start + (offset + i) * history.step;
+      return { head: fmt.formatRange(Math.max(first, min) * 60000, Math.min(min + history.step - 1, history.end_min) * 60000),
+        rows: [{ section: label }, ...[[from, to, out], [to, from, back]].map(([a, b, ms]) => ({
+          label: meshShort(a) + " → " + meshShort(b), value: ms == null ? "–" : ms + " ms" })),
+          { label: "Failed pings", value: fail }, { label: "Gap minutes", value: gaps }] };
+    };
+    return { label, tip, since: first > start && clock.format(first * 60000), offset,
+      rtt: slots.map(([a, b]) => a == null ? b : b == null ? a : Math.max(a, b)),
+      fail: slots.map(s => s[2]), gaps: slots.map(s => s[3]) };
   });
 };
 // </mesh-history-view>
@@ -2721,15 +2729,38 @@ if (document.body.classList.contains("login")) {
     if (meshHistoryEnd === end) return;
     const rtts = [], losses = [];
     for (const link of meshHistoryView(history)) {
-      rtts.push(meshSeries(link.label, sparkBars(link.rtt, "cool", link.tip)));
-      const loss = sparkBars(link.fail, "hot", link.tip);
+      if (!link.rtt) {
+        rtts.push(meshSeries(link.label));
+        losses.push(meshSeries(link.label));
+        continue;
+      }
+      const values = link.rtt.filter(v => v != null);
+      let line;
+      if (values.length) {
+        const lo = Math.min(...values), hi = Math.max(...values);
+        line = svg("svg", { class: "spark mesh-trace", viewBox: "0 0 140 28", preserveAspectRatio: "none" });
+        let path = "";
+        link.rtt.forEach((v, i) => {
+          if (v == null) return;
+          const x = 140 * (i + 0.5) / link.rtt.length, y = hi === lo ? 14 : 25 - 22 * (v - lo) / (hi - lo);
+          path += (link.rtt[i - 1] == null ? "M" : "L") + x + " " + y + " ";
+          line.append(svg("circle", { cx: x, cy: y, r: 1.5 }));
+        });
+        line.append(svg("path", { d: path }));
+        hoverTip(line, link.rtt.length, link.tip);
+      }
+      rtts.push(meshSeries(link.label, line));
+      const empty = Array(link.offset).fill(null);
+      const loss = sparkBars(empty.concat(link.fail), "hot", i => i >= link.offset && link.tip(i - link.offset));
       link.gaps.forEach((n, i) => {
         if (!n) return;
-        const bar = loss.children[i], group = svg("g");
+        const bar = loss.children[i + link.offset], group = svg("g");
         bar.replaceWith(group);
         group.append(bar, svg("rect", { class: "gap-mark", x: bar.getAttribute("x"), width: bar.getAttribute("width"), y: 0, height: 5 }));
       });
-      losses.push(meshSeries(link.label, loss));
+      const row = meshSeries(link.label, loss);
+      if (link.since) row.firstChild.append(el("small", "", "since " + link.since));
+      losses.push(row);
     }
     $("mesh-rtts").replaceChildren(...(rtts.length ? rtts : ["no data yet"]));
     $("mesh-loss").replaceChildren(...(losses.length ? losses : ["no data yet"]));
