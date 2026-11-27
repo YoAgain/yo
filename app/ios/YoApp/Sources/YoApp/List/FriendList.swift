@@ -437,7 +437,9 @@ struct FriendList: View {
     // Measured below the status bar (the top safe area) down to the window's bottom edge.
     // Before the first friend it ends above the controls, which would cover Group and Invite.
     let room = noFriendYet ? heightAboveControls - base : listViewport.height
-    let height = max(base, (room - (notificationsDenied ? base : 0)) / CGFloat(count))
+    // Bars keep their own height as on Android; with few friends the Amethyst below stays empty. Sharing the room
+    // out stretched YoGPT and "+" to half a screen each on a new account.
+    let height = base
     // A short list keeps its place as the camera replaces the notifications button.
     let cameraSpace = cameraOn && notificationsDenied ? min(base, max(0, room - CGFloat(count) * height)) : 0
     let fontScale = RowMetrics.fontScale(width: listViewport.width, height: height)
