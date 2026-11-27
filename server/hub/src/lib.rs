@@ -440,6 +440,7 @@ impl Hub {
         if self.config.corrosion.is_some() {
             // TRANSITION(#15): remove with the delivery checker.
             router = router.route("/v1/peer/check", post(lifecycle::check).with_state(self.clone()));
+            // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
             if self.edge.is_none() {
                 router = router.route(
                     "/v1/peer/upkeep",
@@ -462,6 +463,7 @@ impl Hub {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
         let publisher = self.db.agent.as_ref().map(|_| tokio::spawn(shared::run(self.clone())));
+        // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
         let upkeep = self.edge.as_ref().map(|_| tokio::spawn(upkeep::run(self.clone())));
         let pruner = tokio::spawn(self.clone().every_minute());
         let updates =

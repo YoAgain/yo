@@ -2739,6 +2739,7 @@ if (document.body.classList.contains("login")) {
       let seen = 0;
       const median = samples ? syncBuckets[buckets.findIndex(n => (seen += n) * 2 >= samples)][1] : "–";
       const push = (outcome, service) => total("push-" + outcome + "-" + service);
+      // TRANSITION(#15): the checks go with the hub's delivery checker.
       const reasons = ["unregistered", "auth", "throttled", "server", "network", "other"], checks = ["mesh-stuck", "mesh-ack-lost", "mesh-dup", "mesh-expired"];
       const details = { head: label + " · 24 h", rows: [
         { label: "Accepted Yos", value: num(total("accepted")) }, { label: "Acknowledged envelopes", value: num(total("delivered")) },
