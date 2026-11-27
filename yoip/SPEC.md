@@ -211,7 +211,7 @@ devices_hash = SHA-256("yo devices v1" || account_key || sorted device keys)
 ```
 - `sent_at` is in milliseconds and MUST increase strictly per sending device.
 - `Yo-Copies: 1`: `Copies`, one bucket-sized envelope per device, ≤ 256 KiB total; without it one envelope for all. Missing copies skipped.
-- The hub MUST validate device numbers, MUST store all supplied envelopes (subsets too) and MUST NOT reuse inbox ids.
+- The hub MUST validate device numbers, MUST store all supplied envelopes (subsets too) and MUST NOT reuse inbox ids. Inbox ids are opaque: clients MUST NOT assume they are dense or increase across fetches; a fetch returns every envelope not yet acked.
 - Receivers SHOULD drop duplicates: the last 2000 plaintexts per sender device and the last 2000 opened hashes.
 - Self-delivery MUST be identified and signed; the hub MUST reject sealed self-delivery. It excludes the sender and is never a request.
 
@@ -535,6 +535,7 @@ sequenceDiagram
 - `yo-urgent: true|false` defaults to true; the hub MUST reject other values with `400`. Senders SHOULD mark Yo, photo and video urgent. Apps SHOULD show only urgent deliveries.
 - The hub SHOULD pace pushes at 1/s for contacts and 1/10 s for requests, and 1/10 min above 50 unacked.
 - The hub SHOULD send urgent pushes as APNs mutable-content alerts at priority 10, others as background at priority 5; FCM data-only HIGH/NORMAL.
+- A hub may push before the envelope has reached the place the device fetches from (hubs that take deliveries in several places and sync them in the background). A fetch after a push that finds nothing SHOULD long-poll a few seconds (3 s) before giving up.
 ### 4.3 Storage
 **Blobs.** The 128-bit id inside the encrypted Yo grants access to the media ciphertext. The sender allots one fetch per recipient device.
 ```mermaid
