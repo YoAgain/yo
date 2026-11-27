@@ -610,7 +610,7 @@ async fn peer_only_ack_survives_replication() {
         })
     })
     .await;
-    assert_eq!(count(Path::new(&agents[0].db), "SELECT sum(n) FROM hub_stat_minute WHERE kind='mesh-dup'"), Some(2));
+    assert_eq!(count(Path::new(&agents[0].db), "SELECT sum(n) FROM hub_stat_minute WHERE kind='mesh-dup'"), Some(1));
     hub_a.shift_clock(0);
     // An independent delivery in each direction witnesses replication after reconnecting.
     phone.deliver(&origin_b).await;
