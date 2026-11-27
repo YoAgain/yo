@@ -72,6 +72,13 @@ const meshView = (m, now) => {
     if (d.state === "bad" && d.last !== undefined) rows.push(last, ...errors);
   }
   rows.push({ section: "Status" }, { label: "Written", value: written }, { label: "yo-mesh", value: version });
+  // Each line's hover: both directions, why one is down, and when the status was written.
+  for (const e of edges) {
+    const both = dirs.filter((d) => (d.from === e.a && d.to === e.b) || (d.from === e.b && d.to === e.a));
+    e.tip = { head: `${meshShort(e.a)} – ${meshShort(e.b)}`, rows: [...both.flatMap((d) => [{ label: d.label, value: d.value, cls: d.state === "unknown" ? "" : d.state },
+      ...(d.state === "bad" ? [{ label: "Last answer", value: ago(d.last) }] : []), ...(d.error ? [{ label: "Error", value: d.error }] : [])]),
+      { section: "Status" }, { label: "Written", value: written }, { label: "yo-mesh", value: version }] };
+  }
   return { nodes, edges, rows, dirs, up: nodes.filter((n) => n.state === "ok").length, total: nodes.length, ok: nodes.every((n) => n.state === "ok") && edges.every((e) => e.state === "ok") };
 };
 // </mesh-view>
@@ -109,6 +116,20 @@ const meshHistoryView = history => {
       rtt: slots.map(([a, b]) => a == null ? b : b == null ? a : Math.max(a, b)),
       fail: slots.map(s => s[2]), gaps: slots.map(s => s[3]) };
   });
+};
+// Per site: the hub's own counts (hub_stat_minute, 144 ten-minute slots over 24 h, oldest first) summed into 24 hourly
+// bars as on the other cards; only sites with data.
+const HUB_SITES = [["falkenstein", "FSN"], ["ohio", "OHIO"], ["tokyo", "TYO"]];
+const hubSitesView = (hubs, now) => {
+  const start = Math.floor(now / 60000) - 1439;
+  return HUB_SITES.map(([name, label]) => {
+    const series = hubs?.[name] || hubs?.["yo-" + name];
+    if (!series || !Object.keys(series).length) return null;
+    const add = (...keys) => Array.from({ length: 24 }, (_, h) => keys.reduce((n, k) => n + (series[k] || []).slice(6 * h, 6 * h + 6).reduce((a, b) => a + b, 0), 0));
+    const total = (k) => (series[k] || []).reduce((a, b) => a + b, 0);
+    return { name, label, series, total, start, accepted: add("accepted"), delivered: add("delivered"),
+      pushOk: add("push-ok-apns", "push-ok-fcm"), pushFail: add("push-fail-apns", "push-fail-fcm") };
+  }).filter(Boolean);
 };
 // </mesh-history-view>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
@@ -315,19 +336,20 @@ if (document.body.classList.contains("login")) {
   const MESH_AT = [[120, 23], [36, 118], [204, 118]];
   const renderMesh = () => {
     meshPending = false;
-    const face = $("mesh-svg"), count = $("mesh-n"), dirs = $("mesh-dirs"), v = meshNow;
+    const face = $("mesh-svg"), count = $("mesh-n"), v = meshNow;
     count.textContent = v ? `${v.up}/${v.total} online` : "–";
     count.className = v ? (v.up === v.total ? "ok" : "bad") : "";
     face.replaceChildren();
-    dirs.replaceChildren();
     if (!v) return;
     const at = Object.fromEntries(v.nodes.map((n, i) => [n.name, MESH_AT[i % 3]]));
     for (const e of v.edges) {
       const [x1, y1] = at[e.a], [x2, y2] = at[e.b];
-      face.append(svg("line", { x1, y1, x2, y2, class: `mesh-line ${e.state}` }));
+      const edge = svg("g", { class: "mesh-edge" });
+      edge.append(svg("line", { x1, y1, x2, y2, class: "mesh-hit" }), svg("line", { x1, y1, x2, y2, class: `mesh-line ${e.state}` }));
       const t = svg("text", { x: (x1 + x2) / 2 + (y1 === y2 ? 0 : (x1 < x2) === (y1 < y2) ? 22 : -22), y: (y1 + y2) / 2 + (y1 === y2 ? 14 : 0), class: "mesh-rtt" });
       t.textContent = e.state === "bad" ? "✕" : e.rtt == null ? "–" : `${e.rtt} ms`;
-      face.append(t);
+      edge.append(t);
+      face.append(hint(edge, e.tip));
     }
     for (const n of v.nodes) {
       const [x, y] = at[n.name];
@@ -336,15 +358,11 @@ if (document.body.classList.contains("login")) {
       t.textContent = n.label;
       face.append(t);
     }
-    for (const d of v.dirs) {
-      const row = el("div");
-      row.append(el("span", "", d.label), el("b", d.state, d.value));
-      dirs.append(hint(row, d.tip));
-    }
   };
   const drawMesh = (m) => {
     meshNow = meshView(m, Date.now());
-    if ($("mesh-svg").childElementCount && matchMedia("(any-hover: hover)").matches && $("t-mesh").matches(":hover")) { meshPending = true; return; }
+    const face = $("mesh-svg");
+    if (face.childElementCount && ((matchMedia("(any-hover: hover)").matches && $("t-mesh").matches(":hover")) || (pinned && face.contains(pinned)))) { meshPending = true; return; }
     renderMesh();
   };
   $("t-mesh").addEventListener("pointerleave", () => { if (meshPending) renderMesh(); });
@@ -2706,55 +2724,46 @@ if (document.body.classList.contains("login")) {
   const syncBuckets = [["sync-lt250", "<250 ms"], ["sync-lt500", "<500 ms"], ["sync-lt1000", "<1,000 ms"],
     ["sync-lt5000", "<5,000 ms"], ["sync-ge5000", "≥5,000 ms"]];
   let previousHubCounts;
+  const SLOT_TIME = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  // Per site: accepted Yos, delivered Yos and pushes (failed ones red on top) as the cards' rows; the hub's other
+  // counts (peer hits, replication, delivery checks, push failure reasons) in each row's hover. Sites without data
+  // stay out, the section with none.
   function drawHubCounts(hubs) {
     const key = JSON.stringify(hubs || {});
     if (previousHubCounts === key) return;
     previousHubCounts = key;
-    const area = $("mesh-hubs");
-    if (!Object.keys(hubs || {}).length) { area.textContent = "no data yet"; return; }
-    const table = el("table"), header = table.createTHead().insertRow(), body = table.createTBody();
-    for (const title of ["Hub", "Accepted", "Delivered", "Push ok / fail", "Peer hits", "Sync in", "Sync p50", "Errors"]) header.append(el("th", "", title));
-    for (const name of ["falkenstein", "tokyo", "ohio"]) {
-      const series = hubs[name] || hubs["yo-" + name], row = body.insertRow();
-      const label = meshShort("yo-" + name);
-      row.append(el("th", "", label));
-      if (!series) {
-        const cell = row.insertCell();
-        cell.colSpan = 7;
-        cell.textContent = "no data yet";
-        continue;
-      }
-      const total = k => (series[k] || []).reduce((a, b) => a + b, 0);
-      const buckets = syncBuckets.map(([k]) => total(k)), samples = buckets.reduce((a, b) => a + b, 0);
+    const area = $("mesh-hubs"), sites = hubSitesView(hubs, Date.now());
+    area.hidden = !sites.length;
+    area.replaceChildren(...sites.map(site => {
+      const { total, label } = site, buckets = syncBuckets.map(([k]) => total(k)), samples = buckets.reduce((a, b) => a + b, 0);
       let seen = 0;
       const median = samples ? syncBuckets[buckets.findIndex(n => (seen += n) * 2 >= samples)][1] : "–";
       const push = (outcome, service) => total("push-" + outcome + "-" + service);
-      const pushes = outcome => num(push(outcome, "apns") + push(outcome, "fcm"));
-      const accepted = row.insertCell();
-      if (series.accepted) accepted.append(sparkBars(series.accepted, "cool"));
-      accepted.append(num(total("accepted")));
-      row.insertCell().textContent = num(total("delivered"));
-      const pushCell = row.insertCell();
-      pushCell.textContent = pushes("ok") + " / " + pushes("fail");
-      const reasons = ["unregistered", "auth", "throttled", "server", "network", "other"];
-      hint(pushCell, {head: "Push failures · 24 h", rows: ["apns", "fcm"].flatMap(service => [
-        {section: service === "apns" ? "APNs" : "FCM"},
-        ...reasons.map(label => ({label, value: num(total("push-fail-" + service + "-" + label))})),
-      ])});
-      for (const value of [num(total("peer-hit")), num(total("sync-in")), median]) row.insertCell().textContent = value;
-      const errors = ["mesh-stuck", "mesh-ack-lost", "mesh-dup", "mesh-expired"];
-      const count = errors.reduce((n, k) => n + total(k), 0), errorCell = row.insertCell();
-      errorCell.textContent = num(count);
-      errorCell.classList.toggle("bad", count > 0);
-      hint(errorCell, {head: "Delivery checks · 24 h", rows: [...errors, "mesh-check-skip"].map(label => ({label, value: num(total(label))}))});
-      hint(row, {head: label + " · 24 h", rows: [
-        {label: "Accepted Yos", value: num(total("accepted"))}, {label: "Acknowledged envelopes", value: num(total("delivered"))},
-        ...["apns", "fcm"].map((s, i) => ({label: ["APNs", "FCM"][i] + " ok / fail", value: num(push("ok", s)) + " / " + num(push("fail", s))})),
-        {label: "Fetches with peer items", value: num(total("peer-hit"))}, {label: "Peer-only envelopes", value: num(total("peer-items"))},
-        {label: "Fetches with a peer failure", value: num(total("peer-miss"))}, {label: "Incoming replicated envelopes", value: num(total("sync-in"))},
-        {section: "Replication delay"}, ...["<250 ms", "250–499 ms", "500–999 ms", "1,000–4,999 ms", "≥5,000 ms"].map((label, i) => ({label, value: num(buckets[i])}))]});
-    }
-    area.replaceChildren(table);
+      const reasons = ["unregistered", "auth", "throttled", "server", "network", "other"], checks = ["mesh-stuck", "mesh-ack-lost", "mesh-dup", "mesh-expired"];
+      const details = { head: label + " · 24 h", rows: [
+        { label: "Accepted Yos", value: num(total("accepted")) }, { label: "Acknowledged envelopes", value: num(total("delivered")) },
+        ...["apns", "fcm"].map((s, i) => ({ label: ["APNs", "FCM"][i] + " ok / fail", value: num(push("ok", s)) + " / " + num(push("fail", s)) })),
+        { label: "Fetches with peer items", value: num(total("peer-hit")) }, { label: "Peer-only envelopes", value: num(total("peer-items")) },
+        { label: "Fetches with a peer failure", value: num(total("peer-miss")) }, { label: "Incoming replicated envelopes", value: num(total("sync-in")) },
+        { section: "Replication delay" }, { label: "Median", value: median },
+        ...["<250 ms", "250–499 ms", "500–999 ms", "1,000–4,999 ms", "≥5,000 ms"].map((label, i) => ({ label, value: num(buckets[i]) })),
+        { section: "Delivery checks" }, ...[...checks, "mesh-check-skip"].map(label => ({ label, value: num(total(label)), cls: checks.includes(label) && total(label) ? "bad" : "" })),
+        { section: "Push failures" }, ...["apns", "fcm"].flatMap(service => reasons.map(reason => [service, reason]))
+          .filter(([service, reason]) => total("push-fail-" + service + "-" + reason))
+          .map(([service, reason]) => ({ label: (service === "apns" ? "APNs " : "FCM ") + reason, value: num(total("push-fail-" + service + "-" + reason)) }))] };
+      const tip = i => ({ head: SLOT_TIME.formatRange((site.start + i * 60) * 60000, (site.start + i * 60 + 59) * 60000), rows: [{ section: label },
+        { ico: "send", label: "Accepted", value: num(site.accepted[i]) }, { ico: "check", label: "Delivered", value: num(site.delivered[i]) },
+        { label: "Pushes ok", value: num(site.pushOk[i]) }, { label: "Pushes failed", value: num(site.pushFail[i]), cls: site.pushFail[i] ? "bad" : "" }] });
+      const sum = values => values.reduce((a, b) => a + b, 0), fails = sum(site.pushFail);
+      const box = el("div", "mesh-site"), head = el("h3", "", label + " · 24 h");
+      box.append(hint(head, details), sparkRows([
+        { ico: "send", label: "Accepted", value: num(sum(site.accepted)), values: site.accepted, scls: "cool", tip, title: details },
+        { ico: "check", label: "Delivered", value: num(sum(site.delivered)), values: site.delivered, scls: "cool", tip, title: details },
+        { ico: "chat", label: "Pushes", value: num(sum(site.pushOk) + fails), cls: fails ? "warn" : "",
+          values: site.pushOk, top: site.pushFail, scls: "cool", tip, title: details },
+      ]));
+      return box;
+    }));
   }
   const meshSeries = (label, chart) => {
     const row = el("div", "mesh-series");
@@ -2772,28 +2781,31 @@ if (document.body.classList.contains("login")) {
     }
     const slots = range === 1 || weekly ? [] : rangeSlots(days);
     const names = weekly ? weekNames() : range === 1 ? hourNames() : slots.map(([name]) => name);
+    let any = false;
     $("mesh-users").replaceChildren(...Object.entries(RTT_REGIONS).map(([region, label]) => {
       const buckets = names.map((_, i) => RTT_BUCKETS.map((_, b) => {
         const key = `rtt-${region}-${b}`;
         return weekly ? weekly[key]?.[i] || 0 : range === 1 ? events[key]?.hours?.[i] || 0 : slotSum(slots[i], daily[key]);
       }));
       const { values, tip } = userRttView(buckets, names, label, pctText);
-      return meshSeries(label, values.some(v => v != null) && sparkBars(values, "", tip, null, null, 100));
+      const have = values.some(v => v != null);
+      any ||= have;
+      return meshSeries(label, have && sparkBars(values, "", tip, null, null, 100));
     }));
+    $("mesh-users-box").hidden = !any;
   };
   let meshHistoryEnd;
+  // Mesh RTT: per link a row with its last round trip and its line over 24 h; failed pings: per link a row with the
+  // count and its bars, gap minutes marked yellow on top. Links without data stay out, a section with none too.
   const drawMeshHistory = history => {
     const end = history?.end_min ?? null;
     if (meshHistoryEnd === end) return;
-    const rtts = [], losses = [];
+    const rtts = [], losses = [], sum = values => values.reduce((a, b) => a + (b || 0), 0);
     for (const link of meshHistoryView(history)) {
-      if (!link.rtt) {
-        rtts.push(meshSeries(link.label));
-        losses.push(meshSeries(link.label));
-        continue;
-      }
-      const values = link.rtt.filter(v => v != null);
-      let line;
+      if (!link.rtt) continue;
+      const values = link.rtt.filter(v => v != null), heads = link.rtt.map((_, i) => link.tip(i).head);
+      const lastAt = link.rtt.findLastIndex(v => v != null);
+      let line = null;
       if (values.length) {
         const lo = Math.min(...values), hi = Math.max(...values);
         line = svg("svg", { class: "spark mesh-trace", viewBox: "0 0 140 28", preserveAspectRatio: "none" });
@@ -2802,26 +2814,32 @@ if (document.body.classList.contains("login")) {
           if (v == null) return;
           const x = 140 * (i + 0.5) / link.rtt.length, y = hi === lo ? 14 : 25 - 22 * (v - lo) / (hi - lo);
           path += (link.rtt[i - 1] == null ? "M" : "L") + x + " " + y + " ";
-          line.append(svg("circle", { cx: x, cy: y, r: 1.5 }));
         });
         line.append(svg("path", { d: path }));
         hoverTip(line, link.rtt.length, link.tip);
       }
-      rtts.push(meshSeries(link.label, line));
-      const empty = Array(link.offset).fill(null);
-      const loss = sparkBars(empty.concat(link.fail), "hot", i => i >= link.offset && link.tip(i - link.offset));
+      const plot = historyPlot(Array(link.offset).fill(null).concat(link.rtt), Array(link.offset).fill("").concat(heads), "cool", true);
+      const now = lastAt >= 0 ? link.tip(lastAt).rows.slice(1, 3) : [];
+      rtts.push({ ico: "speed", label: link.label, value: lastAt >= 0 ? Math.round(link.rtt[lastAt]) + " ms" : "–", node: line || el("span"),
+        title: { head: "Mesh RTT · " + link.label, nodes: plot ? [plot] : [], rows: [{ section: "Latest" }, ...now,
+          { section: "24 h" }, { label: "Lowest", value: values.length ? Math.round(Math.min(...values)) + " ms" : "–" },
+          { label: "Highest", value: values.length ? Math.round(Math.max(...values)) + " ms" : "–" }] } });
+      const fails = sum(link.fail), gaps = sum(link.gaps);
+      const loss = sparkBars(Array(link.offset).fill(null).concat(link.fail), "hot", i => i >= link.offset && link.tip(i - link.offset));
       link.gaps.forEach((n, i) => {
         if (!n) return;
         const bar = loss.children[i + link.offset], group = svg("g");
         bar.replaceWith(group);
         group.append(bar, svg("rect", { class: "gap-mark", x: bar.getAttribute("x"), width: bar.getAttribute("width"), y: 0, height: 5 }));
       });
-      const row = meshSeries(link.label, loss);
-      if (link.since) row.firstChild.append(el("small", "", "since " + link.since));
-      losses.push(row);
+      losses.push({ ico: "warn", label: link.label, value: num(fails) + (gaps ? " / " + num(gaps) : ""), cls: fails || gaps ? "warn" : "", node: loss,
+        title: { head: "Failed pings · " + link.label, rows: [{ label: "Failed pings", value: num(fails) }, { label: "Gap minutes", value: num(gaps) },
+          ...(link.since ? [{ label: "Recorded since", value: link.since }] : [])] } });
     }
-    $("mesh-rtts").replaceChildren(...(rtts.length ? rtts : ["no data yet"]));
-    $("mesh-loss").replaceChildren(...(losses.length ? losses : ["no data yet"]));
+    $("mesh-rtts").replaceChildren(sparkRows(rtts));
+    $("mesh-loss").replaceChildren(sparkRows(losses));
+    $("mesh-rtt-box").hidden = !rtts.length;
+    $("mesh-loss-box").hidden = !losses.length;
     meshHistoryEnd = end;
   };
   // A sparkline of stacked bars: per slot the series (each 0 to 100) one on the other from the bottom.

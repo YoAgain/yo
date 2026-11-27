@@ -1339,21 +1339,14 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .mesh-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: var(--gap); }
 @media (width < 760px) { .mesh-body { grid-template-columns: minmax(0, 1fr); } }
 .mesh-graphs { font-size: var(--caption); color: var(--muted); }
-.mesh-graphs h3 { margin: 8px 0 4px; color: var(--text); font-size: inherit; }
-.mesh-graphs h3:first-child { margin-top: 0; }
+.mesh-graphs h3 { margin: 0 0 2px; color: var(--text); font-size: inherit; }
+.mesh-graphs > section + section { margin-top: 10px; }
 .mesh-series { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; min-height: 18px; }
 .mesh-graphs .mesh-series .spark { grid-column: 2; height: 16px; width: 100%; max-width: none; }
 .mesh-series small { display: block; }
-.mesh-trace circle { fill: #5dade2; }
-.mesh-trace path { fill: none; stroke: #5dade2; stroke-width: 2; vector-effect: non-scaling-stroke; }
-.mesh-counts { margin-top: var(--gap); }
-#mesh-hubs { overflow-x: auto; }
-#mesh-hubs table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-#mesh-hubs th, #mesh-hubs td { padding: 3px 5px; text-align: right; white-space: nowrap; }
-#mesh-hubs th:first-child { padding-left: 0; text-align: left; }
-#mesh-hubs tbody { color: var(--text); }
-#mesh-hubs td.bad { color: var(--bad); }
-#mesh-hubs .spark { width: 44px; height: 14px; margin-right: 6px; vertical-align: middle; }
+.mesh-trace path { fill: none; stroke: #5dade2; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.mesh-sites { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px var(--gap); margin-top: var(--gap); }
+.mesh-sites[hidden] { display: none; }
 .mesh-graphs .gap-key { color: var(--warn); }
 .spark .gap-mark { fill: var(--warn); }
 #mesh-n { margin-left: auto; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -1363,9 +1356,9 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .mesh-node { fill: var(--bg); stroke: #35313d; stroke-width: 3; } .mesh-node.ok { stroke: var(--ok); } .mesh-node.bad { stroke: var(--bad); }
 .mesh-label { fill: var(--text); font: 700 11px var(--font); text-anchor: middle; }
 .mesh-rtt { fill: var(--muted); font: 600 12px var(--font); text-anchor: middle; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--card); stroke-width: 4; }
-.mesh-dirs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; font-size: 13px; color: var(--muted); }
-.mesh-dirs > div { display: flex; justify-content: space-between; gap: 4px; }
-.mesh-dirs b { text-align: right; font-variant-numeric: tabular-nums; }
+.mesh-hit { stroke: transparent; stroke-width: 18; }
+#mesh-loss .spark rect { stroke: none; }
+.mesh-edge { cursor: default; }
 #net-n { display: grid; gap: 2px; font-size: 12px; line-height: 1; }
 #net-n small { margin: 0 2px 0 0; color: var(--muted); font-size: 10px; }
 .live-face { gap: 3px; }

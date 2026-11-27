@@ -45,11 +45,27 @@ class MeshViewTests(unittest.TestCase):
                          ["FSN → OHIO", "OHIO → FSN", "FSN → TYO", "TYO → FSN", "OHIO → TYO", "TYO → OHIO"])
         self.assertEqual([d["value"] for d in v["dirs"]], ["107 ms", "106 ms", "252 ms", "254 ms", "down", "down"])
         self.assertIn({"label": "Error", "value": "ping timed out"}, v["dirs"][4]["tip"]["rows"])
+        self.assertEqual(v["edges"][0]["tip"]["head"], "FSN – OHIO")
+        self.assertEqual([(r.get("label"), r.get("value")) for r in v["edges"][0]["tip"]["rows"][:2]],
+                         [("FSN → OHIO", "107 ms"), ("OHIO → FSN", "106 ms")])
+        self.assertIn({"label": "Error", "value": "ping timed out"}, v["edges"][2]["tip"]["rows"])
         rows = [(r.get("label"), r.get("value")) for r in v["rows"]]
         self.assertIn(("FSN → OHIO", "107 ms"), rows)
         self.assertIn(("OHIO → TYO", "down"), rows)
         self.assertIn(("Error", "ping timed out"), rows)
         self.assertFalse(v["ok"])
+
+    def test_sites_hourly_bars_only_with_data(self):
+        script = FN + HISTORY_FN + """
+          const assert = require('node:assert/strict');
+          const s = Array(144).fill(0); s[0] = 2; s[5] = 1; s[143] = 4;
+          const v = hubSitesView({ ohio: { accepted: s, "push-ok-apns": s, "push-fail-fcm": s }, tokyo: {} }, 0);
+          assert.deepEqual(v.map(x => x.label), ["OHIO"]);
+          assert.equal(v[0].accepted.length, 24);
+          assert.deepEqual([v[0].accepted[0], v[0].accepted[23], v[0].pushOk[0], v[0].pushFail[23]], [3, 4, 3, 4]);
+          assert.deepEqual(hubSitesView({}, 0), []);
+        """
+        subprocess.run(["node", "-e", script], check=True)
 
     def test_rtt_shares_and_mesh_slots(self):
         script = FN + HISTORY_FN + """
