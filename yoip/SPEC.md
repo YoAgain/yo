@@ -393,6 +393,7 @@ envelope = SealedSenderV1(UnidentifiedSenderMessageContent {
 | 🔐 Hub key (+ spare) | Curve25519 XEdDSA | yes, current and spare | signed answers (§4.1) |
 | 🔐 Trust root (+ spare) | Curve25519, kept offline | yes, current and spare | signs the server certificate |
 | 🎟️ Server signing key and its certificate | Curve25519, certificate signed by the trust root | no | signs 🎟️ sender certificates (§4.1) |
+| 🔐 Mesh CA (+ one certificate per server) | Ed25519 X.509, root kept offline | no | mutual TLS between the operator's servers |
 | 🔐 zkgroup `ServerSecretParams` | zkgroup | public params | group credentials and endorsements (§3.4) |
 | 🔑 APNs key, FCM service account | provider credentials | no | push (§4.2) |
 | 🔑 Play Integrity keys | Google-issued | no | attestation (§4.2) |
