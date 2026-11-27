@@ -11,7 +11,7 @@ use serde_json::json;
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::Write,
+    io::{BufWriter, Write},
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -36,6 +36,7 @@ pub struct Config {
     pub peers: BTreeMap<String, SocketAddr>,
     pub certs: Option<PathBuf>,
     pub status: Option<PathBuf>,
+    pub history: Option<PathBuf>,
 }
 
 pub fn load(path: impl AsRef<Path>) -> Result<Config> {
@@ -56,17 +57,145 @@ struct Peer {
 type Peers = Arc<Mutex<BTreeMap<String, Peer>>>;
 type Body = Full<Bytes>;
 
+const MINUTES: usize = 1440;
+const MINUTE: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Default)]
+struct Bucket {
+    minute: u64,
+    sum: f32,
+    ok: u16,
+    fail: u16,
+}
+
+struct History(Vec<Bucket>);
+
+impl Default for History {
+    fn default() -> Self {
+        Self(vec![Bucket::default(); MINUTES])
+    }
+}
+
+impl History {
+    fn record<E>(&mut self, minute: u64, result: std::result::Result<f64, E>) {
+        let slot = &mut self.0[(minute % MINUTES as u64) as usize];
+        if slot.minute != minute {
+            *slot = Bucket { minute, ..Bucket::default() };
+        }
+        match result {
+            Ok(ms) if slot.ok < u16::MAX => {
+                slot.ok += 1;
+                slot.sum += ms as f32;
+            }
+            Ok(_) => {}
+            Err(_) => slot.fail = slot.fail.saturating_add(1),
+        }
+    }
+
+    fn to_json(&self, end_min: u64) -> Series {
+        let mut series = Series {
+            rtt: vec![None; MINUTES].into_boxed_slice(),
+            ok: vec![0; MINUTES].into_boxed_slice(),
+            fail: vec![0; MINUTES].into_boxed_slice(),
+        };
+        for slot in &self.0 {
+            if slot.ok == 0 && slot.fail == 0 {
+                continue;
+            }
+            let Some(age) = end_min.checked_sub(slot.minute).filter(|&age| age < MINUTES as u64) else { continue };
+            let i = MINUTES - 1 - age as usize;
+            series.ok[i] = slot.ok;
+            series.fail[i] = slot.fail;
+            if slot.ok > 0 {
+                series.rtt[i] = Some((slot.sum / f32::from(slot.ok) * 10.0).round() / 10.0);
+            }
+        }
+        series
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Series {
+    rtt: Box<[Option<f32>]>,
+    ok: Box<[u16]>,
+    fail: Box<[u16]>,
+}
+
+impl Series {
+    fn valid(&self) -> bool {
+        [self.rtt.len(), self.ok.len(), self.fail.len()] == [MINUTES; 3]
+    }
+
+    fn realign(&mut self, from: u64, to: u64) {
+        fn shift<T: Copy + Default>(values: &mut [T], from: u64, to: u64) {
+            let n = values.len();
+            let by = from.abs_diff(to).min(n as u64) as usize;
+            if from < to {
+                values.copy_within(by.., 0);
+                values[n - by..].fill(T::default());
+            } else if from > to {
+                values.copy_within(..n - by, by);
+                values[..by].fill(T::default());
+            }
+        }
+        shift(&mut self.rtt, from, to);
+        shift(&mut self.ok, from, to);
+        shift(&mut self.fail, from, to);
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Snapshot {
+    node: String,
+    end_min: u64,
+    links: BTreeMap<String, Series>,
+}
+
+#[derive(Default)]
+struct Histories {
+    own: BTreeMap<String, History>,
+    fetched: BTreeMap<String, (Instant, Snapshot)>,
+}
+
+impl Histories {
+    fn snapshot(&self, node: &str, end_min: u64) -> Snapshot {
+        let links = self.own.iter().map(|(peer, h)| (format!("{node}>{peer}"), h.to_json(end_min))).collect();
+        Snapshot { node: node.into(), end_min, links }
+    }
+
+    fn merged(&mut self, node: &str, end_min: u64) -> Snapshot {
+        self.fetched.retain(|_, (at, _)| at.elapsed() < 10 * MINUTE);
+        let mut snapshot = self.snapshot(node, end_min);
+        for (_, peer) in self.fetched.values() {
+            for (key, values) in &peer.links {
+                let mut values = values.clone();
+                values.realign(peer.end_min, end_min);
+                snapshot.links.insert(key.clone(), values);
+            }
+        }
+        snapshot
+    }
+}
+
+type SharedHistory = Arc<Mutex<Histories>>;
+
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-fn ticks() -> tokio::time::Interval {
-    let mut timer = interval(SECOND);
+fn ticks(period: Duration) -> tokio::time::Interval {
+    let mut timer = interval(period);
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
     timer
 }
 
-async fn serve(name: Arc<str>, peers: Peers, stream: TcpStream, tls: TlsAcceptor) -> Result<()> {
+async fn serve(
+    name: Arc<str>,
+    peers: Peers,
+    history: SharedHistory,
+    stream: TcpStream,
+    tls: TlsAcceptor,
+) -> Result<()> {
     let stream = timeout(5 * SECOND, tls.accept(stream)).await??;
     if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
         return Err("h2 required".into());
@@ -81,6 +210,11 @@ async fn serve(name: Arc<str>, peers: Peers, stream: TcpStream, tls: TlsAcceptor
             }))).collect();
                     let ping = json!({"node": &*name, "version": VERSION, "time_ms": now_ms(), "peers": view});
                     Response::builder().header("content-type", "application/json").body(Body::from(ping.to_string()))
+                } else if req.method() == Method::GET && req.uri().path() == "/history" {
+                    let snapshot = history.lock().unwrap().snapshot(&name, now_ms() / 60_000);
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&snapshot).unwrap()))
                 } else {
                     Response::builder().status(404).body(Body::default())
                 };
@@ -92,7 +226,7 @@ async fn serve(name: Arc<str>, peers: Peers, stream: TcpStream, tls: TlsAcceptor
     Ok(())
 }
 
-async fn server(addr: SocketAddr, name: Arc<str>, peers: Peers, tls: TlsAcceptor) {
+async fn server(addr: SocketAddr, name: Arc<str>, peers: Peers, history: SharedHistory, tls: TlsAcceptor) {
     let listener = loop {
         match TcpListener::bind(addr).await {
             Ok(listener) => break listener,
@@ -106,9 +240,9 @@ async fn server(addr: SocketAddr, name: Arc<str>, peers: Peers, tls: TlsAcceptor
             Some(_) = connections.join_next() => {}
             accepted = listener.accept(), if connections.len() < 64 => match accepted {
                 Ok((stream, peer)) => {
-                    let (name, peers, tls) = (name.clone(), peers.clone(), tls.clone());
+                    let (name, peers, history, tls) = (name.clone(), peers.clone(), history.clone(), tls.clone());
                     connections.spawn(async move {
-                        if let Err(e) = serve(name, peers, stream, tls).await {
+                        if let Err(e) = serve(name, peers, history, stream, tls).await {
                             eprintln!("connection from {peer}: {e}");
                         }
                     });
@@ -161,19 +295,54 @@ async fn ping(
     Ok((rtt, ping.peers))
 }
 
-async fn pinger(name: String, addr: SocketAddr, tls: TlsConnector, peers: Peers) {
-    let mut timer = ticks();
+async fn fetch_history(mut sender: SendRequest<Body>, name: &str) -> Result<Snapshot> {
+    let req = Request::get(format!("https://{name}/history")).body(Body::default())?;
+    let response = sender.send_request(req).await?;
+    if response.status() != 200 {
+        return Err("unexpected history status".into());
+    }
+    let bytes = Limited::new(response.into_body(), 512 * 1024).collect().await?.to_bytes();
+    let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
+    if snapshot.node != name
+        || !snapshot.links.iter().all(|(key, series)| {
+            key.split_once('>').is_some_and(|(from, to)| {
+                from == name && from != to && rustls::pki_types::DnsName::try_from(to).is_ok()
+            }) && series.valid()
+        })
+    {
+        return Err("unexpected peer history".into());
+    }
+    Ok(snapshot)
+}
+
+async fn pinger(name: String, addr: SocketAddr, tls: TlsConnector, peers: Peers, history: SharedHistory) {
+    let mut timer = ticks(SECOND);
     let mut sender = None;
+    let mut next_fetch = Instant::now();
+    let mut fetch = JoinSet::new();
     loop {
         timer.tick().await;
+        let _ = fetch.try_join_next();
         let result = timeout(2 * SECOND, ping(&mut sender, &tls, &name, addr))
             .await
             .unwrap_or_else(|_| Err("ping timed out".into()));
+        let at = now_ms();
+        history.lock().unwrap().own.get_mut(&name).unwrap().record(at / 60_000, result.as_ref().map(|(ms, _)| *ms));
+        if result.is_ok() && Instant::now() >= next_fetch {
+            next_fetch = Instant::now() + MINUTE;
+            let sender = sender.as_ref().unwrap().clone();
+            let (name, history) = (name.clone(), history.clone());
+            fetch.spawn(async move {
+                if let Ok(Ok(snapshot)) = timeout(5 * SECOND, fetch_history(sender, &name)).await {
+                    history.lock().unwrap().fetched.insert(name, (Instant::now(), snapshot));
+                }
+            });
+        }
         let mut peers = peers.lock().unwrap();
         let peer = peers.get_mut(&name).unwrap();
         match result {
             Ok((rtt, view)) => {
-                *peer = Peer { online: true, rtt_ms: Some(rtt), last_ok_ms: Some(now_ms()), error: None, view }
+                *peer = Peer { online: true, rtt_ms: Some(rtt), last_ok_ms: Some(at), error: None, view }
             }
             Err(error) => {
                 sender = None;
@@ -189,10 +358,30 @@ async fn pinger(name: String, addr: SocketAddr, tls: TlsConnector, peers: Peers)
 
 fn write_status(path: &Path, name: &str, peers: &Peers) -> Result<()> {
     let status = json!({"node": name, "version": VERSION, "at_ms": now_ms(), "peers": *peers.lock().unwrap()});
+    write_json(path, &status)
+}
+
+fn write_history(path: &Path, node: &str, history: &SharedHistory) -> Result<()> {
+    #[derive(Serialize)]
+    struct File {
+        version: &'static str,
+        at_ms: u64,
+        minutes: usize,
+        #[serde(flatten)]
+        snapshot: Snapshot,
+    }
+    let at_ms = now_ms();
+    let snapshot = history.lock().unwrap().merged(node, at_ms / 60_000);
+    write_json(path, &File { version: VERSION, at_ms, minutes: MINUTES, snapshot })
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(&serde_json::to_vec(&status)?)?;
+    let file = fs::File::create(&tmp)?;
+    let mut writer = BufWriter::new(&file);
+    serde_json::to_writer(&mut writer, value)?;
+    writer.flush()?;
     file.set_permissions(fs::Permissions::from_mode(0o644))?;
     fs::rename(tmp, path)?;
     Ok(())
@@ -210,14 +399,29 @@ pub async fn run(config: Config) -> Result<()> {
         env::var_os("RUNTIME_DIRECTORY").map(PathBuf::from).unwrap_or_else(|| "/run/yo-mesh".into()).join("status.json")
     });
     let peers: Peers = Arc::new(Mutex::new(config.peers.keys().map(|n| (n.clone(), Peer::default())).collect()));
+    let history_path = config.history.unwrap_or_else(|| status.with_file_name("history.json"));
+    let history = Arc::new(Mutex::new(Histories {
+        own: config.peers.keys().map(|name| (name.clone(), History::default())).collect(),
+        ..Histories::default()
+    }));
     let mut tasks = JoinSet::new();
-    tasks.spawn(server(config.listen, Arc::from(config.name.as_str()), peers.clone(), acceptor));
+    tasks.spawn(server(config.listen, Arc::from(config.name.as_str()), peers.clone(), history.clone(), acceptor));
     for (name, addr) in config.peers {
         rustls::pki_types::DnsName::try_from(name.as_str())?;
-        tasks.spawn(pinger(name, addr, connector.clone(), peers.clone()));
+        tasks.spawn(pinger(name, addr, connector.clone(), peers.clone(), history.clone()));
     }
+    let node = config.name.clone();
     tasks.spawn(async move {
-        let mut timer = ticks();
+        let mut timer = ticks(MINUTE);
+        loop {
+            timer.tick().await;
+            if let Err(e) = write_history(&history_path, &node, &history) {
+                eprintln!("write {}: {e}", history_path.display());
+            }
+        }
+    });
+    tasks.spawn(async move {
+        let mut timer = ticks(SECOND);
         loop {
             timer.tick().await;
             if let Err(e) = write_status(&status, &config.name, &peers) {
@@ -227,4 +431,61 @@ pub async fn run(config: Config) -> Result<()> {
     });
     tasks.join_next().await.unwrap()?;
     Err("mesh task stopped".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minute_history() {
+        let mut h = History::default();
+        h.record(0, Ok::<_, ()>(10.0));
+        h.record(0, Ok::<_, ()>(12.3));
+        h.record(0, Err(()));
+        h.record(2, Err(()));
+        let s = h.to_json(2);
+        assert_eq!(&s.rtt[MINUTES - 3..], &[Some(11.2), None, None]);
+        assert_eq!(&s.ok[MINUTES - 3..], &[2, 0, 0]);
+        assert_eq!(&s.fail[MINUTES - 3..], &[1, 0, 1]);
+
+        h.record(MINUTES as u64, Ok::<_, ()>(4.0));
+        let s = h.to_json(MINUTES as u64);
+        assert_eq!(s.fail[1], 1);
+        assert_eq!(s.ok[MINUTES - 1], 1);
+        assert_eq!(s.fail[MINUTES - 1], 0);
+        assert_eq!(s.rtt[MINUTES - 1], Some(4.0));
+        assert!(h.to_json(3 * MINUTES as u64).rtt.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn merge_until_expired() {
+        let mut local = Histories::default();
+        local.own.insert("b".into(), History::default());
+        let mut remote = Histories::default();
+        remote.own.entry("a".into()).or_default().record(100, Ok::<_, ()>(12.0));
+        local.fetched.insert("b".into(), (Instant::now(), remote.snapshot("b", 100)));
+        let snapshot = local.merged("a", 101);
+        assert_eq!(snapshot.links.len(), 2);
+        assert_eq!(snapshot.links["b>a"].rtt[MINUTES - 2], Some(12.0));
+        local.fetched.get_mut("b").unwrap().0 = Instant::now() - 10 * MINUTE;
+        assert_eq!(local.merged("a", 110).links.len(), 1);
+        assert!(local.fetched.is_empty());
+    }
+
+    #[test]
+    fn align_peer_minutes() {
+        let end = MINUTES as u64;
+        let mut h = History::default();
+        h.record(end - 1, Ok::<_, ()>(7.0));
+        h.record(end, Err(()));
+        for to in [end - 1, end, end + 2, 0, u64::MAX] {
+            let mut s = h.to_json(end);
+            s.realign(end, to);
+            let expected = h.to_json(to);
+            assert_eq!(s.rtt, expected.rtt);
+            assert_eq!(s.ok, expected.ok);
+            assert_eq!(s.fail, expected.fail);
+        }
+    }
 }

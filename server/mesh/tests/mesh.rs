@@ -53,6 +53,7 @@ fn node(name: &str, addr: SocketAddr, peer: &str, other: SocketAddr, dir: &Path)
         peers: [(peer.into(), other)].into(),
         certs: Some(dir.into()),
         status: Some(dir.join("status.json")),
+        history: None,
     }
 }
 
@@ -117,6 +118,26 @@ async fn mutual_heartbeat() -> Result<()> {
     assert!(ping["time_ms"].is_u64());
     assert_eq!(ping["peers"]["yo-ohio"]["online"], true);
     assert_eq!(request(addr, "yo-tokyo", valid.clone(), "/other").await?.0, 404);
+
+    let path = tokyo.join("history.json");
+    let file: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o644);
+    assert_eq!(file["node"], "yo-tokyo");
+    assert_eq!(file["minutes"], 1440);
+    assert_eq!(file["end_min"], file["at_ms"].as_u64().unwrap() / 60_000);
+    assert_eq!(file["version"], env!("CARGO_PKG_VERSION"));
+    let (code, body) = request(addr, "yo-tokyo", valid.clone(), "/history").await?;
+    assert_eq!(code, 200);
+    let live: Value = serde_json::from_slice(&body)?;
+    assert_eq!(live["node"], "yo-tokyo");
+    assert_eq!(live["links"].as_object().unwrap().len(), 1);
+    for snapshot in [&file, &live] {
+        let link = &snapshot["links"]["yo-tokyo>yo-ohio"];
+        for field in ["rtt", "ok", "fail"] {
+            assert_eq!(link[field].as_array().unwrap().len(), 1440);
+        }
+    }
+    assert!(live["links"]["yo-tokyo>yo-ohio"]["ok"].as_array().unwrap().iter().any(|n| n.as_u64().unwrap() > 0));
 
     let mut roots = RootCertStore::empty();
     roots.add(root.der().clone())?;
