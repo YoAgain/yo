@@ -111,6 +111,8 @@ pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 /// The app making a request, `PLATFORM/BUILD` ("ios/202611140619"): kept per device, and a build older than the
 /// hub's minimum for its platform is answered `426` (spec 4.1). Not signed; any request may carry it.
 pub const HEADER_APP: &str = "yo-app";
+/// The latest round trip bucket, inside an anonymous OHTTP request (spec 4.1 Round trip).
+pub const HEADER_RTT: &str = "yo-rtt";
 
 /// The requests that name no account (sealed deliveries, blobs, help by install id, groups by their zkgroup proof): the
 /// only ones a client sends on its anonymous connections; every other request, signed or not (a registration, a

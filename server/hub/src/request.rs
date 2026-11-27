@@ -32,11 +32,13 @@ const BODY_DEADLINE: Duration = Duration::from_secs(20);
 // ---- middleware ----
 
 /// An app older than `YO_MIN_APP` for its platform gets `426` on every request (spec 4.1).
+/// Round trips by continent and bucket: counts only, nothing of who (spec 4.1 Round trip).
 /// Every answer counted, and its class (4xx, 429, 5xx): counts only, nothing of the request (1).
 /// A `429` is also logged, with what the operator needs to find the limit and nothing of who: the method, the route's
 /// first two parts (`/v1/inbox/*`: never a name or id) and the refusal's scope (`device`, `bytes 12`).
 pub(crate) async fn counted(State(hub): Hubs, request: Request, next: Next) -> Response {
     let (method, route) = (request.method().clone(), route(request.uri().path()));
+    hub.count_reported_rtt(request.headers());
     let response = next.run(request).await;
     hub.count(crate::Event::Http, 1);
     if let Some(class) = crate::Event::http(response.status().as_u16()) {
@@ -168,6 +170,16 @@ fn out_of_window(headers: &HeaderMap, now: u64) -> Refusal {
 }
 
 impl Hub {
+    pub(crate) fn count_reported_rtt(&self, headers: &HeaderMap) {
+        if self.config.trust_cloudflare {
+            if let (Some([digit @ b'0'..=b'4']), Some(ray)) =
+                (headers.get(api::HEADER_RTT).map(|v| v.as_bytes()), header(headers, "cf-ray"))
+            {
+                self.count_rtt(crate::colo::continent(ray), *digit - b'0');
+            }
+        }
+    }
+
     pub(crate) fn authenticate(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Res<Signed> {
         self.authenticate_hash(method, uri, headers, &sha256(body))
     }

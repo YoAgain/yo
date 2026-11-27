@@ -5,7 +5,8 @@
 //! A failing OHTTP path never falls back to direct requests, and a wrapped request is never sent twice by itself.
 
 use crate::net::{Response, Transport};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use yoip::net::{api, limits};
 
 /// The OHTTP key configs apps pin, per hub (`yo-hub ohttp public`): the one in use first, then the spare.
@@ -37,7 +38,38 @@ pub fn pinned(host: &str) -> Vec<Vec<u8>> {
         .collect()
 }
 
+/// A round trip's bucket (spec 4.1, round trip): 0 < 50 ms, 1 < 100, 2 < 200, 3 < 400, 4 beyond.
+pub(crate) fn rtt_bucket(ms: u128) -> u8 {
+    match ms {
+        0..50 => 0,
+        50..100 => 1,
+        100..200 => 2,
+        200..400 => 3,
+        _ => 4,
+    }
+}
+
+/// The last round trip's bucket, in memory only, and when the next report may go (every 10 minutes at most).
+#[derive(Default)]
+struct Rtt {
+    pending: Option<u8>,
+    next: Option<Instant>,
+}
+
+impl Rtt {
+    /// The bucket to report on this anonymous request, if one is due.
+    fn take(&mut self, now: Instant) -> Option<u8> {
+        if self.next.is_some_and(|next| now < next) {
+            return None;
+        }
+        let bucket = self.pending.take()?;
+        self.next = Some(now + Duration::from_secs(600));
+        Some(bucket)
+    }
+}
+
 pub struct Ohttp {
+    rtt: Mutex<Rtt>,
     signed: Arc<dyn Transport>,
     anonymous: Arc<dyn Transport>,
     /// Pinned key configs (`application/ohttp-keys` items), current first.
@@ -46,16 +78,7 @@ pub struct Ohttp {
 
 impl Ohttp {
     pub fn new(signed: Arc<dyn Transport>, anonymous: Arc<dyn Transport>, configs: Vec<Vec<u8>>) -> Ohttp {
-        Ohttp { signed, anonymous, configs }
-    }
-
-    /// Which connection a request takes: signed, or (naming nobody) anonymous (spec 1.1), as the direct transports.
-    fn line(&self, method: &str, path: &str, headers: &[(String, String)]) -> &dyn Transport {
-        let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(yoip::net::request::HEADER_DEVICE));
-        match !signed && api::anonymous(method, path) {
-            true => self.anonymous.as_ref(),
-            false => self.signed.as_ref(),
-        }
+        Ohttp { signed, anonymous, configs, rtt: Mutex::default() }
     }
 
     /// One request wrapped, sent and its answer unwrapped. A `422` (key id unknown: not processed) tries the spare.
@@ -70,7 +93,7 @@ impl Ohttp {
         if self.configs.is_empty() {
             return Err("no OHTTP key pinned for this hub".into());
         }
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let plain = encode_request(method, path, headers, body)?;
         let outer = [("content-type".to_owned(), api::OHTTP_REQUEST_TYPE.to_owned())];
         for config in &self.configs {
@@ -81,6 +104,10 @@ impl Ohttp {
             let answered = started.elapsed();
             match response.status {
                 200 => {
+                    let long_poll = path.split_once('?').is_some_and(|(_, query)| query.contains("wait="));
+                    if !long_poll && request.len() <= 16 * 1024 && response.body.len() <= 16 * 1024 {
+                        self.rtt.lock().unwrap().pending = Some(rtt_bucket((answered - wrapped).as_millis()));
+                    }
                     let plain = opener.decapsulate(&response.body).map_err(|_| "ohttp: the answer does not open")?;
                     if crate::timing::on() {
                         crate::timing::note(&format!(
@@ -153,13 +180,24 @@ impl Transport for Ohttp {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<(Response, Vec<(String, String)>), String> {
-        let line = self.line(method, path, headers);
+        let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(yoip::net::request::HEADER_DEVICE));
+        let anonymous = !signed && api::anonymous(method, path);
+        let line = if anonymous { self.anonymous.as_ref() } else { self.signed.as_ref() };
+        let mut headers = std::borrow::Cow::Borrowed(headers);
+        if headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(api::HEADER_RTT)) {
+            headers.to_mut().retain(|(name, _)| !name.eq_ignore_ascii_case(api::HEADER_RTT));
+        }
+        if anonymous {
+            if let Some(bucket) = self.rtt.lock().unwrap().take(Instant::now()) {
+                headers.to_mut().push((api::HEADER_RTT.to_owned(), bucket.to_string()));
+            }
+        }
         let blob = path.starts_with(&format!("{}/", api::BLOBS));
         if !(blob && matches!(method, "PUT" | "GET")) {
-            return self.wrapped(line, method, path, headers, body);
+            return self.wrapped(line, method, path, &headers, body);
         }
         // Media (spec 4.1): a ticket inside OHTTP for this blob and direction, then the transfer direct.
-        let mut asking = headers.to_vec();
+        let mut asking = headers.into_owned();
         asking.push((api::HEADER_TICKET.to_owned(), "1".to_owned()));
         if method == "PUT" {
             asking.push((api::HEADER_BLOB_LENGTH.to_owned(), body.len().to_string()));
@@ -176,6 +214,28 @@ impl Transport for Ohttp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn round_trip_buckets() {
+        for (ms, bucket) in [(0, 0), (49, 0), (50, 1), (99, 1), (100, 2), (199, 2), (200, 3), (399, 3), (400, 4)] {
+            assert_eq!(super::rtt_bucket(ms), bucket);
+        }
+    }
+
+    #[test]
+    fn round_trip_reports_take_the_latest_bucket_every_ten_minutes() {
+        use super::{Duration, Instant, Rtt};
+        let now = Instant::now();
+        let mut rtt = Rtt::default();
+        assert_eq!(rtt.take(now), None);
+        rtt.pending = Some(1);
+        assert_eq!(rtt.take(now), Some(1));
+        rtt.pending = Some(2);
+        assert_eq!(rtt.take(now + Duration::from_secs(599)), None);
+        rtt.pending = Some(3);
+        assert_eq!(rtt.take(now + Duration::from_secs(600)), Some(3));
+        assert_eq!(rtt.take(now + Duration::from_secs(1200)), None);
+    }
+
     #[test]
     fn the_pinned_configs_decode_with_the_suite() {
         for host in ["hub.justyo.app", "https://dev.justyo.app/"] {

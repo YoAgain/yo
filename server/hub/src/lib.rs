@@ -9,6 +9,7 @@ mod admin;
 mod attest;
 pub mod blobs;
 pub mod certificate;
+mod colo;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -55,6 +56,29 @@ use {
     request::{held, Signed},
     std::time::Duration,
 };
+
+const RTT_KINDS: [&str; 20] = [
+    "rtt-eu-0",
+    "rtt-eu-1",
+    "rtt-eu-2",
+    "rtt-eu-3",
+    "rtt-eu-4",
+    "rtt-am-0",
+    "rtt-am-1",
+    "rtt-am-2",
+    "rtt-am-3",
+    "rtt-am-4",
+    "rtt-as-0",
+    "rtt-as-1",
+    "rtt-as-2",
+    "rtt-as-3",
+    "rtt-as-4",
+    "rtt-other-0",
+    "rtt-other-1",
+    "rtt-other-2",
+    "rtt-other-3",
+    "rtt-other-4",
+];
 
 /// What the hub counts per minute, without any identifier (`events`, spec 1).
 #[derive(Clone, Copy)]
@@ -180,6 +204,7 @@ pub struct Hub {
     events: [AtomicU64; Event::KINDS.len()],
     /// The blobs each bot account (`Config::bots`, in its order) uploaded since the last flush: `bot-media:LABEL`.
     bot_media: Vec<AtomicU64>,
+    rtt: [AtomicU64; RTT_KINDS.len()],
     /// Each Yo (`yo-in`, `media-in`; bots left out) the moment it is counted, for the operator's live strip
     /// (`/v1/admin/live`): its kind only, nothing of who. Bounded: a stream that falls behind skips what it missed.
     live: tokio::sync::broadcast::Sender<Event>,
@@ -261,6 +286,7 @@ impl Hub {
             deliveries,
             queued_bytes: Arc::default(),
             events: Default::default(),
+            rtt: Default::default(),
             bot_media: config.bots.iter().map(|_| AtomicU64::new(0)).collect(),
             live: tokio::sync::broadcast::channel(LIVE_QUEUE).0,
             closing: tokio::sync::watch::channel(false).0,
@@ -493,6 +519,10 @@ impl Hub {
         self.config.bots.iter().position(|(_, id)| id == user)
     }
 
+    pub(crate) fn count_rtt(&self, continent: usize, bucket: u8) {
+        self.rtt[continent * 5 + usize::from(bucket)].fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The events counted since the last flush into the live strip's minute and the hourly summaries.
     pub fn flush_events(&self, now: u64) -> rusqlite::Result<()> {
         let bots: Vec<_> = self.config.bots.iter().map(|(label, _)| format!("bot-media:{label}")).collect();
@@ -501,6 +531,7 @@ impl Hub {
             .copied()
             .zip(&self.events)
             .chain(bots.iter().map(String::as_str).zip(&self.bot_media))
+            .chain(RTT_KINDS.into_iter().zip(&self.rtt))
             .map(|(kind, n)| (kind, n.swap(0, Ordering::Relaxed)))
             .filter(|(_, n)| *n > 0)
             .collect();
@@ -845,6 +876,44 @@ mod tests {
 
     fn kinds(rows: &[(&str, i64)]) -> Vec<(String, i64)> {
         rows.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    #[tokio::test]
+    async fn round_trips_count_only_with_a_trusted_ray_and_a_bucket() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        for trusted in [false, true] {
+            let config = Config { trust_cloudflare: trusted, ..Config::for_tests() };
+            let hub = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+            let router = hub.router();
+            for (bucket, ray) in [
+                ("2", Some("abc-NRT")),
+                ("2", None),
+                ("5", Some("abc-NRT")),
+                ("x", Some("abc-NRT")),
+                ("12", Some("abc-NRT")),
+            ] {
+                let mut request = Request::get("/").header(api::HEADER_RTT, bucket);
+                if let Some(ray) = ray {
+                    request = request.header("cf-ray", ray);
+                }
+                router.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            }
+            let rows: Vec<_> = counted(&hub).into_iter().filter(|(kind, _)| kind.starts_with("rtt-")).collect();
+            let expected = if trusted { kinds(&[("rtt-as-2", 1)]) } else { Vec::new() };
+            assert_eq!(rows, expected);
+            let hourly: Vec<(String, i64)> = hub
+                .db
+                .conn()
+                .prepare("SELECT metric, value FROM stat WHERE metric LIKE 'rtt-%'")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(hourly, expected);
+        }
     }
 
     #[test]

@@ -27,8 +27,8 @@ const ENC: std::ops::Range<usize> = 7..39;
 const MOST_SEEN: usize = 1 << 20;
 const MOST_TICKETS: usize = 100_000;
 /// Inner headers never taken from the client: the hub sets them, or they belong to the outer request.
-const DROPPED: [&str; 7] =
-    ["host", "content-length", "transfer-encoding", "connection", "cf-connecting-ip", "date", "te"];
+const DROPPED: [&str; 8] =
+    ["host", "content-length", "transfer-encoding", "connection", "cf-connecting-ip", "cf-ray", "date", "te"];
 
 /// A key's config (`application/ohttp-keys` item) from its key id and 32 bytes of key material.
 pub fn key_config(id: u8, ikm: &[u8; 32]) -> Result<Vec<u8>, String> {
@@ -188,7 +188,7 @@ pub(crate) async fn post(hub: Arc<Hub>, inner: Router, peer: SocketAddr, headers
     };
     let Ok((plain, wrap)) = server.decapsulate(&body) else { return outer(StatusCode::BAD_REQUEST) };
     let now = hub.clock_ms();
-    let answer = match unwrapped(gateway, inner, peer, &headers, &body, &plain, now).await {
+    let answer = match unwrapped(&hub, gateway, inner, peer, &headers, &body, &plain, now).await {
         Ok(answer) => answer,
         Err(status) => (status, Vec::new(), Vec::new()),
     };
@@ -235,6 +235,7 @@ fn encode_answer((status, headers, body): Answer) -> Option<Vec<u8>> {
 /// Parses, checks and serves an unwrapped request.
 #[allow(clippy::too_many_arguments)]
 async fn unwrapped(
+    hub: &Hub,
     gateway: &Gateway,
     inner: Router,
     peer: SocketAddr,
@@ -278,6 +279,10 @@ async fn unwrapped(
     if let Some(ip) = outer_headers.get("cf-connecting-ip") {
         headers.insert("cf-connecting-ip", ip.clone());
     }
+    // The proxy's data centre for Yo-Rtt (spec 4.1).
+    if let Some(ray) = outer_headers.get("cf-ray") {
+        headers.insert("cf-ray", ray.clone());
+    }
     // The app's `Yo-App` (spec 4.1): the apps' transports name it on the outer request; inside, unless the wrapped
     // request names its own, it is the same, so `426` and a device's app and version are as direct (#4's gate).
     if !headers.contains_key(api::HEADER_APP) {
@@ -300,6 +305,9 @@ async fn unwrapped(
         if !blob {
             return Err(StatusCode::BAD_REQUEST);
         }
+        hub.count_reported_rtt(&headers);
+        headers.remove(api::HEADER_RTT);
+        headers.remove("cf-ray");
         let ticket = Ticket { method, uri: path.to_owned(), headers, length, until: now + limits::TICKET_MS };
         let id = gateway.issue(ticket, now)?;
         return Ok((StatusCode::OK, vec![("cache-control".into(), b"no-store".to_vec())], id.into_bytes()));
@@ -397,13 +405,13 @@ mod tests {
     }
 
     async fn post(hub: &Arc<Hub>, body: Vec<u8>, ip: [u8; 4]) -> Response {
-        post_as(hub, body, ip, None).await
+        post_with_header(hub, body, ip, None).await
     }
 
-    async fn post_as(hub: &Arc<Hub>, body: Vec<u8>, ip: [u8; 4], app: Option<&str>) -> Response {
+    async fn post_with_header(hub: &Arc<Hub>, body: Vec<u8>, ip: [u8; 4], header: Option<(&str, &str)>) -> Response {
         let mut request = Request::post(api::OHTTP).header(CONTENT_TYPE, api::OHTTP_REQUEST_TYPE);
-        if let Some(app) = app {
-            request = request.header(api::HEADER_APP, app);
+        if let Some((name, value)) = header {
+            request = request.header(name, value);
         }
         let mut request = request.body(Body::from(body)).unwrap();
         request.extensions_mut().insert(ConnectInfo(SocketAddr::from((ip, 1))));
@@ -568,11 +576,47 @@ mod tests {
         let hub = hub(config);
         let now = std::time::SystemTime::now();
         let (wrapped, opener) = wrap("GET", "/v1/username/Somebody", &[], now);
-        let answer = post_as(&hub, wrapped, [192, 0, 2, 1], Some("ios/5 1.0.0")).await;
+        let answer = post_with_header(&hub, wrapped, [192, 0, 2, 1], Some((api::HEADER_APP, "ios/5 1.0.0"))).await;
         assert_eq!(open(answer, opener).await.0, 426, "too old by the outer Yo-App");
         let (wrapped, opener) = wrap("GET", "/v1/username/Somebody", &[(api::HEADER_APP, "ios/11")], now);
-        let answer = post_as(&hub, wrapped, [192, 0, 2, 1], Some("ios/5")).await;
+        let answer = post_with_header(&hub, wrapped, [192, 0, 2, 1], Some((api::HEADER_APP, "ios/5"))).await;
         assert_ne!(open(answer, opener).await.0, 426, "the inner one wins");
+    }
+
+    #[tokio::test]
+    async fn round_trips_use_only_the_outer_ray() {
+        let hub = hub(Config { trust_cloudflare: true, ..Config::for_tests() });
+        let now = std::time::SystemTime::now();
+        let ip = [192, 0, 2, 1];
+        for ray in [None, Some(("cf-ray", "abc-NRT"))] {
+            let headers = [(api::HEADER_RTT, "2"), ("cf-ray", "abc-FRA")];
+            let (wrapped, opener) = wrap("GET", "/v1/username/Somebody", &headers, now);
+            open(post_with_header(&hub, wrapped, ip, ray).await, opener).await;
+        }
+        let headers = [(api::HEADER_RTT, "1"), (api::HEADER_TICKET, "1")];
+        let (wrapped, opener) = wrap("GET", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA", &headers, now);
+        let (status, ticket) =
+            open(post_with_header(&hub, wrapped, ip, Some(("cf-ray", "abc-FRA"))).await, opener).await;
+        assert_eq!(status, 200);
+
+        let counts = || {
+            hub.flush_events(120_000).unwrap();
+            hub.db
+                .conn()
+                .prepare("SELECT kind, n FROM stat_minute WHERE kind LIKE 'rtt-%' ORDER BY kind")
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let expected = [("rtt-as-2".to_owned(), 1), ("rtt-eu-1".to_owned(), 1)];
+        assert_eq!(counts(), expected);
+        let path = api::ticket_path(std::str::from_utf8(&ticket).unwrap());
+        let mut request = Request::get(path).body(Body::empty()).unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::from((ip, 1))));
+        hub.router().oneshot(request).await.unwrap();
+        assert_eq!(counts(), expected);
     }
 
     #[test]
