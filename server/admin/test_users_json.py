@@ -44,6 +44,26 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(sent["hours"][-1], 800)
             self.assertEqual(sent["minutes"][-1], 3)
 
+    def test_round_trip_buckets_in_each_event_history(self):
+        hour = 2400
+        with contextlib.closing(sqlite3.connect(":memory:")) as db:
+            db.executescript("""
+                CREATE TABLE account(id, created_at);
+                CREATE TABLE stat(metric, key, hour INTEGER, value INTEGER);
+                CREATE TABLE stat_minute(kind, minute, n);
+            """)
+            kinds = [f"rtt-{region}-{b}" for region in ("eu", "am", "as", "other") for b in range(5)]
+            for kind in kinds:
+                db.executemany("INSERT INTO stat VALUES (?, '', ?, ?)", [(kind, hour, 5), (kind, hour - 24, 3)])
+            events = users.events(db, hour * 3600000)
+            week = users.week_series(db, hour, False)["events"]
+            for kind in kinds:
+                e = events[kind]
+                self.assertEqual((e["total"], e["today"], sum(e["hours"])), (8, 5, 5))
+                self.assertEqual(e["days"][-2:], [3, 5])
+                self.assertEqual(e["year"][-2:], [3, 5])
+                self.assertEqual((week[kind][-5], week[kind][-1]), (3, 5))
+
     def test_dev_collection_and_tag(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "users.json"

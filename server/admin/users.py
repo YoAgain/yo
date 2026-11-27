@@ -57,7 +57,7 @@ LIMIT ?
 REPORTS = """
 SELECT r.reporter, r.reported_id, (SELECT coalesce(spelling, value) FROM account_name WHERE user_id = r.reported_id AND kind = 2),
        r.reason, r.created_at
-FROM support_report r WHERE NOT EXISTS (SELECT 1 FROM account WHERE id = r.reported_id AND bot = 1)
+FROM support_report r {bot_filter}
 ORDER BY r.created_at DESC LIMIT ?
 """
 REASONS = {1: "spam", 2: "abuse", 3: "other"}
@@ -248,6 +248,7 @@ def push_backlog() -> int:
 EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
                "latency-1s", "latency-5s", "latency-60s", "latency-slow", "push-ok", "push-fail",
                "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced", "crash", "error")
+EVENT_KINDS += tuple(f"rtt-{c}-{b}" for c in ("eu", "am", "as", "other") for b in range(5))  # spec 4.1
 # The same event metrics in each history, without reading the other hourly summaries.
 EVENT_FILTER = "(metric IN (" + ",".join("?" for _ in EVENT_KINDS) + ") OR metric GLOB 'bot-*') AND key = ''"
 # A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
@@ -660,10 +661,12 @@ def hub(name: str, path: str) -> dict:
             by_user.setdefault(uid, []).append(d)
         for u in users:
             u["device_list"] = by_user.get(u["id"], [])
+        bot_filter = ("WHERE NOT EXISTS (SELECT 1 FROM account WHERE id = r.reported_id AND bot = 1)"
+                      if one("SELECT count(*) FROM pragma_table_info('account') WHERE name = 'bot'") else "")
         reports = part("reports", lambda: [
             {"id": a.hex()[:16] + b.hex()[:16], "reporter": a.hex(), "reported": b.hex(), "reported_name": text(bn),
              "reason": REASONS.get(reason, str(reason)), "at": at}
-            for a, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "support_report") else [])
+            for a, b, bn, reason, at in (db.execute(REPORTS.format(bot_filter=bot_filter), (LIMIT,)) if has_table(db, "support_report") else [])
         ], [])
         out = {
             "users": users,

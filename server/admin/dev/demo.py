@@ -273,6 +273,13 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         if h == hour0:
             n = n * (int(now % HOUR) // 60_000) // 60
         db.execute("INSERT INTO stat VALUES ('deliveries','',?,?)", (h, max(0, n)))
+    # App round trips by proxy region, counted hourly (spec 4.1).
+    for h in range(hour0 - 20 * 24, hour0 + 1):
+        for region, weights in (("eu", [4, 6, 3, 1, 1]), ("am", [1, 4, 6, 3, 1]),
+                                ("as", [1, 2, 3, 7, 2]), ("other", [1, 2, 5, 3, 2])):
+            reports = rng.choices(range(5), weights, k=rng.randint(2, 20 if live else 4))
+            db.executemany("INSERT INTO stat VALUES (?, '', ?, ?)",
+                           [(f"rtt-{region}-{b}", h, reports.count(b)) for b in set(reports)])
     # Photos and videos today, per uploader.
     media_hours = {}
     for h in range(midnight // HOUR, hour0 + 1):
@@ -477,6 +484,7 @@ class FakeServer:
             "hub_dev": unit(time.time() - 26 * 3600, 23 << 20),
             "tunnel": unit(self.boot, 38 << 20, 1),
             "failed_units": 0,
+            **self.mesh(),
             "yogpt": unit(time.time() - 26 * 3600, 112 << 20),
             # The last hour, a point a minute, as admin.remember keeps it.
             "history": self.history(),
@@ -484,6 +492,36 @@ class FakeServer:
             "history_day": self.history_day(),
             "history_days": [[int(time.time() // 86400) - 29 + i, 20 + (i * 7) % 25, 33 + (i * 3) % 9, 23.0 + i * 0.05, 90_000 + (i * 37_000) % 200_000, 40_000 + (i * 11_000) % 90_000] for i in range(30)],
         }
+
+    def mesh(self):
+        import admin
+        now = int(time.time() * 1000)
+        end = now // 60000
+        nodes = ("yo-falkenstein", "yo-ohio", "yo-tokyo")
+        if getattr(self, "mesh_end", None) != end:
+            links = {}
+            for i, source in enumerate(nodes):
+                for j, dest in enumerate(nodes):
+                    if i == j:
+                        continue
+                    rtt, ok, fail = [], [], []
+                    base = {(0, 1): 106, (0, 2): 252, (1, 2): 155}[tuple(sorted((i, j)))]
+                    for m in range(end - 1439, end + 1):
+                        gap = (m + i * 71) % 971 < 9
+                        lost = 0 if gap else int((m + j * 17) % 173 < 3)
+                        ok.append(0 if gap else 60 - lost)
+                        fail.append(lost)
+                        rtt.append(None if gap else round(base + 6 * math.sin(m / 24 + j), 1))
+                    links[f"{source}>{dest}"] = {"rtt": rtt, "ok": ok, "fail": fail}
+            self.mesh_past = admin.mesh_slots({"minutes": 1440, "end_min": end, "links": links})
+            self.mesh_end = end
+        views = {n: {} for n in nodes}
+        for link, slots in self.mesh_past["links"].items():
+            source, dest = link.split(">")
+            rtt = slots[-1][0]
+            views[source][dest] = {"online": rtt is not None, "rtt_ms": rtt, "last_ok_ms": now - 1000}
+        peers = {n: {**p, "view": views[n]} for n, p in views[nodes[0]].items()}
+        return {"mesh": {"node": nodes[0], "version": "0.1.0", "at_ms": now, "peers": peers}, "mesh_history": self.mesh_past}
 
     def history(self):
         if not hasattr(self, "past"):

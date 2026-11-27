@@ -44,9 +44,10 @@ const reportGroups = ({ reports, users = [], isDone = () => false }) => {
 // the lines between them: each line the round trip of both directions, green when both answer, red when one does
 // not, grey when nothing is known. A status older than 10 s: yo-mesh here is down, all red.
 const MESH_SHORT = { "yo-falkenstein": "FSN", "yo-ohio": "OHIO", "yo-tokyo": "TYO" };
+const meshShort = (n) => MESH_SHORT[n] || n.replace(/^yo-/, "").slice(0, 4).toUpperCase();
 const meshView = (m, now) => {
   if (!m) return null;
-  const fresh = now - (m.at_ms || 0) < 10000, short = (n) => MESH_SHORT[n] || n.replace(/^yo-/, "").slice(0, 4).toUpperCase();
+  const fresh = now - (m.at_ms || 0) < 10000;
   // seen[a][b]: what a knows of b (this server's own view, the others' from their last answer).
   const seen = { [m.node]: m.peers || {} };
   for (const [n, p] of Object.entries(m.peers || {})) seen[n] = (p.online && p.view) || null;
@@ -59,11 +60,11 @@ const meshView = (m, now) => {
     edges.push({ a, b, ab, ba, rtt: rtts.length ? Math.round(rtts.reduce((x, y) => x + y) / rtts.length) : null,
       state: states.includes("bad") ? "bad" : states.every((x) => x === "ok") ? "ok" : states.includes("ok") ? "ok" : "unknown" });
   }));
-  const nodes = names.map((n) => ({ name: n, label: short(n), state: !fresh ? "bad" : n === m.node || names.some((o) => seen[o]?.[n]?.online) ? "ok" : "bad" }));
+  const nodes = names.map((n) => ({ name: n, label: meshShort(n), state: !fresh ? "bad" : n === m.node || names.some((o) => seen[o]?.[n]?.online) ? "ok" : "bad" }));
   const ago = (ms) => (ms ? `${Math.max(0, Math.round((now - ms) / 1000))} s ago` : "never");
   const rows = [], dirs = [], written = ago(m.at_ms), version = m.version || "–";
   for (const e of edges) for (const [from, to, d] of [[e.a, e.b, e.ab], [e.b, e.a, e.ba]]) {
-    const label = `${short(from)} → ${short(to)}`, value = d.state === "bad" ? "down" : d.rtt == null ? "–" : `${Math.round(d.rtt)} ms`;
+    const label = `${meshShort(from)} → ${meshShort(to)}`, value = d.state === "bad" ? "down" : d.rtt == null ? "–" : `${Math.round(d.rtt)} ms`;
     const last = { label: "Last answer", value: ago(d.last) }, errors = d.error ? [{ label: "Error", value: d.error }] : [];
     const tip = { head: label, rows: [{ label: "Round trip", value }, last, ...errors, { label: "Status written", value: written }, { label: "yo-mesh", value: version }] };
     dirs.push({ from, to, label, state: d.state, rtt: d.rtt ?? null, value, last: d.last ?? null, error: d.error ?? null, tip });
@@ -74,6 +75,34 @@ const meshView = (m, now) => {
   return { nodes, edges, rows, dirs, up: nodes.filter((n) => n.state === "ok").length, total: nodes.length, ok: nodes.every((n) => n.state === "ok") && edges.every((e) => e.state === "ok") };
 };
 // </mesh-view>
+// <mesh-history-view>
+const RTT_REGIONS = { eu: "Europe", am: "Americas", as: "Asia", other: "Other" };
+const RTT_BUCKETS = ["< 50 ms", "50–100 ms", "100–200 ms", "200–400 ms", "> 400 ms"];
+const userRttView = (buckets, names, region, formatShare) => {
+  const totals = buckets.map(b => b.reduce((sum, n) => sum + n, 0));
+  const values = buckets.map((b, i) => totals[i] ? 100 * (b[0] + b[1]) / totals[i] : null);
+  const tip = i => ({ head: names[i], note: "Proxy region. Each app reports at most once every 10 minutes.", rows: [{ section: region }, { label: "Reports", value: totals[i] },
+    { label: "Under 100 ms", value: values[i] == null ? "–" : formatShare(values[i]) },
+    ...RTT_BUCKETS.map((label, j) => ({ label, value: buckets[i][j] }))] });
+  return { values, tip };
+};
+const meshHistoryView = history => {
+  if (!history) return [];
+  const start = history.end_min - history.minutes + 1;
+  const fmt = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const names = Array.from({ length: Math.ceil(history.minutes / history.step) }, (_, i) => {
+    const min = start + i * history.step;
+    return fmt.formatRange(min * 60000, Math.min(min + history.step - 1, history.end_min) * 60000);
+  });
+  return Object.entries(history.links).sort(([a], [b]) => a.localeCompare(b)).map(([link, slots]) => {
+    const label = link.split(">").map(meshShort).join(" → ");
+    const tip = i => ({ head: names[i], rows: [{ section: label },
+      { label: "Average RTT", value: slots[i][0] == null ? "–" : slots[i][0] + " ms" },
+      { label: "Failed pings", value: slots[i][1] }, { label: "Gap minutes", value: slots[i][2] }] });
+    return { label, tip, rtt: slots.map(s => s[0]), fail: slots.map(s => s[1]), gaps: slots.map(s => s[2]) };
+  });
+};
+// </mesh-history-view>
 // A crash or error group's title and text from its payload; "expected" ones (known to happen) count but stay hidden.
 const diagPayload = (d) => {
   try { return JSON.parse(d.payload) ?? {}; } catch { return d.payload ?? {}; }
@@ -362,6 +391,7 @@ if (document.body.classList.contains("login")) {
       if (s.yogpt?.state === "active" && people != null) svcInfo.yogpt.rows.push(["Knows", `${num(people)} people`]);
     });
     part(() => drawMesh(s.mesh));
+    part(() => drawMeshHistory(s.mesh_history));
     redrawDetail(["server", "svc"]);
     if (firstSample && pinned?.dataset.detail) landing();
   }
@@ -1099,6 +1129,8 @@ if (document.body.classList.contains("login")) {
     $("c-q").dataset.tip = ok ? `${num(h.messages)} messages waiting for their device${h.messages && h.oldest_waiting ? `, oldest ${rel(h.oldest_waiting)}` : ""} · ${blobs ? `${num(blobs[0])} images waiting: ${bytes(blobs[1])}` : "images unknown"}` : "";
 
     // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
+
+    part(() => drawUserRtt(ok ? h : null));
 
     // Activity: active users and the sign-ups of the last 24 hours, each value on hover.
     if (ok) {
@@ -2657,6 +2689,51 @@ if (document.body.classList.contains("login")) {
     s.dataset.first = Math.max(0, values.findIndex((v, i) => recorded ? recorded[i] : v != null));
     if (tip) hoverTip(s, values.length, tip, (k) => [...s.children].forEach((r, j) => r.classList.toggle("on", j === k)));
     return s;
+  };
+  const meshSeries = (label, chart) => {
+    const row = el("div", "mesh-series");
+    row.append(el("span", "", label), chart || el("span", "", "no data yet"));
+    return row;
+  };
+  const drawUserRtt = h => {
+    const events = h?.events || {}, weekly = range === 7 && h?.week?.events;
+    const days = new Map(), daily = {};
+    if (!weekly && range !== 1) {
+      for (const [key, event] of Object.entries(events)) if (key.startsWith("rtt-")) {
+        daily[key] = year(event.year);
+        for (const [d, count] of daily[key]) if (count) days.set(d, 1);
+      }
+    }
+    const slots = range === 1 || weekly ? [] : rangeSlots(days);
+    const names = weekly ? weekNames() : range === 1 ? hourNames() : slots.map(([name]) => name);
+    $("mesh-users").replaceChildren(...Object.entries(RTT_REGIONS).map(([region, label]) => {
+      const buckets = names.map((_, i) => RTT_BUCKETS.map((_, b) => {
+        const key = `rtt-${region}-${b}`;
+        return weekly ? weekly[key]?.[i] || 0 : range === 1 ? events[key]?.hours?.[i] || 0 : slotSum(slots[i], daily[key]);
+      }));
+      const { values, tip } = userRttView(buckets, names, label, pctText);
+      return meshSeries(label, values.some(v => v != null) && sparkBars(values, "", tip, null, null, 100));
+    }));
+  };
+  let meshHistoryEnd;
+  const drawMeshHistory = history => {
+    const end = history?.end_min ?? null;
+    if (meshHistoryEnd === end) return;
+    const rtts = [], losses = [];
+    for (const link of meshHistoryView(history)) {
+      rtts.push(meshSeries(link.label, sparkBars(link.rtt, "cool", link.tip)));
+      const loss = sparkBars(link.fail, "hot", link.tip);
+      link.gaps.forEach((n, i) => {
+        if (!n) return;
+        const bar = loss.children[i], group = svg("g");
+        bar.replaceWith(group);
+        group.append(bar, svg("rect", { class: "gap-mark", x: bar.getAttribute("x"), width: bar.getAttribute("width"), y: 0, height: 5 }));
+      });
+      losses.push(meshSeries(link.label, loss));
+    }
+    $("mesh-rtts").replaceChildren(...(rtts.length ? rtts : ["no data yet"]));
+    $("mesh-loss").replaceChildren(...(losses.length ? losses : ["no data yet"]));
+    meshHistoryEnd = end;
   };
   // A sparkline of stacked bars: per slot the series (each 0 to 100) one on the other from the bottom.
   const stackBars = (series, colors, tip) => {

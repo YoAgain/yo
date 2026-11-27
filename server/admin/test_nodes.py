@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 SOURCE = (Path(__file__).with_name("app.js")).read_text()
 FN = SOURCE[SOURCE.index("// <mesh-view>"):SOURCE.index("// </mesh-view>")]
+HISTORY_FN = SOURCE[SOURCE.index("// <mesh-history-view>"):SOURCE.index("// </mesh-history-view>")]
 NOW = 1_800_000_000_000
 
 
@@ -50,6 +51,26 @@ class MeshViewTests(unittest.TestCase):
         self.assertIn(("Error", "ping timed out"), rows)
         self.assertFalse(v["ok"])
 
+    def test_rtt_shares_and_mesh_slots(self):
+        script = FN + HISTORY_FN + """
+          const assert = require('node:assert/strict');
+          const r = userRttView([[2, 1, 3, 0, 4], [0, 0, 0, 0, 0], [0, 0, 1, 0, 0]],
+                                ["first", "second", "third"], "Europe", String);
+          assert.deepEqual(r.values, [30, null, 0]);
+          assert.equal(r.tip(0).head, "first");
+          assert.deepEqual(r.tip(0).rows.slice(1).map(r => r.value), [10, "30", 2, 1, 3, 0, 4]);
+          assert.deepEqual(meshHistoryView(null), []);
+          const [l] = meshHistoryView({end_min: 30, minutes: 11, step: 10,
+            links: {"yo-falkenstein>yo-tokyo": [[250, 2, 1], [null, 0, 1]]}});
+          assert.equal(l.label, "FSN → TYO");
+          assert.deepEqual(l.rtt, [250, null]);
+          assert.deepEqual(l.fail, [2, 0]);
+          assert.deepEqual(l.gaps, [1, 1]);
+          assert.notEqual(l.tip(0).head, l.tip(1).head);
+          assert.deepEqual(l.tip(1).rows.slice(1).map(r => r.value), ["–", 0, 1]);
+        """
+        subprocess.run(["node", "-e", script], check=True)
+
     def test_stale_status_is_all_red_and_none_is_none(self):
         v = view(STATUS, NOW + 60000)
         self.assertEqual({n["state"] for n in v["nodes"]} | {e["state"] for e in v["edges"]}, {"bad"})
@@ -58,16 +79,38 @@ class MeshViewTests(unittest.TestCase):
 
 
 class MeshStatsTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.status = Path(tmp.name, "status.json")
+        self.history = Path(tmp.name, "history.json")
+        env = patch.dict(os.environ, {
+            "ADMIN_USER": "test", "ADMIN_PASSWORD_HASH": "unused", "ADMIN_SESSION_KEY": "00", "ACCESS_TEAM": "invalid",
+            "ACCESS_AUD": "test", "STATE_DIRECTORY": tmp.name, "MESH_STATUS_FILE": str(self.status),
+            "MESH_HISTORY_FILE": str(self.history)})
+        env.start()
+        self.addCleanup(env.stop)
+        spec = importlib.util.spec_from_file_location("admin", Path(__file__).with_name("admin.py"))
+        self.admin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.admin)
+
     def test_reads_the_status_file_or_none(self):
-        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ, {
-                "ADMIN_USER": "test", "ADMIN_PASSWORD_HASH": "unused", "ADMIN_SESSION_KEY": "00", "ACCESS_TEAM": "invalid",
-                "ACCESS_AUD": "test", "STATE_DIRECTORY": d, "MESH_STATUS_FILE": os.path.join(d, "status.json")}):
-            spec = importlib.util.spec_from_file_location("admin", Path(__file__).with_name("admin.py"))
-            admin = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(admin)
-            self.assertIsNone(admin.mesh())
-            Path(d, "status.json").write_text(json.dumps(STATUS))
-            self.assertEqual(admin.mesh(), STATUS)
+        self.assertIsNone(self.admin.mesh())
+        self.status.write_text(json.dumps(STATUS))
+        self.assertEqual(self.admin.mesh(), STATUS)
+
+    def test_history_weighted_rtt_failures_gaps_and_replacement(self):
+        self.assertIsNone(self.admin.mesh_history())
+        link = {"rtt": [20, 60] + [None] * 9, "ok": [3, 1] + [0] * 9, "fail": [1, 2, 5] + [0] * 8}
+        data = {"end_min": 20, "minutes": 11, "links": {"a>b": link}}
+        self.history.write_text(json.dumps(data))
+        result = self.admin.mesh_history()
+        self.assertEqual(result, {**data, "step": 10, "links": {"a>b": [[30, 8, 7], [None, 0, 1]]}})
+        self.assertIs(self.admin.mesh_history(), result)
+        self.status.write_text(json.dumps({**data, "end_min": 21}))
+        self.status.replace(self.history)
+        self.assertEqual(self.admin.mesh_history()["end_min"], 21)
+
 
 
 if __name__ == "__main__":

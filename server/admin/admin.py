@@ -19,6 +19,7 @@ import time
 import urllib.request
 import urllib.error
 from collections import deque
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -560,6 +561,42 @@ def mesh() -> dict | None:
         return None
 
 
+def mesh_slots(history):
+    """Ten-minute slots, oldest first. Weight each minute's RTT by its answers."""
+    step, minutes = 10, history["minutes"]
+    links = {}
+    for name, link in history["links"].items():
+        slots = []
+        for start in range(0, minutes, step):
+            span = slice(start, start + step)
+            samples = zip(link["rtt"][span], link["ok"][span], link["fail"][span], strict=True)
+            elapsed = answers = failures = gaps = 0
+            for rtt, ok, fail in samples:
+                if rtt is not None:
+                    elapsed += rtt * ok
+                    answers += ok
+                failures += fail
+                gaps += ok + fail == 0
+            slots.append([round(elapsed / answers, 1) if answers else None, failures, gaps])
+        links[name] = slots
+    return {"end_min": history["end_min"], "minutes": minutes, "step": step, "links": links}
+
+
+@lru_cache(maxsize=1)
+def _mesh_history(path, inode, mtime):
+    with open(path) as f:
+        return mesh_slots(json.load(f))
+
+
+def mesh_history():
+    path = os.environ.get("MESH_HISTORY_FILE", "/run/yo-mesh/history.json")
+    try:
+        st = os.stat(path)
+        return _mesh_history(path, st.st_ino, st.st_mtime_ns)
+    except FileNotFoundError:
+        return None
+
+
 # The server's figures once a minute, the last hour: the Server rows' bars. All three series are kept in a small file
 # (HISTORY_FILE) so a restart does not empty them.
 # Each [ms, cpu %, memory %, disk %, rx B/s, tx B/s].
@@ -679,6 +716,7 @@ def stats_now() -> dict:
         "yogpt": section("yogpt", lambda: unit(os.environ.get("YOGPT_UNIT", "yo-yogpt.service"))),
         "failed_units": section("failed_units", failed_unit_count),
         "mesh": section("mesh", mesh),
+        "mesh_history": section("mesh_history", mesh_history),
     }
 
 

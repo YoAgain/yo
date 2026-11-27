@@ -60,12 +60,21 @@
     <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </article>
-  <article class="tile group" id="t-mesh" aria-label="Mesh">
-    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m11 7-5 9m2 2h8m2-2-5-9"/><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/></svg><span>Mesh</span><b id="mesh-n">–</b></h2>
-    <svg id="mesh-svg" viewBox="0 0 240 150" role="img" aria-label="Mesh, round trips"></svg>
-    <div class="mesh-dirs" id="mesh-dirs"></div>
-  </article>
   <div id="grp-vr"></div>
+  <article class="tile group full" id="t-mesh" aria-label="Mesh">
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m11 7-5 9m2 2h8m2-2-5-9"/><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/></svg><span>Mesh</span><b id="mesh-n">–</b></h2>
+    <div class="mesh-body">
+      <div>
+        <svg id="mesh-svg" viewBox="0 0 240 150" role="img" aria-label="Mesh, round trips"></svg>
+        <div class="mesh-dirs" id="mesh-dirs"></div>
+      </div>
+      <div class="mesh-graphs">
+        <h3>User round trips under 100 ms</h3><div id="mesh-users">no data yet</div>
+        <h3>Mesh RTT · 24 h</h3><div id="mesh-rtts">no data yet</div>
+        <h3>Failed pings / <span class="gap-key">gaps</span> · 24 h</h3><div id="mesh-loss">no data yet</div>
+      </div>
+    </div>
+  </article>
   <article class="dcard" aria-label="Problems" id="grp-pr"></article>
   <article class="dcard" aria-label="Accounts stats" id="uc-rows"></article>
   <article class="dcard" aria-label="Delivery" id="delivery-rows"></article>

@@ -1334,6 +1334,17 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 :is(#problem-dial, #c-svc) .dial-arc { stroke: var(--accent, #35313d); }
 #c-svc .dial-face { color: var(--accent, var(--text)); }
 .ctip .tr.ok .tv { color: var(--ok); } .ctip .tr.bad .tv { color: var(--bad); }
+@media (min-width: 1200px) { .overview-grid > #t-mesh { grid-column: 1 / span 2; } }
+@media (760px <= width < 1200px) { .overview-grid > #t-mesh { grid-row: 2; } }
+.mesh-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: var(--gap); }
+@media (width < 760px) { .mesh-body { grid-template-columns: minmax(0, 1fr); } }
+.mesh-graphs { font-size: var(--caption); color: var(--muted); }
+.mesh-graphs h3 { margin: 8px 0 4px; color: var(--text); font-size: inherit; }
+.mesh-graphs h3:first-child { margin-top: 0; }
+.mesh-series { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; min-height: 18px; }
+.mesh-graphs .mesh-series .spark { grid-column: 2; height: 16px; width: 100%; }
+.mesh-graphs .gap-key { color: var(--warn); }
+.spark .gap-mark { fill: var(--warn); }
 #mesh-n { margin-left: auto; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
 #t-mesh .ok { color: var(--ok); } #t-mesh .bad { color: var(--bad); }
 #mesh-svg { display: block; width: 100%; height: 170px; }
