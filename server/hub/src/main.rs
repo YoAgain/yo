@@ -1,7 +1,9 @@
 //! yo-hub: reads its configuration from the environment and serves.
 //!
 //!   YO_LISTEN             address, default 127.0.0.1:8080 (behind a Cloudflare Tunnel); a socket from systemd
-//!                         (LISTEN_FDS, `yo-hub.socket`) goes first
+//!                         (LISTEN_FDS, `yo-hub.socket`) goes first. Relay default 127.0.0.1:8090
+//!   YO_MESH_CONFIG        optional mesh.toml for the live hub (certs or CREDENTIALS_DIRECTORY)
+//!   YO_RELAY_STATUS       relay status address, default 127.0.0.1:8091
 //!   YO_DB                 SQLite file, default yo-hub.sqlite
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
 //!   YO_ROBOT_RANGES       ADDRESS/BITS, comma-separated: test robots, whose support messages, reports and
@@ -48,6 +50,8 @@
 //!   yo-hub ohttp new FILE KEY_ID                        new key material (32 bytes, 0600), YO_OHTTP_KEY_FILE or
 //!                                                       YO_OHTTP_SPARE_FILE; prints its key config, base64url, to pin
 //!   yo-hub ohttp public FILE KEY_ID                     prints it again
+
+mod mesh;
 
 use std::sync::Arc;
 use yo_hub::config::{
@@ -313,9 +317,30 @@ fn from_systemd() -> Result<Option<tokio::net::TcpListener>, String> {
     tokio::net::TcpListener::from_std(listener).map(Some).map_err(|error| format!("socket from systemd: {error}"))
 }
 
+async fn shutdown_signal() {
+    let mut term = or_exit(
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|error| error.to_string()),
+    );
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    eprintln!("yo-hub: stopping");
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|s| matches!(s.as_str(), "--relay" | "relay-status")) {
+        match mesh::command(&args).await {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("yo-hub: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.first().is_some_and(|command| ["hub-key", "zk", "trust-root", "ohttp"].contains(&command.as_str())) {
         return or_exit(tool(&args));
     }
@@ -339,20 +364,17 @@ async fn main() {
         // and passes every per-address limit.
         eprintln!("yo-hub: YO_TRUST_CLOUDFLARE with {listen}, not a loopback address: only cloudflared may reach it");
     }
-    // SIGTERM from systemd (a deploy restarts the service; the socket stays and holds new connections for the next
-    // process), Ctrl-C by hand.
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let mesh = var("YO_MESH_CONFIG").map(|path| tokio::spawn(mesh::serve(path, stopped)));
     let shutdown = async {
-        let mut term = or_exit(
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(|error| error.to_string()),
-        );
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-        eprintln!("yo-hub: stopping");
+        shutdown_signal().await;
+        let _ = stop.send(());
     };
-    if let Err(error) = hub.serve(listener, shutdown).await {
+    let result = hub.serve(listener, shutdown).await;
+    if let Some(task) = mesh {
+        let _ = task.await;
+    }
+    if let Err(error) = result {
         eprintln!("yo-hub: {error}");
         std::process::exit(1);
     }

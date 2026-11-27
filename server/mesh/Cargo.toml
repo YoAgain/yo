@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "A heartbeat between the Yo servers over mutual TLS (a library, so the hub can take it in later)."
+description = "Heartbeats and HTTP relaying between Yo servers over mutual TLS."
 
 [lib]
 name = "yo_mesh"
@@ -23,8 +23,8 @@ toml = { workspace = true }
 # TLS on tokio's sockets, with the workspace's rustls (aws-lc-rs).
 tokio-rustls = { version = "=0.26.6", default-features = false }
 # HTTP/2 both ways on one connection per peer, without a web framework: the versions the hub already links.
-hyper = { version = "=1.13.0", features = ["server", "client", "http2"] }
-hyper-util = { version = "=0.1.21", features = ["tokio"] }
+hyper = { version = "=1.13.0", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "=0.1.21", features = ["tokio", "client-legacy", "http1"] }
 http-body-util = "=0.1.5"
 bytes = "=1.12.2"
 

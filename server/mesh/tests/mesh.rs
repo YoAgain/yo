@@ -54,6 +54,7 @@ fn node(name: &str, addr: SocketAddr, peer: &str, other: SocketAddr, dir: &Path)
         certs: Some(dir.into()),
         status: Some(dir.join("status.json")),
         history: None,
+        forward: None,
     }
 }
 
@@ -153,5 +154,189 @@ async fn mutual_heartbeat() -> Result<()> {
     }
     server.abort();
     peer.abort();
+    Ok(())
+}
+
+async fn edge_request(addr: SocketAddr, req: Request<Full<Bytes>>) -> Result<hyper::Response<hyper::body::Incoming>> {
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake(TokioIo::new(TcpStream::connect(addr).await?)).await?;
+    tokio::spawn(conn);
+    Ok(sender.send_request(req).await?)
+}
+
+fn get(path: &str) -> Request<Full<Bytes>> {
+    Request::get(path)
+        .header("host", "dev.example")
+        .header("cf-connecting-ip", "192.0.2.1")
+        .body(Full::default())
+        .unwrap()
+}
+
+async fn edge_status(addr: SocketAddr) -> Result<Value> {
+    let res = edge_request(addr, get("/status")).await?;
+    Ok(serde_json::from_slice(&res.collect().await?.to_bytes())?)
+}
+
+async fn echo(req: Request<hyper::body::Incoming>) -> Result<hyper::Response<hyper::body::Incoming>> {
+    if req.uri().path() == "/slow" {
+        sleep(Duration::from_secs(2)).await;
+    }
+    assert_eq!(req.version(), hyper::Version::HTTP_11);
+    assert!(req.uri().authority().is_none());
+    assert!(!req.headers().contains_key("yo-mesh-relay"));
+    assert!(!req.headers().contains_key("x-hop"));
+    let mut response = hyper::Response::builder()
+        .status(201)
+        .header("x-method", req.method().as_str())
+        .header("x-path", req.uri().to_string())
+        .header("x-host", &req.headers()["host"])
+        .header("x-ip", &req.headers()["cf-connecting-ip"])
+        .header("connection", "x-return-hop")
+        .header("x-return-hop", "drop");
+    if let Some(value) = req.headers().get("yo-rtt") {
+        response = response.header("yo-rtt", value);
+    }
+    Ok(response.body(req.into_body())?)
+}
+
+#[tokio::test]
+async fn relay_round_trip() -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
+    let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let dir = TempDir(env::temp_dir().join(format!("yo-relay-{}-{id}", std::process::id())));
+    fs::DirBuilder::new().mode(0o700).create(&dir.0)?;
+    let (root, issuer) = ca();
+    let a = identity(&dir.0, "node-a", &issuer, &root);
+    let b = identity(&dir.0, "node-b", &issuer, &root);
+    let sockets: Vec<_> = (0..4).map(|_| TcpListener::bind("127.0.0.1:0")).collect::<std::io::Result<_>>()?;
+    let (addr, other, listen, status) =
+        (sockets[0].local_addr()?, sockets[1].local_addr()?, sockets[2].local_addr()?, sockets[3].local_addr()?);
+    let hub = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut config = node("node-a", addr, "node-b", other, &a);
+    config.forward = Some(hub.local_addr()?);
+    let echo_server = tokio::spawn(async move {
+        loop {
+            let stream = hub.accept().await.unwrap().0;
+            tokio::spawn(
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), hyper::service::service_fn(echo)),
+            );
+        }
+    });
+    drop(sockets);
+    let start_edge = || {
+        let (stop, stopped) = oneshot::channel::<()>();
+        let edge = tokio::spawn(yo_mesh::relay(
+            node("node-b", other, "node-a", addr, &b),
+            "node-a".into(),
+            listen,
+            status,
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        (edge, stop)
+    };
+    let (edge, stop) = start_edge();
+    timeout(Duration::from_secs(4), async {
+        while edge_status(status).await.is_err() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert_eq!(edge_request(listen, get("/")).await?.status(), 502);
+    let server = tokio::spawn(run(config));
+    timeout(Duration::from_secs(6), async {
+        while edge_status(status).await.unwrap()["upstream_ok"] != true {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    let health = edge_status(status).await?;
+    assert_eq!(health["upstream"], "node-a");
+    assert!(health["since_ok_ms"].is_u64() && health["upstream_rtt_ms"].is_number());
+
+    for req in [
+        Request::get("/").header("host", "dev.example"),
+        Request::get("/")
+            .header("host", "dev.example")
+            .header("cf-connecting-ip", "192.0.2.1")
+            .header("connection", "cf-connecting-ip"),
+    ] {
+        assert_eq!(edge_request(listen, req.body(Full::default())?).await?.status(), 400);
+    }
+
+    // The echo starts before the upload finishes, through both proxies.
+    let mut stream = TcpStream::connect(listen).await?;
+    stream.write_all(b"PUT /blob?q=1 HTTP/1.1\r\nHost: dev.example:443\r\nCF-Connecting-IP: 192.0.2.1\r\nYo-Rtt: 3\r\nConnection: x-hop, close\r\nX-Hop: drop\r\nContent-Length: 1048576\r\n\r\n").await?;
+    let payload: Vec<u8> = (0..1048576).map(|i| (i % 251) as u8).collect();
+    stream.write_all(&payload[..1024]).await?;
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let body_start = timeout(Duration::from_secs(3), async {
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            received.extend_from_slice(&chunk[..n]);
+            if let Some(i) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                if received.len() > i + 4 {
+                    break i + 4;
+                }
+            }
+        }
+    })
+    .await?;
+    let headers = std::str::from_utf8(&received[..body_start])?.to_ascii_lowercase();
+    for expected in [
+        "http/1.1 201",
+        "x-method: put",
+        "x-path: /blob?q=1",
+        "x-host: dev.example:443",
+        "x-ip: 192.0.2.1",
+        "yo-rtt: 3",
+        "content-length: 1048576",
+    ] {
+        assert!(headers.contains(expected), "{headers}");
+    }
+    assert!(!headers.contains("x-return-hop"));
+    let (mut reader, mut writer) = stream.into_split();
+    let (written, read) = timeout(Duration::from_secs(5), async {
+        tokio::join!(writer.write_all(&payload[1024..]), reader.read_to_end(&mut received))
+    })
+    .await?;
+    written?;
+    read?;
+    assert_eq!(&received[body_start..], payload.as_slice());
+
+    let slow = tokio::spawn(edge_request(listen, get("/slow")));
+    timeout(Duration::from_secs(1), async {
+        while edge_status(status).await.unwrap()["in_flight"] != 1 {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    stop.send(()).unwrap();
+    timeout(Duration::from_secs(1), async {
+        while TcpStream::connect(listen).await.is_ok() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    assert_eq!(slow.await??.status(), 201);
+    timeout(Duration::from_secs(1), edge).await???;
+
+    let (edge, _stop) = start_edge();
+    timeout(Duration::from_secs(6), async {
+        while !edge_status(status).await.is_ok_and(|s| s["upstream_ok"] == true) {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    server.abort();
+    let _ = server.await;
+    assert_eq!(timeout(Duration::from_secs(1), edge_request(listen, get("/slow"))).await??.status(), 502);
+    assert_eq!(timeout(Duration::from_secs(13), edge).await??.unwrap_err().to_string(), "upstream unreachable");
+    echo_server.abort();
     Ok(())
 }

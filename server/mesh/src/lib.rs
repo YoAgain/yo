@@ -1,5 +1,11 @@
+mod forward;
+mod relay;
 mod tls;
+use forward::{Forward, Payload};
+pub use relay::relay;
+use std::future::{pending, Future};
 pub use tls::{client_config, server_config, Certs};
+use tokio::sync::watch;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -11,7 +17,7 @@ use serde_json::json;
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{BufWriter, Write},
+    io::{BufReader, BufWriter, Write},
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -36,6 +42,7 @@ pub struct Config {
     pub peers: BTreeMap<String, SocketAddr>,
     pub certs: Option<PathBuf>,
     pub status: Option<PathBuf>,
+    pub forward: Option<SocketAddr>,
     pub history: Option<PathBuf>,
 }
 
@@ -55,7 +62,7 @@ struct Peer {
 }
 
 type Peers = Arc<Mutex<BTreeMap<String, Peer>>>;
-type Body = Full<Bytes>;
+type Sender = SendRequest<Payload>;
 
 const MINUTES: usize = 1440;
 const MINUTE: Duration = Duration::from_secs(60);
@@ -158,6 +165,32 @@ struct Histories {
 }
 
 impl Histories {
+    fn seed(&mut self, path: &Path, node: &str, now: u64) {
+        let Some(snapshot) =
+            fs::File::open(path).ok().and_then(|f| serde_json::from_reader::<_, Snapshot>(BufReader::new(f)).ok())
+        else {
+            return;
+        };
+        if snapshot.node != node || snapshot.end_min.abs_diff(now) >= MINUTES as u64 {
+            return;
+        }
+        for (peer, ring) in &mut self.own {
+            let Some(series) = snapshot.links.get(&format!("{node}>{peer}")).filter(|s| s.valid()) else { continue };
+            for i in 0..MINUTES {
+                let Some(minute) = snapshot.end_min.checked_sub((MINUTES - 1 - i) as u64) else { continue };
+                if minute > now || now - minute >= MINUTES as u64 {
+                    continue;
+                }
+                ring.0[minute as usize % MINUTES] = Bucket {
+                    minute,
+                    ok: series.ok[i],
+                    fail: series.fail[i],
+                    sum: series.rtt[i].unwrap_or_default() * f32::from(series.ok[i]),
+                };
+            }
+        }
+    }
+
     fn snapshot(&self, node: &str, end_min: u64) -> Snapshot {
         let links = self.own.iter().map(|(peer, h)| (format!("{node}>{peer}"), h.to_json(end_min))).collect();
         Snapshot { node: node.into(), end_min, links }
@@ -193,6 +226,7 @@ async fn serve(
     name: Arc<str>,
     peers: Peers,
     history: SharedHistory,
+    forward: Option<Forward>,
     stream: TcpStream,
     tls: TlsAcceptor,
 ) -> Result<()> {
@@ -202,31 +236,49 @@ async fn serve(
     }
     let service =
         service_fn(move |req: Request<hyper::body::Incoming>| {
-            let response =
+            let forward = forward.clone();
+            let (name, peers, history) = (name.clone(), peers.clone(), history.clone());
+            async move {
+                if req.headers().get(forward::MARKER).is_some_and(|v| v == "1") {
+                    return Ok(match forward {
+                        Some(f) => f.send(req).await,
+                        None => forward::empty(404),
+                    });
+                }
+
                 if req.method() == Method::GET && req.uri().path() == "/ping" {
                     // Its own view only (no views of views): the answer stays small.
                     let view: BTreeMap<_, _> = peers.lock().unwrap().iter().map(|(n, p)| (n.clone(), json!({
                 "online": p.online, "rtt_ms": p.rtt_ms, "last_ok_ms": p.last_ok_ms, "error": p.error,
             }))).collect();
                     let ping = json!({"node": &*name, "version": VERSION, "time_ms": now_ms(), "peers": view});
-                    Response::builder().header("content-type", "application/json").body(Body::from(ping.to_string()))
+                    Response::builder().header("content-type", "application/json").body(forward::full(ping.to_string()))
                 } else if req.method() == Method::GET && req.uri().path() == "/history" {
                     let snapshot = history.lock().unwrap().snapshot(&name, now_ms() / 60_000);
                     Response::builder()
                         .header("content-type", "application/json")
-                        .body(Body::from(serde_json::to_vec(&snapshot).unwrap()))
+                        .body(forward::full(serde_json::to_vec(&snapshot).unwrap()))
                 } else {
-                    Response::builder().status(404).body(Body::default())
-                };
-            async move { response }
+                    Ok(forward::empty(404))
+                }
+            }
         });
+    // Windows that grow with the link (BDP): a relayed photo over a 250 ms link is not held to 64 KiB per round trip.
     hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .adaptive_window(true)
         .serve_connection(TokioIo::new(stream), service)
         .await?;
     Ok(())
 }
 
-async fn server(addr: SocketAddr, name: Arc<str>, peers: Peers, history: SharedHistory, tls: TlsAcceptor) {
+async fn server(
+    addr: SocketAddr,
+    name: Arc<str>,
+    peers: Peers,
+    history: SharedHistory,
+    tls: TlsAcceptor,
+    forward: Option<Forward>,
+) {
     let listener = loop {
         match TcpListener::bind(addr).await {
             Ok(listener) => break listener,
@@ -241,8 +293,9 @@ async fn server(addr: SocketAddr, name: Arc<str>, peers: Peers, history: SharedH
             accepted = listener.accept(), if connections.len() < 64 => match accepted {
                 Ok((stream, peer)) => {
                     let (name, peers, history, tls) = (name.clone(), peers.clone(), history.clone(), tls.clone());
+                    let forward = forward.clone();
                     connections.spawn(async move {
-                        if let Err(e) = serve(name, peers, history, stream, tls).await {
+                        if let Err(e) = serve(name, peers, history, forward, stream, tls).await {
                             eprintln!("connection from {peer}: {e}");
                         }
                     });
@@ -258,23 +311,20 @@ async fn server(addr: SocketAddr, name: Arc<str>, peers: Peers, history: SharedH
 
 type View = Option<BTreeMap<String, Peer>>;
 
-async fn ping(
-    sender: &mut Option<SendRequest<Body>>,
-    tls: &TlsConnector,
-    name: &str,
-    addr: SocketAddr,
-) -> Result<(f64, View)> {
+async fn ping(sender: &mut Option<Sender>, tls: &TlsConnector, name: &str, addr: SocketAddr) -> Result<(f64, View)> {
     if sender.is_none() {
         let stream = tls.connect(ServerName::try_from(name.to_owned())?, TcpStream::connect(addr).await?).await?;
         if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
             return Err("h2 required".into());
         }
-        let (tx, connection) =
-            hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream)).await?;
+        let (tx, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .adaptive_window(true)
+            .handshake(TokioIo::new(stream))
+            .await?;
         tokio::spawn(connection);
         *sender = Some(tx);
     }
-    let req = Request::get(format!("https://{name}/ping")).body(Body::default())?;
+    let req = Request::get(format!("https://{name}/ping")).body(forward::full(Bytes::new()))?;
     let start = Instant::now();
     let response = sender.as_mut().unwrap().send_request(req).await?;
     if response.status() != 200 {
@@ -295,8 +345,8 @@ async fn ping(
     Ok((rtt, ping.peers))
 }
 
-async fn fetch_history(mut sender: SendRequest<Body>, name: &str) -> Result<Snapshot> {
-    let req = Request::get(format!("https://{name}/history")).body(Body::default())?;
+async fn fetch_history(mut sender: Sender, name: &str) -> Result<Snapshot> {
+    let req = Request::get(format!("https://{name}/history")).body(forward::full(Bytes::new()))?;
     let response = sender.send_request(req).await?;
     if response.status() != 200 {
         return Err("unexpected history status".into());
@@ -315,7 +365,14 @@ async fn fetch_history(mut sender: SendRequest<Body>, name: &str) -> Result<Snap
     Ok(snapshot)
 }
 
-async fn pinger(name: String, addr: SocketAddr, tls: TlsConnector, peers: Peers, history: SharedHistory) {
+async fn pinger(
+    name: String,
+    addr: SocketAddr,
+    tls: TlsConnector,
+    peers: Peers,
+    history: SharedHistory,
+    upstream: Option<watch::Sender<relay::Upstream>>,
+) {
     let mut timer = ticks(SECOND);
     let mut sender = None;
     let mut next_fetch = Instant::now();
@@ -336,6 +393,16 @@ async fn pinger(name: String, addr: SocketAddr, tls: TlsConnector, peers: Peers,
                 if let Ok(Ok(snapshot)) = timeout(5 * SECOND, fetch_history(sender, &name)).await {
                     history.lock().unwrap().fetched.insert(name, (Instant::now(), snapshot));
                 }
+            });
+        }
+        if let Some(upstream) = &upstream {
+            upstream.send_modify(|u| match &result {
+                Ok((rtt, _)) => {
+                    u.last_ok = Some(Instant::now());
+                    u.rtt = Some(*rtt);
+                    u.sender = sender.clone();
+                }
+                Err(_) => u.sender = None,
             });
         }
         let mut peers = peers.lock().unwrap();
@@ -388,6 +455,19 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 pub async fn run(config: Config) -> Result<()> {
+    run_with(config, pending()).await
+}
+
+/// Run the heartbeat until shutdown.
+pub async fn run_with(config: Config, shutdown: impl Future<Output = ()>) -> Result<()> {
+    let mut tasks = start(config, None)?;
+    tokio::select! {
+        _ = shutdown => Ok(()),
+        result = tasks.join_next() => { result.unwrap()?; Err("mesh task stopped".into()) }
+    }
+}
+
+fn start(config: Config, monitored: Option<(&str, watch::Sender<relay::Upstream>)>) -> Result<JoinSet<()>> {
     let dir = config
         .certs
         .or_else(|| env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from))
@@ -404,11 +484,20 @@ pub async fn run(config: Config) -> Result<()> {
         own: config.peers.keys().map(|name| (name.clone(), History::default())).collect(),
         ..Histories::default()
     }));
+    history.lock().unwrap().seed(&history_path, &config.name, now_ms() / 60_000);
     let mut tasks = JoinSet::new();
-    tasks.spawn(server(config.listen, Arc::from(config.name.as_str()), peers.clone(), history.clone(), acceptor));
+    tasks.spawn(server(
+        config.listen,
+        Arc::from(config.name.as_str()),
+        peers.clone(),
+        history.clone(),
+        acceptor,
+        config.forward.map(Forward::new),
+    ));
     for (name, addr) in config.peers {
         rustls::pki_types::DnsName::try_from(name.as_str())?;
-        tasks.spawn(pinger(name, addr, connector.clone(), peers.clone(), history.clone()));
+        let upstream = monitored.as_ref().filter(|(peer, _)| *peer == name).map(|(_, tx)| tx.clone());
+        tasks.spawn(pinger(name, addr, connector.clone(), peers.clone(), history.clone(), upstream));
     }
     let node = config.name.clone();
     tasks.spawn(async move {
@@ -429,8 +518,7 @@ pub async fn run(config: Config) -> Result<()> {
             }
         }
     });
-    tasks.join_next().await.unwrap()?;
-    Err("mesh task stopped".into())
+    Ok(tasks)
 }
 
 #[cfg(test)]
@@ -456,6 +544,42 @@ mod tests {
         assert_eq!(s.fail[MINUTES - 1], 0);
         assert_eq!(s.rtt[MINUTES - 1], Some(4.0));
         assert!(h.to_json(3 * MINUTES as u64).rtt.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn seed_local_minutes() {
+        let end = MINUTES as u64 + 10;
+        let mut saved = Histories::default();
+        let ring = saved.own.entry("b".into()).or_default();
+        ring.record(end, Ok::<_, ()>(6.0));
+        ring.record(end, Err(()));
+        let mut file = saved.snapshot("a", end);
+        file.links.insert("b>a".into(), file.links["a>b"].clone());
+        let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = env::temp_dir().join(format!("yo-mesh-seed-{}-{id}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("history.json");
+        write_json(&path, &file).unwrap();
+
+        let restore = |now| {
+            let mut restored = Histories::default();
+            restored.own.insert("b".into(), History::default());
+            restored.seed(&path, "a", now);
+            restored
+        };
+        let mut restored = restore(end + 1);
+        restored.own.get_mut("b").unwrap().record(end, Ok::<_, ()>(10.0));
+        let links = restored.merged("a", end + 1).links;
+        assert_eq!(links.len(), 1);
+        let series = &links["a>b"];
+        assert_eq!(series.ok[MINUTES - 2], 2);
+        assert_eq!(series.fail[MINUTES - 2], 1);
+        assert_eq!(series.rtt[MINUTES - 2], Some(8.0));
+        let stale = restore(end + MINUTES as u64);
+        assert_eq!(stale.snapshot("a", end).links["a>b"].ok[MINUTES - 1], 0);
+        fs::write(&path, b"{").unwrap();
+        assert_eq!(restore(end).snapshot("a", end).links["a>b"].ok[MINUTES - 1], 0);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
