@@ -18,6 +18,12 @@ LoadCredential=hub-key:/etc/yo/hub-key-dev
 LoadCredential=ohttp-key:/etc/yo/ohttp-key-dev
 LoadCredential=server-cert:/etc/yo/server-cert-dev
 LoadCredential=zk-params:/etc/yo/zk-params-dev
+# The other hubs over the mesh (a device's envelopes they hold), with the relay's node certificate.
+LoadCredential=mesh.toml:/etc/yo/mesh.toml
+LoadCredential=ca.crt:/etc/yo/mesh/ca.crt
+LoadCredential=node.crt:/etc/yo/mesh/node.crt
+LoadCredential=node.key:/etc/yo/mesh/node.key
+Environment=YO_MESH_PEERS=%d/mesh.toml
 Environment=YO_APNS_KEY_FILE=%d/apns.p8 YO_FCM_SERVICE_ACCOUNT_FILE=%d/fcm.json YO_HUB_KEY_FILE=%d/hub-key
 Environment=YO_OHTTP_KEY_FILE=%d/ohttp-key YO_SERVER_CERT_FILE=%d/server-cert YO_ZK_PARAMS_FILE=%d/zk-params
 Restart=always

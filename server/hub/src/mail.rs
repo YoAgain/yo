@@ -286,15 +286,111 @@ impl Hub {
     }
 }
 
+const ACK_WINDOW: Duration = Duration::from_secs(120);
+#[derive(Default)]
+pub(crate) struct RecentAcks(HashMap<DeviceId, HashMap<u64, Instant>>);
+
+impl RecentAcks {
+    pub fn expire(&mut self) {
+        self.0.retain(|_, ids| {
+            ids.retain(|_, at| at.elapsed() < ACK_WINDOW);
+            !ids.is_empty()
+        });
+    }
+
+    pub fn remember(&mut self, device: DeviceId, ids: &[u64]) {
+        if !ids.is_empty() {
+            let now = Instant::now();
+            self.0.entry(device).or_default().extend(ids.iter().map(|id| (*id, now)));
+        }
+    }
+
+    pub fn contains(&self, device: &DeviceId, id: u64) -> bool {
+        self.0.get(device).and_then(|ids| ids.get(&id)).is_some_and(|at| at.elapsed() < ACK_WINDOW)
+    }
+}
+
+fn merge_items(mut items: Vec<api::InboxItem>, device: &DeviceId, recent: &RecentAcks) -> Vec<api::InboxItem> {
+    items.retain(|item| !recent.contains(device, item.id));
+    items.sort_by_key(|item| item.id);
+    items.dedup_by_key(|item| item.id);
+    items.truncate(MAX_INBOX_FETCH);
+    items
+}
+
+fn inbox_items(rows: Vec<(u64, Vec<u8>, u64)>) -> Vec<api::InboxItem> {
+    rows.into_iter()
+        .map(|(id, envelope, received_ms)| api::InboxItem { id, received_ms, envelope: envelope.into() })
+        .collect()
+}
+
+pub(crate) async fn peer_inbox(State(hub): Hubs, headers: HeaderMap, Path(device): Path<String>) -> Res<Vec<u8>> {
+    use subtle::ConstantTimeEq;
+    let token = hub.config.corrosion.as_ref().and_then(|c| c.peer_token.as_deref()).filter(|t| !t.is_empty());
+    if !token.zip(headers.get("yo-peer-token")).is_some_and(|(t, h)| bool::from(t.as_bytes().ct_eq(h.as_bytes()))) {
+        return Err(refuse(StatusCode::NOT_FOUND));
+    }
+    let id = path_id(&device)?;
+    let rows = hub.blocking(move |h| h.db.fetch(&id, MAX_INBOX_FETCH)).await??;
+    Ok(encode(&api::Inbox { prekeys_left: 0, items: inbox_items(rows) }))
+}
+
+async fn ask_peers(hub: &Hub, client: &yo_mesh::Client, device: &DeviceId) -> Vec<api::InboxItem> {
+    use futures_util::{stream::FuturesUnordered, StreamExt};
+    let path = format!("/v1/peer/inbox/{}", yoip::b64(device));
+    let token = hub.config.corrosion.as_ref().unwrap().peer_token.as_ref().unwrap();
+    let mut requests = client
+        .peers()
+        .map(|name| {
+            let req = axum::http::Request::get(&path).header("yo-peer-token", token).body(Bytes::new());
+            async move {
+                let reply = client.send(name, req.ok()?, Duration::from_millis(300)).await.ok()?;
+                if reply.status() != StatusCode::OK {
+                    return None;
+                }
+                decode::<api::Inbox>(reply.body()).ok()
+            }
+        })
+        .collect::<FuturesUnordered<_>>();
+    let mut items = Vec::new();
+    while let Some(reply) = requests.next().await {
+        if let Some(inbox) = reply {
+            items.extend(inbox.items);
+        }
+    }
+    items
+}
+
 /// `GET /v1/inbox?wait=s`: the device's envelopes, oldest first, waiting up to `wait` seconds for one.
 pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<Response> {
     let wait_s = query::<u64>(&uri, "wait").unwrap_or(0).min(limits::MAX_WAIT_S);
+    let split = query::<u8>(&uri, "split");
     let device = hub.blocking(move |hub| hub.authenticate(&method, &uri, &headers, &[])).await??;
     let fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
     let id = device.device_id;
-    let read =
-        move |hub: &Hub| Ok::<_, rusqlite::Error>((hub.db.fetch(&id, MAX_INBOX_FETCH)?, hub.db.prekeys_left(&id)?));
-    let (mut items, mut prekeys_left) = hub.blocking(read).await??;
+    let peers = hub.peers.as_ref().filter(|_| wait_s == 0);
+    let only_missing = hub.db.agent.is_some() && wait_s == 0 && split == Some(2);
+    let read = move |hub: &Hub| {
+        let rows = if only_missing { Vec::new() } else { hub.db.fetch(&id, MAX_INBOX_FETCH)? };
+        Ok::<_, rusqlite::Error>((rows, hub.db.prekeys_left(&id)?))
+    };
+    let mut status = StatusCode::OK;
+    let mut remote = Vec::new();
+    let (mut items, mut prekeys_left) = match peers {
+        Some(_) if split == Some(1) => {
+            status = StatusCode::PARTIAL_CONTENT;
+            hub.blocking(read).await??
+        }
+        Some(client) => {
+            let (local, answers) = tokio::join!(hub.blocking(read), ask_peers(&hub, client, &id));
+            let local = local??;
+            if !answers.is_empty() {
+                remote = hub.blocking(move |h| h.db.peer_items(&id, answers, only_missing, h.clock_ms())).await??;
+            }
+            local
+        }
+        None => hub.blocking(read).await??,
+    };
     if items.is_empty() && wait_s > 0 {
         let waiter = hub.waiter(id);
         let notified = waiter.notify.notified();
@@ -312,11 +408,14 @@ pub(crate) async fn get_inbox(State(hub): Hubs, method: Method, uri: Uri, header
             (items, prekeys_left) = hub.blocking(read).await??;
         }
     }
-    let items = items
-        .into_iter()
-        .map(|(id, envelope, received_ms)| api::InboxItem { id, received_ms, envelope: envelope.into() })
-        .collect();
-    Ok(held(encode(&api::Inbox { prekeys_left, items }), fetching))
+    let mut items = inbox_items(items);
+    if peers.is_some() {
+        items.append(&mut remote);
+        items = merge_items(items, &id, &hub.db.agent.as_ref().unwrap().recent_acks.lock().unwrap());
+    }
+    let mut response = held(encode(&api::Inbox { prekeys_left, items }), fetching);
+    *response.status_mut() = status;
+    Ok(response)
 }
 
 /// `POST /v1/inbox/ack`: the envelopes the device has stored.
@@ -329,8 +428,11 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     if request.ids.iter().any(|&id| i64::try_from(id).is_err()) {
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
-    let (acked, bot) = hub.db.ack(&device.device_id, &request.ids)?;
+    let (acked, remote, bot) = hub.db.ack_inbox(&device.device_id, &request.ids)?;
     hub.count_acked(&acked, hub.clock_ms(), bot);
+    if remote > 0 {
+        hub.count(if bot { crate::Event::YoOutBot } else { crate::Event::YoOut }, remote as u64);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -497,5 +599,28 @@ pub(crate) async fn post_envelope(
         // This recipient has no room now: `507` holds back its deliveries only (a `429` stops the sender's round).
         Delivered::Full => Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
         Delivered::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
+    }
+}
+
+#[cfg(test)]
+mod peer_tests {
+    use super::*;
+
+    #[test]
+    fn merge_filters_device_acks_before_sorting_deduplicating_and_limiting() {
+        let device = [1; 16];
+        let other = [2; 16];
+        let mut recent = RecentAcks::default();
+        recent.remember(device, &[1, 2]);
+        recent.remember(other, &[3]);
+        recent.0.get_mut(&device).unwrap().insert(2, Instant::now() - ACK_WINDOW);
+        let item = |id| api::InboxItem { id, received_ms: 0, envelope: vec![0].into() };
+        let mut rows = vec![api::InboxItem { received_ms: 10, ..item(3) }];
+        rows.extend((1..=MAX_INBOX_FETCH as u64 + 4).rev().map(item));
+        let rows = merge_items(rows, &device, &recent);
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), (2..2 + MAX_INBOX_FETCH as u64).collect::<Vec<_>>());
+        assert_eq!(rows[1].received_ms, 10);
+        recent.expire();
+        assert!(!recent.0[&device].contains_key(&2));
     }
 }

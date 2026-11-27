@@ -292,7 +292,7 @@ fn lookup_and_signed_conflict_keep_usable_sessions_and_reencrypt() {
             headers: &[(String, String)],
             body: &[u8],
         ) -> std::result::Result<Response, String> {
-            if path == api::inbox_path(0) {
+            if path == receive::inbox_path(0) {
                 return Ok(Response { status: 200, body: encode(&api::Inbox { items: vec![], prekeys_left: 10 }) });
             }
             assert_eq!(path, api::LOOKUP);

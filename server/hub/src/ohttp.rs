@@ -124,6 +124,7 @@ pub fn served_inside(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     path.starts_with("/v1/")
         && !path.starts_with("/v1/admin")
+        && !path.starts_with("/v1/peer/")
         && !path.starts_with("/v1/help/")
         && path != api::OHTTP
         && !path.starts_with(&format!("{}/", api::TICKETS))
@@ -261,6 +262,9 @@ async fn unwrapped(
     let control = message.control();
     let method = control.method().and_then(|m| Method::from_bytes(m).ok()).ok_or(StatusCode::BAD_REQUEST)?;
     let path = control.path().and_then(|p| std::str::from_utf8(p).ok()).ok_or(StatusCode::BAD_REQUEST)?;
+    if path.starts_with("/v1/peer/") {
+        return Err(StatusCode::NOT_FOUND);
+    }
     if hub.edge.is_some() && !crate::edge::local(&method, path.split('?').next().unwrap_or(path)) {
         return Ok(None);
     }

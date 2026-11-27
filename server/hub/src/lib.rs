@@ -188,6 +188,7 @@ impl Event {
 }
 
 pub struct Hub {
+    peers: Option<yo_mesh::Client>,
     edge: Option<edge::Edge>,
     config: Config,
     /// Oblivious HTTP (spec 4.1), with its keys configured.
@@ -255,6 +256,15 @@ pub fn now_ms() -> u64 {
 
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
+        let peers = config
+            .corrosion
+            .as_ref()
+            .filter(|c| c.peer_token.as_deref().is_some_and(|t| !t.is_empty()))
+            .and_then(|c| c.mesh_peers.as_ref())
+            .map(yo_mesh::Client::load)
+            .transpose()
+            .map_err(|e| format!("mesh peers: {e}"))?
+            .filter(|c| c.peers().next().is_some());
         let edge = config.corrosion.as_ref().and_then(|c| c.upstream.as_deref()).map(edge::Edge::new).transpose()?;
         let mut db = Db::configured(&config).map_err(|e| format!("database: {e}"))?;
         db.add_devices = config.add_devices;
@@ -282,6 +292,7 @@ impl Hub {
         let gateway = ohttp::Gateway::new(&config.ohttp_keys)?;
         let hub = Arc::new(Hub {
             edge,
+            peers,
             ohttp: gateway,
             db,
             blobs: Arc::new(blobs),
@@ -405,13 +416,16 @@ impl Hub {
                 }
             }
         };
-        let router = inner
+        let mut router = inner
             .route(api::OHTTP, post(wrapped).layer(DefaultBodyLimit::max(limits::MAX_OHTTP_REQUEST)))
             .route(api::OHTTP_KEYS_PATH, get(keys))
             .route(
                 &format!("{}/{{ticket}}", api::TICKETS),
                 put(transfer.clone()).get(transfer).layer(DefaultBodyLimit::disable()),
             );
+        if self.config.corrosion.is_some() {
+            router = router.route("/v1/peer/inbox/{device}", get(mail::peer_inbox).with_state(self.clone()));
+        }
         if let Some(edge) = &self.edge {
             Router::new().fallback_service(router).layer(from_fn_with_state(edge.clone(), edge::route))
         } else {
@@ -483,6 +497,9 @@ impl Hub {
             self.links.forget_expired(self.clock_ms());
             if let Some(gateway) = &self.ohttp {
                 gateway.forget_expired(self.clock_ms());
+            }
+            if let Some(agent) = &self.db.agent {
+                agent.recent_acks.lock().unwrap().expire();
             }
             self.forget_pushes(std::time::Instant::now());
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
@@ -592,11 +609,11 @@ impl Hub {
 
     /// The hourly cleanup at `now`: envelopes past their time (4.1), blobs past theirs and files no blob owns (4.3).
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
+        let limits = &self.config.limits;
+        self.db.prune(now, limits.envelope_ttl_days * DAY_MS)?;
         if self.edge.is_some() {
             return Ok(());
         }
-        let limits = &self.config.limits;
-        self.db.prune(now, limits.envelope_ttl_days * DAY_MS)?;
         for blob in self.db.prune_blobs(now, limits.blob_ttl_days * DAY_MS)? {
             self.blobs.remove(&blob);
         }

@@ -311,18 +311,83 @@ async fn server(
 
 type View = Option<BTreeMap<String, Peer>>;
 
+async fn connect(tls: &TlsConnector, name: &str, addr: SocketAddr) -> Result<Sender> {
+    let stream = tls.connect(ServerName::try_from(name.to_owned())?, TcpStream::connect(addr).await?).await?;
+    if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
+        return Err("h2 required".into());
+    }
+    let (tx, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+        .adaptive_window(true)
+        .handshake(TokioIo::new(stream))
+        .await?;
+    tokio::spawn(connection);
+    Ok(tx)
+}
+
+/// An outbound-only mesh connection pool. Concurrent requests share HTTP/2 streams.
+pub struct Client {
+    tls: TlsConnector,
+    peers: BTreeMap<String, (SocketAddr, tokio::sync::Mutex<Option<Sender>>)>,
+}
+
+impl Client {
+    pub fn new(config: &Config) -> Result<Self> {
+        Self::configured(&config.name, &config.peers, config.certs.as_deref())
+    }
+
+    /// Read only the outbound fields. The same file may also configure a listening mesh node.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct Outbound {
+            name: String,
+            peers: BTreeMap<String, SocketAddr>,
+            certs: Option<PathBuf>,
+        }
+        let config: Outbound = toml::from_str(&fs::read_to_string(path)?)?;
+        Self::configured(&config.name, &config.peers, config.certs.as_deref())
+    }
+
+    fn configured(node: &str, addresses: &BTreeMap<String, SocketAddr>, dir: Option<&Path>) -> Result<Self> {
+        let certs = load_certs(dir)?;
+        let mut peers = BTreeMap::new();
+        for (name, addr) in addresses {
+            if name != node {
+                rustls::pki_types::DnsName::try_from(name.as_str())?;
+                peers.insert(name.clone(), (*addr, Default::default()));
+            }
+        }
+        Ok(Self { tls: TlsConnector::from(client_config(&certs)?), peers })
+    }
+
+    pub fn peers(&self) -> impl Iterator<Item = &str> {
+        self.peers.keys().map(String::as_str)
+    }
+
+    pub async fn send(&self, peer: &str, mut req: Request<Bytes>, deadline: Duration) -> Result<Response<Bytes>> {
+        let (addr, cached) = self.peers.get(peer).ok_or("unknown mesh peer")?;
+        timeout(deadline, async {
+            let mut sender = {
+                let mut slot = cached.lock().await;
+                if slot.as_ref().is_none_or(Sender::is_closed) {
+                    *slot = Some(connect(&self.tls, peer, *addr).await?);
+                }
+                slot.as_ref().unwrap().clone()
+            };
+            let path = req.uri().path_and_query().ok_or("missing path")?;
+            *req.uri_mut() = format!("https://{peer}{path}").parse()?;
+            req.headers_mut().insert(forward::MARKER, "1".parse()?);
+            req.headers_mut().entry("cf-connecting-ip").or_insert("127.0.0.1".parse()?);
+            let (parts, body) = sender.send_request(req.map(forward::full)).await?.into_parts();
+            let bytes = Limited::new(body, 8 << 20).collect().await?.to_bytes();
+            Ok(Response::from_parts(parts, bytes))
+        })
+        .await?
+    }
+}
+
 async fn ping(sender: &mut Option<Sender>, tls: &TlsConnector, name: &str, addr: SocketAddr) -> Result<(f64, View)> {
     if sender.is_none() {
-        let stream = tls.connect(ServerName::try_from(name.to_owned())?, TcpStream::connect(addr).await?).await?;
-        if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
-            return Err("h2 required".into());
-        }
-        let (tx, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-            .adaptive_window(true)
-            .handshake(TokioIo::new(stream))
-            .await?;
-        tokio::spawn(connection);
-        *sender = Some(tx);
+        *sender = Some(connect(tls, name, addr).await?);
     }
     let req = Request::get(format!("https://{name}/ping")).body(forward::full(Bytes::new()))?;
     let start = Instant::now();
@@ -467,12 +532,16 @@ pub async fn run_with(config: Config, shutdown: impl Future<Output = ()>) -> Res
     }
 }
 
-fn start(config: Config, monitored: Option<(&str, watch::Sender<relay::Upstream>)>) -> Result<JoinSet<()>> {
-    let dir = config
-        .certs
+fn load_certs(configured: Option<&Path>) -> Result<Certs> {
+    let dir = configured
+        .map(Path::to_owned)
         .or_else(|| env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from))
         .ok_or("set certs or CREDENTIALS_DIRECTORY")?;
-    let certs = Certs::load(&dir)?;
+    Certs::load(&dir)
+}
+
+fn start(config: Config, monitored: Option<(&str, watch::Sender<relay::Upstream>)>) -> Result<JoinSet<()>> {
+    let certs = load_certs(config.certs.as_deref())?;
     let acceptor = TlsAcceptor::from(server_config(&certs)?);
     let connector = TlsConnector::from(client_config(&certs)?);
     let status = config.status.unwrap_or_else(|| {

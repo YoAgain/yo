@@ -53,6 +53,7 @@ struct MinuteCount {
 
 pub(crate) struct Agent {
     pub config: CorrosionConfig,
+    pub recent_acks: Mutex<crate::mail::RecentAcks>,
     ids: Ids,
     writes: mpsc::Sender<Job>,
     counts: Mutex<std::collections::BTreeMap<(i64, String), MinuteCount>>,
@@ -73,7 +74,11 @@ impl Agent {
         }
         attach(conn, &config.db)?;
         conn.execute_batch(
-            "DROP VIEW temp.inbox_message;
+            "CREATE TABLE IF NOT EXISTS main.peer_inbox_receipt (
+                device_id BLOB NOT NULL, id INTEGER NOT NULL, seen_at INTEGER NOT NULL,
+                PRIMARY KEY(device_id, id)
+            );
+            DROP VIEW temp.inbox_message;
             CREATE TEMP VIEW inbox_message AS SELECT * FROM corro.message",
         )?;
         let ids = Ids { index: config.index, last: AtomicI64::new(-1) };
@@ -112,7 +117,8 @@ impl Agent {
                 }
             })
             .map_err(error)?;
-        let agent = Self { config: config.clone(), ids, writes, counts: Mutex::default() };
+        let agent =
+            Self { config: config.clone(), ids, writes, counts: Mutex::default(), recent_acks: Mutex::default() };
         if config.upstream.is_some() {
             let tx = conn.transaction()?;
             for table in [

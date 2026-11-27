@@ -2289,7 +2289,7 @@ impl Client {
         }
         // The inbox's answer is processed in `sync_end`, without `receive_all`: the storage first.
         self.storage_fetched()?;
-        let path = api::inbox_path(wait_s);
+        let path = receive::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
         // Idempotent GET: a signature collision after a crash is retried by sync_end.
         let wait = InboxWait { transport: self.transport.clone(), path, headers, time };
@@ -2813,9 +2813,37 @@ mod handle_tests {
             transport.0.lock().unwrap().iter().filter(|(path, _)| path.starts_with(api::INBOX)).cloned().collect();
         assert_eq!(
             polls.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
-            [api::inbox_path(25), api::inbox_path(0)]
+            [api::inbox_path(25), receive::inbox_path(0)]
         );
         assert_ne!(polls[0].1, polls[1].1, "signed anew, never the cut-off request's signature again");
+    }
+
+    #[test]
+    fn short_sync_and_receive_all_process_both_inbox_answers() {
+        struct Split;
+        impl Transport for Split {
+            fn request(
+                &self,
+                _: &str,
+                path: &str,
+                _: &[(String, String)],
+                _: &[u8],
+            ) -> std::result::Result<Response, String> {
+                let (status, id) = match path {
+                    "/v1/inbox?wait=0&split=1" => (206, 1),
+                    "/v1/inbox?wait=0&split=2" => (200, 2),
+                    _ => return Err("offline".into()),
+                };
+                let items = vec![api::InboxItem { id, received_ms: 0, envelope: Vec::new().into() }];
+                Ok(Response { status, body: encode(&api::Inbox { items, prekeys_left: 10 }) })
+            }
+        }
+        let mut client = Client::registering(Arc::new(Split), "SPLIT", None, None, None, Push::none(), None).unwrap();
+        client.state.storage_fetched = true;
+        client.sync(0).unwrap();
+        assert_eq!(client.unacked, [1, 2]);
+        client.receive_all(0).unwrap();
+        assert_eq!(client.received_ids, [1, 2]);
     }
 
     struct Offline;

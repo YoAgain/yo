@@ -3,6 +3,8 @@
 //!   YO_LISTEN             address, default 127.0.0.1:8080 (behind a Cloudflare Tunnel); a socket from systemd
 //!                         (LISTEN_FDS, `yo-hub.socket`) goes first. Relay default 127.0.0.1:8090
 //!   YO_MESH_CONFIG        optional mesh.toml for the live hub (certs or CREDENTIALS_DIRECTORY)
+//!   YO_MESH_PEERS         optional mesh.toml for Corrosion inbox reads from other hubs
+//!   YO_PEER_TOKEN         shared peer inbox credential, required for those reads
 //!   YO_RELAY_STATUS       relay status address, default 127.0.0.1:8091
 //!   YO_DB                 SQLite file, default yo-hub.sqlite
 //!   YO_CORROSION_API      local Corrosion HTTP origin; unset for a standalone hub
@@ -162,6 +164,8 @@ fn config() -> Result<(Config, String), String> {
                     .filter(|i| *i < 16)
                     .ok_or("YO_HUB_INDEX must be 0..15")?,
                 upstream: var("YO_EDGE_UPSTREAM"),
+                mesh_peers: var("YO_MESH_PEERS").map(Into::into),
+                peer_token: var("YO_PEER_TOKEN").filter(|t| !t.is_empty()),
             })
         } else {
             None

@@ -47,8 +47,8 @@ fn count(path: &Path, sql: &str) -> Option<i64> {
 }
 
 impl Cluster {
-    async fn start(binary: &str) -> (Self, Vec<CorrosionConfig>) {
-        let root = std::env::temp_dir().join(format!("yo-corro-{}-{}", std::process::id(), now_ms()));
+    async fn start(binary: &str, joined: bool) -> (Self, Vec<CorrosionConfig>) {
+        let root = std::env::temp_dir().join(format!("yo-corro-{}-{}-{joined}", std::process::id(), now_ms()));
         fs::create_dir(&root).unwrap();
         let schema = root.join("schema");
         fs::create_dir(&schema).unwrap();
@@ -64,7 +64,7 @@ impl Cluster {
             let db = dir.join("data.db");
             let conf = dir.join("config.toml");
             let api = listener.local_addr().unwrap();
-            let bootstrap = &peers[1 - i];
+            let bootstrap = if joined { format!("{:?}", peers[1 - i]) } else { String::new() };
             let addr = socket.local_addr().unwrap();
             let admin = dir.join("a.sock");
             fs::write(
@@ -76,7 +76,7 @@ schema_paths = [{schema:?}]
 cache_size_kib = -16384
 [gossip]
 addr = "{addr}"
-bootstrap = ["{bootstrap}"]
+bootstrap = [{bootstrap}]
 plaintext = true
 [api]
 addr = "{api}"
@@ -96,6 +96,8 @@ path = {admin:?}
                 hub: format!("hub{i}"),
                 index: i as u8,
                 upstream: None,
+                mesh_peers: None,
+                peer_token: None,
             });
         }
         (cluster, configs)
@@ -170,7 +172,7 @@ impl Phone {
         ]
     }
 
-    async fn wrapped_get(&self, url: &str, path: &str) -> Vec<u8> {
+    async fn wrapped_get(&self, url: &str, path: &str, status: u16) -> Vec<u8> {
         use yo_hub::config::{TEST_OHTTP_KEY, TEST_OHTTP_KEY_ID};
         use yoip::net::limits;
         let mut message = bhttp::Message::request(b"GET".to_vec(), b"https".to_vec(), Vec::new(), path.into());
@@ -197,7 +199,7 @@ impl Phone {
             .unwrap();
         let plain = opener.decapsulate(&response).unwrap();
         let reply = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(plain)).unwrap();
-        assert_eq!(reply.control().status().unwrap().code(), 200);
+        assert_eq!(reply.control().status().unwrap().code(), status);
         reply.content().to_vec()
     }
 
@@ -207,7 +209,11 @@ impl Phone {
         for (name, value) in headers {
             req = req.header(name, value);
         }
-        req.body(body).send().await.unwrap().error_for_status().unwrap().bytes().await.unwrap()
+        let response = req.body(body).send().await.unwrap().error_for_status().unwrap();
+        if path.starts_with(api::INBOX) && path != api::INBOX_ACK {
+            assert_eq!(response.status(), 200);
+        }
+        response.bytes().await.unwrap()
     }
 
     async fn inbox(&self, url: &str, wait: u64) -> api::Inbox {
@@ -240,9 +246,11 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
         eprintln!("skipping: set YO_CORROSION_BIN");
         return;
     };
-    let (cluster, mut configs) = Cluster::start(&bin).await;
+    let (cluster, mut configs) = Cluster::start(&bin, true).await;
     let (upstream, authority) = listener().await;
     configs[1].upstream = Some(authority.clone());
+    let edge_token = yoip::b64(&rand::random::<[u8; 32]>());
+    configs[1].peer_token = Some(edge_token.clone());
     let config = |i: usize| {
         let mut c = Config::for_tests();
         c.db_path = cluster.root.join(format!("hub{i}.db")).to_str().unwrap().into();
@@ -277,8 +285,8 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     let other = Phone::register(&authority, "ANOTHERBOX", 2).await;
     assert_eq!(count(Path::new(&configs[1].db), "SELECT count(*) FROM account"), Some(0));
     other.deliver(&edge_url).await;
-    let forwarded: api::Inbox = yoip::decode(&other.wrapped_get(&edge_url, api::INBOX).await).unwrap();
-    let devices = other.wrapped_get(&edge_url, api::DEVICES).await;
+    let forwarded: api::Inbox = yoip::decode(&other.wrapped_get(&edge_url, api::INBOX, 200).await).unwrap();
+    let devices = other.wrapped_get(&edge_url, api::DEVICES, 200).await;
     assert_eq!(yoip::decode::<api::OwnDevices>(&devices).unwrap().devices.len(), 1);
     assert_eq!(forwarded.items.len(), 2);
     assert_eq!(forwarded.items[0].id, 42);
@@ -294,6 +302,8 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     until(|| count(Path::new(&configs[1].db), "SELECT count(*) FROM account_device") == Some(2)).await;
     authority_task.abort();
     let _ = authority_task.await;
+    let denied = reqwest::get(format!("{edge_url}/v1/peer/inbox/{}", yoip::b64(&phone.device))).await.unwrap();
+    assert_eq!(denied.status(), 404, "unauthorized peer reads stay on the edge");
     let polling = phone.clone();
     let poll_url = url.clone();
     let poll = tokio::spawn(async move { polling.inbox(&poll_url, 30).await });
@@ -304,7 +314,21 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     let id = inbox.items[0].id;
     assert_eq!((id >> 18) & 15, 1);
     assert_eq!(phone.inbox(&edge_url, 0).await.items, inbox.items);
-    let wrapped: api::Inbox = yoip::decode(&phone.wrapped_get(&edge_url, api::INBOX).await).unwrap();
+    let peer = reqwest::Client::new()
+        .get(format!("{edge_url}/v1/peer/inbox/{}", yoip::b64(&phone.device)))
+        .header("yo-peer-token", edge_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let peer: api::Inbox = yoip::decode(&peer).unwrap();
+    assert_eq!(peer.prekeys_left, 0);
+    assert_eq!(peer.items, inbox.items);
+    let wrapped: api::Inbox = yoip::decode(&phone.wrapped_get(&edge_url, api::INBOX, 200).await).unwrap();
     assert_eq!(wrapped.items, inbox.items);
     phone.signed(&edge_url, reqwest::Method::POST, api::INBOX_ACK, yoip::encode(&api::Ack { ids: vec![id] })).await;
     until(|| count(Path::new(&configs[0].db), "SELECT count(*) FROM message") == Some(0)).await;
@@ -333,4 +357,170 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     let restored = local.fetch(&phone.device, 10).unwrap();
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].0, rollback_id);
+}
+
+// One real mesh listener forwards to B. A uses the outbound-only client.
+async fn peer_mesh(
+    root: &Path,
+    forward: SocketAddr,
+    stalled: SocketAddr,
+) -> (PathBuf, tokio::task::JoinHandle<yo_mesh::Result<()>>) {
+    use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair};
+    let dir = root.join("tls");
+    fs::create_dir(&dir).unwrap();
+    let mut ca = CertificateParams::default();
+    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let key = KeyPair::generate().unwrap();
+    fs::write(dir.join("ca.crt"), ca.self_signed(&key).unwrap().pem()).unwrap();
+    let issuer = Issuer::new(ca, key);
+    let node = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec!["peer".into()]).unwrap();
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+    fs::write(dir.join("node.key"), node.serialize_pem()).unwrap();
+    fs::write(dir.join("node.crt"), params.signed_by(&node, &issuer).unwrap().pem()).unwrap();
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listen = socket.local_addr().unwrap();
+    drop(socket);
+    let path = root.join("mesh.toml");
+    fs::write(&path, format!("name='reader'\ncerts={dir:?}\n[peers]\npeer='{listen}'\nstalled='{stalled}'\n")).unwrap();
+    let task = tokio::spawn(yo_mesh::run(yo_mesh::Config {
+        name: "peer".into(),
+        listen,
+        peers: Default::default(),
+        certs: Some(dir),
+        forward: Some(forward),
+        status: Some(root.join("mesh-status")),
+        history: None,
+    }));
+    until(|| std::net::TcpStream::connect(listen).is_ok()).await;
+    (path, task)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_only_ack_survives_replication() {
+    let Ok(bin) = std::env::var("YO_CORROSION_BIN") else { return };
+    let (mut cluster, mut agents) = Cluster::start(&bin, false).await;
+    let (socket_b, origin_b) = listener().await;
+    // This peer accepts TCP but never completes TLS. Every fan-out must still return B's answer.
+    let stalled = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (mesh_path, mesh) =
+        peer_mesh(&cluster.root, socket_b.local_addr().unwrap(), stalled.local_addr().unwrap()).await;
+    let token = yoip::b64(&rand::random::<[u8; 32]>());
+    agents[0].mesh_peers = Some(mesh_path);
+    for agent in &mut agents {
+        agent.peer_token = Some(token.clone());
+    }
+    let config = |i: usize| {
+        let mut c = Config::for_tests();
+        c.db_path = cluster.root.join(format!("hub{i}.db")).to_str().unwrap().into();
+        c.blobs.dir = cluster.root.join(format!("blobs{i}"));
+        c.corrosion = Some(agents[i].clone());
+        c
+    };
+    let a = config(0);
+    let b = config(1);
+    let db_b = b.db_path.clone();
+    let hub_b = Hub::new(b, Arc::new(push::Recorder::default())).unwrap();
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let router = hub_b
+        .router()
+        .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            if req.uri().path().starts_with("/v1/peer/") {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            async move { next.run(req).await }
+        }))
+        .into_make_service_with_connect_info::<SocketAddr>();
+    let server_b = tokio::spawn(async move { axum::serve(socket_b, router).await.unwrap() });
+    let phone = Phone::register(&origin_b, "PEERBOX", 1).await;
+    // Both authorities know the same device before the disconnected writes.
+    Connection::open(&db_b).unwrap().execute("VACUUM INTO ?", [&a.db_path]).unwrap();
+    let db_a = PathBuf::from(&a.db_path);
+    let hub_a = Hub::new(a, Arc::new(push::Recorder::default())).unwrap();
+    let (socket_a, origin_a) = listener().await;
+    let router = hub_a.router().into_make_service_with_connect_info::<SocketAddr>();
+    let server_a = tokio::spawn(async move { axum::serve(socket_a, router).await.unwrap() });
+    phone.deliver(&origin_b).await;
+    let remote = phone.inbox(&origin_b, 0).await.items;
+    assert_eq!(remote.len(), 1);
+    assert_eq!(count(Path::new(&agents[0].db), "SELECT count(*) FROM message"), Some(0));
+    assert!(phone.inbox(&origin_a, 1).await.items.is_empty());
+    phone.deliver(&origin_a).await;
+    let split = |step: u8| {
+        let phone = &phone;
+        let url = &origin_a;
+        async move {
+            let path =
+                if step == 1 { format!("{}?wait=0&split=1", api::INBOX) } else { format!("{}?split=2", api::INBOX) };
+            let mut req = reqwest::Client::new().get(format!("{url}{path}"));
+            for (name, value) in phone.headers("GET", &path, &[]) {
+                req = req.header(name, value);
+            }
+            let reply = req.send().await.unwrap();
+            assert_eq!(reply.status().as_u16(), if step == 1 { 206 } else { 200 });
+            yoip::decode::<api::Inbox>(&reply.bytes().await.unwrap()).unwrap().items
+        }
+    };
+    let local = split(1).await;
+    assert_eq!(local.len(), 1);
+    assert_ne!(local[0].id, remote[0].id);
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "long polls and split=1 never queried B");
+    assert_eq!(tokio::time::timeout(Duration::from_secs(2), split(2)).await.unwrap(), remote);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    let wrapped: api::Inbox =
+        yoip::decode(&phone.wrapped_get(&origin_a, "/v1/inbox?wait=0&split=1", 206).await).unwrap();
+    assert_eq!(wrapped.items, local);
+    let endpoint = format!("/v1/peer/inbox/{}", yoip::b64(&phone.device));
+    assert!(!yo_hub::ohttp::served_inside(&endpoint));
+    phone.wrapped_get(&origin_b, &endpoint, 404).await;
+    let denied = reqwest::Client::new()
+        .get(format!("{origin_b}{endpoint}"))
+        .header("yo-peer-token", "wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+    let without_peers = phone.signed(&origin_b, reqwest::Method::GET, "/v1/inbox?wait=0&split=1", vec![]).await;
+    assert_eq!(yoip::decode::<api::Inbox>(&without_peers).unwrap().items, remote);
+    let followup = phone.signed(&origin_b, reqwest::Method::GET, "/v1/inbox?split=2", vec![]).await;
+    assert!(yoip::decode::<api::Inbox>(&followup).unwrap().items.is_empty());
+    let mut both = [local.clone(), remote.clone()].concat();
+    both.sort_by_key(|item| item.id);
+    assert_eq!(phone.inbox(&origin_a, 0).await.items, both);
+    let id = remote[0].id;
+    let other = Phone::register(&origin_a, "OTHERBOX", 2).await;
+    let ack = yoip::encode(&api::Ack { ids: vec![id] });
+    other.signed(&origin_a, reqwest::Method::POST, api::INBOX_ACK, ack.clone()).await;
+    phone.signed(&origin_a, reqwest::Method::POST, api::INBOX_ACK, ack).await;
+    assert_eq!(phone.inbox(&origin_b, 0).await.items, remote);
+    assert_eq!(phone.inbox(&origin_a, 0).await.items, local);
+    phone.signed(&origin_a, reqwest::Method::POST, api::INBOX_ACK, yoip::encode(&api::Ack { ids: vec![id] })).await;
+    hub_a.flush_events(now_ms()).unwrap();
+    assert_eq!(count(&db_a, "SELECT sum(value) FROM stat WHERE metric='yo-out'"), Some(1));
+    assert_eq!(count(&db_a, "SELECT coalesce(sum(value),0) FROM stat WHERE metric LIKE 'latency-%'"), Some(0));
+    // An independent delivery in each direction witnesses replication after reconnecting.
+    phone.deliver(&origin_b).await;
+    let witness = phone.inbox(&origin_b, 0).await.items.into_iter().find(|item| item.id != id).unwrap();
+    let mut survivors = local;
+    survivors.push(witness);
+    survivors.sort_by_key(|item| item.id);
+    let conf_a = fs::read_to_string(cluster.root.join("0/config.toml")).unwrap();
+    let addr_a = conf_a.split("[gossip]\naddr = ").nth(1).unwrap().lines().next().unwrap();
+    let conf_b = cluster.root.join("1/config.toml");
+    let joined = fs::read_to_string(&conf_b).unwrap().replace("bootstrap = []", &format!("bootstrap = [{addr_a}]"));
+    cluster.agents[1].kill().unwrap();
+    cluster.agents[1].wait().unwrap();
+    fs::write(&conf_b, joined).unwrap();
+    cluster.agents[1] = Command::new(&bin).arg("-c").arg(&conf_b).arg("agent").spawn().unwrap();
+    let converged =
+        format!("SELECT count(*)=2 AND min(id)={} AND max(id)={} FROM message", survivors[0].id, survivors[1].id);
+    until(|| agents.iter().all(|a| count(Path::new(&a.db), &converged) == Some(1))).await;
+    assert_eq!(phone.inbox(&origin_a, 0).await.items, survivors);
+    assert_eq!(phone.inbox(&origin_b, 0).await.items, survivors);
+    for task in [server_a, server_b] {
+        task.abort();
+    }
+    mesh.abort();
 }

@@ -1762,6 +1762,39 @@ impl Db {
             .collect()
     }
 
+    /// Remember which remote ids this device can acknowledge before replication arrives.
+    pub(crate) fn peer_items(
+        &self,
+        device: &DeviceId,
+        items: Vec<api::InboxItem>,
+        only_missing: bool,
+        now: u64,
+    ) -> rusqlite::Result<Vec<api::InboxItem>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut found = Vec::new();
+        {
+            let mut local = tx.prepare_cached("SELECT 1 FROM corro.message WHERE id=? AND device_id=?")?;
+            let mut receipt = tx.prepare_cached("INSERT OR REPLACE INTO peer_inbox_receipt VALUES(?,?,?)")?;
+            let recent = self.agent.as_ref().unwrap().recent_acks.lock().unwrap();
+            for item in items {
+                if recent.contains(device, item.id) {
+                    continue;
+                }
+                if local.exists(params![item.id, device])? {
+                    if only_missing {
+                        continue;
+                    }
+                } else {
+                    receipt.execute(params![device, item.id, now])?;
+                }
+                found.push(item);
+            }
+        }
+        tx.commit()?;
+        Ok(found)
+    }
+
     /// A device's number among its user's devices (spec 3).
     pub fn device_number(&self, device: &DeviceId) -> rusqlite::Result<Option<u8>> {
         row(&self.conn(), "SELECT number FROM account_device WHERE id = ?1", [device], |row| row.get(0))
@@ -1772,6 +1805,13 @@ impl Db {
     /// Deletes the device's envelopes of `ids`; when each one deleted was accepted (ms), for the latency counts.
     /// Deletes the acknowledged envelopes; returns when each was accepted, and whether the device is a bot's.
     pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<(Vec<u64>, bool)> {
+        let (times, _, bot) = self.ack_inbox(device, ids)?;
+        Ok((times, bot))
+    }
+
+    pub(crate) fn ack_inbox(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<(Vec<u64>, usize, bool)> {
+        let mut remote = 0;
+        let mut acknowledged = Vec::new();
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut acked = Vec::new();
@@ -1785,10 +1825,27 @@ impl Db {
                     .prepare(&format!("SELECT id, received_at FROM corro.message WHERE {filter}"))?
                     .query_map(rusqlite::params_from_iter(&args), |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?;
-                acked.extend(ids.iter().filter_map(|id| received.remove(id)));
+                let mut batch = Vec::new();
+                let device_hex = crate::blobs::hex(device);
+                for &id in ids {
+                    let offered =
+                        tx.execute("DELETE FROM peer_inbox_receipt WHERE device_id=? AND id=?", params![device, id])?;
+                    if let Some(time) = received.remove(&id) {
+                        acked.push(time);
+                        acknowledged.push(id);
+                    } else if offered != 0 {
+                        batch.push(serde_json::json!([
+                            "INSERT OR IGNORE INTO message(id, device_id) VALUES (?, unhex(?))",
+                            [id, device_hex]
+                        ]));
+                        remote += 1;
+                        acknowledged.push(id);
+                    }
+                }
                 let mut args = vec![serde_json::json!(crate::blobs::hex(device))];
                 args.extend(ids.iter().map(|&id| serde_json::json!(id as i64)));
-                agent.write(vec![serde_json::json!([format!("DELETE FROM message WHERE {filter}"), args])])?;
+                batch.push(serde_json::json!([format!("DELETE FROM message WHERE {filter}"), args]));
+                agent.write(batch)?;
             }
         } else {
             let mut delete =
@@ -1802,7 +1859,10 @@ impl Db {
         let app: Option<String> =
             tx.query_row("SELECT app FROM account_device WHERE id = ?1", [device], |r| r.get(0)).optional()?.flatten();
         tx.commit()?;
-        Ok((acked, is_bot_app(app.as_deref())))
+        if let Some(agent) = &self.agent {
+            agent.recent_acks.lock().unwrap().remember(*device, &acknowledged);
+        }
+        Ok((acked, remote, is_bot_app(app.as_deref())))
     }
 
     // ---- upkeep and audit ----
@@ -1812,6 +1872,9 @@ impl Db {
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
+        if self.agent.is_some() {
+            conn.execute("DELETE FROM peer_inbox_receipt WHERE seen_at < ?", [before])?;
+        }
         if self.edge() {
             return Ok(0);
         }

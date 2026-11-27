@@ -1,6 +1,14 @@
 use super::*;
 use std::collections::VecDeque;
 
+pub(super) fn inbox_path(wait: u64) -> String {
+    if wait == 0 {
+        format!("{}&split=1", api::inbox_path(0))
+    } else {
+        api::inbox_path(wait)
+    }
+}
+
 impl Client {
     /// Fetches and processes the inbox until it is empty. Transport failures stop it with nothing lost.
     pub(super) fn receive_all(&mut self, wait_s: u64) -> Result<()> {
@@ -9,15 +17,7 @@ impl Client {
         self.acknowledge_inbox()?;
         let mut wait = wait_s;
         loop {
-            let path = api::inbox_path(wait);
-            let (headers, mut time) = self.sign("GET", &path, &[]);
-            let mut response = self.unsigned("GET", &path, &headers, &[])?;
-            if response.status == status::UNAUTHORIZED {
-                // As `signed`: once more, signed anew.
-                let (headers, again) = self.sign("GET", &path, &[]);
-                (response, time) = (self.signed_again(self.unsigned("GET", &path, &headers, &[])?)?, again);
-            }
-            // The last batch is acknowledged only after `finish` has saved and handed out its events.
+            let (response, time) = self.fetch_inbox(&inbox_path(wait))?;
             let (more, ids) = self.inbox(response, time, true)?;
             self.received_ids.extend(ids);
             if !more {
@@ -27,6 +27,17 @@ impl Client {
             }
             wait = 0;
         }
+    }
+
+    fn fetch_inbox(&mut self, path: &str) -> Result<(Response, u64)> {
+        let (headers, mut time) = self.sign("GET", path, &[]);
+        let mut response = self.unsigned("GET", path, &headers, &[])?;
+        if response.status == status::UNAUTHORIZED {
+            // As `signed`: once more, signed anew.
+            let (headers, again) = self.sign("GET", path, &[]);
+            (response, time) = (self.signed_again(self.unsigned("GET", path, &headers, &[])?)?, again);
+        }
+        Ok((response, time))
     }
 
     /// The storage, fetched once before anything is received, so its blocks hold from the first message on.
@@ -49,7 +60,36 @@ impl Client {
     /// more. The answer may be older than the state: seen envelopes are skipped, an older prekey count ignored. With
     /// `later`, a complete answer is neither saved nor acknowledged here: its ids are returned for `sync_end`.
     pub(super) fn inbox(&mut self, response: Response, requested_at: u64, later: bool) -> Result<(bool, Vec<u64>)> {
-        let response = expect(response, status::OK)?;
+        let partial = response.status == 206;
+        let (local_full, mut ids) = self.inbox_batch(response, requested_at, later)?;
+        if !partial {
+            return Ok((local_full, ids));
+        }
+        let followup = self
+            .fetch_inbox(&format!("{}&split=2", api::inbox_path(0)))
+            .and_then(|(answer, time)| self.inbox_batch(answer, time, later));
+        let (peer_full, peer_ids) = match followup {
+            Ok(batch) => batch,
+            Err(error) => {
+                // A passing failure still hands out the local batch once it is saved.
+                self.received_ids.extend(ids);
+                return Err(error);
+            }
+        };
+        ids.extend(peer_ids);
+        let more = local_full || peer_full;
+        if more && !ids.is_empty() {
+            // The shorter half also has to advance before asking for another page.
+            self.persist()?;
+            return Ok((self.ack(ids)?, Vec::new()));
+        }
+        Ok((more, ids))
+    }
+
+    fn inbox_batch(&mut self, response: Response, requested_at: u64, later: bool) -> Result<(bool, Vec<u64>)> {
+        if !matches!(response.status, status::OK | 206) {
+            return Err(refused(&response));
+        }
         let inbox: api::Inbox = decode(&response.body)?;
         self.refused_until_read.clear();
         if requested_at > self.prekeys_known_ms {

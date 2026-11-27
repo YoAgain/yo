@@ -101,7 +101,7 @@ impl Edge {
 
 pub(crate) async fn route(State(edge): State<Edge>, request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    if request.method() == Method::GET && path == "/" {
+    if path.starts_with("/v1/peer/") || (request.method() == Method::GET && path == "/") {
         return next.run(request).await;
     }
     let wrapped = request.method() == Method::POST && path == api::OHTTP;

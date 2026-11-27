@@ -51,4 +51,4 @@ hyper-util = { version = "=0.1.21", features = ["tokio", "client-legacy", "http1
 
 [dev-dependencies]
 ohttp = { version = "=0.8.0", default-features = false, features = ["client", "server", "rust-hpke"] }
-rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }

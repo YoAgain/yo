@@ -199,6 +199,8 @@ pub struct CorrosionConfig {
     pub hub: String,
     pub index: u8,
     pub upstream: Option<String>,
+    pub mesh_peers: Option<std::path::PathBuf>,
+    pub peer_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
