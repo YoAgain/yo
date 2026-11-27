@@ -535,7 +535,8 @@ sequenceDiagram
 - `yo-urgent: true|false` defaults to true; the hub MUST reject other values with `400`. Senders SHOULD mark Yo, photo and video urgent. Apps SHOULD show only urgent deliveries.
 - The hub SHOULD pace pushes at 1/s for contacts and 1/10 s for requests, and 1/10 min above 50 unacked.
 - The hub SHOULD send urgent pushes as APNs mutable-content alerts at priority 10, others as background at priority 5; FCM data-only HIGH/NORMAL.
-- A hub may push before the envelope has reached the place the device fetches from (hubs that take deliveries in several places and sync them in the background). A fetch after a push that finds nothing SHOULD long-poll a few seconds (3 s) before giving up.
+- Hubs that take deliveries in several places and sync them in the background MUST answer a short fetch (no `wait`) with what all of them hold for the device, asking the others within a short timeout (300 ms); one that does not answer is left out. A long poll does not ask them: an envelope that arrives wakes it. An ack at one hub removes the envelopes from all, also those not yet synced to it. A push stays a bare wake-up.
+- With `split=1` on a short fetch such a hub answers `206` at once with what it holds itself; the client then sends `split=2` at once, which the hub answers `200` when the others have answered or timed out, with only what they added. Without the parameter clients get one answer.
 ### 4.3 Storage
 **Blobs.** The 128-bit id inside the encrypted Yo grants access to the media ciphertext. The sender allots one fetch per recipient device.
 ```mermaid
