@@ -45,7 +45,7 @@ pub(crate) struct Delivery {
     /// From the operator's bots (the server's own services, or a bot account's request): `bot-yo`, not `yo-in`.
     pub from_bot: bool,
     /// A request (signed, 3.3): its pushes are paced by the requests' window, a contact's by the contacts'.
-    pub request: bool,
+    pub request: Option<limiter::SharedReservation>,
     pub stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
     /// Where its pushes are sent from.
     pub runtime: tokio::runtime::Handle,
@@ -93,6 +93,12 @@ pub(crate) fn writer(
         match delivered {
             Ok(outcomes) => {
                 for (delivery, mut outcome) in batch.into_iter().zip(outcomes) {
+                    let request = delivery.request.is_some();
+                    if let Some(reservation) = delivery.request {
+                        if matches!(outcome, Delivered::Stored(_)) {
+                            reservation.stored();
+                        }
+                    }
                     // Here, not in the request: one cut off after its envelope was stored still wakes and pushes.
                     if let (Delivered::Stored(devices), Some(hub)) = (&mut outcome, &hub) {
                         // Counted here too: a bot's inbox apart (every device a bot's), nothing of whose.
@@ -106,7 +112,7 @@ pub(crate) fn writer(
                             1,
                         );
                         hub.db.count_mesh_events(now, &[("accepted", 1)]);
-                        hub.woken(std::mem::take(devices), delivery.urgent, delivery.request, &delivery.runtime);
+                        hub.woken(std::mem::take(devices), delivery.urgent, request, &delivery.runtime);
                     }
                     let _ = delivery.stored.send(Ok(outcome));
                 }
@@ -114,6 +120,7 @@ pub(crate) fn writer(
             Err(error) => {
                 eprintln!("yo-hub: database: {error}");
                 for delivery in batch {
+                    drop(delivery.request);
                     let _ = delivery.stored.send(Err(()));
                 }
             }
@@ -364,13 +371,14 @@ fn inbox_items(rows: Vec<(u64, Vec<u8>, u64)>) -> Vec<api::InboxItem> {
         .collect()
 }
 
-pub(crate) fn authorize_peer(hub: &Hub, headers: &HeaderMap) -> Res<()> {
+pub(crate) fn peer_forwarded(hub: &Hub, headers: &HeaderMap) -> bool {
     use subtle::ConstantTimeEq;
     let token = hub.config.corrosion.as_ref().and_then(|c| c.peer_token.as_deref()).filter(|t| !t.is_empty());
-    if !token.zip(headers.get("yo-peer-token")).is_some_and(|(t, h)| bool::from(t.as_bytes().ct_eq(h.as_bytes()))) {
-        return Err(refuse(StatusCode::NOT_FOUND));
-    }
-    Ok(())
+    token.zip(headers.get("yo-peer-token")).is_some_and(|(t, h)| bool::from(t.as_bytes().ct_eq(h.as_bytes())))
+}
+
+pub(crate) fn authorize_peer(hub: &Hub, headers: &HeaderMap) -> Res<()> {
+    peer_forwarded(hub, headers).then_some(()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))
 }
 
 pub(crate) async fn peer_inbox(State(hub): Hubs, headers: HeaderMap, Path(device): Path<String>) -> Res<Vec<u8>> {
@@ -586,42 +594,39 @@ pub(crate) async fn post_envelope(
         let limits = &hub.config.limits;
         let key = format!("inbound:{}", yoip::b64(&user));
         let (size, per) = (limits.recipient_bytes_burst, limits.recipient_bytes_per_hour);
-        hub.limiter
-            .take_shaped(key, body.len() as u64, size, per, crate::request::HOUR)
-            .map_err(|ms| error::limited("recipient", Some(ms.div_ceil(60_000).clamp(1, 60) * 60_000)))?;
+        let cost = body.len() as u64;
+        let limited = |ms: u64| error::limited("recipient", Some(ms.div_ceil(60_000).clamp(1, 60) * 60_000));
+        hub.limiter.take_shaped(key.clone(), cost, size, per, crate::request::HOUR).map_err(limited)?;
+        if size != u64::MAX && hub.db.agent.is_some() {
+            hub.blocking(move |h| {
+                h.db.shared_take(&key, cost as f64, size as f64, per.max(1) as f64 / 3_600_000., crate::now_ms())
+            })
+            .await?
+            .map_err(limited)?;
+        }
     }
     // Taken now, before the writer stores it (requests sent together must not pass one token), given back unless stored.
-    let reserved = match &request {
-        Some(sender) => Some(
-            hub.requests
-                .reserve(sender, &user, hub.clock_ms())
-                .map_err(|(scope, ms)| error::limited(scope, Some(ms)))?,
-        ),
+    let reserved = match request {
+        Some(sender) if hub.db.agent.is_some() => {
+            let owner = hub.clone();
+            Some(hub.blocking(move |_| owner.reserve_request(&sender, &user)).await??)
+        }
+        Some(sender) => Some(hub.reserve_request(&sender, &user)?),
         None => None,
     };
-    let give_back = |hub: &Hub, reserved: Option<crate::limiter::Reserved>| {
-        if let Some(reserved) = reserved {
-            hub.requests.give_back(reserved, hub.clock_ms());
-        }
-    };
-    if let Err(full) = hub.db_room() {
-        give_back(&hub, reserved);
-        return Err(full);
-    }
+    hub.db_room()?;
 
     // To the writer; full (it is behind) or gone: "later", the envelope stays with its sender. Never waits here.
     let size = body.len();
     let queued = &hub.queued_bytes;
     if queued.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size > QUEUED_BYTES {
         queued.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
-        give_back(&hub, reserved);
         return Err(refuse(StatusCode::SERVICE_UNAVAILABLE));
     }
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
     let envelope = if copies.is_some() { Bytes::new() } else { body.clone() };
-    let sent = hub
-        .deliveries
+    hub.deliveries
         .try_send(Delivery {
             user,
             devices_hash,
@@ -631,25 +636,15 @@ pub(crate) async fn post_envelope(
             envelope,
             urgent,
             from_bot,
-            request: request.is_some(),
+            request: reserved,
             stored,
             runtime,
         })
         .map_err(|_| {
             queued.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
             refuse(StatusCode::SERVICE_UNAVAILABLE)
-        });
-    let outcome = match &sent {
-        Ok(()) => outcome.await.ok().and_then(Result::ok),
-        Err(_) => None,
-    };
-    let Some(outcome) = outcome else {
-        give_back(&hub, reserved);
-        return Err(sent.err().unwrap_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR)));
-    };
-    if !matches!(outcome, Delivered::Stored(_)) {
-        give_back(&hub, reserved);
-    }
+        })?;
+    let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
         Delivered::Stored(_) => {
             if let Some(sender) = request {

@@ -18,6 +18,8 @@ pub mod error;
 pub mod groups;
 mod help;
 pub mod limiter;
+mod shared;
+mod upkeep;
 // TRANSITION(#15): remove with the delivery checker.
 mod lifecycle;
 // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
@@ -269,7 +271,11 @@ impl Hub {
             .transpose()
             .map_err(|e| format!("mesh peers: {e}"))?
             .filter(|c| c.peers().next().is_some());
-        let edge = config.corrosion.as_ref().and_then(|c| c.upstream.as_deref()).map(edge::Edge::new).transpose()?;
+        let edge = config
+            .corrosion
+            .as_ref()
+            .and_then(|c| c.upstream.as_deref().map(|origin| edge::Edge::new(origin, c.peer_token.as_deref())))
+            .transpose()?;
         let mut db = Db::configured(&config).map_err(|e| format!("database: {e}"))?;
         db.add_devices = config.add_devices;
         let db = Arc::new(db);
@@ -430,6 +436,12 @@ impl Hub {
         if self.config.corrosion.is_some() {
             // TRANSITION(#15): remove with the delivery checker.
             router = router.route("/v1/peer/check", post(lifecycle::check).with_state(self.clone()));
+            if self.edge.is_none() {
+                router = router.route(
+                    "/v1/peer/upkeep",
+                    post(upkeep::receive).layer(DefaultBodyLimit::max(upkeep::BODY_LIMIT)).with_state(self.clone()),
+                );
+            }
             router = router.route("/v1/peer/inbox/{device}", get(mail::peer_inbox).with_state(self.clone()));
         }
         if self.edge.is_some() {
@@ -445,6 +457,8 @@ impl Hub {
         listener: tokio::net::TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
+        let publisher = self.db.agent.as_ref().map(|_| tokio::spawn(shared::run(self.clone())));
+        let upkeep = self.edge.as_ref().map(|_| tokio::spawn(upkeep::run(self.clone())));
         let pruner = tokio::spawn(self.clone().every_minute());
         let updates =
             self.config.corrosion.as_ref().map(|cfg| tokio::spawn(corrosion::watch(self.clone(), cfg.api.clone())));
@@ -491,7 +505,7 @@ impl Hub {
                 Ok(())
             }
         };
-        for task in [updates, mirror, checks, switch].into_iter().flatten() {
+        for task in [updates, mirror, checks, switch, publisher, upkeep].into_iter().flatten() {
             task.abort();
         }
         pruner.abort();
@@ -510,6 +524,10 @@ impl Hub {
                 gateway.forget_expired(self.clock_ms());
             }
             if let Some(agent) = &self.db.agent {
+                agent.touches.lock().unwrap().clear();
+                if let Ok(Err(error)) = self.blocking(|h| h.db.agent.as_ref().unwrap().prune_shared(now_ms())).await {
+                    eprintln!("yo-hub: prune shared admission: {error}");
+                }
                 agent.recent_acks.lock().unwrap().expire();
             }
             self.forget_pushes(std::time::Instant::now());
@@ -1262,7 +1280,7 @@ mod tests {
                 envelope,
                 urgent: true,
                 from_bot: false,
-                request: false,
+                request: None,
                 stored,
                 runtime,
             })
@@ -1291,7 +1309,7 @@ mod tests {
                 envelope,
                 urgent: true,
                 from_bot: true,
-                request: false,
+                request: None,
                 stored,
                 runtime,
             })

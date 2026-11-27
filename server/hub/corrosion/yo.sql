@@ -55,3 +55,18 @@ CREATE TABLE hub_setting (
     key TEXT PRIMARY KEY NOT NULL,
     value TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE hub_seen (
+    signature BLOB NOT NULL DEFAULT x'',
+    hub TEXT NOT NULL DEFAULT '',
+    signer BLOB NOT NULL DEFAULT x'',
+    expires INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(signature, hub)
+);
+CREATE INDEX hub_seen_expires ON hub_seen(hub, expires);
+CREATE TABLE hub_limit (
+    key TEXT NOT NULL DEFAULT '',
+    hub TEXT NOT NULL DEFAULT '',
+    slots TEXT NOT NULL DEFAULT '[]',
+    at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(key, hub)
+);

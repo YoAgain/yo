@@ -383,7 +383,10 @@ pub(crate) async fn get_backup(
     let by_code = signed_by(auth.code);
     match found {
         // Signed with the hub's key when asked with a nonce (spec 4.1): nobody between hands back an older record.
-        Some((record, _)) if (by_passkey || by_code) && hub.first_time(&id, &signature, time, now) => {
+        Some((record, _))
+            if (by_passkey || by_code)
+                && hub.first_time(&id, &signature, time, now, crate::mail::peer_forwarded(&hub, &headers)) =>
+        {
             Ok(hub.signed_answer(&headers, uri.path(), &[], record))
         }
         _ => Err(not_found()),

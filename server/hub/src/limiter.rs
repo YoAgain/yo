@@ -118,6 +118,65 @@ type Level = ((u8, Vec<u8>), f64, f64);
 /// The buckets a request took from (`Requests::reserve`).
 pub struct Reserved(Vec<(u8, Vec<u8>)>);
 
+const SCOPES: [&str; 3] = ["pair", "new", "recipient"];
+
+/// Holds both the local reservation and the exact shared slots to refund.
+pub(crate) struct SharedReservation {
+    hub: std::sync::Weak<crate::Hub>,
+    local: Reserved,
+    stored: bool,
+    keys: Vec<String>,
+    at: u64,
+}
+
+impl SharedReservation {
+    pub(crate) fn stored(mut self) {
+        self.stored = true;
+    }
+}
+
+impl Drop for SharedReservation {
+    fn drop(&mut self) {
+        if self.stored {
+            return;
+        }
+        if let Some(hub) = self.hub.upgrade() {
+            for key in &self.keys {
+                hub.db.shared_give_back(key, 1.0, self.at);
+            }
+            hub.requests.give_back(Reserved(std::mem::take(&mut self.local.0)), hub.clock_ms());
+        }
+    }
+}
+
+impl crate::Hub {
+    pub(crate) fn reserve_request(
+        self: &Arc<Self>,
+        sender: &[u8],
+        recipient: &[u8],
+    ) -> crate::error::Res<SharedReservation> {
+        let at = self.clock_ms();
+        let local = self
+            .requests
+            .reserve(sender, recipient, at)
+            .map_err(|(scope, ms)| crate::error::limited(scope, Some(ms)))?;
+        let mut reservation =
+            SharedReservation { hub: Arc::downgrade(self), stored: false, local, keys: Vec::new(), at };
+        if self.db.agent.is_some() {
+            for (kind, bytes) in &reservation.local.0 {
+                let (size, every) = self.requests.shape(*kind).unwrap();
+                let key = format!("req{kind}:{}", yoip::b64(bytes));
+                if let Err(ms) = self.db.shared_take(&key, 1.0, size, 1.0 / every, at) {
+                    let scope = SCOPES[*kind as usize];
+                    return Err(crate::error::limited(scope, Some(ms)));
+                }
+                reservation.keys.push(key);
+            }
+        }
+        Ok(reservation)
+    }
+}
+
 impl Requests {
     pub fn new(pair: u64, recipients: u64, per_recipient: u64, hour_ms: u64) -> Self {
         Requests { pair, recipients, per_recipient, hour_ms: hour_ms.max(1), buckets: Mutex::default() }
@@ -157,7 +216,7 @@ impl Requests {
         for ((kind, _), tokens, every) in levels {
             let wait = ((1.0 - tokens) * every).ceil() as u64;
             if *tokens < 1.0 && longest.is_none_or(|(_, longest)| wait > longest) {
-                longest = Some((["pair", "new", "recipient"][*kind as usize], wait));
+                longest = Some((SCOPES[*kind as usize], wait));
             }
         }
         longest
@@ -230,6 +289,15 @@ type Expiries = HashMap<[u8; 64], u64>;
 pub const REPLAY_PER_SIGNER: usize = 32_768;
 
 impl ReplayCache {
+    pub fn seen(&self, signer: &[u8; 16], signature: &[u8; 64], now: u64) -> bool {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(signer)
+            .and_then(|m| m.get(signature))
+            .is_some_and(|expiry| *expiry > now)
+    }
+
     /// Drops expired signatures: run periodically.
     pub fn forget_expired(&self, now_ms: u64) {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
@@ -323,6 +391,9 @@ mod tests {
     fn replay_once() {
         let cache = ReplayCache::default();
         assert!(cache.first_time([7; 16], [1; 64], 0, 100));
+        assert!(cache.seen(&[7; 16], &[1; 64], 99));
+        assert!(!cache.seen(&[7; 16], &[1; 64], 100));
+        assert!(!cache.seen(&[8; 16], &[1; 64], 10));
         assert!(!cache.first_time([7; 16], [1; 64], 50, 150));
         assert!(cache.first_time([7; 16], [1; 64], 101, 200));
     }

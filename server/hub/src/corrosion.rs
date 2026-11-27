@@ -59,6 +59,8 @@ pub(crate) struct Agent {
     pub checks: Mutex<crate::lifecycle::Checks>,
     // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
     pub switch: Option<crate::killswitch::Switch>,
+    pub shared: crate::shared::Shared,
+    pub touches: Mutex<crate::upkeep::Touches>,
     ids: Ids,
     writes: mpsc::Sender<Job>,
     mesh_events: Mutex<BTreeMap<(i64, String), u64>>,
@@ -125,6 +127,8 @@ impl Agent {
             .map_err(error)?;
         let agent = Self {
             config: config.clone(),
+            shared: Default::default(),
+            touches: Default::default(),
             ids,
             writes,
             mesh_events: Mutex::default(),
@@ -137,6 +141,7 @@ impl Agent {
         };
         if config.upstream.is_some() {
             let tx = conn.transaction()?;
+            tx.execute_batch(crate::upkeep::SCHEMA)?;
             for table in [
                 "message",
                 "account_prekey",

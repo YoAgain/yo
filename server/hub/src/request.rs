@@ -204,7 +204,7 @@ impl Hub {
         yoip::net::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
             .map_err(|_| unauthorized())?;
         // A replay is refused before it is counted: whoever repeats a device's request must not spend its budget.
-        if !self.first_time(&device_id, &signature, time, now) {
+        if !self.first_time(&device_id, &signature, time, now, crate::mail::peer_forwarded(self, headers)) {
             return Err(unauthorized());
         }
         // Counted only once the signature holds: a stranger who knows a device id must not spend its requests.
@@ -224,8 +224,23 @@ impl Hub {
     }
 
     /// Each signature once (the replay cache, per signer: a device, a backup's id), while its time is in the window.
-    pub(crate) fn first_time(&self, signer: &[u8; 16], signature: &[u8; 64], time: u64, now: u64) -> bool {
-        self.replay.first_time(*signer, *signature, now, time + limits::MAX_SKEW_MS + 1)
+    pub(crate) fn first_time(
+        &self,
+        signer: &[u8; 16],
+        signature: &[u8; 64],
+        time: u64,
+        now: u64,
+        forwarded: bool,
+    ) -> bool {
+        let expires = time + limits::MAX_SKEW_MS + 1;
+        self.replay.first_time(*signer, *signature, now, expires)
+            && self.db.unseen(*signer, *signature, expires, now, forwarded)
+    }
+
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+    pub(crate) fn replayed(&self, headers: &HeaderMap, now: u64) -> bool {
+        let device = header(headers, HEADER_DEVICE).and_then(b64_array);
+        device.zip(signature_of(headers, now)).is_some_and(|(id, (_, sig))| self.replay.seen(&id, &sig, now))
     }
 
     /// An answer that hands out keys, signed with the hub's key when the request asks with a nonce (spec 4.1).
@@ -253,7 +268,16 @@ impl Hub {
 
     /// A signed request's limit by `kind` and an id of `signed`'s; none for the operator's bot accounts.
     pub(crate) fn limit_signed(&self, signed: &Signed, kind: &str, id: &[u8], per: u32, window: Duration) -> Res<()> {
-        match self.bot(&signed.user_id).is_some() || self.limit(format!("{kind}:{}", b64(id)), per, window) {
+        if self.bot(&signed.user_id).is_some() || per == u32::MAX {
+            return Ok(());
+        }
+        let key = format!("{kind}:{}", b64(id));
+        match self.limit(key.clone(), per, window)
+            && self
+                .db
+                .shared_take(&key, 1.0, per.into(), f64::from(per) / window.as_millis() as f64, crate::now_ms())
+                .is_ok()
+        {
             true => Ok(()),
             false => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         }

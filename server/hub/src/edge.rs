@@ -15,6 +15,7 @@ use yoip::net::{api, limits};
 
 #[derive(Clone)]
 pub(crate) struct Edge {
+    peer_token: Option<axum::http::HeaderValue>,
     upstream: axum::http::uri::Authority,
     client: Client<HttpConnector, Body>,
     reading: std::sync::Arc<tokio::sync::Semaphore>,
@@ -31,8 +32,12 @@ pub(crate) fn local(method: &Method, path: &str) -> bool {
 }
 
 // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
-pub(crate) fn retry(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 401 | 403 | 404 | 409 | 410)
+pub(crate) fn retry(hub: &crate::Hub, status: StatusCode, headers: &HeaderMap) -> bool {
+    match status.as_u16() {
+        401 => !hub.replayed(headers, crate::now_ms()),
+        403 | 404 | 409 | 410 => true,
+        _ => false,
+    }
 }
 
 fn strip(headers: &mut HeaderMap) {
@@ -61,12 +66,13 @@ fn strip(headers: &mut HeaderMap) {
 }
 
 impl Edge {
-    pub fn new(upstream: &str) -> Result<Self, String> {
+    pub fn new(upstream: &str, token: Option<&str>) -> Result<Self, String> {
         let uri: Uri = upstream.parse().map_err(|_| "invalid edge upstream")?;
         if uri.scheme_str() != Some("http") || uri.path() != "/" || uri.query().is_some() {
             return Err("expected an HTTP relay origin".into());
         }
         Ok(Self {
+            peer_token: token.map(str::parse).transpose().map_err(|_| "invalid peer token")?,
             upstream: uri.authority().ok_or("missing relay authority")?.clone(),
             client: Client::builder(TokioExecutor::new()).build_http(),
             reading: std::sync::Arc::new(tokio::sync::Semaphore::new(crate::READING_AT_ONCE)),
@@ -74,7 +80,21 @@ impl Edge {
     }
 
     // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
-    async fn send(&self, mut request: Request) -> Response {
+    pub(crate) async fn post_upkeep(&self, body: Vec<u8>) -> crate::error::Res<()> {
+        let request =
+            Request::post("/v1/peer/upkeep").header("content-type", "application/json").body(Body::from(body)).unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), self.send(request, true))
+            .await
+            .map_err(|_| crate::error::refuse(StatusCode::GATEWAY_TIMEOUT))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(crate::error::refuse(response.status()))
+        }
+    }
+
+    // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
+    async fn send(&self, mut request: Request, forwarded: bool) -> Response {
         let path = request.uri().path_and_query().cloned().unwrap_or_else(|| "/".parse().unwrap());
         let Ok(uri) = Uri::builder().scheme("http").authority(self.upstream.clone()).path_and_query(path).build()
         else {
@@ -88,6 +108,10 @@ impl Edge {
             Some(peer.to_string().parse().expect("an IP address is a header value"))
         });
         strip(request.headers_mut());
+        request.headers_mut().remove("yo-peer-token");
+        if let Some(token) = self.peer_token.as_ref().filter(|_| forwarded) {
+            request.headers_mut().insert("yo-peer-token", token.clone());
+        }
         if let Some(ip) = client_ip {
             request.headers_mut().insert("cf-connecting-ip", ip);
         }
@@ -106,7 +130,7 @@ pub(crate) async fn route(State(hub): State<std::sync::Arc<crate::Hub>>, request
     let edge = hub.edge.as_ref().unwrap();
     // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
     if hub.db.edge_off() {
-        return edge.send(request).await;
+        return edge.send(request, false).await;
     }
     let path = request.uri().path();
     if path.starts_with("/v1/peer/") || (request.method() == Method::GET && path == "/") {
@@ -114,7 +138,7 @@ pub(crate) async fn route(State(hub): State<std::sync::Arc<crate::Hub>>, request
     }
     let wrapped = request.method() == Method::POST && path == api::OHTTP;
     if !wrapped && !local(request.method(), path) {
-        return edge.send(request).await;
+        return edge.send(request, false).await;
     }
     let limit = if wrapped {
         limits::MAX_OHTTP_REQUEST
@@ -132,8 +156,8 @@ pub(crate) async fn route(State(hub): State<std::sync::Arc<crate::Hub>>, request
     };
     drop(place);
     let result = next.run(Request::from_parts(parts.clone(), Body::from(bytes.clone()))).await;
-    if result.extensions().get::<Forward>().is_some() || (!wrapped && retry(result.status())) {
-        edge.send(Request::from_parts(parts, Body::from(bytes))).await
+    if result.extensions().get::<Forward>().is_some() || (!wrapped && retry(&hub, result.status(), &parts.headers)) {
+        edge.send(Request::from_parts(parts, Body::from(bytes)), true).await
     } else {
         result
     }

@@ -730,7 +730,7 @@ impl Db {
         inside: bool,
     ) -> rusqlite::Result<()> {
         if self.edge() {
-            return Ok(());
+            return self.queue_touch(device, now, app, inside);
         }
         let (app, version) = (app.map(|(a, _)| a), app.and_then(|(_, v)| v));
         self.run(
@@ -738,6 +738,22 @@ impl Db {
                  version = CASE WHEN ?3 IS NULL THEN version ELSE ?4 END,
                  ohttp_at = CASE WHEN ?5 THEN ?2 ELSE ohttp_at END WHERE id = ?1",
             params![device, to_the_hour(now), app, version, inside],
+        )
+    }
+
+    pub(crate) fn touch_from_peer(
+        &self,
+        device: &DeviceId,
+        at: u64,
+        app: Option<&str>,
+        version: Option<&str>,
+        inside: bool,
+    ) -> rusqlite::Result<()> {
+        self.run(
+            "UPDATE account_device SET last_seen_at=max(last_seen_at,?2),app=coalesce(?3,app),
+            version=CASE WHEN ?3 IS NULL THEN version ELSE ?4 END,
+            ohttp_at=CASE WHEN ?5 THEN max(coalesce(ohttp_at,0),?2) ELSE ohttp_at END WHERE id=?1",
+            params![device, at, app, version, inside],
         )
     }
 
@@ -1646,7 +1662,8 @@ impl Db {
     /// Clears a push token the push service refused, unless the device set another meanwhile.
     pub fn clear_push(&self, device: &DeviceId, token: &[u8]) -> rusqlite::Result<()> {
         if self.edge() {
-            return Ok(());
+            return self
+                .run("INSERT OR IGNORE INTO peer_upkeep(kind,device_id,token) VALUES(0,?,?)", params![device, token]);
         }
         self.run(
             "UPDATE account_device SET push_platform = 0, push_token = x'' WHERE id = ?1 AND push_token = ?2",

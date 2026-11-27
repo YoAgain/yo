@@ -174,10 +174,14 @@ impl Phone {
     }
 
     async fn wrapped_get(&self, url: &str, path: &str, status: u16) -> Vec<u8> {
+        self.wrapped_get_with(url, path, status, self.headers("GET", path, &[])).await
+    }
+
+    async fn wrapped_get_with(&self, url: &str, path: &str, status: u16, headers: [(&str, String); 3]) -> Vec<u8> {
         use yo_hub::config::{TEST_OHTTP_KEY, TEST_OHTTP_KEY_ID};
         use yoip::net::limits;
         let mut message = bhttp::Message::request(b"GET".to_vec(), b"https".to_vec(), Vec::new(), path.into());
-        for (name, value) in self.headers("GET", path, &[]) {
+        for (name, value) in headers {
             message.put_header(name, value);
         }
         message.put_header("date", httpdate::fmt_http_date(std::time::SystemTime::now()));
@@ -764,4 +768,107 @@ async fn edge_off_forwards_wakes_polls_and_drains_deleted_mail() {
     peer_task.abort();
     stop.send(()).unwrap();
     central_task.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edges_share_replays_limits_and_push_upkeep() {
+    let Ok(bin) = std::env::var("YO_CORROSION_BIN") else { return };
+    let (cluster, mut agents) = Cluster::start(&bin, true).await;
+    let (central_socket, central_url) = listener().await;
+    let (edge_socket, edge_url) = listener().await;
+    agents[1].upstream = Some(central_url.clone());
+    let token = yoip::b64(&rand::random::<[u8; 32]>());
+    for a in &mut agents {
+        a.peer_token = Some(token.clone());
+    }
+    let config = |i: usize| {
+        let mut c = Config::for_tests();
+        c.db_path = cluster.root.join(format!("hub{i}.db")).to_str().unwrap().into();
+        c.blobs.dir = cluster.root.join(format!("blobs{i}"));
+        c.corrosion = Some(agents[i].clone());
+        c.limits.signed_per_device_minute = 6;
+        c
+    };
+    let main = cluster.root.join("hub0.db");
+    let central = Hub::new(config(0), Arc::new(push::Recorder::default())).unwrap();
+    let mut ec = config(1);
+    ec.apns = Some(yo_hub::config::ApnsConfig {
+        key_pem: include_str!("../../../tests/fixtures/test-apns.p8").into(),
+        key_id: "test".into(),
+        team_id: "test".into(),
+        topic: "test".into(),
+    });
+    let recorder = Arc::new(push::Recorder::default());
+    *recorder.device_status.lock().unwrap() = Some(410);
+    let edge = Hub::new(ec, recorder.clone()).unwrap();
+    let (central_stop, done) = tokio::sync::oneshot::channel();
+    let central_task = tokio::spawn(central.serve(central_socket, async {
+        let _ = done.await;
+    }));
+    let (edge_stop, done) = tokio::sync::oneshot::channel();
+    let edge_task = tokio::spawn(edge.serve(edge_socket, async {
+        let _ = done.await;
+    }));
+    let phone = Phone::register(&central_url, "REPLAYBOX", 1).await;
+    let fresh = Phone::register(&central_url, "LIMITBOX", 2).await;
+    let replica = Path::new(&agents[1].db);
+    let authority = Path::new(&agents[0].db);
+    until(|| count(replica, "SELECT count(*) FROM account_device") == Some(2)).await;
+    let path = "/v1/inbox?wait=0";
+    let get = |url: &str, headers: [(&str, String); 3]| {
+        let mut req = reqwest::Client::new().get(format!("{url}{path}"));
+        for (name, value) in headers {
+            req = req.header(name, value);
+        }
+        async move { req.send().await.unwrap().status().as_u16() }
+    };
+    let same = phone.headers("GET", path, &[]);
+    assert_eq!(get(&edge_url, same.clone()).await, 200);
+    assert_eq!(get(&edge_url, same.clone()).await, 401);
+    // A new OHTTP encapsulation carrying the same signed request also retains the edge's refusal.
+    phone.wrapped_get_with(&edge_url, path, 401, same.clone()).await;
+    until(|| count(authority, "SELECT count(*) FROM hub_seen WHERE hub='hub1'") == Some(1)).await;
+    assert_eq!(get(&central_url, same).await, 401);
+
+    for _ in 0..3 {
+        assert_eq!(get(&edge_url, fresh.headers("GET", path, &[])).await, 200);
+    }
+    let spent = format!(
+        "SELECT sum(json_extract(value,'$[1]'))=3 FROM hub_limit,json_each(slots)
+         WHERE hub='hub1' AND hub_limit.key='signed:{}'",
+        yoip::b64(&fresh.device)
+    );
+    until(|| count(authority, &spent) == Some(1)).await;
+    for _ in 0..3 {
+        assert_eq!(get(&central_url, fresh.headers("GET", path, &[])).await, 200);
+    }
+    assert_eq!(get(&central_url, fresh.headers("GET", path, &[])).await, 429);
+
+    let push =
+        api::Push { platform: api::PUSH_APNS, token: format!("{:064x}", rand::random::<u128>()).into_bytes().into() };
+    phone.signed(&central_url, reqwest::Method::PUT, api::PUSH, yoip::encode(&push)).await;
+    until(|| count(replica, "SELECT count(*) FROM account_device WHERE length(push_token)>0") == Some(1)).await;
+    phone.deliver(&edge_url).await;
+    until(|| !recorder.sent.lock().unwrap().is_empty()).await;
+    let cleared = "SELECT count(*) FROM account_device WHERE push_token=x''";
+    until(|| count(&main, cleared) == Some(2) && count(replica, cleared) == Some(2)).await;
+    Connection::open(&main)
+        .unwrap()
+        .execute("UPDATE account_device SET last_seen_at=0 WHERE id=?", [phone.device])
+        .unwrap();
+    until(|| count(replica, "SELECT count(*) FROM account_device WHERE last_seen_at=0") == Some(1)).await;
+    assert_eq!(get(&edge_url, phone.headers("GET", path, &[])).await, 200);
+    let at = yo_hub::db::to_the_hour(now_ms());
+    until(|| {
+        Connection::open(&main)
+            .unwrap()
+            .query_row("SELECT last_seen_at FROM account_device WHERE id=?", [phone.device], |r| r.get::<_, u64>(0))
+            .unwrap()
+            == at
+    })
+    .await;
+    central_stop.send(()).unwrap();
+    edge_stop.send(()).unwrap();
+    central_task.await.unwrap().unwrap();
+    edge_task.await.unwrap().unwrap();
 }

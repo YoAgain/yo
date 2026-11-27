@@ -27,8 +27,17 @@ const ENC: std::ops::Range<usize> = 7..39;
 const MOST_SEEN: usize = 1 << 20;
 const MOST_TICKETS: usize = 100_000;
 /// Inner headers never taken from the client: the hub sets them, or they belong to the outer request.
-const DROPPED: [&str; 8] =
-    ["host", "content-length", "transfer-encoding", "connection", "cf-connecting-ip", "cf-ray", "date", "te"];
+const DROPPED: [&str; 9] = [
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "cf-connecting-ip",
+    "cf-ray",
+    "date",
+    "te",
+    "yo-peer-token",
+];
 
 /// A key's config (`application/ohttp-keys` item) from its key id and 32 bytes of key material.
 pub fn key_config(id: u8, ikm: &[u8; 32]) -> Result<Vec<u8>, String> {
@@ -292,6 +301,9 @@ async fn unwrapped(
         }
         headers.append(name, HeaderValue::from_bytes(field.value()).map_err(|_| StatusCode::BAD_REQUEST)?);
     }
+    if let Some(token) = outer_headers.get("yo-peer-token") {
+        headers.insert("yo-peer-token", token.clone());
+    }
     // The client's address as the outer request had it, so per-address limits count as before.
     if let Some(ip) = outer_headers.get("cf-connecting-ip") {
         headers.insert("cf-connecting-ip", ip.clone());
@@ -333,6 +345,7 @@ async fn unwrapped(
     headers.insert(CONTENT_LENGTH, HeaderValue::from(content.len()));
     let mut request =
         Request::builder().method(method).uri(path).body(Body::from(content)).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let retry_headers = hub.edge.as_ref().map(|_| headers.clone());
     *request.headers_mut() = headers;
     request.extensions_mut().insert(ConnectInfo(peer));
     request.extensions_mut().insert(Inside);
@@ -348,7 +361,7 @@ async fn unwrapped(
         .await
         .map_err(|_| StatusCode::INSUFFICIENT_STORAGE)?;
     // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
-    if hub.edge.is_some() && crate::edge::retry(status) {
+    if retry_headers.is_some_and(|h| crate::edge::retry(hub, status, &h)) {
         return Ok(None);
     }
     Ok(Some((status, headers, body.to_vec())))
