@@ -2809,14 +2809,18 @@ if (document.body.classList.contains("login")) {
       if (values.length) {
         const lo = Math.min(...values), hi = Math.max(...values);
         line = svg("svg", { class: "spark mesh-trace", viewBox: "0 0 140 28", preserveAspectRatio: "none" });
+        // Placed on the 24 h axis like the failed-ping bars; a sample with no neighbour is a dot, as a path of one
+        // point draws nothing.
         let path = "";
+        const slots = link.offset + link.rtt.length;
         link.rtt.forEach((v, i) => {
           if (v == null) return;
-          const x = 140 * (i + 0.5) / link.rtt.length, y = hi === lo ? 14 : 25 - 22 * (v - lo) / (hi - lo);
+          const x = 140 * (link.offset + i + 0.5) / slots, y = hi === lo ? 14 : 25 - 22 * (v - lo) / (hi - lo);
           path += (link.rtt[i - 1] == null ? "M" : "L") + x + " " + y + " ";
+          if (link.rtt[i - 1] == null && link.rtt[i + 1] == null) line.append(svg("circle", { cx: x, cy: y, r: 2 }));
         });
-        line.append(svg("path", { d: path }));
-        hoverTip(line, link.rtt.length, link.tip);
+        if (path.includes("L")) line.append(svg("path", { d: path }));
+        hoverTip(line, slots, i => i >= link.offset && link.tip(i - link.offset));
       }
       const plot = historyPlot(Array(link.offset).fill(null).concat(link.rtt), Array(link.offset).fill("").concat(heads), "cool", true);
       const now = lastAt >= 0 ? link.tip(lastAt).rows.slice(1, 3) : [];

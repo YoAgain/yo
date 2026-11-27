@@ -1344,6 +1344,7 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .mesh-series { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; min-height: 18px; }
 .mesh-graphs .mesh-series .spark { grid-column: 2; height: 16px; width: 100%; max-width: none; }
 .mesh-series small { display: block; }
+.mesh-trace circle { fill: #5dade2; }
 .mesh-trace path { fill: none; stroke: #5dade2; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
 .mesh-sites { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 4px var(--gap); margin-top: var(--gap); }
 .mesh-sites[hidden] { display: none; }
