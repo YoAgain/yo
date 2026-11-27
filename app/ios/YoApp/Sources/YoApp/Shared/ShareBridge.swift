@@ -316,24 +316,76 @@ extension ShareBridge {
     return try? JSONDecoder().decode(LastYo.self, from: data)
   }
 
-  /// The newest of `yos`, if newer than the one noted.
+  /// The newest of `yos`, if newer than the one noted; each of them also among the recent ones (`RecentYo`).
   static func noteLast(_ yos: [Yos], client: YoClient) {
-    guard let newest = yos.filter({ !$0.request }).max(by: { $0.sentAtMs < $1.sentAtMs }), let file = lastYoFile,
-      let owner = Hub.bytes(client.userId())?.base64EncodedString()
-    else { return }
-    if let noted = readLastYo(), noted.owner == owner, noted.sentAtMs >= newest.sentAtMs { return }
-    let name = newest.bar.map { $0.isEmpty ? newest.name : $0 } ?? newest.name
-    let last = LastYo(owner: owner, to: newest.user, name: name, sentAtMs: newest.sentAtMs)
-    guard let data = try? JSONEncoder().encode(last) else { return }
-    Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+    let yos = yos.filter { !$0.request }
+    guard let owner = Hub.bytes(client.userId())?.base64EncodedString() else { return }
+    let recent = noteRecent(yos, owner: owner)
+    let last = noteNewest(yos, owner: owner)
+    guard recent || last else { return }
     CFNotificationCenterPostNotification(
       CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(lastYoChanged as CFString), nil, nil, true)
+    guard last else { return }
     // The Lock Screen's Yo Back and "Yo from …" name the newest sender, and so does the Yo Back control.
     WidgetCenter.shared.reloadAllTimelines()
     ControlCenter.shared.reloadControls(ofKind: yoBackControlKind)
   }
 
+  private static func noteNewest(_ yos: [Yos], owner: String) -> Bool {
+    guard let newest = yos.max(by: { $0.sentAtMs < $1.sentAtMs }), let file = lastYoFile else { return false }
+    if let noted = readLastYo(), noted.owner == owner, noted.sentAtMs >= newest.sentAtMs { return false }
+    let name = newest.bar.map { $0.isEmpty ? newest.name : $0 } ?? newest.name
+    let last = LastYo(owner: owner, to: newest.user, name: name, sentAtMs: newest.sentAtMs)
+    guard let data = try? JSONEncoder().encode(last) else { return false }
+    Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+    return true
+  }
+
   static let yoBackControlKind = "app.justyo.ios.controls.back"
+}
+
+/// The Yos taken lately, wherever they were taken (the app, the notification service, the share extension), for
+/// CarPlay's list: it moves and names their bars itself while the app's list does not run (the iPhone locked).
+extension ShareBridge {
+  struct RecentYo: Codable, Equatable, Sendable {
+    /// As `List.owner`.
+    let owner: String
+    /// The Yo's own id ("user/sent at", "group/user/sent at"): each one counts once.
+    let id: String
+    /// Its bar, as `Friend.to`: the sender's user id, or "group:" and the group's id.
+    let bar: String
+    let senderUser: String
+    let senderName: String
+    let sentAtMs: UInt64
+  }
+
+  static var recentYosFile: URL? { container?.appending(path: "recent-yos.json") }
+  /// A day's, at most this many.
+  static let recentKept = 50
+
+  /// Oldest first.
+  static func readRecentYos() -> [RecentYo] {
+    guard let file = recentYosFile, let data = try? Data(contentsOf: file) else { return [] }
+    return (try? JSONDecoder().decode([RecentYo].self, from: data)) ?? []
+  }
+
+  /// True when one was new.
+  private static func noteRecent(_ yos: [Yos], owner: String) -> Bool {
+    guard let file = recentYosFile else { return false }
+    var recent = readRecentYos()
+    let known = Set(recent.map(\.id))
+    let new = yos.filter { !known.contains($0.id) }.sorted { $0.sentAtMs < $1.sentAtMs }
+    guard !new.isEmpty else { return false }
+    recent += new.map {
+      RecentYo(owner: owner, id: $0.id, bar: $0.user, senderUser: $0.senderUser, senderName: $0.senderName,
+        sentAtMs: $0.sentAtMs)
+    }
+    let dayAgo = UInt64(max(0, Date.now.timeIntervalSince1970 - 24 * 3600) * 1000)
+    recent = Array(recent.filter { $0.sentAtMs > dayAgo }.sorted { $0.sentAtMs < $1.sentAtMs }.suffix(recentKept))
+    guard let data = try? JSONEncoder().encode(recent) else { return false }
+    Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+    return true
+  }
 }
 
 extension MessageKind {
@@ -379,6 +431,12 @@ struct IntentSent: Codable, Sendable {
   private static func read(_ file: URL) -> [IntentSent] {
     guard let data = try? Data(contentsOf: file) else { return [] }
     return (try? JSONDecoder().decode([IntentSent].self, from: data)) ?? []
+  }
+
+  /// Oldest first, the file stays (CarPlay's list reads them beside the app's list, which takes them).
+  static func peek() -> [IntentSent] {
+    guard let file else { return [] }
+    return read(file).filter { $0.at > .now - kept }
   }
 
   /// Posts `changed` on the main queue for a note from any process.
