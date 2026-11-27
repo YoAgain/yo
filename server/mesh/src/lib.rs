@@ -328,11 +328,12 @@ async fn connect(tls: &TlsConnector, name: &str, addr: SocketAddr) -> Result<Sen
 pub struct Client {
     tls: TlsConnector,
     peers: BTreeMap<String, (SocketAddr, tokio::sync::Mutex<Option<Sender>>)>,
+    status: PathBuf,
 }
 
 impl Client {
     pub fn new(config: &Config) -> Result<Self> {
-        Self::configured(&config.name, &config.peers, config.certs.as_deref())
+        Self::configured(&config.name, &config.peers, config.certs.as_deref(), config.status.as_deref())
     }
 
     /// Read only the outbound fields. The same file may also configure a listening mesh node.
@@ -342,12 +343,18 @@ impl Client {
             name: String,
             peers: BTreeMap<String, SocketAddr>,
             certs: Option<PathBuf>,
+            status: Option<PathBuf>,
         }
         let config: Outbound = toml::from_str(&fs::read_to_string(path)?)?;
-        Self::configured(&config.name, &config.peers, config.certs.as_deref())
+        Self::configured(&config.name, &config.peers, config.certs.as_deref(), config.status.as_deref())
     }
 
-    fn configured(node: &str, addresses: &BTreeMap<String, SocketAddr>, dir: Option<&Path>) -> Result<Self> {
+    fn configured(
+        node: &str,
+        addresses: &BTreeMap<String, SocketAddr>,
+        dir: Option<&Path>,
+        status: Option<&Path>,
+    ) -> Result<Self> {
         let certs = load_certs(dir)?;
         let mut peers = BTreeMap::new();
         for (name, addr) in addresses {
@@ -356,11 +363,30 @@ impl Client {
                 peers.insert(name.clone(), (*addr, Default::default()));
             }
         }
-        Ok(Self { tls: TlsConnector::from(client_config(&certs)?), peers })
+        // The node on this server writes its heartbeat there (another process: its runtime directory, not ours).
+        let status = status.map_or_else(|| PathBuf::from("/run/yo-mesh/status.json"), Path::to_owned);
+        Ok(Self { tls: TlsConnector::from(client_config(&certs)?), peers, status })
     }
 
     pub fn peers(&self) -> impl Iterator<Item = &str> {
         self.peers.keys().map(String::as_str)
+    }
+
+    /// The peers the heartbeat of this server's node reports down. None without a fresh status file (no node, or a
+    /// stopped one), and none the node has not pinged yet.
+    pub fn down(&self) -> Vec<String> {
+        #[derive(Deserialize)]
+        struct Status {
+            at_ms: u64,
+            peers: BTreeMap<String, Peer>,
+        }
+        let Some(status) = fs::read(&self.status).ok().and_then(|b| serde_json::from_slice::<Status>(&b).ok()) else {
+            return Vec::new();
+        };
+        if now_ms().abs_diff(status.at_ms) > 5_000 {
+            return Vec::new();
+        }
+        status.peers.into_iter().filter(|(_, p)| !p.online && p.error.is_some()).map(|(name, _)| name).collect()
     }
 
     pub async fn send(&self, peer: &str, mut req: Request<Bytes>, deadline: Duration) -> Result<Response<Bytes>> {

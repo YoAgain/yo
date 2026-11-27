@@ -444,7 +444,7 @@ async fn two_hubs_share_delivery_wakes_and_counts() {
     assert_eq!(restored[0].0, rollback_id);
 }
 
-// One real mesh listener forwards to B. A uses the outbound-only client.
+// One real mesh listener forwards to B. A uses the outbound-only client, and the heartbeat of a node of its own.
 async fn peer_mesh(
     root: &Path,
     name: &str,
@@ -466,10 +466,25 @@ async fn peer_mesh(
     fs::write(dir.join("node.crt"), params.signed_by(&node, &issuer).unwrap().pem()).unwrap();
     let socket = TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = socket.local_addr().unwrap();
-    drop(socket);
+    let reader = TcpListener::bind("127.0.0.1:0").unwrap();
+    let reader_listen = reader.local_addr().unwrap();
+    drop((socket, reader));
     let path = root.join("mesh.toml");
-    fs::write(&path, format!("name='reader'\ncerts={dir:?}\n[peers]\n{name}='{listen}'\nstalled='{stalled}'\n"))
-        .unwrap();
+    let status = root.join("reader-status.json");
+    fs::write(
+        &path,
+        format!("name='reader'\ncerts={dir:?}\nstatus={status:?}\n[peers]\n{name}='{listen}'\nstalled='{stalled}'\n"),
+    )
+    .unwrap();
+    tokio::spawn(yo_mesh::run(yo_mesh::Config {
+        name: "reader".into(),
+        listen: reader_listen,
+        peers: [(name.into(), listen), ("stalled".into(), stalled)].into(),
+        certs: Some(dir.clone()),
+        forward: None,
+        status: Some(status.clone()),
+        history: Some(root.join("reader-history.json")),
+    }));
     let task = tokio::spawn(yo_mesh::run(yo_mesh::Config {
         name: name.into(),
         listen,
@@ -480,6 +495,14 @@ async fn peer_mesh(
         history: None,
     }));
     until(|| std::net::TcpStream::connect(listen).is_ok()).await;
+    // The stalled peer's heartbeat times out: a short fetch does not wait for it.
+    until(|| {
+        fs::read(&status)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .is_some_and(|s| s["peers"]["stalled"]["online"] == false && s["peers"]["stalled"]["error"].is_string())
+    })
+    .await;
     (path, task)
 }
 

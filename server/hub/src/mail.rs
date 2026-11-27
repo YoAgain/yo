@@ -388,36 +388,55 @@ pub(crate) async fn peer_inbox(State(hub): Hubs, headers: HeaderMap, Path(device
     Ok(encode(&api::Inbox { prekeys_left: 0, items: inbox_items(rows) }))
 }
 
+/// How long a short fetch waits for another hub. It returns once every asked hub answered (an empty one at once), so
+/// this bites only on a hub that hangs; one the mesh heartbeat reports down is not asked.
+const PEER_WAIT: Duration = Duration::from_secs(5);
+
 async fn ask_peers(hub: &Hub, client: &yo_mesh::Client, device: &DeviceId) -> Vec<api::InboxItem> {
-    use futures_util::{stream::FuturesUnordered, StreamExt};
     let path = format!("/v1/peer/inbox/{}", yoip::b64(device));
     let token = hub.config.corrosion.as_ref().unwrap().peer_token.as_ref().unwrap();
-    let mut requests = client
-        .peers()
-        .map(|name| {
-            let req = axum::http::Request::get(&path).header("yo-peer-token", token).body(Bytes::new());
-            async move {
-                let reply = client.send(name, req.ok()?, Duration::from_millis(300)).await.ok()?;
-                if reply.status() != StatusCode::OK {
-                    return None;
-                }
-                decode::<api::Inbox>(reply.body()).ok()
+    let down = client.down();
+    let (items, missed) = gather(client.peers(), &down, |name| {
+        let req = axum::http::Request::get(&path).header("yo-peer-token", token).body(Bytes::new());
+        async move {
+            let reply = client.send(name, req.ok()?, PEER_WAIT).await.ok()?;
+            if reply.status() != StatusCode::OK {
+                return None;
             }
-        })
-        .collect::<FuturesUnordered<_>>();
-    let mut items = Vec::new();
-    let mut missed = false;
-    while let Some(reply) = requests.next().await {
-        if let Some(inbox) = reply {
-            items.extend(inbox.items);
-        } else {
-            missed = true;
+            decode::<api::Inbox>(reply.body()).ok()
         }
-    }
+    })
+    .await;
     if missed {
         hub.db.count_mesh_events(hub.clock_ms(), &[("peer-miss", 1)]);
     }
     items
+}
+
+/// Every answer of the peers not down, as they come; and whether one is missing (down, failed or timed out).
+async fn gather<'a, F: std::future::Future<Output = Option<api::Inbox>>>(
+    peers: impl Iterator<Item = &'a str>,
+    down: &[String],
+    ask: impl Fn(&'a str) -> F,
+) -> (Vec<api::InboxItem>, bool) {
+    use futures_util::{stream::FuturesUnordered, StreamExt};
+    let mut missed = false;
+    let mut requests = peers
+        .filter(|peer| {
+            let skip = down.iter().any(|d| d == peer);
+            missed |= skip;
+            !skip
+        })
+        .map(ask)
+        .collect::<FuturesUnordered<_>>();
+    let mut items = Vec::new();
+    while let Some(reply) = requests.next().await {
+        match reply {
+            Some(inbox) => items.extend(inbox.items),
+            None => missed = true,
+        }
+    }
+    (items, missed)
 }
 
 /// `GET /v1/inbox?wait=s`: the device's envelopes, oldest first, waiting up to `wait` seconds for one.
@@ -687,5 +706,35 @@ mod peer_tests {
         assert_eq!(rows[1].received_ms, 10);
         recent.expire();
         assert!(!recent.0[&device].contains_key(&2));
+    }
+
+    #[tokio::test]
+    async fn peers_answer_until_the_last_one_but_never_one_that_is_down() {
+        let inbox = |id| api::Inbox {
+            prekeys_left: 0,
+            items: vec![api::InboxItem { id, received_ms: 0, envelope: vec![0].into() }],
+        };
+        let asked = std::sync::Mutex::new(Vec::new());
+        let ask = |peer: &'static str| {
+            asked.lock().unwrap().push(peer);
+            async move {
+                match peer {
+                    "slow" => tokio::time::sleep(Duration::from_secs(1)).await,
+                    "dead" => std::future::pending().await,
+                    _ => {}
+                }
+                Some(inbox(if peer == "slow" { 2 } else { 1 }))
+            }
+        };
+        let start = Instant::now();
+        let (items, missed) = gather(["fast", "slow", "dead"].into_iter(), &["dead".into()], ask).await;
+        assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2], "the slow peer is merged");
+        assert!(missed, "the dead peer is missing");
+        assert_eq!(*asked.lock().unwrap(), ["fast", "slow"], "the dead peer is not asked");
+        assert!(start.elapsed() < Duration::from_millis(1500));
+        let start = Instant::now();
+        let (items, missed) = gather(["fast", "other"].into_iter(), &[], ask).await;
+        assert_eq!((items.len(), missed), (2, false));
+        assert!(start.elapsed() < Duration::from_millis(100), "all answered: no wait");
     }
 }
