@@ -1,0 +1,40 @@
+# Corrosion on NODE (yo #15), written by the deploy: @ADDR@ the node's tailnet address, @PEERS@ the others'.
+[db]
+path = "/var/lib/yo-corrosion/corrosion.db"
+schema_paths = ["/etc/yo-corrosion/schema"]
+# Its page cache: 1 GiB by default, far beyond a 512 MB edge.
+cache_size_kib = -16384
+
+[gossip]
+addr = "@ADDR@:7001"
+bootstrap = [@PEERS@]
+# Tailscale's MTU is 1280: QUIC's packets must fit in it.
+max_mtu = 1232
+
+# Plumtree: a change goes to the eager peers at once (all of them, with three nodes). The default gossip sends to peers
+# outside the nearest ring only every 500 ms: 150 to 550 ms between Tokyo and Ohio instead of the round trip.
+[gossip.broadcast.plumtree]
+
+[gossip.tls]
+cert_file = "/etc/yo-corrosion/tls/server.crt"
+key_file = "/etc/yo-corrosion/tls/server.key"
+ca_file = "/etc/yo-corrosion/tls/ca.crt"
+
+[gossip.tls.client]
+cert_file = "/etc/yo-corrosion/tls/client.crt"
+key_file = "/etc/yo-corrosion/tls/client.key"
+
+[api]
+addr = "127.0.0.1:8097"
+
+[admin]
+path = "/run/yo-corrosion/admin.sock"
+
+[log]
+format = "plaintext"
+
+# Message ids are never used again: their bookkeeping goes 30 days after the ack.
+[reaper]
+check_interval = 3600
+[reaper.tables.message]
+retention = "30d"

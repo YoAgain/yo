@@ -5,6 +5,11 @@
 //!   YO_MESH_CONFIG        optional mesh.toml for the live hub (certs or CREDENTIALS_DIRECTORY)
 //!   YO_RELAY_STATUS       relay status address, default 127.0.0.1:8091
 //!   YO_DB                 SQLite file, default yo-hub.sqlite
+//!   YO_CORROSION_API      local Corrosion HTTP origin; unset for a standalone hub
+//!   YO_CORROSION_DB       Corrosion SQLite file, required with YO_CORROSION_API
+//!   YO_HUB_NAME           unique hub name for counts, required with YO_CORROSION_API
+//!   YO_HUB_INDEX          unique hub number (0..15), required with YO_CORROSION_API
+//!   YO_EDGE_UPSTREAM      relay HTTP origin; unset on the central hub
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
 //!   YO_ROBOT_RANGES       ADDRESS/BITS, comma-separated: test robots, whose support messages, reports and
 //!                         diagnostics are answered 204 and dropped; default Firebase Test Lab's (config::ROBOT_RANGES)
@@ -29,6 +34,9 @@
 //!   YO_DIRECT_GONE        1: after the OHTTP cutoff the direct YoIP routes answer 426 (apps before it update)
 //!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 3.4); their public half is
 //!                         pinned in the apps
+//!
+//! Rollback: stop the central hub and run `yo-hub corrosion-back` with its environment to copy pending mail
+//! into YO_DB before restarting in standalone mode.
 //!
 //! Sender-certificate keys (Signal's: a trust root kept offline, a server certificate on the hub):
 //!   yo-hub trust-root new ROOT_FILE                     a new trust root (its private key, 32 bytes, 0600); prints
@@ -143,6 +151,21 @@ fn config() -> Result<(Config, String), String> {
         add_devices: var("YO_ADD_DEVICES").as_deref() == Some("1"),
         admin_token: var("YO_ADMIN_TOKEN"),
         db_path,
+        corrosion: if let Some(api) = var("YO_CORROSION_API") {
+            Some(yo_hub::config::CorrosionConfig {
+                api,
+                db: required("YO_CORROSION_DB")?,
+                hub: required("YO_HUB_NAME")?,
+                index: required("YO_HUB_INDEX")?
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|i| *i < 16)
+                    .ok_or("YO_HUB_INDEX must be 0..15")?,
+                upstream: var("YO_EDGE_UPSTREAM"),
+            })
+        } else {
+            None
+        },
         reserved: Vec::new(), // the names live in the database, added through the admin page
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
         robot_ranges: parse_ranges(&var("YO_ROBOT_RANGES").unwrap_or_else(|| ROBOT_RANGES.to_owned()))?,
@@ -345,6 +368,9 @@ async fn main() {
         return or_exit(tool(&args));
     }
     let (config, listen) = or_exit(config());
+    if args.as_slice() == ["corrosion-back"] {
+        return or_exit(yo_hub::db::Db::corrosion_back(&config).map_err(|e| e.to_string()));
+    }
     let trust_cloudflare = config.trust_cloudflare;
     let hub = or_exit(Hub::new(config, Arc::new(push::Https::default())));
     let listener = match or_exit(from_systemd()) {

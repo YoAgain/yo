@@ -47,8 +47,14 @@ pub struct Blobs {
 /// An upload under way of a user; its place is given back when it is dropped.
 pub type Slot<'a> = Place;
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGIT: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        text.push(DIGIT[(b >> 4) as usize] as char);
+        text.push(DIGIT[(b & 15) as usize] as char);
+    }
+    text
 }
 
 /// A stored blob: its id and when it was stored, which tells one upload under an id from another.

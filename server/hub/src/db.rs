@@ -37,6 +37,7 @@ pub type Install = [u8; 16];
 pub type Sealed = (u64, Vec<u8>);
 
 pub struct Db {
+    pub(crate) agent: Option<crate::corrosion::Agent>,
     pub(crate) add_devices: bool,
     conn: Mutex<Connection>,
 }
@@ -554,12 +555,46 @@ impl Db {
              PRAGMA busy_timeout = 5000;",
         )?;
         schema::upgrade(&mut conn)?;
+        conn.execute_batch("CREATE TEMP VIEW inbox_message AS SELECT * FROM main.message")?;
         // Expected groups are counts, never open problems (`diagnostic_write`): those kept open before are done too.
         conn.execute(
             "UPDATE diag SET done = 1 WHERE done = 0 AND json_extract(payload, '$.severity') = 'expected'",
             [],
         )?;
-        Ok(Db { conn: Mutex::new(conn), add_devices: false })
+        Ok(Db { agent: None, conn: Mutex::new(conn), add_devices: false })
+    }
+
+    pub(crate) fn configured(config: &crate::config::Config) -> rusqlite::Result<Self> {
+        let mut db = Self::open(&config.db_path)?;
+        if let Some(config) = &config.corrosion {
+            let agent = crate::corrosion::Agent::open(&mut db.conn(), config)?;
+            db.agent = Some(agent);
+        } else {
+            crate::corrosion::detach_mirror(&mut db.conn())?;
+        }
+        Ok(db)
+    }
+
+    /// Restores the replicated inboxes before restarting in standalone mode.
+    pub fn corrosion_back(config: &crate::config::Config) -> rusqlite::Result<()> {
+        let cfg = config
+            .corrosion
+            .as_ref()
+            .filter(|c| c.upstream.is_none())
+            .ok_or(rusqlite::Error::InvalidParameterName("central Corrosion configuration required".into()))?;
+        let db = Self::open(&config.db_path)?;
+        let conn = db.conn();
+        crate::corrosion::attach(&conn, &cfg.db)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO main.message(id,device_id,envelope,received_at)
+            SELECT id,device_id,envelope,received_at FROM corro.message",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn edge(&self) -> bool {
+        self.agent.as_ref().is_some_and(|a| a.config.upstream.is_some())
     }
 
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -692,6 +727,9 @@ impl Db {
         app: Option<(&str, Option<&str>)>,
         inside: bool,
     ) -> rusqlite::Result<()> {
+        if self.edge() {
+            return Ok(());
+        }
         let (app, version) = (app.map(|(a, _)| a), app.and_then(|(_, v)| v));
         self.run(
             "UPDATE account_device SET last_seen_at = ?2, app = coalesce(?3, app),
@@ -1114,6 +1152,9 @@ impl Db {
     /// One signed request (3.3) a sender sent, counted in its hour; kept 25 hours, for the operator's Users page
     /// ("Requests 24h"). Only requests: a contact's delivery is sealed and never counted by sender.
     pub fn count_request(&self, sender: &UserId, now: u64) -> rusqlite::Result<()> {
+        if self.edge() {
+            return Ok(());
+        }
         let hour = (now / 3_600_000) as i64;
         let conn = self.conn();
         conn.prepare_cached(
@@ -1155,7 +1196,7 @@ impl Db {
             ("open-crashes", "SELECT coalesce(sum(count), 0) FROM diag WHERE done = 0 AND kind = 'crash'"),
         ];
         const OTHERS: [(&str, &str); 5] = [
-            ("queue-envelopes", "SELECT count(*) FROM message"),
+            ("queue-envelopes", "SELECT count(*) FROM inbox_message"),
             ("queue-media-bytes", "SELECT coalesce(sum(size), 0) FROM message_blob"),
             ("active-24h", "SELECT count(DISTINCT user_id) FROM account_device WHERE last_seen_at > ?1 - 86400000"),
             // People, not bots (`is_bot_app`): an account with a device of a person's app heard from in 48 hours.
@@ -1231,6 +1272,9 @@ impl Db {
         install: Option<&Install>,
         now: u64,
     ) -> rusqlite::Result<()> {
+        if self.edge() {
+            return Ok(());
+        }
         self.write(|tx| {
             let uuid = payload["uuid"].as_str().map(str::to_ascii_lowercase);
             if let Some(uuid) = &uuid {
@@ -1542,6 +1586,15 @@ impl Db {
 
     /// The one-time prekeys a device has left here: of the scarcer kind.
     pub fn prekeys_left(&self, device: &DeviceId) -> rusqlite::Result<u32> {
+        if self.edge() {
+            return Ok(row(
+                &self.conn(),
+                "SELECT n FROM corro.account_prekey_left WHERE device_id=?",
+                [device],
+                |r| r.get(0),
+            )?
+            .unwrap_or(0));
+        }
         self.conn()
             .prepare_cached(
                 "SELECT min(
@@ -1590,6 +1643,9 @@ impl Db {
 
     /// Clears a push token the push service refused, unless the device set another meanwhile.
     pub fn clear_push(&self, device: &DeviceId, token: &[u8]) -> rusqlite::Result<()> {
+        if self.edge() {
+            return Ok(());
+        }
         self.run(
             "UPDATE account_device SET push_platform = 0, push_token = x'' WHERE id = ?1 AND push_token = ?2",
             params![device, token],
@@ -1604,6 +1660,8 @@ impl Db {
     pub fn deliver(&self, items: &[Incoming<'_>], now: u64, most: u32) -> rusqlite::Result<Vec<Delivered>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut batch = Vec::new();
+        let mut pending = std::collections::HashMap::<DeviceId, u32>::new();
         let mut outcomes = Vec::with_capacity(items.len());
         for Incoming { user, devices_hash, from, copies } in items {
             let Some(current) = roster(&tx, user)? else {
@@ -1650,32 +1708,43 @@ impl Db {
             }
             devices.retain(|(number, _)| listed.contains(number));
             // Only the last allowed slot matters: an index probe, no count.
-            let mut slot = tx.prepare_cached("SELECT 1 FROM message WHERE device_id = ?1 LIMIT 1 OFFSET ?2")?;
+            let mut slot = tx.prepare_cached("SELECT 1 FROM inbox_message WHERE device_id = ?1 LIMIT 1 OFFSET ?2")?;
             let mut full = most == 0;
             for (_, device) in &devices {
                 if full {
                     break;
                 }
-                full = slot.exists(params![device.device_id, most - 1])?;
+                let extra = pending.get(&device.device_id).copied().unwrap_or(0);
+                full = extra >= most || slot.exists(params![device.device_id, most - extra - 1])?;
             }
             if full {
                 outcomes.push(Delivered::Full);
                 continue;
             }
-            let mut insert =
-                tx.prepare_cached("INSERT INTO message (device_id, envelope, received_at) VALUES (?1, ?2, ?3)")?;
-            let mut waiting = tx.prepare_cached("SELECT COUNT(*) FROM message WHERE device_id = ?1")?;
+            let mut waiting = tx.prepare_cached("SELECT COUNT(*) FROM inbox_message WHERE device_id = ?1")?;
             // Each device only its own copy (Signal's per-device message): nothing stored N times.
             for (number, device) in &mut devices {
                 let envelope = match copies {
                     Copies::Each(each) => each.iter().find(|(n, _)| n == number).map_or(&[][..], |(_, e)| *e),
                     Copies::Legacy(envelope) => *envelope,
                 };
-                insert.execute(params![device.device_id, envelope, now])?;
-                device.waiting = waiting.query_row([device.device_id], |row| row.get(0))?;
+                let extra = if let Some(agent) = &self.agent {
+                    batch.push(agent.message(&device.device_id, envelope, now));
+                    let n = pending.entry(device.device_id).or_default();
+                    *n += 1;
+                    *n
+                } else {
+                    tx.prepare_cached("INSERT INTO message (device_id,envelope,received_at) VALUES (?,?,?)")?
+                        .execute(params![device.device_id, envelope, now])?;
+                    0
+                };
+                device.waiting = waiting.query_row([device.device_id], |row| row.get::<_, u32>(0))? + extra;
             }
             let devices = devices.into_iter().map(|(_, wake)| wake).collect();
             outcomes.push(Delivered::Stored(devices));
+        }
+        if let Some(agent) = &self.agent {
+            agent.write(batch)?;
         }
         tx.commit()?;
         Ok(outcomes)
@@ -1684,7 +1753,9 @@ impl Db {
     /// A device's envelopes, oldest first: id, envelope, when it came (ms).
     pub fn fetch(&self, device: &DeviceId, most: usize) -> rusqlite::Result<Vec<(u64, Vec<u8>, u64)>> {
         self.conn()
-            .prepare_cached("SELECT id, envelope, received_at FROM message WHERE device_id = ?1 ORDER BY id LIMIT ?2")?
+            .prepare_cached(
+                "SELECT id, envelope, received_at FROM inbox_message WHERE device_id = ?1 ORDER BY id LIMIT ?2",
+            )?
             .query_map(params![device, most as i64], |row| {
                 Ok((row.get::<_, i64>(0)? as u64, row.get(1)?, row.get::<_, i64>(2)? as u64))
             })?
@@ -1704,7 +1775,22 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut acked = Vec::new();
-        {
+        if let Some(agent) = &self.agent {
+            if !ids.is_empty() {
+                let slots = std::iter::repeat_n("?", ids.len()).collect::<Vec<_>>().join(",");
+                let filter = format!("device_id=unhex(?) AND id IN ({slots})");
+                let mut args = vec![rusqlite::types::Value::Text(crate::blobs::hex(device))];
+                args.extend(ids.iter().map(|&id| rusqlite::types::Value::Integer(id as i64)));
+                let mut received: std::collections::HashMap<u64, u64> = tx
+                    .prepare(&format!("SELECT id, received_at FROM corro.message WHERE {filter}"))?
+                    .query_map(rusqlite::params_from_iter(&args), |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                acked.extend(ids.iter().filter_map(|id| received.remove(id)));
+                let mut args = vec![serde_json::json!(crate::blobs::hex(device))];
+                args.extend(ids.iter().map(|&id| serde_json::json!(id as i64)));
+                agent.write(vec![serde_json::json!([format!("DELETE FROM message WHERE {filter}"), args])])?;
+            }
+        } else {
             let mut delete =
                 tx.prepare_cached("DELETE FROM message WHERE device_id = ?1 AND id = ?2 RETURNING received_at")?;
             for id in ids {
@@ -1726,7 +1812,14 @@ impl Db {
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
-        let messages = conn.execute("DELETE FROM message WHERE received_at < ?1", [before])?;
+        if self.edge() {
+            return Ok(0);
+        }
+        let messages = if let Some(agent) = &self.agent {
+            agent.write(vec![serde_json::json!(["DELETE FROM message WHERE received_at < ?", [before]])])?
+        } else {
+            conn.execute("DELETE FROM message WHERE received_at < ?1", [before])?
+        };
         // Crash and error groups not seen for 90 days go, with their uuids and installs (spec 4).
         let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
         conn.execute("DELETE FROM diag WHERE last_seen < ?1", [kept as i64])?;
@@ -1758,12 +1851,15 @@ impl Db {
             ("blobs without their user", "message_blob WHERE user_id NOT IN (SELECT id FROM account)"),
             ("blob quotas without their user", "message_blob_quota WHERE user_id NOT IN (SELECT id FROM account)"),
             ("prekeys without their device", "account_prekey WHERE device_id NOT IN (SELECT id FROM account_device)"),
-            ("envelopes without their device", "message WHERE device_id NOT IN (SELECT id FROM account_device)"),
+            ("envelopes without their device", "inbox_message WHERE device_id NOT IN (SELECT id FROM account_device)"),
             ("devices both there and gone", "account_device WHERE id IN (SELECT id FROM account_device_gone)"),
         ];
         let conn = self.conn();
         let mut failed = Vec::new();
         for (what, sql) in CHECKS {
+            if self.edge() && (sql.contains("account_key") || sql.contains("account_prekey")) {
+                continue;
+            }
             let n: i64 = conn.query_row(&format!("SELECT count(*) FROM {sql}"), [], |row| row.get(0))?;
             if n > 0 {
                 failed.push((*what, n));

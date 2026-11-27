@@ -193,6 +193,15 @@ pub const NAME_MIN_ATTESTED: usize = 4;
 pub const NAME_MIN_UNATTESTED: usize = 12;
 
 #[derive(Debug, Clone)]
+pub struct CorrosionConfig {
+    pub api: String,
+    pub db: String,
+    pub hub: String,
+    pub index: u8,
+    pub upstream: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Test hub registration adds devices up to the roster limit.
     pub add_devices: bool,
@@ -200,6 +209,7 @@ pub struct Config {
     pub admin_token: Option<String>,
     /// The SQLite file; ":memory:" for tests.
     pub db_path: String,
+    pub corrosion: Option<CorrosionConfig>,
     /// Names to reserve at start, for tests and tools: the operator's live in the database.
     pub reserved: Vec<Reserved>,
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
@@ -369,6 +379,7 @@ impl Config {
         Config {
             add_devices: false,
             db_path: ":memory:".into(),
+            corrosion: None,
             reserved: Vec::new(),
             admin_token: None,
             trust_cloudflare: false,

@@ -11,7 +11,9 @@ pub mod blobs;
 pub mod certificate;
 mod colo;
 pub mod config;
+mod corrosion;
 pub mod db;
+mod edge;
 pub mod error;
 pub mod groups;
 mod help;
@@ -186,6 +188,7 @@ impl Event {
 }
 
 pub struct Hub {
+    edge: Option<edge::Edge>,
     config: Config,
     /// Oblivious HTTP (spec 4.1), with its keys configured.
     ohttp: Option<ohttp::Gateway>,
@@ -252,7 +255,8 @@ pub fn now_ms() -> u64 {
 
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
-        let mut db = Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?;
+        let edge = config.corrosion.as_ref().and_then(|c| c.upstream.as_deref()).map(edge::Edge::new).transpose()?;
+        let mut db = Db::configured(&config).map_err(|e| format!("database: {e}"))?;
         db.add_devices = config.add_devices;
         let db = Arc::new(db);
         if !config.reserved.is_empty() {
@@ -277,6 +281,7 @@ impl Hub {
         );
         let gateway = ohttp::Gateway::new(&config.ohttp_keys)?;
         let hub = Arc::new(Hub {
+            edge,
             ohttp: gateway,
             db,
             blobs: Arc::new(blobs),
@@ -400,13 +405,18 @@ impl Hub {
                 }
             }
         };
-        inner
+        let router = inner
             .route(api::OHTTP, post(wrapped).layer(DefaultBodyLimit::max(limits::MAX_OHTTP_REQUEST)))
             .route(api::OHTTP_KEYS_PATH, get(keys))
             .route(
                 &format!("{}/{{ticket}}", api::TICKETS),
                 put(transfer.clone()).get(transfer).layer(DefaultBodyLimit::disable()),
-            )
+            );
+        if let Some(edge) = &self.edge {
+            Router::new().fallback_service(router).layer(from_fn_with_state(edge.clone(), edge::route))
+        } else {
+            router
+        }
     }
 
     /// Serves until `shutdown` resolves; cleans up meanwhile.
@@ -416,6 +426,27 @@ impl Hub {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
         let pruner = tokio::spawn(self.clone().every_minute());
+        let updates =
+            self.config.corrosion.as_ref().map(|cfg| tokio::spawn(corrosion::watch(self.clone(), cfg.api.clone())));
+        let mirror = self.config.corrosion.as_ref().filter(|c| c.upstream.is_none()).map(|_| {
+            let db = self.db.clone();
+            tokio::spawn(async move {
+                // Logged once per outage: Corrosion away, every round fails alike.
+                let mut failing = false;
+                loop {
+                    let db = db.clone();
+                    match tokio::task::spawn_blocking(move || db.mirror()).await {
+                        Ok(Ok(())) => failing = false,
+                        result if !failing => {
+                            eprintln!("yo-hub: mirror: {result:?}");
+                            failing = true;
+                        }
+                        _ => {}
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+        });
         let app = self.router().into_make_service_with_connect_info::<SocketAddr>();
         let hub = self.clone();
         let shutdown = async move {
@@ -435,6 +466,9 @@ impl Hub {
                 Ok(())
             }
         };
+        for task in [updates, mirror].into_iter().flatten() {
+            task.abort();
+        }
         pruner.abort();
         served
     }
@@ -452,10 +486,12 @@ impl Hub {
             }
             self.forget_pushes(std::time::Instant::now());
             // The minute's events, a count per kind (nothing of who or what): the operator's page.
-            let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;
+            if let Ok(Err(error)) = self.blocking(|hub| hub.flush_events(now_ms())).await {
+                eprintln!("yo-hub: flush events: {error}");
+            }
             // The levels, once an hour at its first minute: counts only, the operator's page.
             let hour = now_ms() / 3_600_000;
-            if sampled != Some(hour) {
+            if self.edge.is_none() && sampled != Some(hour) {
                 match self.blocking(|hub| hub.db.sample_levels(now_ms(), false)).await {
                     Ok(Ok(())) => sampled = Some(hour),
                     Ok(Err(error)) => eprintln!("yo-hub: levels: {error}"),
@@ -535,6 +571,9 @@ impl Hub {
             .map(|(kind, n)| (kind, n.swap(0, Ordering::Relaxed)))
             .filter(|(_, n)| *n > 0)
             .collect();
+        if self.edge.is_some() {
+            return self.db.edge_counts(now, &counts);
+        }
         // Deliveries per hour count every Yo, a bot's too.
         let delivered: u64 = counts
             .iter()
@@ -544,11 +583,18 @@ impl Hub {
         if delivered > 0 {
             self.db.count_deliveries(now, delivered)?;
         }
-        self.db.count_events(now, &counts)
+        self.db.count_events(now, &counts)?;
+        if let Some(agent) = &self.db.agent {
+            self.db.fold(&agent.config.hub, now)?;
+        }
+        Ok(())
     }
 
     /// The hourly cleanup at `now`: envelopes past their time (4.1), blobs past theirs and files no blob owns (4.3).
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
+        if self.edge.is_some() {
+            return Ok(());
+        }
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY_MS)?;
         for blob in self.db.prune_blobs(now, limits.blob_ttl_days * DAY_MS)? {

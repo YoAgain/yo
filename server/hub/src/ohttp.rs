@@ -175,7 +175,14 @@ pub(crate) async fn post(hub: Arc<Hub>, inner: Router, peer: SocketAddr, headers
     if let Err(refusal) = hub.limit_ohttp(peer, &headers) {
         return refusal.into_response();
     }
-    let Some(gateway) = hub.ohttp.as_ref() else { return outer(StatusCode::NOT_FOUND) };
+    let fallback = |status| {
+        let mut response = outer(status);
+        if hub.edge.is_some() {
+            response.extensions_mut().insert(crate::edge::Forward);
+        }
+        response
+    };
+    let Some(gateway) = hub.ohttp.as_ref() else { return fallback(StatusCode::NOT_FOUND) };
     if headers.get(CONTENT_TYPE).is_none_or(|t| t.as_bytes() != api::OHTTP_REQUEST_TYPE.as_bytes()) {
         return outer(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
@@ -184,12 +191,13 @@ pub(crate) async fn post(hub: Arc<Hub>, inner: Router, peer: SocketAddr, headers
     }
     // An unknown key id: `422`, which a client may try with its other pinned key (nothing was processed).
     let Some((_, server)) = gateway.servers.iter().find(|(id, _)| *id == body[0]) else {
-        return outer(StatusCode::UNPROCESSABLE_ENTITY);
+        return fallback(StatusCode::UNPROCESSABLE_ENTITY);
     };
     let Ok((plain, wrap)) = server.decapsulate(&body) else { return outer(StatusCode::BAD_REQUEST) };
     let now = hub.clock_ms();
     let answer = match unwrapped(&hub, gateway, inner, peer, &headers, &body, &plain, now).await {
-        Ok(answer) => answer,
+        Ok(None) => return fallback(StatusCode::NOT_FOUND),
+        Ok(Some(answer)) => answer,
         Err(status) => (status, Vec::new(), Vec::new()),
     };
     let Some(encoded) = encode_answer(answer) else { return outer(StatusCode::INTERNAL_SERVER_ERROR) };
@@ -243,7 +251,7 @@ async fn unwrapped(
     wrapped: &[u8],
     plain: &[u8],
     now: u64,
-) -> Result<Answer, StatusCode> {
+) -> Result<Option<Answer>, StatusCode> {
     let mut cursor = Cursor::new(plain);
     let message = bhttp::Message::read_bhttp(&mut cursor).map_err(|_| StatusCode::BAD_REQUEST)?;
     // Only zeros after the message (RFC 9292 padding).
@@ -253,6 +261,9 @@ async fn unwrapped(
     let control = message.control();
     let method = control.method().and_then(|m| Method::from_bytes(m).ok()).ok_or(StatusCode::BAD_REQUEST)?;
     let path = control.path().and_then(|p| std::str::from_utf8(p).ok()).ok_or(StatusCode::BAD_REQUEST)?;
+    if hub.edge.is_some() && !crate::edge::local(&method, path.split('?').next().unwrap_or(path)) {
+        return Ok(None);
+    }
     // Replay (spec 4.1): its `Date` within 5 minutes, its `enc` once in that window.
     let date = message.header().get(b"date").and_then(|d| std::str::from_utf8(d).ok());
     let date = date.and_then(|d| httpdate::parse_http_date(d).ok()).ok_or(StatusCode::BAD_REQUEST)?;
@@ -310,7 +321,7 @@ async fn unwrapped(
         headers.remove("cf-ray");
         let ticket = Ticket { method, uri: path.to_owned(), headers, length, until: now + limits::TICKET_MS };
         let id = gateway.issue(ticket, now)?;
-        return Ok((StatusCode::OK, vec![("cache-control".into(), b"no-store".to_vec())], id.into_bytes()));
+        return Ok(Some((StatusCode::OK, vec![("cache-control".into(), b"no-store".to_vec())], id.into_bytes())));
     }
     let content = message.content().to_vec();
     headers.insert(CONTENT_LENGTH, HeaderValue::from(content.len()));
@@ -330,7 +341,10 @@ async fn unwrapped(
     let body = to_bytes(response.into_body(), limits::MAX_OHTTP_RESPONSE)
         .await
         .map_err(|_| StatusCode::INSUFFICIENT_STORAGE)?;
-    Ok((status, headers, body.to_vec()))
+    if hub.edge.is_some() && crate::edge::retry(status) {
+        return Ok(None);
+    }
+    Ok(Some((status, headers, body.to_vec())))
 }
 
 /// `PUT` or `GET /v1/blobs/t/{ticket}`: the transfer a ticket allows, direct and streamed; never cached.

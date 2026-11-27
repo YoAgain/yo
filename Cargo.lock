@@ -5864,6 +5864,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "httpdate",
+ "hyper-util",
  "jsonwebtoken",
  "libsignal-protocol",
  "ohttp",
