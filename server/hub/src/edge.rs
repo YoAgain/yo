@@ -82,7 +82,12 @@ impl Edge {
     // TRANSITION(#15): remove when edges are equal hubs and the relay is gone.
     pub(crate) async fn post_upkeep(&self, body: Vec<u8>) -> crate::error::Res<()> {
         let request =
-            Request::post("/v1/peer/upkeep").header("content-type", "application/json").body(Body::from(body)).unwrap();
+            // The mesh forwards only requests that name their client: here the edge itself.
+            Request::post("/v1/peer/upkeep")
+                .header("content-type", "application/json")
+                .header("cf-connecting-ip", "127.0.0.1")
+                .body(Body::from(body))
+                .unwrap();
         let response = tokio::time::timeout(std::time::Duration::from_secs(10), self.send(request, true))
             .await
             .map_err(|_| crate::error::refuse(StatusCode::GATEWAY_TIMEOUT))?;
@@ -108,6 +113,11 @@ impl Edge {
             Some(peer.to_string().parse().expect("an IP address is a header value"))
         });
         strip(request.headers_mut());
+        // The relay needs a host (a client's request has its own; the edge's upkeep names the relay).
+        if !request.headers().contains_key(axum::http::header::HOST) {
+            let host = self.upstream.as_str().parse().expect("an authority is a header value");
+            request.headers_mut().insert(axum::http::header::HOST, host);
+        }
         request.headers_mut().remove("yo-peer-token");
         if let Some(token) = self.peer_token.as_ref().filter(|_| forwarded) {
             request.headers_mut().insert("yo-peer-token", token.clone());
