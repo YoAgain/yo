@@ -69,16 +69,26 @@ pub fn deliver<L: Locked>(locked: &L, mut deliveries: crate::Deliveries) -> Resu
 pub fn send<L: Locked>(locked: &L, target: &Target, content: Content) -> Result<Vec<Event>, L::Error> {
     match target {
         Target::User(to) => {
-            let to = user_for(locked, to)?;
-            match locked.step(|c| c.send_begin(&to, content.clone()))? {
-                Some(deliveries) => deliver(locked, deliveries),
-                None => Ok(locked.step(|c| c.send(&to, content))??),
+            let pinned = locked.step(|c| c.pinned_contact(to))?;
+            let sent = send_to(locked, &user_for(locked, to)?, content.clone());
+            // A pinned contact's name whose account is gone: the name may be someone else's now, asked once (3.1).
+            if sent.is_err() && locked.step(|c| c.name_left(to, pinned.as_deref()))? {
+                return send_to(locked, &user_for(locked, to)?, content);
             }
+            sent
         }
         Target::Group(id) => match locked.step(|c| c.send_group_begin(id, content.clone()))? {
             Some(deliveries) => deliver(locked, deliveries),
             None => Ok(locked.step(|c| c.send_group(id, content))??),
         },
+    }
+}
+
+/// A Yo to a user id, its way to the hub without the client where sessions are in place.
+fn send_to<L: Locked>(locked: &L, to: &str, content: Content) -> Result<Vec<Event>, L::Error> {
+    match locked.step(|c| c.send_begin(to, content.clone()))? {
+        Some(deliveries) => deliver(locked, deliveries),
+        None => Ok(locked.step(|c| c.send(to, content))??),
     }
 }
 

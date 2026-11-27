@@ -111,7 +111,8 @@ impl HttpTransport for Held {
     fn opened(&self, _: String, _: String, _: u16) {}
 
     fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
-        if path.contains("wait=") && !path.ends_with("wait=0") {
+        // A long poll: a wait above 0 (a short fetch may carry more after its `wait=0`, as `&split=1`).
+        if path.split_once("wait=").is_some_and(|(_, wait)| !wait.starts_with('0')) {
             self.waiting.lock().unwrap().send(()).unwrap();
             self.release.lock().unwrap().recv().unwrap();
         }

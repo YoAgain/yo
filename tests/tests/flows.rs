@@ -379,11 +379,13 @@ fn a_hub_restart_in_the_middle_of_a_send_loses_and_repeats_nothing() {
     a.send_yo(b.user()).unwrap();
     assert_eq!(a.waiting(), 1);
     hub.stop();
-    // Down: the Yo by user id waits in the outbox; by name it needs the hub.
+    // Down: the Yo by user id waits in the outbox, and by the contact's name (resolved locally, spec 3.1); a name
+    // no contact has needs the hub.
     a.send_yo(b.user()).unwrap();
-    assert!(matches!(a.send_yo(b.name.clone()), Err(YoError::Network { .. })));
+    a.send_yo(b.name.clone()).unwrap();
+    assert!(matches!(a.send_yo(format!("{}x", b.name)), Err(YoError::Network { .. })));
     assert!(matches!(b.sync(0), Err(YoError::Network { .. })));
-    assert_eq!(a.waiting(), 2);
+    assert_eq!(a.waiting(), 3);
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     for phone in [&a, &b] {
         *phone.http.base.write().unwrap() = hub.url();
@@ -391,7 +393,7 @@ fn a_hub_restart_in_the_middle_of_a_send_loses_and_repeats_nothing() {
     a.deliver().unwrap();
     assert_eq!(a.waiting(), 0);
     let times = yo_times(&b.drain(), &a.user());
-    assert_eq!(times.len(), 2, "the one the hub took before it died once, the one that waited");
+    assert_eq!(times.len(), 3, "the one the hub took before it died once, the two that waited");
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
     drop(hub);

@@ -166,7 +166,7 @@ fn warm_probe_reuses_session_without_catch_up() {
         .filter(|(method, _, _)| method == "POST")
         .all(|(_, _, body)| body[0] == yoip::protocol::envelope::SEALED));
     assert!(routes.contains(&("GET", "/v1/inbox?wait=3")));
-    assert!(!routes.iter().any(|(_, path)| path.contains("lookup") || *path == "/v1/inbox?wait=0"));
+    assert!(!routes.iter().any(|(_, path)| path.contains("lookup") || path.starts_with("/v1/inbox?wait=0")));
 }
 
 #[test]

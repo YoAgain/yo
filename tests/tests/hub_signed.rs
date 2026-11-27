@@ -141,14 +141,18 @@ fn duplicate_device_numbers_change_nothing() {
     });
     let name = format!("Two{}", random_u64() % 1_000_000);
     let mut a = Client::register_username(transport.clone(), &name, None, None, Push::none()).unwrap();
+    let other = format!("One{}", random_u64() % 1_000_000);
+    let mut stranger = Client::register_username(transport.clone(), &other, None, None, Push::none()).unwrap();
     let mut b = client(&hub, "SigB", Tamper::None, None);
     a.send_yo(b.user_id()).unwrap();
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
     let key = yo_core::state::unhex(&a.account_key_of(b.user_id()).unwrap()).unwrap();
     *transport.account_key.lock().unwrap() = Some(key.try_into().unwrap());
-    // The lookup by name is refused; the `409` leaves the Yo waiting.
-    assert!(matches!(a.send_yo(b.username().unwrap()), Err(Error::Protocol(_))));
-    let _ = a.send_yo(b.user_id());
+    // A lookup by name (a name no contact has, spec 3.1) is refused, nothing pinned.
+    assert!(matches!(stranger.send_yo(b.username().unwrap()), Err(Error::Protocol(_))));
+    assert!(stranger.contacts().is_empty(), "nothing taken in");
+    // A's pinned contact goes without a lookup; the `409` leaves the Yo waiting.
+    let _ = a.send_yo(b.username().unwrap());
     assert_eq!(a.waiting(), 1);
     a.maintenance().unwrap();
     assert_eq!(a.waiting(), 0);

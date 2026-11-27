@@ -2048,8 +2048,22 @@ impl Client {
 
     /// Sends a message: starts writing to the user if this device has not yet (spec 3.1).
     pub fn send(&mut self, to: &str, content: Content) -> Result<Vec<Event>> {
-        let result = self.send_inner(to, content);
+        let pinned = self.pinned_contact(to);
+        let mut result = self.send_inner(to, content.clone());
+        // A pinned contact's name whose account the hub no longer knows (its handles forgotten): the name may be
+        // someone else's now, so it is asked of the hub once (spec 3.1).
+        if result.is_err() && pinned.is_some() && self.name_left(to, pinned.as_deref()) {
+            result = self.send_inner(to, content);
+        }
         self.finish_sent(result)
+    }
+
+    /// Whether a typed name that resolved locally to `pinned` no longer does, its account gone: `shared::send` and
+    /// `send` then ask the hub for it once (spec 3.1).
+    pub fn name_left(&self, to: &str, pinned: Option<&str>) -> bool {
+        pinned.is_some_and(|user| {
+            self.state.contacts.get(user).is_some_and(|c| c.gone) && self.pinned_contact(to).as_deref() != Some(user)
+        })
     }
 
     /// `finish` for a send: queued and saved before it went (3.2), so a later failed save does not make it unsent
