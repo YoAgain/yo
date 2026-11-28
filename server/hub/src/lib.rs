@@ -112,7 +112,7 @@ pub(crate) enum Event {
     Latency5s,
     /// Within a minute.
     Latency60s,
-    /// Later.
+    /// Later than a day (before the finer buckets, `Latency10m` to `Latency24h`: later than a minute).
     LatencySlow,
     /// A push the service took (APNs or FCM answered 200).
     PushOk,
@@ -140,11 +140,16 @@ pub(crate) enum Event {
     Error,
     /// A Yo a bot's device (`db::is_bot_app`) fetched and acknowledged, out of `yo-out` (like `yo-in-bot` of `yo-in`).
     YoOutBot,
+    /// Acknowledged within ten minutes (later than a minute), within an hour, six hours, a day; later is `LatencySlow`.
+    Latency10m,
+    Latency1h,
+    Latency6h,
+    Latency24h,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 25] = [
+    const KINDS: [&str; 29] = [
         "yo-in",
         "yo-out",
         "media-in",
@@ -170,6 +175,10 @@ impl Event {
         "crash",
         "error",
         "yo-out-bot",
+        "latency-10m",
+        "latency-1h",
+        "latency-6h",
+        "latency-24h",
     ];
 
     /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
@@ -178,6 +187,10 @@ impl Event {
             0..1_000 => Event::Latency1s,
             1_000..5_000 => Event::Latency5s,
             5_000..60_000 => Event::Latency60s,
+            60_000..600_000 => Event::Latency10m,
+            600_000..3_600_000 => Event::Latency1h,
+            3_600_000..21_600_000 => Event::Latency6h,
+            21_600_000..86_400_000 => Event::Latency24h,
             _ => Event::LatencySlow,
         }
     }
@@ -1024,8 +1037,33 @@ mod tests {
             now,
             false,
         );
-        let rows = [("latency-1s", 3), ("latency-5s", 2), ("latency-60s", 1), ("latency-slow", 1), ("yo-out", 7)];
+        let rows = [("latency-10m", 1), ("latency-1s", 3), ("latency-5s", 2), ("latency-60s", 1), ("yo-out", 7)];
         assert_eq!(counted(&hub), kinds(&rows), "a clock behind counts as at once");
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let now = 100 * 86_400_000;
+        let ago = |ms: u64| now - ms;
+        hub.count_acked(
+            &[
+                ago(599_999),
+                ago(600_000),
+                ago(3_599_999),
+                ago(3_600_000),
+                ago(21_600_000),
+                ago(86_399_999),
+                ago(86_400_000),
+            ],
+            now,
+            false,
+        );
+        let rows = [
+            ("latency-10m", 1),
+            ("latency-1h", 2),
+            ("latency-24h", 2),
+            ("latency-6h", 1),
+            ("latency-slow", 1),
+            ("yo-out", 7),
+        ];
+        assert_eq!(counted(&hub), kinds(&rows), "each band holds its lower end");
     }
 
     #[test]

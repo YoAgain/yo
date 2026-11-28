@@ -542,6 +542,10 @@ fn blob_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(BlobId, u64)> {
     Ok((array(row.get(0)?)?, row.get::<_, i64>(1)? as u64))
 }
 
+/// The waiting envelopes' age bands, sampled hourly (`Db::sample_levels`): under an hour, 1-6 hours, 6-24 hours,
+/// 1-7 days, older.
+const QUEUE_AGES: [&str; 5] = ["queue-age-1h", "queue-age-6h", "queue-age-24h", "queue-age-7d", "queue-age-older"];
+
 impl Db {
     /// WAL, `synchronous = NORMAL`: a power loss may roll back recent commits (SECURITY.md, Hub).
     pub fn open(path: &str) -> rusqlite::Result<Self> {
@@ -1275,6 +1279,25 @@ impl Db {
                     .query_map([now as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 for (kind, value) in rows {
+                    put.execute(params![kind, hour, value])?;
+                }
+                // The envelopes waiting, by how long they have waited (`received_at`): counts per band, no ids. With
+                // Corrosion they are its `message` (`inbox_message`), plus any still in the local table on their way.
+                let sources: &[&str] = if self.agent.is_some() { &["inbox_message", "main.message"] } else { &["inbox_message"] };
+                let mut ages = [0i64; QUEUE_AGES.len()];
+                for source in sources {
+                    let sql = format!(
+                        "SELECT coalesce(sum(age < 3600000), 0), coalesce(sum(age >= 3600000 AND age < 21600000), 0),
+                         coalesce(sum(age >= 21600000 AND age < 86400000), 0),
+                         coalesce(sum(age >= 86400000 AND age < 604800000), 0), coalesce(sum(age >= 604800000), 0)
+                         FROM (SELECT ?1 - received_at AS age FROM {source})"
+                    );
+                    let row = tx.prepare_cached(&sql)?.query_row([now as i64], |r| {
+                        Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)?])
+                    })?;
+                    ages.iter_mut().zip(row).for_each(|(n, add)| *n += add);
+                }
+                for (kind, value) in QUEUE_AGES.iter().zip(ages) {
                     put.execute(params![kind, hour, value])?;
                 }
             }
@@ -2688,6 +2711,31 @@ mod tests {
     }
 
     #[test]
+    fn waiting_envelopes_are_counted_by_age() {
+        let db = Db::open(":memory:").unwrap();
+        let hour = 3_600_000u64;
+        let now = 1000 * DAY + 30_000;
+        for age in [0, hour - 1, hour, 6 * hour - 1, 6 * hour, 24 * hour, 7 * DAY - 1, 7 * DAY, 30 * DAY] {
+            db.conn()
+                .execute(
+                    "INSERT INTO message (device_id, envelope, received_at) VALUES (X'01', X'00', ?1)",
+                    [(now - age) as i64],
+                )
+                .unwrap();
+        }
+        db.sample_levels(now, false).unwrap();
+        let ages: Vec<i64> = QUEUE_AGES
+            .iter()
+            .map(|kind| {
+                db.conn()
+                    .query_row("SELECT value FROM stat WHERE key = '' AND metric = ?1", [kind], |r| r.get(0))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ages, [2, 2, 1, 2, 2]);
+    }
+
+    #[test]
     fn levels_keep_every_hour_for_good() {
         let db = Db::open(":memory:").unwrap();
         let hour = 3_600_000u64;
@@ -2737,6 +2785,11 @@ mod tests {
                 row("problem-installs-24h", h, 0),
                 row("problem-installs-24h:android", h, 0),
                 row("problem-installs-24h:ios", h, 0),
+                row("queue-age-1h", h, 0),
+                row("queue-age-24h", h, 0),
+                row("queue-age-6h", h, 0),
+                row("queue-age-7d", h, 0),
+                row("queue-age-older", h, 1),
                 row("queue-envelopes", h, 1),
                 row("queue-media-bytes", h, 700),
             ]
@@ -2747,7 +2800,7 @@ mod tests {
         assert_eq!(rows(&db)[5], row("open-errors", h, 3));
         db.sample_levels(now + 60_000, true).unwrap();
         assert_eq!(rows(&db)[5], row("open-errors", h, 0));
-        assert_eq!(rows(&db).len(), 14);
+        assert_eq!(rows(&db).len(), 19);
         let columns: Vec<String> = db
             .conn()
             .prepare("SELECT name FROM pragma_table_info('stat')")

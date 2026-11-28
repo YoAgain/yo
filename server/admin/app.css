@@ -763,6 +763,7 @@ body.dash { max-width: 1400px; }
 .hc-hint { margin-top: 6px; color: var(--amethyst-soft); font-size: 11px; }
 .hc-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; }
 .hc-kv dt { color: var(--muted); } .hc-kv dd { margin: 0; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.hc-kvt dd.hc-kvh { color: var(--muted); font-weight: 400; }
 .hc-kv dd.ok { color: var(--ok); } .hc-kv dd.bad { color: var(--bad); } .hc-kv dd.warn { color: var(--warn); }
 .hc-sel { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); }
 .hc-sel select { padding: 4px 8px; font-size: 12px; }

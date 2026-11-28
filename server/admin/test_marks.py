@@ -42,6 +42,22 @@ class MarksTests(unittest.TestCase):
                                                str(h0 + 3): {"ios/202611191626": 6}}, "devices per build, none at 0")
         self.assertEqual(out["error_free_levels"], {str(h0 + 3): [10, 3, 6, 1, None, None]})
 
+    def test_ack_times_and_queue_ages_per_band(self):
+        users, hour = load("users"), 3600000
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE stat (metric TEXT, key TEXT DEFAULT '', hour INTEGER, value INTEGER, PRIMARY KEY (metric,key,hour))")
+        h = 500000
+        db.executemany("INSERT INTO stat(metric,hour,value) VALUES (?, ?, ?)", [
+            ("latency-1s", h, 8), ("latency-1h", h - 23, 1), ("latency-1h", h - 24, 2), ("latency-slow", h - 167, 4),
+            ("latency-slow", h - 168, 100), ("yo-out", h, 9),
+            ("queue-age-1h", h - 1, 3), ("queue-age-older", h - 1, 1), ("queue-age-1h", h - 30, 1),
+            ("queue-age-7d", h - 30, 2), ("queue-age-1h", h - 200, 50)])
+        now = h * hour + 5000
+        self.assertEqual(users.ack_times(db, now), {"24h": [8, 0, 0, 0, 1, 0, 0, 0], "7d": [8, 0, 0, 0, 3, 0, 0, 4]})
+        self.assertEqual(users.queue_ages(db, now), {"hour": h - 1, "now": [3, 0, 0, 0, 1], "24h": [3, 0, 0, 0, 1],
+                                                     "7d": [2, 0, 0, 1, 0.5]})
+        self.assertIsNone(users.queue_ages(db, (h + 500) * hour))
+
     def test_version_days_keep_the_latest_per_day_for_good(self):
         admin, day = self.admin, 20400
         now = day * 86400000 + 5000

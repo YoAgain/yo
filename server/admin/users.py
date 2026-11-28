@@ -247,7 +247,8 @@ def push_backlog() -> int:
 
 EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
                "latency-1s", "latency-5s", "latency-60s", "latency-slow", "push-ok", "push-fail",
-               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced", "crash", "error")
+               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced", "crash", "error",
+               "latency-10m", "latency-1h", "latency-6h", "latency-24h")
 EVENT_KINDS += tuple(f"rtt-{c}-{b}" for c in ("eu", "am", "as", "other") for b in range(5))  # spec 4.1
 # The same event metrics in each history, without reading the other hourly summaries.
 EVENT_FILTER = "(metric IN (" + ",".join("?" for _ in EVENT_KINDS) + ") OR metric GLOB 'bot-*') AND key = ''"
@@ -543,6 +544,45 @@ def open_problems(db, now: int) -> dict:
             "days": [at(min(now, midnight + (1 - i) * DAY_MS)) for i in range(364, -1, -1)]}
 
 
+# How long a Yo took from the hub taking it to its device's ack, finest first (the hub's Event::latency); before the
+# finer four, latency-slow held all later than 60 s, since then later than 24 hours.
+ACK_BANDS = ("latency-1s", "latency-5s", "latency-60s", "latency-10m", "latency-1h", "latency-6h", "latency-24h",
+             "latency-slow")
+# The envelopes waiting by age, sampled hourly by the hub: under 1 h, 1-6 h, 6-24 h, 1-7 days, older.
+QUEUE_AGES = ("queue-age-1h", "queue-age-6h", "queue-age-24h", "queue-age-7d", "queue-age-older")
+
+
+def ack_times(db, now: int) -> dict:
+    """The acks per band of ACK_BANDS (in its order) in the last 24 hours and the last 7 days (the current hour in both)."""
+    hour = now // 3600000
+    out = {}
+    for name, hours in (("24h", 24), ("7d", 168)):
+        sums = dict(db.execute(
+            "SELECT metric, sum(value) FROM stat WHERE key = '' AND metric IN (" + ",".join("?" for _ in ACK_BANDS) +
+            ") AND hour > ? AND hour <= ? GROUP BY 1", (*ACK_BANDS, hour - hours, hour)))
+        out[name] = [sums.get(k, 0) for k in ACK_BANDS]
+    return out
+
+
+def queue_ages(db, now: int) -> dict:
+    """The waiting envelopes per band of QUEUE_AGES (in its order): "now" the latest hourly sample ("hour" its hour),
+    "24h" and "7d" the mean of the samples in those hours; None before the hub samples them."""
+    hour = now // 3600000
+    rows = {}
+    for kind, h, value in db.execute(
+            "SELECT metric, hour, value FROM stat WHERE key = '' AND metric IN (" + ",".join("?" for _ in QUEUE_AGES) +
+            ") AND hour > ? AND hour <= ?", (*QUEUE_AGES, hour - 168, hour)):
+        rows.setdefault(h, {})[kind] = value
+    if not rows:
+        return None
+    latest = max(rows)
+
+    def mean(hours):
+        kept = [rows[h] for h in rows if h > hour - hours]
+        return [round(sum(r.get(k, 0) for r in kept) / len(kept), 1) if kept else None for k in QUEUE_AGES]
+    return {"hour": latest, "now": [rows[latest].get(k, 0) for k in QUEUE_AGES], "24h": mean(24), "7d": mean(168)}
+
+
 def deliveries(db, hour):
     today = hour // 24
     counts = dict(db.execute("SELECT hour, value FROM stat WHERE metric = 'deliveries' AND key = '' AND hour BETWEEN ? AND ?",
@@ -766,6 +806,9 @@ def hub(name: str, path: str) -> dict:
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM message_blob").fetchone() if has_table(db, "message_blob") else None),
             "deliveries": part("deliveries", lambda: deliveries(db, hour)),
+            # Acks per delivery-time band, 24 hours and 7 days, and the waiting envelopes by age (counts only).
+            "ack_times": part("ack_times", lambda: ack_times(db, now)),
+            "queue_ages": part("queue_ages", lambda: queue_ages(db, now)),
             "min_app": min_app(name),
             # Multi-device's 80 % gate (#4): devices seen in 30 days on a build with it, per platform.
             "multi_device": part("multi_device", lambda: multi_device(

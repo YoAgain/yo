@@ -580,7 +580,9 @@ if (document.body.classList.contains("login")) {
   // retention D1/D7/D30 under Yos, crash-free (est.) with Problems.
   // Speed: how long from the hub taking a Yo to the friend's phone having it, in four buckets; the last one is mostly a
   // phone that was offline (the Yo waited at the hub), not a slow hub.
-  const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"];
+  // The hub's finer buckets past a minute (10 min, 1 h, 6 h, 24 h; latency-slow since then later than a day) fold into
+  // "Later" here, so the four stay comparable with the counts from before them.
+  const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"], LAT_LATER = ["latency-10m", "latency-1h", "latency-6h", "latency-24h"];
   const LAT_NAME = ["Within 1 s", "1–5 s", "5–60 s", "Later (phone offline)"];
   let speedData = null, healthData = null, pushData = null;
   const areaSub = {};
@@ -591,7 +593,7 @@ if (document.body.classList.contains("login")) {
     const whole = (rows) => rows.reduce((a, r) => a.map((v, i) => v + r[i]), rows[0].map(() => 0));
     const none = (key, what) => { sparkData[key].empty = `No data yet: the hub has counted no ${what} in this range`; $(`c-${key}`).dataset.tip = "no data yet"; };
     // Speed: per bar the share of Yos on the friend's phone within 1 s (higher is better); the hover splits them all.
-    const lat = sums(LAT), latAll = whole(lat), latN = (b) => b.reduce((a, v) => a + v, 0);
+    const lat = sums([...LAT, ...LAT_LATER]).map((b) => [b[0], b[1], b[2], b.slice(3).reduce((a, v) => a + v, 0)]), latAll = whole(lat), latN = (b) => b.reduce((a, v) => a + v, 0);
     const fast = (b) => (latN(b) ? (100 * b[0]) / latN(b) : 0);
     spark("dl", null, lat.map(fast), names, (i) => (latN(lat[i]) ? `${num(latN(lat[i]))} Yos · ${pctText(fast(lat[i]))} within 1 s` : "no Yos"),
       latN(latAll) ? `${pctText(fast(latAll))} within 1 s` : "", 100);
@@ -2618,6 +2620,36 @@ if (document.body.classList.contains("login")) {
     return s;
   };
 
+  // A small table: a head row, then a label and its values per row (the distributions of acks and of the queue).
+  const kvTable = (head, rows) => {
+    const dl = el("dl", "hc-kv hc-kvt");
+    dl.style.gridTemplateColumns = `auto repeat(${head.length}, 1fr)`;
+    dl.append(el("dt"), ...head.map((x) => el("dd", "hc-kvh", x)));
+    for (const [k, ...vs] of rows) dl.append(el("dt", null, k), ...vs.map((v) => el("dd", null, v)));
+    return dl;
+  };
+  // When a Yo reached its device: the share acknowledged within each time, of the Yos acknowledged in the last 24 hours
+  // and 7 days (users.py ack_times). Yos never acknowledged are not in it: they are the queue (ageCard).
+  const ACK_NAME = ["1 s", "5 s", "60 s", "10 min", "1 h", "6 h", "24 h"];
+  const ackCard = (h) => {
+    const a = h.ack_times;
+    if (!a) return null;
+    const tot = (b) => b.reduce((x, v) => x + v, 0), within = (b, i) => (tot(b) ? pctText((100 * b.slice(0, i + 1).reduce((x, v) => x + v, 0)) / tot(b)) : "–");
+    const rows = ACK_NAME.map((name, i) => [`Within ${name}`, within(a["24h"], i), within(a["7d"], i)]);
+    rows.push(["Later", ...["24h", "7d"].map((k) => (tot(a[k]) ? pctText((100 * a[k][7]) / tot(a[k])) : "–"))], ["Yos acknowledged", num(tot(a["24h"])), num(tot(a["7d"]))]);
+    return dcard("Acknowledged within", null, kvTable(["24 h", "7 d"], rows),
+      note("Of the Yos acknowledged in the time. The bands past 60 s are counted since 28 Nov 2026; before, all later Yos count as Later."));
+  };
+  // The Yos waiting, by how long they have waited: the hub's last hourly sample and the mean of its samples (users.py queue_ages).
+  const AGE_NAME = ["Under 1 h", "1–6 h", "6–24 h", "1–7 days", "Older"];
+  const ageCard = (h) => {
+    const q = h.queue_ages;
+    if (!q) return dcard("Waiting by age", null, note("Kept from now on: the hub samples it every hour."));
+    const n = (v) => (v == null ? "–" : num(v)), sum = (b) => (b.some((v) => v == null) ? null : Math.round(b.reduce((x, v) => x + v, 0)));
+    const rows = AGE_NAME.map((name, i) => [name, n(q.now[i]), n(q["24h"][i]), n(q["7d"][i])]);
+    rows.push(["All", n(sum(q.now)), n(sum(q["24h"])), n(sum(q["7d"]))]);
+    return dcard("Waiting by age", null, kvTable([clock(q.hour * 3600000), "Mean 24 h", "Mean 7 d"], rows), note("Yos not yet acknowledged, counts only."));
+  };
   // A detail card: a title, its value on the right, then charts, rows and a note.
   const dcard = (title, value, ...kids) => {
     const c = el("section", "dcard"), h = el("h3");
@@ -3087,8 +3119,10 @@ if (document.body.classList.contains("login")) {
       if (!d || !tot(d.all)) return [dcard("Delivery", null, note(sparkData.dl?.empty || "No data yet.")), waiting];
       return [
         dcard("Delivery", `${pctText(latPct(d.all, 0))} within 1 s`, speedBars(foot), foot),
+        ackCard(h),
         comboCard("Yos delivered", { names: d.names, values: d.lat.map(tot) }),
         waiting,
+        ageCard(h),
       ];
     },
     ps: () => {
