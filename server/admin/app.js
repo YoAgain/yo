@@ -2766,9 +2766,9 @@ if (document.body.classList.contains("login")) {
       return box;
     }));
   }
-  const meshSeries = (label, chart) => {
+  const meshSeries = (label, value, chart) => {
     const row = el("div", "mesh-series");
-    row.append(el("span", "", label), chart || el("span", "", "no data yet"));
+    row.append(el("span", "", label), el("span", "mesh-share", value), chart);
     return row;
   };
   const drawUserRtt = h => {
@@ -2782,18 +2782,20 @@ if (document.body.classList.contains("login")) {
     }
     const slots = range === 1 || weekly ? [] : rangeSlots(days);
     const names = weekly ? weekNames() : range === 1 ? hourNames() : slots.map(([name]) => name);
-    let any = false;
-    $("mesh-users").replaceChildren(...Object.entries(RTT_REGIONS).map(([region, label]) => {
+    // A region without reports stays out, the section with none too; the share over the range stands next to the
+    // bars, as a bar at 0 % draws nothing.
+    $("mesh-users").replaceChildren(...Object.entries(RTT_REGIONS).flatMap(([region, label]) => {
       const buckets = names.map((_, i) => RTT_BUCKETS.map((_, b) => {
         const key = `rtt-${region}-${b}`;
         return weekly ? weekly[key]?.[i] || 0 : range === 1 ? events[key]?.hours?.[i] || 0 : slotSum(slots[i], daily[key]);
       }));
       const { values, tip } = userRttView(buckets, names, label, pctText);
-      const have = values.some(v => v != null);
-      any ||= have;
-      return meshSeries(label, have && sparkBars(values, "", tip, null, null, 100));
+      const all = buckets.reduce((sum, b) => sum.map((n, j) => n + b[j]), RTT_BUCKETS.map(() => 0));
+      const reports = all.reduce((a, b) => a + b, 0);
+      if (!reports) return [];
+      return [meshSeries(label, pctText(100 * (all[0] + all[1]) / reports), sparkBars(values, "", tip, null, null, 100))];
     }));
-    $("mesh-users-box").hidden = !any;
+    $("mesh-users-box").hidden = !$("mesh-users").children.length;
   };
   let meshHistoryEnd;
   // Mesh RTT: per link a row with its last round trip and its line over 24 h; failed pings: per link a row with the

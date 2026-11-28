@@ -1341,8 +1341,9 @@ body.dash { --gap: 16px; --inset: 16px; --caption: 13px; max-width: 2400px; padd
 .mesh-graphs { font-size: var(--caption); color: var(--muted); }
 .mesh-graphs h3 { margin: 0 0 2px; color: var(--text); font-size: inherit; }
 .mesh-graphs > section + section { margin-top: 10px; }
-.mesh-series { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; min-height: 18px; }
-.mesh-graphs .mesh-series .spark { grid-column: 2; height: 16px; width: 100%; max-width: none; }
+.mesh-series { display: grid; grid-template-columns: 96px 56px minmax(0, 1fr); align-items: center; min-height: 18px; }
+.mesh-series .mesh-share { font-variant-numeric: tabular-nums; }
+.mesh-graphs .mesh-series .spark { grid-column: 3; height: 16px; width: 100%; max-width: none; }
 .mesh-series small { display: block; }
 .mesh-trace circle { fill: #5dade2; }
 .mesh-trace path { fill: none; stroke: #5dade2; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
