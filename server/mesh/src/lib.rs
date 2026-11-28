@@ -315,15 +315,32 @@ async fn server(
 
 type View = Option<BTreeMap<String, Peer>>;
 
+/// A link that drops packets silently (a partition, a dead route) is given up after this: a connect that gets no
+/// answer, and a connection whose pings go unanswered. Without it requests queue on a dead connection, or behind a
+/// connect waiting out TCP's retries (minutes), until the kernel gives up.
+const DEAD_LINK: Duration = Duration::from_secs(3);
+const PING_EVERY: Duration = Duration::from_secs(2);
+// Longer than a connect: a ping may wait behind a large transfer in the send buffer.
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn connect(tls: &TlsConnector, name: &str, addr: SocketAddr) -> Result<Sender> {
-    let stream = tls.connect(ServerName::try_from(name.to_owned())?, TcpStream::connect(addr).await?).await?;
-    if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
-        return Err("h2 required".into());
-    }
-    let (tx, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
-        .adaptive_window(true)
-        .handshake(TokioIo::new(stream))
-        .await?;
+    let (tx, connection) = timeout(DEAD_LINK, async {
+        let stream = tls.connect(ServerName::try_from(name.to_owned())?, TcpStream::connect(addr).await?).await?;
+        if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
+            return Err("h2 required".into());
+        }
+        let handshake = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+            .adaptive_window(true)
+            .timer(hyper_util::rt::TokioTimer::new())
+            .keep_alive_interval(PING_EVERY)
+            .keep_alive_timeout(PING_TIMEOUT)
+            .keep_alive_while_idle(true)
+            .handshake(TokioIo::new(stream))
+            .await?;
+        Result::Ok(handshake)
+    })
+    .await
+    .map_err(|_| "connect timed out")??;
     tokio::spawn(connection);
     Ok(tx)
 }

@@ -373,3 +373,106 @@ async fn relay_round_trip() -> Result<()> {
     echo_server.abort();
     Ok(())
 }
+
+/// A link that goes silent (a partition drops packets, nothing closes): the client gives the connection up and the
+/// next request goes over a new one; a connect that gets no answer fails instead of waiting out TCP (#15 hunt).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_link_is_given_up_and_a_new_one_serves() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use yo_mesh::{server_config, Client};
+    let id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let dir = TempDir(env::temp_dir().join(format!("yo-silent-{}-{id}", std::process::id())));
+    fs::DirBuilder::new().mode(0o700).create(&dir.0)?;
+    let (root, issuer) = ca();
+    let certs = identity(&dir.0, "silent", &issuer, &root);
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config(&Certs::load(&certs)?)?);
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let server_addr = server.local_addr()?;
+    tokio::spawn(async move {
+        loop {
+            let (tcp, _) = server.accept().await.unwrap();
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(socket) = acceptor.accept(tcp).await else { return };
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(socket),
+                        hyper::service::service_fn(|_| async {
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::<Bytes>::default()))
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+    // A relay in between: once `silent`, the connections it carries pass nothing more (and stay open).
+    let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let relay_addr = relay.local_addr()?;
+    let silent = Arc::new(AtomicBool::new(false));
+    let connections = Arc::new(AtomicUsize::new(0));
+    {
+        let (silent, connections) = (silent.clone(), connections.clone());
+        tokio::spawn(async move {
+            loop {
+                let (a, _) = relay.accept().await.unwrap();
+                connections.fetch_add(1, Ordering::Relaxed);
+                let b = TcpStream::connect(server_addr).await.unwrap();
+                let dead = silent.load(Ordering::Relaxed);
+                let silent = silent.clone();
+                tokio::spawn(async move {
+                    let (ar, aw) = a.into_split();
+                    let (br, bw) = b.into_split();
+                    let pass = |mut r: tokio::net::tcp::OwnedReadHalf, mut w: tokio::net::tcp::OwnedWriteHalf| {
+                        let silent = silent.clone();
+                        async move {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            let mut buf = [0u8; 16384];
+                            loop {
+                                let Ok(n) = r.read(&mut buf).await else { return };
+                                if n == 0 {
+                                    return;
+                                }
+                                // Swallowed: nothing arrives, nothing closes.
+                                if !(silent.load(Ordering::Relaxed) && !dead) && w.write_all(&buf[..n]).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    let _ = tokio::join!(pass(ar, bw), pass(br, aw));
+                });
+            }
+        });
+    }
+    let client = Client::new(&node("client", relay_addr, "silent", relay_addr, &certs))?;
+    let send = || client.send("silent", Request::get("/").body(Bytes::new()).unwrap(), Duration::from_secs(1));
+    assert!(send().await?.status().is_success());
+    // The link goes silent for the connection in use; a new one passes.
+    silent.store(true, Ordering::Relaxed);
+    let start = std::time::Instant::now();
+    loop {
+        if send().await.is_ok_and(|r| r.status().is_success()) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(15), "still on the dead connection");
+        sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(connections.load(Ordering::Relaxed), 2);
+    // A peer that takes the connection and never answers: the connect fails within seconds.
+    let mute = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mute_addr = mute.local_addr()?;
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            held.push(mute.accept().await.unwrap().0);
+        }
+    });
+    let client = Client::new(&node("client", mute_addr, "silent", mute_addr, &certs))?;
+    let start = std::time::Instant::now();
+    assert!(client
+        .send("silent", Request::get("/").body(Bytes::new()).unwrap(), Duration::from_secs(30))
+        .await
+        .is_err());
+    assert!(start.elapsed() < Duration::from_secs(5));
+    Ok(())
+}
